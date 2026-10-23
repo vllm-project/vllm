@@ -31,7 +31,7 @@ from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle
 from vllm.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model, _reads_raw_weights
+from .qwen3_dflash import DFlashQwen3Model, _reads_raw_weights, _rebuild_in_place
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -351,4 +351,4 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         return loaded_weight_names
 
     def process_weights_after_loading(self) -> None:
-        self.model._build_fused_kv_buffers()
+        _rebuild_in_place(self.model, self.model._build_fused_kv_buffers)

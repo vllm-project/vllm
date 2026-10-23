@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import regex as re
 import torch
@@ -110,6 +110,28 @@ def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     return not current_platform.is_cpu() and all(
         isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
     )
+
+
+def _rebuild_in_place(module: nn.Module, build: Callable[[], None]) -> None:
+    """Run `build`, then copy rebuilt tensors into the ones they replace.
+
+    A FULL CUDA graph records the context-KV step with the addresses of these
+    tensors, so a reload must refresh them in place.
+    """
+    old = {k: v for k, v in vars(module).items() if isinstance(v, torch.Tensor)}
+    build()
+    for name, tensor in old.items():
+        new = getattr(module, name, None)
+        if (
+            isinstance(new, torch.Tensor)
+            and new is not tensor
+            and new.shape == tensor.shape
+            and new.dtype == tensor.dtype
+            and new.device == tensor.device
+        ):
+            with torch.inference_mode():
+                tensor.copy_(new)
+            setattr(module, name, tensor)
 
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
@@ -911,7 +933,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         loader.load_weights(model_weights.items(), mapper=mapper)
 
     def process_weights_after_loading(self) -> None:
-        self.model._build_fused_kv_buffers()
+        _rebuild_in_place(self.model, self.model._build_fused_kv_buffers)
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.
