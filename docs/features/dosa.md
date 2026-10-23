@@ -39,6 +39,8 @@ Each speedup is stock / DoSA, using three formal requests after one warmup.
 GLM-5.2 task accuracy uses 100 fixed LongBench-v2 requests, zero-shot, greedy
 nonthinking answers, 128 output tokens and Q16K: stock 54/100, DoSA 58/100.
 A separate stock A/A run scores 55/100 and does not replace the baseline.
+See the [LongBench-v2 reproduction guide](dosa_longbench_v2.md) for the frozen
+sample list, evaluation protocol and commands.
 DeepSeek results cover TTFT only. Its native context is 163840 tokens; longer
 requests use a 1048576-token server limit for latency extrapolation, without an
 answer-quality claim. The SQLite prefixes are not independent agent tasks.
