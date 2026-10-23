@@ -239,6 +239,7 @@ def test_flash_attention_geometry_comes_from_the_group():
 def test_attention_cache_spec_carries_layer_query_heads(sliding_window):
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     layer = SimpleNamespace(
         attn_type=AttentionType.DECODER,
@@ -259,6 +260,7 @@ def test_attention_cache_spec_carries_layer_query_heads(sliding_window):
         cache_config=SimpleNamespace(block_size=512, skip_page_size_padded=None)
     )
     spec = Attention.get_kv_cache_spec(layer, config)
+    assert isinstance(spec, AttentionSpec)
     assert spec.num_query_heads == 40
     assert spec.num_kv_heads == 40
 
