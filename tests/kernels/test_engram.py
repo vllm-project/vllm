@@ -144,6 +144,85 @@ def test_fused_engram_post_wkv_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU required")
+@pytest.mark.parametrize(
+    "num_tokens,hc_mult,dim,tp_size,use_mask",
+    [
+        (5, 4, 5120, 4, True),
+        (3, 4, 5120, 2, False),
+        (1, 4, 96, 4, False),
+        (7, 2, 96, 2, True),
+        (0, 4, 96, 4, False),
+    ],
+)
+def test_sharded_engram_post_wkv_matches_reference(
+    num_tokens, hc_mult, dim, tp_size, use_mask, monkeypatch
+):
+    """Each rank's dim slice of the keys and value, exchanged as value slices
+    plus gate partial sums, gives the full-projection update on every rank."""
+    torch.manual_seed(0)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device=device
+    )
+    kv = torch.randn(
+        num_tokens, (hc_mult + 1) * dim, dtype=torch.bfloat16, device=device
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    token_mask = None
+    if use_mask:
+        token_mask = torch.arange(num_tokens, device=device) % 2 == 0
+    eps = 1e-20
+    clamp_value = 1e-6
+    expected = _reference_engram_post_wkv(
+        hidden_states, kv, q_weight, k_weight, token_mask, eps, clamp_value, 0
+    )
+
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.dim = dim
+    module.hc_mult = hc_mult
+    module.eps = eps
+    module.clamp_value = clamp_value
+    module.kv_shards = tp_size
+    module.q_weight = torch.nn.Parameter(q_weight, requires_grad=False)
+    module.k_weight = torch.nn.Parameter(k_weight, requires_grad=False)
+
+    # MergedColumnParallelLinear's layout: rank r holds columns
+    # [r * width, (r + 1) * width) of every key and of the value.
+    width = dim // tp_size
+    parts = kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    local_kv = [
+        parts[:, :, rank].reshape(num_tokens, (hc_mult + 1) * width)
+        for rank in range(tp_size)
+    ]
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        assert dim == 0
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        assert dim == 0 and len(sent) == tp_size
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank in range(tp_size):
+            monkeypatch.setattr(
+                engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+            )
+            actual = module._forward_sharded_kv(
+                hidden_states, local_kv[rank], token_mask
+            )
+            if gather is exchange:
+                assert actual.shape == hidden_states.shape
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
 def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state = NgramHashState.__new__(NgramHashState)
     torch.nn.Module.__init__(state)
