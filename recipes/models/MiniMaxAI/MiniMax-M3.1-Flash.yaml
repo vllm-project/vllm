@@ -180,6 +180,38 @@ variants:
           VLLM_ROCM_USE_AITER_MOE: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
 
+  mxfp4_mono:
+    # The Quark export on the ROCm mono decode kernels: a decode step of up to
+    # 16 tokens runs each layer as one kernel. They need the AITER sparse PA
+    # path with FP8 KV and FP8 indexer K caches (shuffled KV layout) and no
+    # piecewise graphs; steps they refuse (more tokens, prefill in the step)
+    # run on the normal path.
+    model_id: "amd/MiniMax-M3.1-Flash-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (Quark) + mono decode"
+    supported_hardware:
+      - mi355x
+    vram_minimum_gb: 285
+    description: "The Quark MXFP4 export with mono decode for low concurrency: decode steps of up to 16 tokens (4 requests with DSpark 3) run each layer as one fused kernel. FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager. MI355X only."
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--moe-backend"
+          - "aiter"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"indexer_kv_dtype": "fp8"}'
+          - "--compilation-config"
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - "--gpu-memory-utilization"
+          - "0.85"
+        extra_env:
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+          VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+          VLLM_ROCM_MINIMAX_M3_MONO: "1"
+
   fp8:
     # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
     # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
