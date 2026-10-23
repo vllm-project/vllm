@@ -673,6 +673,7 @@ def prefill_local_score(
                 rank=comm.rank,
                 max_score=scores,
                 sm_scale=1.0,
+                initialize=False,
             )
         else:
             minimax_m3_index_score(
