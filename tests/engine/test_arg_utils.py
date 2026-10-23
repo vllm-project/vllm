@@ -358,6 +358,22 @@ def test_jit_monitor_mode_arg(mode):
     assert engine_args.create_observability_config().jit_monitor_mode == mode
 
 
+def test_sleep_mode_backend_arg():
+    """A plugin-registered sleep-mode backend can be selected from the CLI."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    engine_args = EngineArgs.from_cli_args(
+        parser.parse_args(["--model", "facebook/opt-125m"])
+    )
+    assert engine_args.sleep_mode_backend == "cumem"
+
+    args = parser.parse_args(
+        ["--model", "facebook/opt-125m", "--sleep-mode-backend", "my_backend"]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == "my_backend"
+    assert engine_args.create_model_config().sleep_mode_backend == "my_backend"
+
+
 def test_hf_token_get_kwargs():
     kwargs = get_kwargs(ModelConfig)["hf_token"]
 
@@ -482,7 +498,7 @@ def test_compilation_config():
 
 
 def test_trust_request_mm_kwargs_cli():
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
 
     parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
 
