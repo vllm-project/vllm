@@ -53,6 +53,10 @@ class Lfm2ToolParser(ToolParser):
     """
 
     TOOL_CALL_REGEX = re.compile(r"\[.*\]$", re.DOTALL)
+    # Constrains tool calls to the native block whenever a structural tag
+    # applies (required/named tool_choice, or strict tools), so
+    # extract_tool_calls parses them back.
+    structural_tag_model = "lfm2"
 
     def __init__(
         self,
