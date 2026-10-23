@@ -504,7 +504,13 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
         out="$(python3 -P /tmp/select.py)" || { echo "$out" >&2; exit 1; }; \
         echo "$out"; spec="$(echo "$out" | head -n 1)"; \
     fi; \
-    if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi
+    if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi; \
+    # A wheel built against a newer glibc or libstdc++ than this image installs and imports fine
+    # but fails every test that loads its modules; fail here instead.
+    if [ -n "$spec" ]; then \
+        aiter="$(python3 -c 'import importlib.util as u; print(u.find_spec("aiter").origin)')"; \
+        ! find "${aiter%/*}" -name '*.so' -exec ldd {} + 2>&1 | grep "version .* not found"; \
+    fi
 
 FROM test-base AS test
 COPY --link --from=native /out /

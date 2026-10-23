@@ -10,9 +10,9 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  cuda-13-0 | cuda-13-0-ubuntu-24-04 | rocm | xpu | cpu | all) ;;
+  cuda-13-0 | rocm | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-13-0-ubuntu-24-04|rocm|xpu|cpu|all}"
+    echo "Usage: $0 {cuda-13-0|rocm|xpu|cpu|all}"
     exit 2
     ;;
 esac
@@ -67,30 +67,6 @@ if target_enabled cuda-13-0; then
   .buildkite/scripts/publish-zstd-image.sh \
     "public.ecr.aws/q9t5s3a7/vllm-release-repo@${ZSTD_DIGEST}" \
     "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-zstd"
-fi
-
-# ---- Ubuntu 24.04 (CUDA 13.0) ----
-
-if target_enabled cuda-13-0-ubuntu-24-04; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-
-  docker manifest rm vllm/vllm-openai:latest-ubuntu2404 || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" || true
-  docker manifest create vllm/vllm-openai:latest-ubuntu2404 vllm/vllm-openai:latest-x86_64-ubuntu2404 vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker manifest push vllm/vllm-openai:latest-ubuntu2404
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404"
 fi
 
 # ---- ROCm ----
