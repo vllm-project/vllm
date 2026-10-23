@@ -580,8 +580,17 @@ mooncake_stats = {
         }
     ]
 }
+mooncake_transfer_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [1],
+    "num_failed_recvs": [],
+    "num_kv_expired_reqs": [1],
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
+    "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
@@ -607,6 +616,7 @@ print(
 )
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
