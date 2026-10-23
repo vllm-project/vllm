@@ -22,7 +22,7 @@ ahead writes the other half, so no peer's unread partials are overwritten.
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
@@ -35,6 +35,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     CM_NT,
+    bf2_f32,
     bf16_round,
     mfma_bf16,
     row_sum,
@@ -48,14 +49,33 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     pair_layout,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ranks import sum_partials
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import Addr
 
 TP = 8
+OWN_COLS = HIDDEN // TP  # two-shot: the columns a rank reduces (7 slices)
+
+
+def two_shot(s):
+    """Above 8 rows the AR scatters each partial to its columns' owner rank,
+    which reduces and broadcasts: 2/8 of the one-shot's bytes a link."""
+    return s > 8
+
+
+def peer_at(peers, p):
+    """``peers[p]`` (an Addr a rank) for a traced rank ``p``."""
+    v = peers[0].value
+    for q in range(1, TP):
+        v = (p == q).select(peers[q].value, v)
+    return Addr(peers[0].region, peers[0].space, v)
+
+
 OROWS = HIDDEN  # o_proj rows (full hidden, a rank's K slice)
 OTASKS = OROWS // ROWS  # 448
 OK = PROJ  # K = 1536 a rank
 OKCH = OK // 128  # 12 chunks
 GEMV0 = NA  # the first gemv CTA
 GEMV_N = BLOCKS - NA  # 200
+TL_POINTS = 6  # start, gemv, pushed, reduced, slice/gate, mix
 
 _STREAM = fx.Stream(None)
 
@@ -105,15 +125,22 @@ def o_loads(c, rg):
 
 
 @traced
-def load_core(c):
-    """The core rows (S x 1536 bf16) -> LDS, rows padded."""
-    s, tid = c["S"], c["tid"]
-    words = s * OK // 8
+def load_core(c, t0, n, cm=0):
+    """Core rows t0 .. t0 + n (of S x 1536 bf16) -> LDS, rows padded; ``cm``
+    CM_DEV when this launch's own CTAs wrote them (K2's fused M1b)."""
+    tid = c["tid"]
+    words = n * OK // 8
     row = OK + LDS_PAD
     for i in range_constexpr((words + THREADS - 1) // THREADS):
         e = fx.min(tid + THREADS * i, words - 1)
         v = fx.Vector(
-            bo.buffer_load(rsrc(c["args"]["core"]), e * 4, vec_width=4, dtype=T.i32)
+            bo.buffer_load(
+                rsrc(c["args"]["core"]),
+                (t0 * (OK // 8) + e) * 4,
+                vec_width=4,
+                dtype=T.i32,
+                cache_modifier=cm,
+            )
         )
         t = e // (OK // 8)
         k = e % (OK // 8) * 8
@@ -123,12 +150,13 @@ def load_core(c):
 
 
 @traced
-def stage_o(c, rg, ops):
-    """Rows 16 rg ..: GEMV -> bf16 partials -> every rank's AR region, this
-    rank's slot (thread: token, row pair; a put a peer)."""
+def stage_o(c, rg, ops, t0, n):
+    """Rows 16 rg .. for the core tile t0 .. t0 + n: GEMV -> bf16 partials ->
+    every rank's AR region, this rank's slot (thread: token, row pair; a put a
+    peer)."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     g = lane // ROWS
-    t = fx.min(lane % ROWS, s - 1)
+    t = fx.min(lane % ROWS, n - 1)
     row = OK + LDS_PAD
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(2):
@@ -150,14 +178,18 @@ def stage_o(c, rg, ops):
             )
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
-    if tid < s * (ROWS // 2):
+    if tid < n * (ROWS // 2):
         tt = tid // (ROWS // 2)
         rp = tid % (ROWS // 2)
         v0 = bf16_round(row_sum(red, 2 * rp, tt))
         v1 = bf16_round(row_sum(red, 2 * rp + 1, tt))
-        at = (c["rank"] * s + tt) * HIDDEN + rg * ROWS + 2 * rp
-        for p in range_constexpr(TP):
-            c["put_bf"](c["ar_peer"][p], at, [v0, v1])
+        at = (c["rank"] * s + t0 + tt) * HIDDEN + rg * ROWS + 2 * rp
+        if const_expr(two_shot(s)):
+            owner = rg * ROWS // OWN_COLS
+            c["put_bf"](peer_at(c["ar_peer"], owner), at, [v0, v1])
+        else:
+            for p in range_constexpr(TP):
+                c["put_bf"](c["ar_peer"][p], at, [v0, v1])
     gpu.barrier()
 
 
@@ -166,13 +198,47 @@ def stage_reduce(c, task):
     """Columns 128 task ..: the 8 ranks' partials, rank order, -> bf16 delta in
     LDS (thread: token, column pair)."""
     s, tid = c["S"], c["tid"]
-    if tid < s * (COLS // 2):
-        t = tid // (COLS // 2)
-        cp = tid % (COLS // 2)
-        col = task * COLS + 2 * cp
-        lo, hi = sum_partials(
-            c["poll"], c["ar_own"], lambda src: ((src * s + t) * HIDDEN + col) // 2, TP
-        )
-        fx.ptr_store(bf16_round(lo), c["delta_lds"] + (t * COLS + 2 * cp))
-        fx.ptr_store(bf16_round(hi), c["delta_lds"] + (t * COLS + 2 * cp + 1))
+    n = s * (COLS // 2)
+    for i in range_constexpr((n + THREADS - 1) // THREADS):
+        idx = tid + THREADS * i
+        if idx < n:
+            t = idx // (COLS // 2)
+            cp = idx % (COLS // 2)
+            col = task * COLS + 2 * cp
+            if const_expr(two_shot(s)):
+                lo, hi = reduce_two_shot(c, task, t, col)
+            else:
+                lo, hi = sum_partials(
+                    c["poll"],
+                    c["ar_own"],
+                    lambda src, t=t, col=col: ((src * s + t) * HIDDEN + col) // 2,
+                    TP,
+                )
+            fx.ptr_store(bf16_round(lo), c["delta_lds"] + (t * COLS + 2 * cp))
+            fx.ptr_store(bf16_round(hi), c["delta_lds"] + (t * COLS + 2 * cp + 1))
     gpu.barrier()
+
+
+@traced
+def reduce_two_shot(c, task, t, col):
+    """The owner of ``col`` sums the 8 scattered partials (rank order, as the
+    one-shot) and puts the bf16 sum to the other ranks' slot [owner]; they
+    poll it there (a slot the scatter leaves free off the owner)."""
+    s = c["S"]
+    owner = task * COLS // OWN_COLS
+    at = (owner * s + t) * HIDDEN + col
+    lo, hi = fx.Float32(0.0), fx.Float32(0.0)
+    if owner == c["rank"]:
+        a0, a1 = sum_partials(
+            c["poll"],
+            c["ar_own"],
+            lambda src: ((src * s + t) * HIDDEN + col) // 2,
+            TP,
+        )
+        for p in range_constexpr(TP):
+            if p != c["rank"]:
+                c["put_bf"](c["ar_peer"][p], at, [a0, a1])
+        lo, hi = a0, a1
+    else:
+        lo, hi = bf2_f32(c["poll"]([(c["ar_own"], at // 2, 1)])[0][0])
+    return lo, hi
