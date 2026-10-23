@@ -69,7 +69,11 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 // converts the float32 score to a 32-bit ordered unsigned integer — the full
 // precision key for radix sorting
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
-  uint32_t bits = __float_as_uint(x);
+  // Read the bits through an opaque move: otherwise nvcc lowers
+  // `bits | 0x80000000u` to the FP op -|x|, which canonicalizes NaN to
+  // 0x7FFFFFFF (the key of -0.0) while the FP16 coarse bin puts NaN on top.
+  uint32_t bits;
+  asm("mov.b32 %0, %1;" : "=r"(bits) : "f"(x));
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
