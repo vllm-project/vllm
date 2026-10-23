@@ -17,6 +17,9 @@ MODEL = "distilbert/distilgpt2"
 STOP_STR = "."
 SEED = 42
 MAX_TOKENS = 1024
+# Sampled tokens depend on batch composition, which depends on timing, so
+# without a bias some trajectories never emit STOP_STR within MAX_TOKENS.
+STOP_BIAS = 5.0
 
 
 @pytest.fixture
@@ -38,33 +41,29 @@ def test_stop_reason(vllm_model, example_prompts):
             seed=SEED,
             max_tokens=MAX_TOKENS,
             stop_token_ids=[stop_token_id],
+            logit_bias={stop_token_id: STOP_BIAS},
         ),
     )
-    # A sampled output can run to the length limit without the stop token.
-    completions = [output.outputs[0] for output in outputs]
-    assert any(output.finish_reason == "stop" for output in completions)
-    for output in completions:
-        if output.finish_reason == "stop":
-            assert output.stop_reason == stop_token_id
-        else:
-            assert output.finish_reason == "length"
-            assert stop_token_id not in output.token_ids
+    for output in outputs:
+        output = output.outputs[0]
+        assert output.finish_reason == "stop"
+        assert output.stop_reason == stop_token_id
 
     # test stop string
     outputs = llm.generate(
         example_prompts,
         sampling_params=SamplingParams(
-            ignore_eos=True, seed=SEED, max_tokens=MAX_TOKENS, stop="."
+            ignore_eos=True,
+            seed=SEED,
+            max_tokens=MAX_TOKENS,
+            stop=".",
+            logit_bias={stop_token_id: STOP_BIAS},
         ),
     )
-    completions = [output.outputs[0] for output in outputs]
-    assert any(output.finish_reason == "stop" for output in completions)
-    for output in completions:
-        if output.finish_reason == "stop":
-            assert output.stop_reason == STOP_STR
-        else:
-            assert output.finish_reason == "length"
-            assert STOP_STR not in output.text
+    for output in outputs:
+        output = output.outputs[0]
+        assert output.finish_reason == "stop"
+        assert output.stop_reason == STOP_STR
 
     # test EOS token
     outputs = llm.generate(
