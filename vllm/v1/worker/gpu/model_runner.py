@@ -69,6 +69,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
+from vllm.v1.conf_compute_utils import register_d2h_stream
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -233,6 +235,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
+        register_d2h_stream(self.output_copy_stream)
+        if current_platform.is_confidential_compute():
+            install_conf_compute_copy_patches()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
