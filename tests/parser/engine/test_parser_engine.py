@@ -956,6 +956,15 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"count": 5}', "f")
         assert json.loads(result) == {"count": 5}
 
+    def test_deep_nesting_passes_through_verbatim(self):
+        """Nesting deeper than the rewriter's depth cap passes through
+        verbatim instead of raising RecursionError.
+        """
+        tool = _make_tool("f", {"a": {"type": "array"}})
+        engine = _make_engine(tools=[tool])
+        args = '{"a": ' + "[" * 5000 + "]" * 5000 + "}"
+        assert engine._fix_arg_types(args, "f") == args
+
     @pytest.mark.parametrize(
         "type_name",
         ["str", "text", "varchar", "char", "STRING"],
@@ -2229,6 +2238,15 @@ class TestCoercionInstabilityRegression:
         """An aliased string property still holds a string, so its value may
         stream before it closes."""
         assert ParserEngine._streamable_string_keys({"zip": {"type": "str"}}) == {"zip"}
+
+    def test_deep_nesting_streams_verbatim(self):
+        """A model emitting nesting deeper than the rewriter's cap streams
+        verbatim instead of crashing the request with RecursionError."""
+        tool = _make_tool("f", {"a": {"type": "array"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        deep = "[" * 1000 + "]" * 1000
+        args = _stream_tool_args(engine, "f", ['{"a": ' + deep + "}"])
+        assert args == '{"a": ' + deep + "}"
 
 
 _STREAMABLE_SCHEMA_SHAPES: list[dict] = [

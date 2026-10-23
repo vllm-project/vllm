@@ -113,6 +113,11 @@ class ToolCallSlot:
 
 _NON_FINITE_LITERALS = ("NaN", "Infinity", "-Infinity")
 _NUMBER_CHARS = frozenset("0123456789+-.eE")
+# Real tool-call arguments nest a handful of levels deep; beyond this the
+# rewriter passes the tail through verbatim rather than recurse toward the
+# interpreter's limit, where a model stuck emitting brackets would otherwise
+# raise RecursionError and fail the request.
+_MAX_NESTING_DEPTH = 200
 
 
 def _literal_type(literal: str) -> str | None:
@@ -161,6 +166,7 @@ class _ArgsRewriter:
         # treated as still growing: it is only rewritten once delimited.
         self._final = final
         self._out: list[str] = []
+        self._depth = 0
 
     def rewrite(self) -> str:
         text = self._text
@@ -280,12 +286,20 @@ class _ArgsRewriter:
         if i >= len(text):
             return i
         c = text[i]
-        if c == "{":
-            nested = schema.get("properties") if isinstance(schema, dict) else None
-            return self._object(i, nested if isinstance(nested, dict) else None)
-        if c == "[":
-            items = schema.get("items") if isinstance(schema, dict) else None
-            return self._array(i, items if isinstance(items, dict) else None)
+        if c == "{" or c == "[":
+            if self._depth >= _MAX_NESTING_DEPTH:
+                return self._truncated(i)
+            self._depth += 1
+            try:
+                if c == "{":
+                    nested = (
+                        schema.get("properties") if isinstance(schema, dict) else None
+                    )
+                    return self._object(i, nested if isinstance(nested, dict) else None)
+                items = schema.get("items") if isinstance(schema, dict) else None
+                return self._array(i, items if isinstance(items, dict) else None)
+            finally:
+                self._depth -= 1
         if c == '"':
             scanned = self._scan_string(i)
             if scanned is None:
