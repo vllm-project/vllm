@@ -19,7 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -37,18 +37,11 @@ from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.device_allocator import get_mem_allocator_instance
-from vllm.distributed.aux_output_connector.worker import (
-    AuxOutputWorkerConnector,
-    get_aux_output_connector,
-)
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-    bind_routed_experts_capturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -369,10 +362,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The runner owns capture; the connector owns copying and storage.
+        # The connector owns capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
-        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
-        self._unbind_routed_experts_capturer: Callable[[], None] | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -390,19 +381,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # on the last PP rank.
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
-
-    def initialize_routed_experts_capturer(self) -> None:
-        """Allocate and bind R3 outside the weights pool, before profiling."""
-        if (
-            not self.vllm_config.aux_output_config.enable_return_routed_experts
-            or self.routed_experts_capturer is not None
-        ):
-            return
-        capturer = RoutedExpertsCapturer(self.max_num_tokens, self.vllm_config)
-        self._unbind_routed_experts_capturer = bind_routed_experts_capturer(
-            self.model, capturer
-        )
-        self.routed_experts_capturer = capturer
 
     def load_model(
         self,
@@ -858,15 +836,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-
-            # AuxOutput connector requires resolved kv_cache_config.
+            # The auxiliary-output data plane needs the resolved KV capacity.
             if self.vllm_config.aux_output_config.enabled:
-                assert self.routed_experts_capturer is not None
-                self.aux_output_connector = get_aux_output_connector(
-                    self.vllm_config,
-                    kv_cache_config,
-                    routed_experts_capturer=self.routed_experts_capturer,
-                )
+                if self.aux_output_connector is None:
+                    raise RuntimeError(
+                        "auxiliary output is enabled but its connector was not "
+                        "initialized before KV-cache initialization"
+                    )
+                self.aux_output_connector.initialize_storage(kv_cache_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2452,30 +2429,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     def _release_capture_resources(self) -> None:
-        """Release graphs, connector, and R3 bindings in teardown order.
+        """Release graphs before the connector and its capture buffers.
 
         Captured graphs reference the R3 callbacks, so they are dropped before
-        the capturer's buffers; the connector stops using the buffers before
-        the bindings are removed.
+        the connector unbinds and releases them.
         """
-        has_capturer = self.routed_experts_capturer is not None
-        if current_platform.is_rocm() or has_capturer:
+        has_aux_output = self.aux_output_connector is not None
+        if current_platform.is_rocm() or has_aux_output:
             # R3 callbacks are captured into graphs that must be dropped before
             # the referenced buffers. On ROCm RCCL's ncclCommAbort also waits
             # for live graphs that captured the comm:
             # https://github.com/ROCm/rocm-systems/issues/13018
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
-        if has_capturer and self.cudagraph_manager is not None:
+        if has_aux_output and self.cudagraph_manager is not None:
             self.cudagraph_manager.release_graphs()
             self.cudagraph_manager = None
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
             self.aux_output_connector = None
-        if self._unbind_routed_experts_capturer is not None:
-            self._unbind_routed_experts_capturer()
-            self._unbind_routed_experts_capturer = None
-        self.routed_experts_capturer = None
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
