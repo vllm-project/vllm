@@ -9,12 +9,14 @@ never addressed by the logical view.
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
 import vllm.v1.hisparse.binding as attn_utils_module
+import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -90,6 +92,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
             get_attn_backend=lambda backend=backend: backend,
+            is_draft_layer=False,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(
@@ -108,6 +111,29 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
+
+
+def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    backend = SimpleNamespace(
+        customize_spec=AttentionBackend.customize_spec,
+        get_supported_kernel_block_sizes=lambda _=None: [16],
+    )
+    layers = {
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _: spec,
+            get_attn_backend=lambda: backend,
+            is_draft_layer=name == "draft",
+        )
+        for name in ("target", "draft")
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
+
+    specs = attn_utils.get_kv_cache_spec(config)
+    assert specs["draft"].is_draft and not specs["target"].is_draft
 
 
 class _FakeMetadataBuilder:
@@ -423,49 +449,63 @@ class _FakeSharedHostRegion:
         self.cleanup_calls += 1
 
 
-def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
-    """TP-shared profiling pools must use region-aware chunk cleanup."""
-    region = _FakeSharedHostRegion()
+def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
+    """The real KV cache must reuse the profiling host pool, not pin it again."""
+    pinned = torch.empty(8, dtype=torch.int8)
+    allocate_pinned = MagicMock(return_value=(pinned, pinned))
+    monkeypatch.setattr(
+        hisparse_runtime_module, "allocate_pinned_host_pool", allocate_pinned
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module, "check_hisparse_host_memory", lambda size: None
+    )
+    vllm_config = SimpleNamespace(instance_id="profiling-reuse")
+    kv_cache_config = SimpleNamespace(hisparse_shared_host_pool=False)
+    pool = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
+    backing = pool.allocate(8)
     runtime = SimpleNamespace(
-        _host_cache=object(),
-        registered_host_pool=region.base_tensor,
-        hot_backing=object(),
-        shared_host_region=region,
+        _host_cache=backing, registered_host_pool=pinned, hot_backing=object()
     )
     forward_context = {
-        "layer": SimpleNamespace(
-            hisparse_cache=SimpleNamespace(runtime=runtime),
-        )
+        "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
     }
-    released = []
-
-    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
-        released.append((runtimes, pinned_host_pools, shared_host_region))
-
-    monkeypatch.setattr(
-        attn_utils_module,
-        "release_pinned_state",
-        release_pinned_state,
-    )
 
     attn_utils_module.release_hisparse_profiling_cache(forward_context)
 
-    assert released == [([runtime], [], region)]
+    assert not hasattr(runtime, "_host_cache")
+    reused = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
+    assert reused is pool
+    assert reused.allocate(8) is backing
+    allocate_pinned.assert_called_once_with(8)
+    hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
 @pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
-def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
-    """A failure after mmap allocation must not leak the shared registration."""
+@pytest.mark.parametrize("shared", [False, True])
+def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
+    """Failed initialization must release shared or private registrations."""
     region = _FakeSharedHostRegion()
+    registered = torch.empty(4096, dtype=torch.int8)
+    cudart = MagicMock()
+    cudart.cudaHostUnregister.return_value.value = 0
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=1),
+        instance_id="rollback",
     )
+    pools = []
 
     def allocate(*args):
-        args[-1].shared_region = region
+        pools.append(args[-1])
+        if shared:
+            args[-1].shared_region = region
+        else:
+            args[-1].registered = registered
+            args[-1].backing = registered[:8]
         if failure_phase == "allocation":
             raise RuntimeError("initialization failed")
         return {}
@@ -492,7 +532,13 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
             {},
             SimpleNamespace(),
         )
-    assert region.cleanup_calls == 1
+    assert region.cleanup_calls == int(shared)
+    if shared:
+        cudart.cudaHostUnregister.assert_not_called()
+    else:
+        cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
+    assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
+    hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():
@@ -513,6 +559,7 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     # Content dim packs K and V: 2 * head_size.
     assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
     assert kv_cache.dtype == spec.dtype
+    assert spec.page_size_padded is not None
     assert kv_cache.stride(0) == spec.page_size_padded // elem_size
     assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
     # Within one block the (unpadded) content stays compact.
