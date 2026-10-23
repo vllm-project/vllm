@@ -1074,24 +1074,6 @@ steps:
   commands:
   - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
 
-- label: ":amd: (MI300) LM Eval KV-Offload Medium" # TBD
-  timeout_in_minutes: 70
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-  - vllm/v1/kv_offload/
-  - vllm/v1/simple_kv_offload/
-  - tests/evals/gsm8k/test_gsm8k_offloading.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
-
 - label: ":amd: (MI300) LM Eval Small Models Harness" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1133,50 +1115,6 @@ steps:
   - tests/evals/gpt_oss/
   commands:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
-
-- label: ":amd: (MI300) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
-  timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/quantization/
-  - vllm/distributed/eplb
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - .buildkite/scripts/scheduled_integration_test/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
-
-- label: ":amd: (MI300) Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy" # TBD
-  timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/quantization/
-  - vllm/distributed/eplb
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - .buildkite/scripts/scheduled_integration_test/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 # TODO(akaratza): Retire this standalone ROCm coverage after
 # tests/distributed/test_eplb_spec_decode.py is enabled and validated on ROCm.
@@ -2089,21 +2027,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not slow_test' v1/spec_decode --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
-- label: ":amd: (MI300) Acceptance Length (Large Models)" # TBD
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - tests/v1/spec_decode/test_acceptance_length.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 - label: ":amd: (MI300) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -3835,6 +3758,28 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-rocm-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
+- label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy TP2" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
 
 - label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
   timeout_in_minutes: 25
@@ -3857,6 +3802,28 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
+- label: ":amd: (MI355) Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 - label: ":amd: (MI355) LM Eval Large Models FP8" # TBD
   timeout_in_minutes: 45
@@ -4195,6 +4162,24 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - VLLM_ENGINE_READY_TIMEOUT_S=1800 bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
+
+- label: ":amd: (MI355) LM Eval KV-Offload Medium" # TBD
+  timeout_in_minutes: 70
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
 
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
@@ -5857,6 +5842,21 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+
+- label: ":amd: (MI355 DPX) Acceptance Length (Large Models)" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - tests/v1/spec_decode/test_acceptance_length.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 #-----------------------------------------------------------  mi355 · misc  ------------------------------------------------------------#
 

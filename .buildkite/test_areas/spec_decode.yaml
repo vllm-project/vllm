@@ -418,9 +418,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
+      label: ":amd: (MI355) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
