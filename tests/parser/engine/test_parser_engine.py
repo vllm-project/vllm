@@ -2187,6 +2187,22 @@ class TestCoercionInstabilityRegression:
         assert args == '{"a": 1, "x": 1e999}'
         assert json.loads(args)["x"] == float("inf")
 
+    def test_exponent_literal_kept_verbatim_under_integer(self):
+        """``5e3`` under an integer schema already carries the right value;
+        re-encoding it as the float ``5000.0`` would change its type."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": 5e3}'])
+        assert args == '{"n": 5e3}'
+
+    def test_exponent_literal_normalizes_under_number(self):
+        """Under a number schema the integral exponent form normalizes to
+        an integer, as the parse-and-redump repair did."""
+        tool = _make_tool("f", {"n": {"type": "number"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": 5e3}'])
+        assert args == '{"n": 5000}'
+
     def test_truncated_first_member_sanitized(self):
         """A truncated call still has its complete tokens corrected: the
         first member is never preceded by a comma, but its ``NaN`` literal

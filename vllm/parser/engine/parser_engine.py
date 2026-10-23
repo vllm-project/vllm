@@ -130,6 +130,15 @@ def _literal_type(literal: str) -> str | None:
     return None
 
 
+def _changes_value(literal: str, coerced: object) -> bool:
+    """Whether coercing *literal* to *coerced* changes its value or type."""
+    try:
+        parsed = json.loads(literal)
+    except ValueError:
+        return True
+    return type(coerced) is not type(parsed) or coerced != parsed
+
+
 class _ArgsRewriter:
     """Rewrite tool-call argument JSON in place.
 
@@ -315,11 +324,17 @@ class _ArgsRewriter:
                 # numeric literal that no declared type can represent
                 # (1e999 under "number") comes back as its own text: leave it
                 # verbatim rather than turn a number field into a string.
+                # So does a re-encoding that preserves the value (5e3 ->
+                # 5000.0 under an integer schema).
                 coerced = coerce_to_schema_type(literal, types)
                 dumped = json.dumps(coerced, ensure_ascii=False)
-                if dumped != literal and not (
-                    isinstance(coerced, str)
-                    and "string" not in canonical_schema_types(types)
+                if (
+                    dumped != literal
+                    and _changes_value(literal, coerced)
+                    and not (
+                        isinstance(coerced, str)
+                        and "string" not in canonical_schema_types(types)
+                    )
                 ):
                     out.append(dumped)
                     return j

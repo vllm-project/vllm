@@ -234,6 +234,44 @@ def test_json_untyped_param_keeps_emitted_type(tokenizer):
     }
 
 
+def test_xml_untyped_param_keeps_emitted_type(tokenizer):
+    # An untyped property carries no schema type, so the model's explicit
+    # ``<arg_type>`` tag must decide, as it does when the schema is missing.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "xml_typed"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_xml_call("lookup", [("query", "x"), ("limit", "5")], typed=True)),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "limit": 5,
+    }
+
+
 def test_json_untyped_param_keeps_containers_structured(tokenizer):
     # Dict/list values for an untyped property stay structured JSON, not
     # double-encoded JSON text a client would have to re-parse.
