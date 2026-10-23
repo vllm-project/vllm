@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -621,8 +622,16 @@ class MuseSpark1xAttention(nn.Module):
             q = (q * self._get_attn_temperature_scale(positions)).to(q.dtype)
 
         if self.rotary_emb is not None:
-            # forward_cuda takes the flat layout and rotates in place.
-            q, k = self.rotary_emb.forward_cuda(positions, q, k)
+            # In place, on the flat layout. Not the module's forward, which
+            # would replace the FP32 table with a copy in the q/k dtype.
+            ops.rotary_embedding(
+                positions,
+                q,
+                k,
+                self.head_dim,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+            )
         return q, k, v, og
 
     def forward(
