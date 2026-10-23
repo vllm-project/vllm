@@ -201,7 +201,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     assert len(sched._jobs) == 1
     job = next(iter(sched._jobs.values()))
     if needs_left:
-        assert {left_key, swa[end - 1]} <= job.keys
+        assert {left_key, swa[end - 1]} <= set(job.keys)
     manager.complete_load(job.keys, state.req_context)
 
 
@@ -2615,7 +2615,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # First store: fires when block 0 is fully populated.
     runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
     assert runner.manager.complete_store.call_count == 1
-    first_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    first_call_keys = runner.manager.complete_store.call_args.args[0]
     assert len(first_call_keys) == 1
     runner.manager.complete_store.reset_mock()
 
@@ -2625,13 +2625,47 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
         expected_stored=(3, 4, 5),
     )
     assert runner.manager.complete_store.call_count == 1
-    second_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    second_call_keys = runner.manager.complete_store.call_args.args[0]
     assert first_call_keys != second_call_keys
     runner.manager.complete_store.reset_mock()
 
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_job_preserves_prepare_store_key_order(
+    request_runner, async_scheduling: bool
+):
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_chunk * 2))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    job_keys = {}
+
+    def capture_job_keys():
+        job_keys.update(runner.connector_scheduler._jobs.items())
+
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=tuple(range(6)),
+        post_step_fn=capture_job_keys,
+    )
+
+    assert len(job_keys) == 1
+    keys = next(iter(job_keys.values())).keys
+    assert keys == tuple(runner.manager.prepare_store.call_args.args[0])
+    assert runner.manager.complete_store.call_args.args[0] == keys
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

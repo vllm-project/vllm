@@ -465,7 +465,7 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     assert not tracker._pending_event_metadata
 
 
-def test_take_events_factor_gt_1_store_is_order_independent():
+def test_take_events_factor_gt_1_store_uses_prefix_order():
     blocks_per_chunk = 3
     tracker = _tracker()
     group_config = _group_config(blocks_per_chunk=blocks_per_chunk)
@@ -479,12 +479,33 @@ def test_take_events_factor_gt_1_store_is_order_independent():
     events = list(tracker.take_events([_stored_event([keys[1], unknown_key, keys[0]])]))
 
     assert len(events) == 3
-    chunk1, placeholder, chunk0 = events
-    assert [len(event.block_hashes) for event in events] == [3, 1, 3]
+    chunk0, chunk1, placeholder = events
+    assert [len(event.block_hashes) for event in events] == [3, 3, 1]
     assert placeholder.block_size == 0
     assert placeholder.token_ids == []
     assert chunk0.parent_block_hash is None
     assert chunk1.parent_block_hash == chunk0.block_hashes[-1]
+
+
+def test_take_events_sorts_store_keys_by_group_and_chunk():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
+    group0 = _group_config(group_idx=0)
+    group1 = _group_config(group_idx=1)
+    keys0 = _record_chunks(tracker, req, group0, num_chunks=2)
+    keys1 = _record_chunks(tracker, req, group1, num_chunks=2)
+
+    events = list(
+        tracker.take_events([_stored_event([keys1[1], keys0[1], keys1[0], keys0[0]])])
+    )
+
+    assert [event.group_idx for event in events] == [0, 0, 1, 1]
+    assert [event.token_ids for event in events] == [
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+    ]
 
 
 def test_take_events_opt_out_keeps_placeholders():
