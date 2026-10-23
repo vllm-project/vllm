@@ -16,6 +16,8 @@ materialize [N * (B - 1), V] bf16 logits per pass (~146 MB at N = 32, V = 152k)
 only to reduce them; fusing the add into the reduction never writes them.
 """
 
+import torch
+
 from vllm.triton_utils import tl, triton
 
 
@@ -39,15 +41,17 @@ def _xpress_add_argmax_partial_kernel(
     sum is never stored.
 
     Args:
-        base_ptr: [rows, V] base logits (bf16), row stride ``stride_base_r``.
-        bias_ptr: [rows, V] refiner bias, same layout.
-        out_val_ptr: [rows, num_chunks] fp32 chunk maxima (written).
-        out_idx_ptr: [rows, num_chunks] int64 chunk argmax, in vocab ids (written).
-        V: vocabulary size; the last chunk is masked to it.
-        stride_base_r: row stride of ``base_ptr``.
-        stride_bias_r: row stride of ``bias_ptr``.
-        stride_ov_r: row stride of ``out_val_ptr``.
-        stride_oi_r: row stride of ``out_idx_ptr``.
+        base_ptr (tl.tensor): [rows, V] base logits (bf16), row stride
+            ``stride_base_r``.
+        bias_ptr (tl.tensor): [rows, V] refiner bias, same layout.
+        out_val_ptr (tl.tensor): [rows, num_chunks] fp32 chunk maxima (written).
+        out_idx_ptr (tl.tensor): [rows, num_chunks] int64 chunk argmax, in vocab
+            ids (written).
+        V (int): vocabulary size; the last chunk is masked to it.
+        stride_base_r (int): row stride of ``base_ptr``.
+        stride_bias_r (int): row stride of ``bias_ptr``.
+        stride_ov_r (int): row stride of ``out_val_ptr``.
+        stride_oi_r (int): row stride of ``out_idx_ptr``.
         BLOCK_V: vocab chunk width per program.
 
     """
@@ -94,17 +98,18 @@ def _xpress_latent_kernel(
     is never read out).
 
     Args:
-        blk_ptr: [N, B] int64 current block tokens; slot b reads ``blk[b - 1]``.
-        am1_ptr: [N] int64 token preceding each block's anchor.
-        xh_ptr: [N, B, R] hidden cache, ``down_h(h) ++ down_g(mean h)`` projected
-            to R, constant across passes.
-        lat_out_ptr: [N, B - 1, R] latent output (written).
-        w1_ptr: [V, R] token embedding.
-        wlat_ptr: [R, R] embedding-to-latent projection (transposed).
-        mixl_ptr: [B, B, R] folded mixer ``L * tril + I``, per channel.
-        wg_ptr: [R, H] SwiGLU gate (transposed).
-        wu_ptr: [R, H] SwiGLU up (transposed).
-        wd_ptr: [H, R] SwiGLU down (transposed).
+        blk_ptr (tl.tensor): [N, B] int64 current block tokens; slot b reads
+            ``blk[b - 1]``.
+        am1_ptr (tl.tensor): [N] int64 token preceding each block's anchor.
+        xh_ptr (tl.tensor): [N, B, R] hidden cache, ``down_h(h) ++ down_g(mean h)``
+            projected to R, constant across passes.
+        lat_out_ptr (tl.tensor): [N, B - 1, R] latent output (written).
+        w1_ptr (tl.tensor): [V, R] token embedding.
+        wlat_ptr (tl.tensor): [R, R] embedding-to-latent projection (transposed).
+        mixl_ptr (tl.tensor): [B, B, R] folded mixer ``L * tril + I``, per channel.
+        wg_ptr (tl.tensor): [R, H] SwiGLU gate (transposed).
+        wu_ptr (tl.tensor): [R, H] SwiGLU up (transposed).
+        wd_ptr (tl.tensor): [H, R] SwiGLU down (transposed).
         B: block size.
         R: latent rank.
         H: MLP hidden size.
@@ -265,7 +270,12 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
 
 
 def fused_add_argmax_to_blk(
-    base, bias, out_val, out_idx, blk, block_v: int = 4096
+    base: torch.Tensor,
+    bias: torch.Tensor,
+    out_val: torch.Tensor,
+    out_idx: torch.Tensor,
+    blk: torch.Tensor,
+    block_v: int = 4096,
 ) -> None:
     """``blk[n, 1 + b] = argmax_v(base[r, v] + bias[r, v])`` for row r = n * (B-1) + b.
 
@@ -328,11 +338,12 @@ def _xpress_topc_argmax_to_blk_kernel(
     the same program, which removes a second kernel and its round trip.
 
     Args:
-        base_ptr: [rows, C] base logits gathered at the candidates (bf16).
-        bias_ptr: [rows, C] refiner bias on the same candidates.
-        cand_ptr: [rows, C] int64 vocab ids of the candidates.
-        blk_ptr: [N, B] int64 block tokens; slot j of row n is written at j + 1.
-        C: candidates per slot.
+        base_ptr (tl.tensor): [rows, C] base logits gathered at the candidates (bf16).
+        bias_ptr (tl.tensor): [rows, C] refiner bias on the same candidates.
+        cand_ptr (tl.tensor): [rows, C] int64 vocab ids of the candidates.
+        blk_ptr (tl.tensor): [N, B] int64 block tokens; slot j of row n is written
+            at j + 1.
+        C (int): candidates per slot.
         B: block size, to map a row back to its (block, slot).
         BLOCK_C: C rounded up to a power of two.
 
@@ -354,7 +365,9 @@ def _xpress_topc_argmax_to_blk_kernel(
     tl.store(blk_ptr + n * B + j + 1, tok)
 
 
-def fused_topc_argmax_to_blk(base_c, bias_c, cand, blk) -> None:
+def fused_topc_argmax_to_blk(
+    base_c: torch.Tensor, bias_c: torch.Tensor, cand: torch.Tensor, blk: torch.Tensor
+) -> None:
     """Run ``_xpress_topc_argmax_to_blk_kernel``; see it for shapes."""
     N, Bm1, C = base_c.shape
     _xpress_topc_argmax_to_blk_kernel[(N * Bm1,)](
