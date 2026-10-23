@@ -96,7 +96,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -399,6 +399,9 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
         FinishReason::Error(Some(error)) if error.retryable => {
             return Err(Status::unavailable(error.message.clone()));
         }
@@ -709,10 +712,7 @@ mod tests {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
                 let text = to_text_request(decoded, stream, &["test-model".to_string()])
                     .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn retryable_engine_error_maps_to_unavailable() {
+    fn engine_errors_map_to_status_codes() {
         let error = RequestError {
             code: "engine_paused".to_string(),
             message: "Generation is paused.".to_string(),
@@ -1054,6 +1054,19 @@ mod tests {
         let fin = finished(FinishReason::Error(Some(Box::new(error))));
         let status = to_finish_info(&fin, &[]).expect_err("retryable error");
         assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
 
         let fin = finished(FinishReason::Error(None));
         let status = to_finish_info(&fin, &[]).expect_err("internal error");

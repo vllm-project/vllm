@@ -19,7 +19,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -28,6 +27,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -229,11 +229,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.supports_quant_query_input = False
 
         self._sm_count = current_platform.num_compute_units()
+        self._vllm_config = get_current_vllm_config()
 
     def reserve_workspace(self) -> None:
         # The builder reserves after memory profiling; reserve its upper bound
         # here so the KV cache is sized around it.
-        vllm_config = get_current_vllm_config()
+        vllm_config = self._vllm_config
         _reserve_attn_logits_workspace(
             vllm_config,
             vllm_config.scheduler_config.max_num_seqs
