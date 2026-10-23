@@ -2143,6 +2143,31 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         )
 
 
+def wvSplitK_int8(
+    weight: torch.Tensor,
+    activation: torch.Tensor,
+    scale: torch.Tensor,
+    cu_count: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK_int8(weight, activation, scale, bias, cu_count)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int8"):
+
+    @register_fake("_rocm_C::wvSplitK_int8")
+    def _wvSplitK_int8_fake(
+        in_a: torch.Tensor,
+        in_b: torch.Tensor,
+        in_scale: torch.Tensor,
+        in_bias: torch.Tensor | None,
+        CuCount: int,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (in_b.size(0), in_a.size(0)), dtype=in_b.dtype, device=in_b.device
+        )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:

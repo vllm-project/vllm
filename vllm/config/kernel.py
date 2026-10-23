@@ -266,7 +266,7 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
-LMHeadQuantization = Literal["int4_per_group_32"]
+LMHeadQuantization = Literal["int4_per_group_32", "int8_per_channel"]
 
 
 @config
@@ -402,6 +402,8 @@ class KernelConfig:
     - "int4_per_group_32": Asymmetric uint4 weights with one scale and zero
       point per 32 input channels, on the RDNA hybrid W4A16 kernels (ROCm
       gfx11/gfx12 only)
+    - "int8_per_channel": Symmetric int8 weights with one scale per output
+      channel, on the RDNA W8A16 kernels (ROCm gfx11/gfx12 only)
 
     Explicit values raise ValueError when their constraints are not met."""
 
