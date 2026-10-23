@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import trap_if
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
 )
@@ -188,11 +189,11 @@ def _count_expert_num_tokens(
         mask = offsets < (topk_numel - x * BLOCK_SIZE)
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
-            # Bound the gather: expert_ids come from topk_ids, which is data and
-            # can hold stale out-of-range values on rows the router did not
-            # overwrite. Masking on `>= 0` alone reads past expert_map. Note the
-            # bound is the GLOBAL expert count (expert_map's length), not
-            # num_experts, which is this rank's local expert count.
+            # -1 marks an unrouted slot; any other id must index expert_map,
+            # whose length is the GLOBAL expert count (num_experts is this
+            # rank's local count). A larger id is a producer bug: fail loudly,
+            # and keep the gather masked so it never reads past the map.
+            trap_if(expert_ids >= num_global_experts)
             expert_map_ptrs = expert_map + expert_ids
             expert_map_mask = (expert_ids >= 0) & (expert_ids < num_global_experts)
             expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
@@ -631,16 +632,11 @@ def _swiglu_limit_pad_aware_kernel(
         expert_id = tl.load(topk_ids_ptr + row)
         should_compute = expert_id != -1
         if HAS_EXPERT_MAP:
-            # expert_id is data, not a loop bound: it is read from topk_ids,
-            # which the routers allocate with torch.empty and, on the padded
-            # rows of a CUDA-graph batch, do not always overwrite. Such a slot
-            # can hold an arbitrary positive value (in practice the bit pattern
-            # of whatever float tensor previously owned the allocation), so
-            # masking on `expert_id >= 0` alone let it gather past the end of
-            # expert_map -- a Warp MMU fault that takes down every TP rank.
-            # Bound the row offset as well; out-of-range ids fall out as
-            # not-computed, so a producer bug degrades one token slot instead
-            # of killing the engine.
+            # -1 marks an unrouted row; any other id must index expert_map. A
+            # larger one is a producer bug (observed as garbage ids from an
+            # out-of-bounds router gather), so fail loudly. The load stays
+            # masked so it never reads past the map.
+            trap_if(expert_id >= num_experts)
             in_range = (expert_id >= 0) & (expert_id < num_experts)
             local_expert_id = tl.load(
                 expert_map_ptr + expert_id,

@@ -411,17 +411,18 @@ __device__ __forceinline__ bool moe_sum_pad_aware_skip(
     const idx_t* __restrict__ topk_ids, const int32_t* __restrict__ expert_map,
     int64_t idx, int32_t num_experts) {
   int64_t expert_id = static_cast<int64_t>(topk_ids[idx]);
-  // expert_id is data, not a loop bound: routers allocate topk_ids with
-  // torch.empty and do not always overwrite every slot, so it can hold an
-  // arbitrary positive value. Bound it before indexing expert_map -- checking
-  // only `< 0` let a stale slot gather past the end of the map, an illegal
-  // access that takes down every TP rank. `get_local_expert_id()` above
-  // already applies exactly this bound.
-  if (expert_id < 0 || expert_id >= static_cast<int64_t>(num_experts)) {
-    return true;
+  // -1 marks a slot that is not routed.
+  if (expert_id < 0) return true;
+  if (expert_map == nullptr) return false;
+  // Any other id must index expert_map. A larger one is a producer bug (it
+  // was a garbage id from an out-of-bounds router gather); gathering with it
+  // reads past the map, so stop here with a clear message instead.
+  if (expert_id >= static_cast<int64_t>(num_experts)) {
+    printf("moe_sum: expert id %lld is outside expert_map [0, %d)\n",
+           static_cast<long long>(expert_id), num_experts);
+    VLLM_DEVICE_TRAP();
   }
-  if (expert_map != nullptr && expert_map[expert_id] < 0) return true;
-  return false;
+  return expert_map[expert_id] < 0;
 }
 
 template <typename scalar_t, typename idx_t, int TOPK, bool PAD_AWARE>

@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kernel test utils."""
 
+import subprocess
+import sys
+import textwrap
 from collections.abc import Sequence
 from typing import Any
 from unittest.mock import patch
 
+import regex as re
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -413,3 +417,24 @@ def baseline_scaled_mm(
         output = output + bias
 
     return output
+
+
+def assert_kernel_traps(code: str) -> None:
+    """Run `code` in a fresh process and assert a device-side trap killed it.
+
+    A trapped kernel poisons the CUDA context, so the check cannot run in the
+    test process itself. `torch` is imported for `code`.
+    """
+    script = (
+        "import torch\n"
+        + textwrap.dedent(code)
+        + "\ntorch.accelerator.synchronize()\nprint('NO TRAP')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0 and "NO TRAP" not in proc.stdout, output
+    assert re.search(
+        r"illegal instruction|unspecified launch failure|device-side assert", output
+    ), output
