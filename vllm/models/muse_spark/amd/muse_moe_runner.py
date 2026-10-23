@@ -83,10 +83,6 @@ def _validate_tp_post_norm_deployment(
         raise NotImplementedError(
             f"MuseSpark1x {precision} on ROCm does not support sequence-parallel MoE."
         )
-    if parallel_config.enable_eplb:
-        raise NotImplementedError(
-            f"MuseSpark1x {precision} on ROCm does not support EPLB."
-        )
     if moe_config.is_lora_enabled:
         raise NotImplementedError(
             f"MuseSpark1x {precision} on ROCm does not support MoE LoRA."
@@ -111,6 +107,8 @@ def validate_bf16_deployment(moe_config: FusedMoEConfig) -> None:
 def validate_mxfp4_deployment(moe_config: FusedMoEConfig) -> None:
     """Reject deployments whose MXFP4 finalization is not implemented."""
     _validate_tp_post_norm_deployment(moe_config, "MXFP4")
+    if moe_config.moe_parallel_config.enable_eplb:
+        raise NotImplementedError("MuseSpark1x MXFP4 on ROCm does not support EPLB.")
 
 
 def validate_fp8_deployment(moe_config: FusedMoEConfig) -> None:
@@ -568,6 +566,11 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
                 f"got {self.fp8_backend.value}."
             )
         self.experts_cls = MuseSparkTritonExperts
+
+    @property
+    def supports_eplb(self) -> bool:
+        # The Triton path keeps the expert dim outermost in every weight and scale.
+        return True
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
