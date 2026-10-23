@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
@@ -747,11 +748,25 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
     if fp8_backend == Fp8MoeBackend.CPU_W8A8:
-        return fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            block_shape=block_shape,
+        assert block_shape == [128, 128]
+        fp8_dtype = current_platform.fp8_dtype()
+        weight_shape = GroupShape(row=128, col=128)
+        return FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(
+                dtype=fp8_dtype, shape=GroupShape.PER_TOKEN, scale=a1_scale
+            ),
+            _a2=FusedMoEQuantDesc(
+                dtype=fp8_dtype, shape=GroupShape.PER_TOKEN, scale=a2_scale
+            ),
+            _w1=FusedMoEQuantDesc(
+                dtype=fp8_dtype, shape=weight_shape, scale=w1_scale, bias=w1_bias
+            ),
+            _w2=FusedMoEQuantDesc(
+                dtype=fp8_dtype, shape=weight_shape, scale=w2_scale, bias=w2_bias
+            ),
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # MARLIN and CPU (W8A16) are mixed precision W8A16 configs.
