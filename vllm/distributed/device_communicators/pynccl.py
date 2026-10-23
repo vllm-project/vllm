@@ -98,8 +98,7 @@ class PyNcclCommunicator:
         device: int | str | torch.device,
         library_path: str | None = None,
     ):
-        """
-        Args:
+        """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the PyNcclCommunicator to. If None,
@@ -108,6 +107,7 @@ class PyNcclCommunicator:
                 use the default library path.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
+
         """
         if not isinstance(group, StatelessProcessGroup):
             assert dist.is_initialized()
@@ -255,9 +255,14 @@ class PyNcclCommunicator:
             # thread teardown, so a direct call here self-deadlocks.
             # Run it in a daemon thread with a timeout: the main
             # thread proceeds, the graphs drop, and the abort returns.
+            # The thread must not reference self: if it outlives the join
+            # and finishes during interpreter shutdown, freeing self.group
+            # there releases the GIL in a C++ destructor and aborts.
+            nccl, comm, device_index = self.nccl, self.comm, self.device.index
+
             def _abort():
-                with torch.accelerator.device_index(self.device.index):
-                    self.nccl.ncclCommAbort(self.comm)
+                with torch.accelerator.device_index(device_index):
+                    nccl.ncclCommAbort(comm)
 
             abort_thread = threading.Thread(target=_abort, daemon=True)
             abort_thread.start()

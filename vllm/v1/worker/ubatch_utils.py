@@ -43,8 +43,7 @@ class SMControlContextManager:
         set_comm_sms: Callable[[int], None],
         set_compute_sms: Callable[[int], None],
     ):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
+        """Context manager for controlling SM (Streaming Multiprocessor)
         allocation. Upon entering the context, it sets the number of SMs
         allocated for communication and computation to comm_sms and
         total_sms - comm_sms respectively. Upon exiting, it restores the
@@ -57,8 +56,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for communication.
             set_compute_sms (Callable[[int], None]):
                 A function that sets the number of SMs for computation.
-        """
 
+        """
         assert current_platform.is_cuda() or current_platform.is_rocm(), (
             "SM/CU control is supported on CUDA and ROCm platforms"
         )
@@ -177,7 +176,12 @@ def maybe_create_ubatch_slices(
     if split_point is None:
         split_point = int(num_tokens_padded) // num_ubatches
 
-    token_split_points = [split_point * i for i in range(1, num_ubatches)]
+    if isinstance(split_point, int):
+        token_split_points = [split_point * i for i in range(1, num_ubatches)]
+    else:
+        # Explicit split points, one per ubatch boundary.
+        assert len(split_point) == num_ubatches - 1
+        token_split_points = [int(p) for p in split_point]
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
@@ -188,7 +192,7 @@ def maybe_create_ubatch_slices(
     start_token = 0
 
     # Add the end point to the split points to make iteration easier
-    all_points = token_split_points + [cu_num_tokens[-1]]
+    all_points = token_split_points + [int(cu_num_tokens[-1])]
 
     for end_token in all_points:
         token_slice = slice(start_token, end_token)
@@ -221,8 +225,7 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
 ) -> torch.Tensor:
-    """
-    Creates a new query_start_loc that corresponds to the requests in
+    """Creates a new query_start_loc that corresponds to the requests in
     request_slice.
 
     Note: This function creates a new tensor to hold the new query_start_locs.
@@ -237,11 +240,9 @@ def slice_query_start_locs(
 def _make_metadata_with_slice(
     ubatch_slice: UBatchSlice, attn_metadata: CommonAttentionMetadata
 ) -> CommonAttentionMetadata:
-    """
-    This function creates a new CommonAttentionMetadata that corresponds to
+    """This function creates a new CommonAttentionMetadata that corresponds to
     the requests included in ubatch_slice
     """
-
     assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
     request_slice = ubatch_slice.request_slice
@@ -320,6 +321,10 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    positions = attn_metadata.positions
+    if positions is not None:
+        positions = positions[token_slice]
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -330,6 +335,7 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        positions=positions,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
     )
 
@@ -338,8 +344,7 @@ def split_attn_metadata(
     ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
-    """
-    Creates a new CommonAttentionMetadata instance that corresponds to the
+    """Creates a new CommonAttentionMetadata instance that corresponds to the
     requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata

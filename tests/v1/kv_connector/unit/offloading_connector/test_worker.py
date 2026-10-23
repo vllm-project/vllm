@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -97,10 +99,9 @@ def _make_worker(
     kv_cache_config: KVCacheConfig,
     replicated_layout: bool = False,
     rank: int = 0,
+    canonical_layout: bool = False,
 ):
-    """
-    Create an OffloadingConnectorWorker with mocked dependencies.
-    """
+    """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
     )
@@ -108,6 +109,7 @@ def _make_worker(
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
     spec.config = MagicMock()
+    spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 
@@ -206,11 +208,13 @@ def test_prepare_store_kv_non_writer_marks_completed_without_submit():
     assert meta.completed_jobs == {7: 1}
 
 
-def test_prepare_store_kv_writer_submits_store():
+@pytest.mark.parametrize("rank,canonical_layout", [(0, False), (0, True), (1, True)])
+def test_prepare_store_kv_writer_submits_store(rank, canonical_layout):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=0,
+        rank=rank,
+        canonical_layout=canonical_layout,
     )
 
     worker.prepare_store_kv(_store_metadata(8))
@@ -308,6 +312,7 @@ def test_register_kv_caches(backend):
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerBackend,
     )
@@ -326,6 +331,7 @@ def test_register_kv_caches(backend):
     ALIGNED_SSM_STATE_SHAPE = (BLOCK_SIZE * NUM_KV_HEADS, HEAD_SIZE)
 
     backend_cls = AttentionBackendEnum[backend].get_class()
+    indexer_backend_cls = cast(type[AttentionBackend], DeepseekV32IndexerBackend)
 
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -419,19 +425,19 @@ def test_register_kv_caches(backend):
                 kv_cache_group_id=0,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,
+                backend=indexer_backend_cls,
                 layer_names=mla_layer_names,
                 kv_cache_spec=mla_spec,
                 kv_cache_group_id=1,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=unaligned_mamba_layer_names,
                 kv_cache_spec=unaligned_mamba_spec,
                 kv_cache_group_id=2,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=aligned_mamba_layer_names,
                 kv_cache_spec=aligned_mamba_spec,
                 kv_cache_group_id=3,
@@ -516,6 +522,47 @@ def test_register_kv_caches(backend):
             assert actual.page_size_bytes == expected.page_size_bytes
             # Every layer gets a canonical mapping, certified or opaque
             assert actual.mapping is not None
+
+
+def test_register_packed_kv_caches_skips_scratch_group():
+    attn_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page = attn_spec.page_size_bytes
+    layers = ["layer0", "layer1"]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * page * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=page,
+                block_stride=2 * page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layers, attn_spec),
+            KVCacheGroupSpec(
+                ["scratch"],
+                CircularBufferSpec(
+                    block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE
+                ),
+            ),
+        ],
+    )
+    kv_caches = _allocate_kv_caches(
+        kv_cache_config, [], device=torch.device(f"{DEVICE_TYPE}:0")
+    )
+    worker, spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+
+    canonical = spec.get_worker.call_args[0][0]
+    assert len(canonical.tensors) == 1
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, 2 * page)
+    assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
@@ -634,5 +681,9 @@ def test_register_kv_caches_uniform_type(backend):
 
     # Only layer_a matches the model's total KV head count, so layer_b gets an
     # opaque mapping rather than a certified, parallelism-agnostic one
-    assert group_refs[0].mapping.parallelism_agnostic
-    assert not group_refs[1].mapping.parallelism_agnostic
+    layer_a_mapping = group_refs[0].mapping
+    layer_b_mapping = group_refs[1].mapping
+    assert layer_a_mapping is not None
+    assert layer_b_mapping is not None
+    assert layer_a_mapping.parallelism_agnostic
+    assert not layer_b_mapping.parallelism_agnostic

@@ -30,8 +30,7 @@ def llm(vllm_runner):
 
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_basic(llm):
-    """
-    Basic test with a small number of prompts (less than max_num_seqs).
+    """Basic test with a small number of prompts (less than max_num_seqs).
     No tiling should be triggered, but the engine still processes correctly.
     """
     prompts = ["Hello", "World"]
@@ -41,8 +40,7 @@ def test_tiling_engine_basic(llm):
 
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_many_requests(llm):
-    """
-    Test with a large number of prompts that exceeds max_num_seqs.
+    """Test with a large number of prompts that exceeds max_num_seqs.
     This verifies that _run_tiling_engine correctly chunks requests,
     processes all of them, and returns outputs in the correct order.
     """
@@ -54,8 +52,7 @@ def test_tiling_engine_many_requests(llm):
 
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_with_pooling_params(llm):
-    """
-    Test the tiling engine when different PoolingParams are provided.
+    """Test the tiling engine when different PoolingParams are provided.
     The engine must handle a list of params that matches the number of prompts.
     """
     num_prompts = 10
@@ -77,8 +74,7 @@ def test_tiling_engine_with_pooling_params(llm):
 
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_abort_on_exception(llm):
-    """
-    Test that abort_request IS called with the correct arguments when an
+    """Test that abort_request IS called with the correct arguments when an
     exception occurs inside the engine's step() loop.
     """
     prompts = ["Prompt 0", "Prompt 1", "Prompt 2"]

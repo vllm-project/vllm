@@ -21,8 +21,7 @@ from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
-    """
-    Tests for scenarios that are specific to the Responses API
+    """Tests for scenarios that are specific to the Responses API
     response_previous_input_to_harmony function.
     """
 
@@ -562,3 +561,11 @@ class TestHarmonyToResponseOutput:
         output_items = harmony_to_response_output(message, frozenset())
 
         assert len(output_items) == 0
+
+    @pytest.mark.parametrize("channel", ["comment", "commentaryanalysis"])
+    def test_unknown_channel_raises_validation_error(self, channel):
+        message = Message.from_role_and_content(Role.ASSISTANT, "some text")
+        message = message.with_channel(channel)
+
+        with pytest.raises(VLLMValidationError, match=f"Unknown channel: {channel}"):
+            harmony_to_response_output(message, frozenset())
