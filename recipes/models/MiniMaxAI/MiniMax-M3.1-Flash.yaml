@@ -316,6 +316,7 @@ strategy_overrides:
             - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
           extra_env:
             VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
         gb300: *m31_gb_prefill
         mi355x:
           extra_args:
@@ -360,6 +361,7 @@ strategy_overrides:
             - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
           extra_env:
             VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
         gb300: *m31_gb_decode
         mi355x:
           extra_args:
@@ -579,7 +581,7 @@ guide: |
 
   ```bash
   VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
-  VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
     --data-parallel-size 2 \
     --enable-expert-parallel \
@@ -605,7 +607,7 @@ guide: |
 
   ```bash
   VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
-  VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
     --data-parallel-size 4 \
     --enable-expert-parallel \
@@ -627,11 +629,15 @@ guide: |
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
   ```
 
+  - `VLLM_ENGINE_READY_TIMEOUT_S=3600`: with data parallel, each API server
+    waits this long for its engines to start (default 600 s). A cold prefill
+    start (JIT builds, CUDA graph capture, FlashInfer autotune) takes longer
+    than 10 minutes.
   - `--max-num-seqs` is per DP rank. The decode CUDA graphs cover 28 requests
     of 1 + 7 tokens (224).
   - `--watermark 0.05` keeps 5% of the decode KV cache free when admitting
     requests, so extra requests wait in the queue instead of preempting
-    running ones. On GB300 (about 4.6M KV tokens per decode rank) at a
+    running ones. On GB300 (about 4.5M KV tokens per decode rank) at a
     200K-token mean context, expect about 19-21 running requests per rank.
   - Keep the decode `--max-num-batched-tokens` at 8192: a preempted request
     recomputes its context in chunks of that size, and every DP rank runs
