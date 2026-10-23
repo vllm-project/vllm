@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-21
+  date_updated: 2026-10-23
   tasks:
     - multimodal
     - text
@@ -13,6 +13,8 @@ meta:
     - "moonshotai/Kimi-K2.6"
     - "moonshotai/Kimi-K2.5"
   default_hardware: b300
+  default_variant:
+    ascend_950dt: ascend_w4a8
   hardware:
     h200: verified
     b200: verified
@@ -21,6 +23,7 @@ meta:
     gb300: verified
     mi355x: verified
     ascend_910c: verified
+    ascend_950dt: verified
 
 model:
   model_id: "moonshotai/Kimi-K3"
@@ -98,6 +101,10 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","model":"RedHatAI/Kimi-K3-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
+      ascend_950dt:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","enforce_eager":true}'
   text_only:
     description: "Skip the vision encoder for text-only workloads. Mutually exclusive with encoder_parallel."
     args:
@@ -176,7 +183,7 @@ variants:
     precision: int4
     label: "W4A8 (Ascend)"
     vram_minimum_gb: 1711
-    supported_hardware: [ascend_910c]
+    supported_hardware: [ascend_910c, ascend_950dt]
     extra_args:
       - "--quantization"
       - "ascend"
@@ -212,6 +219,8 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a3"
+      ascend_950dt:
+        docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a5"
     description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
 
   fp8:
@@ -234,23 +243,34 @@ compatible_strategies:
 # in compatible_strategies (unlisted = unsupported by default); the
 # `supported` grants below opt it in on exactly the validated GPUs.
 strategy_hardware:
+  single_node_tp:
+    ascend_950dt: unsupported
   multi_node_tp_dp:
     h200: supported
     gb200: supported
     gb300: supported
     ascend_910c: supported
+    # A5 mixed serving: 4 nodes, DP4 / TP8 / EP32.
+    ascend_950dt: supported
   multi_node_dep:
     h100: unsupported
     h200: unsupported
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tep:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp_pp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   pd_cluster:
     ascend_910c: unsupported
+    # A5 target: P DP1/TP8/PP4/EP8; D DP4/TP8/EP32 (4 nodes per role).
+    # Role-specific PD command generation will be adapted separately.
+    ascend_950dt: supported
 
 default_strategy: single_node_tp
 
@@ -275,6 +295,7 @@ strategy_min_gpus:
   gb200:
     multi_node_tp: 16
   ascend_910c: 64
+  ascend_950dt: 32
 
 
 hardware_overrides:
