@@ -190,6 +190,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8ChannelWiseScaledMMLinearKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
     CPUFp8W8A8BlockScaledMMKernel,
     CPUFP8W8A8ScaledMMLinearKernel,
@@ -470,6 +471,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         CPUFP8W8A8ScaledMMLinearKernel,
         CPUFp8PerTensorScaledMMLinearKernel,
+        CPUFp8ChannelWiseScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],

@@ -14,12 +14,15 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+    CPUFp8ChannelWiseScaledMMLinearKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -362,6 +365,51 @@ def test_cpu_fp8_per_tensor_kernel_rejects_non_multiple_of_32_n(n: int):
     )
     supported, _ = CPUFp8PerTensorScaledMMLinearKernel.can_implement(config)
     assert not supported
+
+
+@pytest.mark.parametrize("M", [1, 64])
+@pytest.mark.parametrize("N,K", [(32, 64), (4096, 2560)])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_cpu_fp8_channelwise_scaled_mm_kernel(
+    M: int, N: int, K: int, use_bias: bool, default_vllm_config
+):
+    """CPUFp8ChannelWiseScaledMMLinearKernel against a dequantized reference."""
+    torch.manual_seed(0)
+    out_dtype = torch.bfloat16
+    x = torch.randn(M, K, dtype=out_dtype) / (K**0.5)
+    w_f32 = torch.randn(N, K, dtype=torch.float32) / (K**0.5)
+    scale = (w_f32.abs().amax(dim=1, keepdim=True) / FP8_MAX).float()
+    fp8_weight = (w_f32 / scale).to(torch.float8_e4m3fn)
+    bias = torch.randn(N, dtype=out_dtype) * 0.1 if use_bias else None
+
+    ref_out = torch.nn.functional.linear(
+        x.float(), fp8_weight.float() * scale, None if bias is None else bias.float()
+    ).to(out_dtype)
+
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(N, K),
+        input_dtype=out_dtype,
+        out_dtype=out_dtype,
+    )
+    kernel = CPUFp8ChannelWiseScaledMMLinearKernel(
+        config,
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
+    )
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(fp8_weight.t().contiguous(), requires_grad=False)
+    )
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(scale.clone(), requires_grad=False)
+    )
+    kernel.process_weights_after_loading(layer)
+
+    kernel_out = kernel.apply_weights(layer, x, bias)
+
+    assert kernel_out.dtype == out_dtype
+    torch.testing.assert_close(kernel_out, ref_out, rtol=0.02, atol=0.01)
 
 
 def reference_dynamic_fp8_linear(
