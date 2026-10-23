@@ -1570,6 +1570,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # The skinny GEMM launchers are split per kernel family: the kernels (and the
   # device code they instantiate) are shared through skinny_gemms.cuh, but each
   # family gets its own translation unit so ninja compiles them in parallel.
+  # The int4 skinny GEMM is instantiated one unit per N_in (see
+  # WVSPLITK_INT4_LANE in skinny_gemms_int4.cu): with the whole op in one unit
+  # the 9-arch build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and forwards on N_in.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu")
   set(VLLM_SKINNY_SRC
     "csrc/rocm/skinny_gemms_llmm1.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
@@ -1657,17 +1668,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Paged attention generation is up to date.")
   endif()
 
-  # The int4 skinny GEMM is instantiated one unit per N_in (see
-  # WVSPLITK_INT4_LANE in skinny_gemms_int4.cu): with the whole op in one unit
-  # the 9-arch build spends its entire length compiling that single file.
-  # skinny_gemms_int4_api.cu keeps the public entry point and forwards on N_in.
-  set(VLLM_SKINNY_INT4_SRC
-    "csrc/rocm/skinny_gemms_int4_api.cu"
-    "csrc/rocm/skinny_gemms_int4_n1.cu"
-    "csrc/rocm/skinny_gemms_int4_n2.cu"
-    "csrc/rocm/skinny_gemms_int4_n3.cu"
-    "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     ${VLLM_SKINNY_SRC}
