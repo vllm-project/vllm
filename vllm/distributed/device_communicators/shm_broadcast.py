@@ -72,7 +72,7 @@ SHM_READER_RECHECK_INTERVAL_MS = 5000
 # How often a busy reader polls its notify socket. CONFLATE keeps one message,
 # but libzmq still queues an internal command per notification until the socket
 # is polled, so a reader that never goes idle would grow without bound.
-SHM_NOTIFY_POLL_INTERVAL_S = 1.0
+SHM_NOTIFY_POLL_INTERVAL_S = 2.0
 
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
