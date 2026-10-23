@@ -654,6 +654,15 @@ class EngineCore:
         Overridden by the DP engine core; never throttles otherwise."""
         return False
 
+    def _schedule(self) -> SchedulerOutput:
+        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if scheduler_output.scheduled_new_reqs:
+            # Admitted requests and their KV block lists live until the request
+            # finishes and grow with context length. Freeze them like the
+            # startup heap so that full GC passes don't traverse them.
+            gc.freeze()
+        return scheduler_output
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -664,7 +673,7 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        scheduler_output = self._schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -722,7 +731,7 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            scheduler_output = self._schedule()
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
