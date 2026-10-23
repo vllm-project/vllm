@@ -225,10 +225,12 @@ def test_indexer_device_metadata_replay(tp, page_size):
 
     cu_q = torch.tensor([0, 4, 133, 133, 136], dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor([259, 512, 0, 1151], dtype=torch.int32, device="cuda")
-    positions = torch.tensor([-1, 0, 127, 128, 511], device="cuda")
+    positions = torch.tensor([-1, 0, 127, 128, 511, 0], device="cuda")
     slots = torch.cat(
         (torch.arange(512, device="cuda"), torch.tensor([-1], device="cuda"))
     )
+    slots[1] = 0  # A real token owned by a peer still needs causal page counts.
+    slots[5] = -1
     context = torch.empty_like(seq_lens)
     valid = torch.empty_like(positions, dtype=torch.int32)
     output_slots = torch.empty_like(slots)
@@ -250,14 +252,17 @@ def test_indexer_device_metadata_replay(tp, page_size):
         prepare_prefill_window(cu_q, seq_lens, 3, 135, window)
 
     run()
+    torch.testing.assert_close(valid, valid.new_tensor([0, 1, 1, 2, 4, 0]))
+    assert output_slots[1] == -1
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         run()
     seq_lens.add_(128)
     positions.add_(128)
+    slots[4] = -1
     graph.replay()
     torch.testing.assert_close(context, seq_lens - cu_q.diff())
-    torch.testing.assert_close(valid, (positions // 128 + 1).int())
+    torch.testing.assert_close(valid, valid.new_tensor([1, 2, 2, 3, 0, 0]))
     begin = (cu_q[:-1] - 3).clamp(0, 132)
     end = (cu_q[1:] - 3).clamp(0, 132)
     prefix = seq_lens - cu_q.diff() + (3 - cu_q[:-1]).clamp(min=0).minimum(cu_q.diff())

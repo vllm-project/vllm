@@ -522,7 +522,7 @@ To score local K and exchange Top16 candidates instead, use
 Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
 The experimental `local_score_unified` mode also includes decode queries in the
 local-score exchange during mixed batches; pure decode keeps its existing path.
-Both paths preserve logical 128-token block IDs; decode and main attention are
-unchanged. Local prefill scores bounded query chunks and accumulates candidates
+All modes preserve logical 128-token block IDs and main attention.
+Local prefill scores bounded query chunks and accumulates candidates
 in reusable buffers for one NCCL exchange per layer.
 There is no automatic path selection; compare full-model performance for your workload.

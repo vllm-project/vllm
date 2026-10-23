@@ -29,12 +29,12 @@ def _indexer_metadata(
     seq = tl.load(SeqLens + row, row < num_reqs, other=0)
     tl.store(Context + row, seq - (q1 - q0), row < num_reqs)
     position = tl.load(Positions + row, row < num_tokens, other=-1)
+    slot = tl.load(Slots + row, row < num_slots, other=-1)
     tl.store(
         ValidPages + row,
-        tl.where(position >= 0, position // 128 + 1, 0),
+        tl.where((position >= 0) & (slot >= 0), position // 128 + 1, 0),
         row < num_tokens,
     )
-    slot = tl.load(Slots + row, row < num_slots, other=-1)
     offset = slot % PAGE_SIZE
     if PAGE_SIZE == 256:
         owner = offset // (PAGE_SIZE // tp)
