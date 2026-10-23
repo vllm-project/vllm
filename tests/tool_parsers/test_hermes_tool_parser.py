@@ -420,3 +420,165 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+_WEATHER_CALL = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tool_call>'
+)
+
+
+class _DummyTokenizer:
+    """Tokenizer stand-in. These cases feed text directly to the parser."""
+
+
+def _hermes_request() -> ChatCompletionRequest:
+    return ChatCompletionRequest(model="test-model", messages=[])
+
+
+def _stream_hermes(text: str, chunk_size: int) -> tuple[str, list[dict[str, str]]]:
+    parser = Hermes2ProToolParser(_DummyTokenizer())
+    request = _hermes_request()
+    previous = ""
+    content_parts: list[str] = []
+    tools: dict[int, dict[str, str]] = {}
+    for offset in range(0, len(text), chunk_size):
+        delta_text = text[offset : offset + chunk_size]
+        current = previous + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous,
+            current_text=current,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        previous = current
+        if delta is None:
+            continue
+        if delta.content:
+            content_parts.append(delta.content)
+        for tool_call in delta.tool_calls or []:
+            slot = tools.setdefault(tool_call.index, {"name": "", "arguments": ""})
+            function = get_function_delta(tool_call)
+            if function.name:
+                slot["name"] += function.name
+            if function.arguments:
+                slot["arguments"] += function.arguments
+    flushed = parser.finish_streaming()
+    if flushed is not None and flushed.content:
+        content_parts.append(flushed.content)
+    ordered = [tools[index] for index in sorted(tools)]
+    return "".join(content_parts), ordered
+
+
+@pytest.mark.parametrize(
+    "trailing",
+    [
+        " Second. <tool_call>",
+        " Second. <tool_call> opens a call. Done.",
+        " Second. <tool_call></tool_call> Third.",
+        " Second. <tool_call>not json</tool_call> Third.",
+    ],
+)
+def test_hermes_keeps_calls_before_malformed_region(trailing: str) -> None:
+    """A later malformed region must not drop earlier valid tool calls.
+
+    Regression for https://github.com/vllm-project/vllm/issues/63358.
+    """
+    text = f"First. {_WEATHER_CALL}{trailing}"
+    result = Hermes2ProToolParser(_DummyTokenizer()).extract_tool_calls(
+        text, _hermes_request()
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_weather"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
+    assert result.content == f"First. {trailing}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The literal <tool_call> tag opens a call. Done.",
+        'Mention <tool_call> and "name": "foo" in prose.',
+        "Use <tool_call> when you want a tool.",
+    ],
+)
+def test_hermes_stray_tool_call_in_prose_stays_content(text: str) -> None:
+    """A literal tag in prose is content on both paths.
+
+    Regression for https://github.com/vllm-project/vllm/issues/63309.
+    """
+    result = Hermes2ProToolParser(_DummyTokenizer()).extract_tool_calls(
+        text, _hermes_request()
+    )
+    content, tools = _stream_hermes(text, chunk_size=1)
+
+    assert not result.tools_called
+    assert result.content == text
+    assert content == text
+    assert tools == []
+
+
+def test_hermes_lone_malformed_region_returns_raw_text() -> None:
+    text = "<tool_call>not json</tool_call> Third."
+    result = Hermes2ProToolParser(_DummyTokenizer()).extract_tool_calls(
+        text, _hermes_request()
+    )
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == text
+
+
+def test_hermes_well_formed_output_is_unchanged() -> None:
+    text = f"Hello {_WEATHER_CALL} thanks"
+    result = Hermes2ProToolParser(_DummyTokenizer()).extract_tool_calls(
+        text, _hermes_request()
+    )
+
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "get_weather"
+    # Text after a successful call stays dropped, matching the previous parser.
+    assert result.content == "Hello "
+
+
+@pytest.mark.parametrize("chunk_size", [1, 3, 8])
+def test_hermes_streaming_matches_nonstreaming_on_trailing_malformed(
+    chunk_size: int,
+) -> None:
+    text = f"First. {_WEATHER_CALL} Second. <tool_call>not json</tool_call> Third."
+    nonstreaming = Hermes2ProToolParser(_DummyTokenizer()).extract_tool_calls(
+        text, _hermes_request()
+    )
+    content, tools = _stream_hermes(text, chunk_size)
+
+    assert content == nonstreaming.content
+    assert len(tools) == 1
+    assert tools[0]["name"] == "get_weather"
+    assert json.loads(tools[0]["arguments"]) == {"city": "Paris"}
+
+
+def test_hermes_streaming_buffers_empty_unclosed_tag_until_finish() -> None:
+    text = f"First. {_WEATHER_CALL} Second. <tool_call>"
+    parser = Hermes2ProToolParser(_DummyTokenizer())
+    request = _hermes_request()
+    delta = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=text,
+        delta_text=text,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+    assert delta is not None
+    assert delta.content == "First.  Second. "
+    assert delta.tool_calls
+    assert get_function_delta(delta.tool_calls[0]).name == "get_weather"
+
+    flushed = parser.finish_streaming()
+    assert flushed is not None
+    assert flushed.content == "<tool_call>"

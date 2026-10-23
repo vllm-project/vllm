@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import regex as re
 
@@ -33,6 +33,9 @@ logger = init_logger(__name__)
 
 class Hermes2ProToolParser(ToolParser):
     structural_tag_model = "hermes"
+    # Flush a held partial region when generation ends. This parser is not
+    # engine-based, so the serving layer must opt in explicitly.
+    flush_streaming_on_finish = True
     tool_call_start_token: str = "<tool_call>"
     tool_call_end_token: str = "</tool_call>"
     tool_call_regex = re.compile(
@@ -55,6 +58,12 @@ class Hermes2ProToolParser(ToolParser):
 
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0
+        # Index into the text after the last valid tool call that has already
+        # been emitted as content. None until a later region stops being a call.
+        self._suffix_sent_idx: int | None = None
+        # An unclosed region is still buffered; finish_streaming emits it.
+        self._holding_partial_region: bool = False
+        self._last_text: str = ""
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -78,46 +87,122 @@ class Hermes2ProToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+        tool_calls: list[ToolCall] = []
+        last_good_end: int | None = None
+        malformed = False
+        for _start, region_end, body, _closed in self._iter_tool_call_regions(
+            model_output
+        ):
+            parsed = self._tool_call_from_body(body)
+            if parsed is None:
+                malformed = True
+                break
+            tool_calls.append(parsed)
+            last_good_end = region_end
+
+        if not tool_calls:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        prefix_end = model_output.find(self.tool_call_start_token)
+        if malformed and last_good_end is not None:
+            content = model_output[:prefix_end] + model_output[last_good_end:]
         else:
-            try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+            # Well-formed output keeps only the text before the first call.
+            content = model_output[:prefix_end]
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=tool_calls,
+            content=content if content else None,
+        )
 
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
-                ]
-                tool_calls = [
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=function_call["name"],
-                            # function call args are JSON but as a string
-                            arguments=json.dumps(
-                                function_call["arguments"], ensure_ascii=False
-                            ),
-                        ),
-                    )
-                    for function_call in raw_function_calls
-                ]
+    def _iter_tool_call_regions(
+        self, text: str
+    ) -> Iterator[tuple[int, int, str, bool]]:
+        """Yield ``(start, end, body, closed)`` for each tool-call region.
 
-                content = model_output[: model_output.find(self.tool_call_start_token)]
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content if content else None,
-                )
+        ``body`` excludes a partial closing tag. ``end`` is the index after a
+        closed region, or ``len(text)`` while the region is still open.
+        """
+        pos = 0
+        start_token = self.tool_call_start_token
+        end_token = self.tool_call_end_token
+        while True:
+            start = text.find(start_token, pos)
+            if start == -1:
+                return
+            body_start = start + len(start_token)
+            end = text.find(end_token, body_start)
+            if end != -1:
+                region_end = end + len(end_token)
+                yield start, region_end, text[body_start:end], True
+                pos = region_end
+                continue
+            raw = text[body_start:]
+            overlap = partial_tag_overlap(raw, end_token)
+            if overlap:
+                raw = raw[:-overlap]
+            yield start, len(text), raw, False
+            return
 
-            except Exception:
-                logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
+    def _tool_call_from_body(self, body: str) -> ToolCall | None:
+        """Parse one region. None means this region is not a tool call."""
+        stripped = body.strip()
+        if not stripped:
+            return None
+        try:
+            function_call = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if (
+            not isinstance(function_call, dict)
+            or not isinstance(function_call.get("name"), str)
+            or "arguments" not in function_call
+        ):
+            return None
+        return ToolCall(
+            type="function",
+            function=FunctionCall(
+                name=function_call["name"],
+                arguments=json.dumps(function_call["arguments"], ensure_ascii=False),
+            ),
+        )
+
+    def _classify_stream_region(self, body: str, closed: bool, index: int) -> str:
+        """Return ``tool``, ``text``, or ``pending`` for a streaming region.
+
+        A region is text as soon as its body does not start with ``{``, or
+        once it is closed without a parseable call. An empty unclosed tag
+        stays pending so a later JSON payload can still arrive.
+        """
+        stripped = body.strip()
+        if not stripped:
+            return "text" if closed else "pending"
+        if not stripped.startswith("{"):
+            return "text"
+        already_named = (
+            index < len(self.prev_tool_call_arr)
+            and "name" in self.prev_tool_call_arr[index]
+        )
+        complete = closed or is_complete_json(stripped)
+        if complete:
+            if self._tool_call_from_body(stripped) is not None or already_named:
+                return "tool"
+            return "text"
+        if self._extract_tool_name(stripped) or already_named:
+            return "tool"
+        return "pending"
+
+    def _take_suffix(self, current_text: str, start: int, end: int) -> str | None:
+        """Return not-yet-sent text in ``current_text[start:end]``."""
+        if self._suffix_sent_idx is None or self._suffix_sent_idx < start:
+            self._suffix_sent_idx = start
+        if end <= self._suffix_sent_idx:
+            return None
+        extra = current_text[self._suffix_sent_idx : end]
+        self._suffix_sent_idx = end
+        return extra or None
 
     def _extract_content(self, current_text: str) -> str | None:
         """Return unsent non-tool-call text, or None.
@@ -137,33 +222,6 @@ class Hermes2ProToolParser(ToolParser):
             self._sent_content_idx = sendable_idx
             return content
         return None
-
-    def _extract_tool_call_jsons(self, text: str) -> list[tuple[str, bool]]:
-        """Extract (json_text, is_complete) for each <tool_call> region."""
-        results: list[tuple[str, bool]] = []
-        pos = 0
-        while True:
-            start = text.find(self.tool_call_start_token, pos)
-            if start == -1:
-                break
-            json_start = start + len(self.tool_call_start_token)
-            json_end = text.find(self.tool_call_end_token, json_start)
-            if json_end != -1:
-                results.append((text[json_start:json_end].strip(), True))
-                pos = json_end + len(self.tool_call_end_token)
-            else:
-                raw = text[json_start:]
-                # Strip partial </tool_call> suffix if present.
-                overlap = partial_tag_overlap(raw, self.tool_call_end_token)
-                if overlap:
-                    raw = raw[:-overlap]
-                tc_json = raw.strip()
-                # Valid JSON without closing tag = complete body,
-                # tag tokens just haven't arrived yet.
-                is_complete = is_complete_json(tc_json) if tc_json else False
-                results.append((tc_json, is_complete))
-                break
-        return results
 
     @staticmethod
     def _extract_tool_name(tc_json: str) -> str | None:
@@ -221,9 +279,44 @@ class Hermes2ProToolParser(ToolParser):
         text preceding any tool call) or one or more ``DeltaToolCall``
         entries, or ``None`` if there is nothing new to send yet."""
         try:
+            self._last_text = current_text
             # Extract any content before tool calls.
             content = self._extract_content(current_text)
-            tool_call_jsons = self._extract_tool_call_jsons(current_text)
+            tool_call_jsons: list[tuple[str, bool]] = []
+            last_good_end: int | None = None
+            self._holding_partial_region = False
+            for index, (start, _region_end, body, closed) in enumerate(
+                self._iter_tool_call_regions(current_text)
+            ):
+                kind = self._classify_stream_region(body, closed, index)
+                if kind == "pending":
+                    # Keep the tag buffered, but do not swallow the prose
+                    # that sits between the previous call and this tag.
+                    suffix_from = start if last_good_end is None else last_good_end
+                    extra = self._take_suffix(current_text, suffix_from, start)
+                    if extra:
+                        content = extra if not content else content + extra
+                    self._holding_partial_region = True
+                    break
+                if kind == "text":
+                    suffix_from = start if last_good_end is None else last_good_end
+                    extra = self._take_suffix(
+                        current_text, suffix_from, len(current_text)
+                    )
+                    if extra:
+                        content = extra if not content else content + extra
+                    break
+                stripped = body.strip()
+                is_complete = closed or is_complete_json(stripped)
+                tool_call_jsons.append((stripped, is_complete))
+                last_good_end = _region_end
+                # A region that was buffered and then became a call must not
+                # be emitted again as content.
+                if (
+                    self._suffix_sent_idx is not None
+                    and self._suffix_sent_idx < _region_end
+                ):
+                    self._suffix_sent_idx = _region_end
             tool_call_deltas: list[DeltaToolCall] = []
 
             for i, (tc_json, is_complete) in enumerate(tool_call_jsons):
@@ -272,3 +365,17 @@ class Hermes2ProToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Emit a tool-call tag that was still open when generation ended."""
+        if not self._holding_partial_region or self._suffix_sent_idx is None:
+            return None
+        if self._suffix_sent_idx >= len(self._last_text):
+            self._holding_partial_region = False
+            return None
+        extra = self._last_text[self._suffix_sent_idx :]
+        self._suffix_sent_idx = len(self._last_text)
+        self._holding_partial_region = False
+        if not extra:
+            return None
+        return DeltaMessage(content=extra)
