@@ -37,6 +37,21 @@ from vllm.triton_utils import tl, triton
 _MIN_BLOCK_KV = tl.constexpr(32)
 
 
+@triton.jit
+def _cast_kv_tile(data, dtype: tl.constexpr, IS_FP8_KV: tl.constexpr):
+    """Cast a loaded KV tile to ``dtype``, bitcast-dequantizing fp8 storage.
+
+    See the identical helper in ``fa4_rel_attention.py`` for rationale: an
+    fp8 KV cache is raw ``uint8``-stored e4m3 bytes, not integer magnitudes,
+    so dequantization must bitcast before casting. No k_scale/v_scale
+    multiply is applied — Inkling never computes or threads a non-unity
+    scale anywhere in its attention call path.
+    """
+    if IS_FP8_KV:
+        return data.to(tl.float8e4nv, bitcast=True).to(dtype)
+    return data.to(dtype)
+
+
 def decode_split_count(max_kv_len: int, window_left: int) -> int:
     """Return the number of parallel KV partitions for decode."""
     if window_left >= 0:
@@ -102,6 +117,7 @@ def _split_kv_stage1(
     head_dim: tl.constexpr,
     rel_extent: tl.constexpr,
     max_kv_splits: tl.constexpr,
+    IS_FP8_KV: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -162,7 +178,8 @@ def _split_kv_stage1(
                 mask=d_valid[:, None] & n_valid[None, :],
                 other=0.0,
             )
-            scores = tl.dot(q, k.to(q.dtype)) * softmax_scale
+            k = _cast_kv_tile(k, q.dtype, IS_FP8_KV)
+            scores = tl.dot(q, k) * softmax_scale
 
             rel_dist = cache_len - 1 - token_idx
             rel_valid = (rel_dist >= 0) & (rel_dist < rel_extent)
@@ -195,6 +212,7 @@ def _split_kv_stage1(
                 mask=n_valid[:, None] & d_valid[None, :],
                 other=0.0,
             )
+            v = _cast_kv_tile(v, q.dtype, IS_FP8_KV)
 
             next_max = tl.maximum(tl.max(scores, axis=1), row_max)
             old_scale = tl.exp(row_max - next_max)
@@ -373,6 +391,7 @@ def inkling_rel_attention_split_kv_decode(
         head_dim=q.shape[2],
         rel_extent=rel_extent,
         max_kv_splits=max_kv_splits,
+        IS_FP8_KV=key_cache.dtype == torch.uint8,
         BLOCK_D=block_d,
         BLOCK_H=block_h,
         BLOCK_N=key_cache.shape[1],

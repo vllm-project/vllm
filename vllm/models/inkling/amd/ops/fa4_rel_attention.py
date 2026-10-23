@@ -99,6 +99,23 @@ def inkling_fa4_num_splits(
     )
 
 
+@triton.jit
+def _cast_kv_tile(data, dtype: tl.constexpr, IS_FP8_KV: tl.constexpr):
+    """Cast a loaded KV tile to ``dtype``, bitcast-dequantizing fp8 storage.
+
+    Mirrors ``triton_unified_attention.py``'s ``_cast_kv_tile``: an fp8
+    KV cache is stored as raw ``uint8`` bytes (a real e4m3 bit pattern, not
+    an unsigned-integer magnitude), so a plain ``.to(dtype)`` would silently
+    perform an integer-to-float conversion instead of dequantizing. No
+    k_scale/v_scale multiply is applied because Inkling never computes or
+    threads a non-unity scale anywhere in its attention call path (unity is
+    the correct, if limited, implicit scale on current evidence).
+    """
+    if IS_FP8_KV:
+        return data.to(tl.float8e4nv, bitcast=True).to(dtype)
+    return data.to(dtype)
+
+
 @triton.heuristics(
     {
         "BLOCK_D": lambda args: triton.next_power_of_2(args["head_dim"]),
@@ -142,6 +159,7 @@ def _inkling_rel_attention_kernel(
     page_size: tl.constexpr,
     rel_extent: tl.constexpr,
     window_left: tl.constexpr,
+    IS_FP8_KV: tl.constexpr,
     BLOCK_Q: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -212,6 +230,7 @@ def _inkling_rel_attention_kernel(
             mask=d_valid[:, None] & k_valid[None, :],
             other=0.0,
         )
+        k = _cast_kv_tile(k, q.dtype, IS_FP8_KV)
         scores = tl.dot(q, k) * (softmax_scale * log2e)
 
         dist = q_abs[:, None] - k_pos[None, :]
@@ -268,6 +287,7 @@ def _inkling_rel_attention_kernel(
             mask=k_valid[:, None] & d_valid[None, :],
             other=0.0,
         )
+        v = _cast_kv_tile(v, q.dtype, IS_FP8_KV)
         acc += tl.dot(p.to(v.dtype), v)
         m_i = m_ij
 
@@ -438,6 +458,7 @@ def inkling_fa4_rel_attention(
         page_size=key_cache.shape[1],
         rel_extent=rel_extent,
         window_left=window_size[0],
+        IS_FP8_KV=key_cache.dtype == torch.uint8,
         BLOCK_Q=block_q,
         BLOCK_K=64,
         num_warps=4,

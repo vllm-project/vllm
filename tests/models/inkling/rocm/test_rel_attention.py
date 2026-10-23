@@ -70,6 +70,121 @@ def _reference(
     return torch.cat(out).to(DTYPE)
 
 
+def _make_fp8_kv_cache(
+    shape: tuple[int, ...], device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize normalized random values to float8_e4m3fn and return both
+    the raw uint8-viewed byte cache (what the kernels actually read for
+    ``--kv-cache-dtype=fp8``) and the dequantized cache in ``DTYPE`` (ground
+    truth for ``_reference``, matching how vLLM's real fp8 KV cache is
+    stored)."""
+    raw = torch.nn.functional.normalize(torch.randn(shape, device=device), dim=-1)
+    fp8 = raw.to(torch.float8_e4m3fn)
+    return fp8.view(torch.uint8).contiguous(), fp8.to(DTYPE)
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "page_size",
+        "q_lens",
+        "kv_lens",
+        "num_kv_heads",
+        "rel_extent",
+        "window_left",
+        "max_kv_len",
+        "gluon_enabled",
+    ),
+    [
+        # Generic kernel (ragged prefill).
+        ("generic", 16, [17, 1], [35, 80], 2, 16, None, None, None),
+        # Split-KV decode kernel.
+        ("split_kv", 16, [1, 1], [257, 513], 1, 64, None, 8192, None),
+        # gfx950 Gluon decode kernel.
+        ("gluon_decode", 64, [1, 1], [100, 200], 2, 16, None, None, True),
+        # gfx950 Gluon extend kernel.
+        ("gluon_extend", 64, [32, 17], [8200, 8300], 2, 16, None, 8192, True),
+    ],
+)
+@torch.inference_mode()
+def test_fp8_kv_cache_matches_dequantized_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    page_size: int,
+    q_lens: list[int],
+    kv_lens: list[int],
+    num_kv_heads: int,
+    rel_extent: int,
+    window_left: int | None,
+    max_kv_len: int | None,
+    gluon_enabled: bool | None,
+):
+    """A ``torch.uint8``-stored fp8 e4m3 KV cache (``--kv-cache-dtype=fp8``)
+    must be bitcast-dequantized, not numerically cast, before use. Prior to
+    this fix, every one of these dispatch paths either raised a Triton/MLIR
+    compile error or silently misinterpreted the raw fp8 bytes as integer
+    magnitudes; none of the cases above used anything but a bf16 KV cache."""
+    if gluon_enabled is not None:
+        monkeypatch.setenv("INKLING_GFX950_GLUON", "1" if gluon_enabled else "0")
+    torch.manual_seed(2026)
+    device = "cuda"
+    num_heads = 8
+    max_pages = max((length + page_size - 1) // page_size for length in kv_lens)
+    cache_shape = (1 + len(q_lens) * max_pages, page_size, num_kv_heads, HEAD_DIM)
+
+    q = torch.randn(sum(q_lens), num_heads, HEAD_DIM, device=device)
+    q = torch.nn.functional.normalize(q.float(), dim=-1).to(DTYPE)
+    key_cache_u8, key_cache_deq = _make_fp8_kv_cache(cache_shape, device)
+    value_cache_u8, value_cache_deq = _make_fp8_kv_cache(cache_shape, device)
+    rel_logits = torch.randn(
+        sum(q_lens), num_heads, rel_extent, device=device, dtype=DTYPE
+    )
+    block_table = torch.stack(
+        [
+            torch.arange(1 + req * max_pages, 1 + (req + 1) * max_pages)
+            for req in range(len(q_lens))
+        ]
+    ).to(device=device, dtype=torch.int32)
+    cu_seqlens_q = torch.tensor(
+        [0, *torch.tensor(q_lens).cumsum(0).tolist()],
+        device=device,
+        dtype=torch.int32,
+    )
+    cache_seqlens = torch.tensor(kv_lens, device=device, dtype=torch.int32)
+    window_size = (-1, -1) if window_left is None else (window_left, 0)
+
+    actual = inkling_fa4_rel_attention(
+        q,
+        key_cache_u8,
+        value_cache_u8,
+        block_table=block_table,
+        cache_seqlens=cache_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=bucket_max_seqlen_q(max(q_lens)),
+        softmax_scale=1.0 / HEAD_DIM,
+        causal=True,
+        window_size=window_size,
+        rel_extent=rel_extent,
+        rel_logits=rel_logits,
+        max_kv_len=max_kv_len,
+    )
+    expected = _reference(
+        q,
+        key_cache_deq,
+        value_cache_deq,
+        rel_logits,
+        block_table,
+        q_lens,
+        kv_lens,
+        rel_extent,
+        window_left,
+    )
+    # Looser than the bf16-only suite's 3e-2 to account for fp8 e4m3's
+    # ~2-3 bit mantissa, matching the tolerance validated in the fix's
+    # supporting experiment.
+    torch.testing.assert_close(actual.float(), expected.float(), atol=6e-2, rtol=6e-2)
+
+
 def test_query_length_bucket():
     assert bucket_max_seqlen_q(1) == 1
     assert bucket_max_seqlen_q(17) == 32

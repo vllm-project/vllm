@@ -109,6 +109,7 @@ class ExtendConfig:
     REL_EXTENT: gl.constexpr
     REL_BIAS_QK_SCALE: gl.constexpr
     IS_FP8: gl.constexpr
+    IS_FP8_KV: gl.constexpr
     q_strides: InputStrides
     rel_strides: InputStrides
     k_strides: PagedKVStrides
@@ -142,6 +143,7 @@ class ExtendConfig:
         REL_EXTENT,
         REL_BIAS_QK_SCALE,
         IS_FP8,
+        IS_FP8_KV,
         q_strides,
         rel_strides,
         k_strides,
@@ -159,9 +161,11 @@ class ExtendConfig:
         )
         qk_layout = mfma_layout
         pv_layout = mfma_layout
-        # Elements loaded per lane depend on the input dtype, matching qk_kw.
+        # Elements loaded per lane depend on the raw K/V storage width (one
+        # byte per fp8 element when the KV cache is quantized), not on Q's
+        # dtype.
         # load_threads is how many lanes span HEAD_DIM.
-        load_vec = 16 if IS_FP8 else 8
+        load_vec = 16 if IS_FP8_KV else 8
         load_threads = HEAD_DIM // load_vec
         load_layout = gl.BlockedLayout(
             [1, load_vec], [64 // load_threads, load_threads], [NUM_WARPS, 1], [1, 0]
@@ -175,9 +179,9 @@ class ExtendConfig:
         )
         # Padding interval is 64 lanes * load_vec elems.
         pad_interval = 64 * load_vec
-        # Empirically tuned.
-        pad_k = 16 if IS_FP8 else 8
-        pad_v = 16 if IS_FP8 else 32
+        # Empirically tuned; must track load_vec's storage-width basis.
+        pad_k = 16 if IS_FP8_KV else 8
+        pad_v = 16 if IS_FP8_KV else 32
         k_smem_layout = gl.PaddedSharedLayout.with_identity_for(
             [[pad_interval, pad_k]], [BLOCK_N, HEAD_DIM], [1, 0]
         )
@@ -201,6 +205,7 @@ class ExtendConfig:
         self.REL_EXTENT = gl.constexpr(REL_EXTENT)
         self.REL_BIAS_QK_SCALE = gl.constexpr(REL_BIAS_QK_SCALE)
         self.IS_FP8 = gl.constexpr(IS_FP8)
+        self.IS_FP8_KV = gl.constexpr(IS_FP8_KV)
         self.q_strides = q_strides
         self.rel_strides = rel_strides
         self.k_strides = k_strides
@@ -376,12 +381,18 @@ class ExtendProgram:
     def shared_load_k(self, k_smem):
         cfg = self.cfg
         k_buffer = k_smem.permute([1, 0])
-        return k_buffer.load(cfg.k_layout)
+        k = k_buffer.load(cfg.k_layout)
+        if cfg.IS_FP8_KV:
+            k = k.to(gl.float8e4nv, bitcast=True).to(self.q_ptr.dtype.element_ty)
+        return k
 
     @gluon.jit
     def shared_load_v(self, v_smem):
         cfg = self.cfg
-        return v_smem.load(cfg.v_layout)
+        v = v_smem.load(cfg.v_layout)
+        if cfg.IS_FP8_KV:
+            v = v.to(gl.float8e4nv, bitcast=True).to(self.q_ptr.dtype.element_ty)
+        return v
 
     @gluon.jit
     def compute_qk(self, q, k):
@@ -542,6 +553,7 @@ def _rel_mha_extend_fp16(
     REL_EXTENT: gl.constexpr,
     REL_BIAS_QK_SCALE: gl.constexpr,
     IS_FP8: gl.constexpr,
+    IS_FP8_KV: gl.constexpr,
 ):
     cfg = ExtendConfig(
         N_HEADS,
@@ -559,6 +571,7 @@ def _rel_mha_extend_fp16(
         REL_EXTENT,
         REL_BIAS_QK_SCALE,
         IS_FP8,
+        IS_FP8_KV,
         InputStrides(Q_STRIDE_T, Q_STRIDE_H, Q_STRIDE_D),
         InputStrides(REL_STRIDE_T, REL_STRIDE_H, REL_STRIDE_E),
         PagedKVStrides(K_STRIDE_B, K_STRIDE_P, K_STRIDE_H, K_STRIDE_D),
@@ -697,6 +710,7 @@ def gluon_rel_mha_extend_gfx950(
     cache_i32 = cache_seqlens.to(torch.int32).contiguous()
 
     is_fp8 = q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    is_fp8_kv = k_cache.dtype == torch.uint8
     out_dtype = torch.bfloat16 if is_fp8 else q.dtype
     if page_size not in (64, 128, 256):
         raise ValueError(
@@ -752,6 +766,7 @@ def gluon_rel_mha_extend_gfx950(
         rel_logits.shape[2],
         rel_bias_qk_scale,
         is_fp8,
+        is_fp8_kv,
         num_warps=num_warps,
     )
     if return_lse:

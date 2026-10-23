@@ -65,6 +65,7 @@ class AttentionConfig:
     REL_EXTENT: gl.constexpr
     REL_BIAS_QK_SCALE: gl.constexpr
     IS_FP8: gl.constexpr
+    IS_FP8_KV: gl.constexpr
     GROUP_SIZE: gl.constexpr
     NUM_GROUPS: gl.constexpr
     q_strides: InputStrides
@@ -101,6 +102,7 @@ class AttentionConfig:
         REL_EXTENT,
         REL_BIAS_QK_SCALE,
         IS_FP8,
+        IS_FP8_KV,
         q_strides,
         rel_strides,
         k_strides,
@@ -130,9 +132,12 @@ class AttentionConfig:
         k_layout = gl.DotOperandLayout(1, qk_layout, k_width=qk_kw)
         p_layout = gl.DotOperandLayout(0, pv_layout, k_width=pv_kw)
         v_layout = gl.DotOperandLayout(1, pv_layout, k_width=pv_kw)
-        # Elements loaded per lane depend on the input dtype, matching qk_kw.
+        # Elements loaded per lane depend on the raw K/V storage width (one
+        # byte per fp8 element when the KV cache is quantized), not on Q's
+        # dtype: with bf16 Q and a uint8 fp8 KV cache, the shared-memory load
+        # layout must still vectorize over 8-bit elements.
         # load_threads is how many lanes span HEAD_DIM.
-        load_vec = 16 if IS_FP8 else 8
+        load_vec = 16 if IS_FP8_KV else 8
         load_threads = HEAD_DIM // load_vec
         load_layout = gl.BlockedLayout(
             [1, load_vec], [64 // load_threads, load_threads], [1, 1], [1, 0]
@@ -147,8 +152,8 @@ class AttentionConfig:
         reduce_layout = gl.BlockedLayout([1, HEAD_DIM // 64], [1, 64], [1, 1], [1, 0])
         # Padding interval is 64 lanes * load_vec elems.
         pad_interval = 64 * load_vec
-        # Empirically tuned.
-        pad_k = 16 if IS_FP8 else 8
+        # Empirically tuned; must track load_vec's storage-width basis.
+        pad_k = 16 if IS_FP8_KV else 8
         pad_v = 32
         k_smem_layout = gl.PaddedSharedLayout.with_identity_for(
             [[pad_interval, pad_k]], [BLOCK_N, HEAD_DIM], [1, 0]
@@ -172,6 +177,7 @@ class AttentionConfig:
         self.REL_EXTENT = gl.constexpr(REL_EXTENT)
         self.REL_BIAS_QK_SCALE = gl.constexpr(REL_BIAS_QK_SCALE)
         self.IS_FP8 = gl.constexpr(IS_FP8)
+        self.IS_FP8_KV = gl.constexpr(IS_FP8_KV)
         self.GROUP_SIZE = gl.constexpr(NUM_Q_HEADS // NUM_KV_HEADS)
         self.NUM_GROUPS = gl.constexpr((self.GROUP_SIZE + BLOCK_M - 1) // BLOCK_M)
         self.q_strides = q_strides
@@ -408,11 +414,19 @@ class AttentionProgram:
 
     @gluon.jit
     def shared_load_k(self, k_smem):
-        return k_smem.permute([1, 0]).load(self.cfg.k_layout)
+        cfg = self.cfg
+        k = k_smem.permute([1, 0]).load(cfg.k_layout)
+        if cfg.IS_FP8_KV:
+            k = k.to(gl.float8e4nv, bitcast=True).to(self.q_ptr.dtype.element_ty)
+        return k
 
     @gluon.jit
     def shared_load_v(self, v_smem):
-        return v_smem.load(self.cfg.v_layout)
+        cfg = self.cfg
+        v = v_smem.load(cfg.v_layout)
+        if cfg.IS_FP8_KV:
+            v = v.to(gl.float8e4nv, bitcast=True).to(self.q_ptr.dtype.element_ty)
+        return v
 
     @gluon.jit
     def compute_qk(self, q, k):
@@ -546,6 +560,7 @@ def _rel_mha_decode_fp16(
     REL_EXTENT: gl.constexpr,
     REL_BIAS_QK_SCALE: gl.constexpr,
     IS_FP8: gl.constexpr,
+    IS_FP8_KV: gl.constexpr,
 ):
     cfg = AttentionConfig(
         SM_SCALE,
@@ -563,6 +578,7 @@ def _rel_mha_decode_fp16(
         REL_EXTENT,
         REL_BIAS_QK_SCALE,
         IS_FP8,
+        IS_FP8_KV,
         InputStrides(Q_STRIDE_B, Q_STRIDE_H, Q_STRIDE_D),
         InputStrides(REL_STRIDE_T, REL_STRIDE_H, REL_STRIDE_E),
         PagedKVStrides(K_STRIDE_B, K_STRIDE_P, K_STRIDE_H, K_STRIDE_D),
@@ -646,6 +662,7 @@ def _rel_mha_decode_reduce_fp16(
         1,  # REL_EXTENT
         1.0,  # REL_BIAS_QK_SCALE
         IS_FP8,
+        False,  # IS_FP8_KV: reduce kernel never loads raw K/V tiles.
         InputStrides(1, 1, 1),
         InputStrides(1, 1, 1),
         PagedKVStrides(1, 1, 1, 1),
@@ -830,6 +847,7 @@ def gluon_rel_mha_decode_gfx950(
     )
 
     is_fp8 = q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    is_fp8_kv = k_cache.dtype == torch.uint8
     out_dtype = torch.bfloat16 if is_fp8 else q.dtype
     if k_cache.shape[1] not in (64, 128, 256):
         raise ValueError(
@@ -897,6 +915,7 @@ def gluon_rel_mha_decode_gfx950(
         rel_logits.shape[2],
         config.rel_bias_qk_scale,
         is_fp8,
+        is_fp8_kv,
         num_warps=1,
     )
 
