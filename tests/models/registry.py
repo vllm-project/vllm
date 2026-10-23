@@ -278,6 +278,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlintForCausalLM": _HfExamplesInfo("RecursiveSI/flint", is_available_online=False),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo(
@@ -1106,6 +1107,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "Custom processor code is not compatible with Transformers v5."
         },
     ),
+    "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-OCR-1.0",
+        min_transformers_version="5.19.0",
+        is_available_online=False,
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
@@ -1526,6 +1532,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="meta-models/Muse-Glimmer-30B-assistant",
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
+    ),
+    # [XPress]
+    "Qwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
+    ),
+    "DFlashQwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
     ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
