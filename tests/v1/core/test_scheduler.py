@@ -3192,7 +3192,9 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async)
         scoring.sampling_params.prompt_logprob_start = BLOCK_SIZE
     else:
         scoring.sampling_params.prompt_logprobs = 1
-        scoring.skip_reading_prefix_cache = True
+    # Re-resolve the fields the request derives from its params at construction.
+    scoring.skip_reading_prefix_cache = scoring.get_skip_reading_prefix_cache()
+    scoring.prefix_cache_hit_limit = scoring.get_prefix_cache_hit_limit()
     admission = []
     scheduler.connector.on_new_request = lambda req: admission.append(
         req.skip_reading_prefix_cache

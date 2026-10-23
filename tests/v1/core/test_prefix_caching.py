@@ -3049,6 +3049,7 @@ def test_computed_blocks_not_evicted():
         (5, None, None, 0),
         (5, True, None, 0),
         (5, False, 0, 0),
+        (None, False, 0, 0),
     ],
 )
 def test_fixed_token_scores_reuse_only_unscored_prefix(
@@ -3071,7 +3072,9 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
         block_size,
         sha256,
         sampling_params=SamplingParams(
-            prompt_logprob_token_ids=[[1]] * (len(tokens) - 1 - start),
+            prompt_logprob_token_ids=(
+                None if start is None else [[1]] * (len(tokens) - 1 - start)
+            ),
             prompt_logprob_start=start,
             prompt_logprobs=prompt_logprobs,
             skip_reading_prefix_cache=skip_reading_prefix_cache,

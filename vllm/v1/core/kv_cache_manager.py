@@ -246,6 +246,13 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    @staticmethod
+    def _max_cache_hit_length(request: Request) -> int:
+        max_length = request.num_tokens - 1
+        if request.prefix_cache_hit_limit is not None:
+            max_length = min(max_length, request.prefix_cache_hit_limit)
+        return max_length
+
     def prefix_cache_lookup_enabled(self, request: Request) -> bool:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and not request.skip_reading_prefix_cache
@@ -292,10 +299,9 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.max_cache_hit_length
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+                request.block_hashes, self._max_cache_hit_length(request)
             )
         )
 
@@ -355,7 +361,7 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.max_cache_hit_length
+            request.block_hashes, self._max_cache_hit_length(request)
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
