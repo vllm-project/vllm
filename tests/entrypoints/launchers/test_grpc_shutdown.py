@@ -144,7 +144,8 @@ async def test_open_rpc_without_request_does_not_hold_shutdown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rpc_over_budget_aborts_before_engine_deadline():
+async def test_rpc_over_budget_aborts_before_engine_deadline(monkeypatch):
+    monkeypatch.setattr(grpc_server, "_RPC_GRACE_S", 0.5)
     llm, _, elapsed, results = await shut_down([("Generate", b"1000")], 1)
     # The RPC is cancelled at the deadline and aborts its request; EngineCore
     # still gets the teardown floor.
@@ -153,6 +154,18 @@ async def test_rpc_over_budget_aborts_before_engine_deadline():
     assert llm.timeout == pytest.approx(grpc_server._ENGINE_TEARDOWN_S, abs=0.2)
     assert llm.outcome == "drained"
     assert 1 <= elapsed < 1 + grpc_server._ENGINE_TEARDOWN_S
+
+
+@pytest.mark.asyncio
+async def test_short_timeout_keeps_default_rpc_grace(monkeypatch):
+    monkeypatch.setattr(grpc_server, "_RPC_GRACE_S", 2.0)
+    llm, _, elapsed, results = await shut_down([("Generate", b"1000")], 1)
+    # A 1 s timeout still gives the RPC the 2 s it gets with 0, instead of
+    # cutting it at 1 s (about 130 tokens in).
+    n, code = results[0]
+    assert 200 < n < 1000 and code != grpc.StatusCode.OK
+    assert 2 <= elapsed < 2 + grpc_server._ENGINE_TEARDOWN_S
+    assert llm.timeout == pytest.approx(grpc_server._ENGINE_TEARDOWN_S, abs=0.2)
 
 
 @pytest.mark.asyncio

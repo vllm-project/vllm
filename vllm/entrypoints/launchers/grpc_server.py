@@ -53,6 +53,9 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+# Grace in-flight RPCs get with --shutdown-timeout 0. A positive timeout never
+# gives them less, so setting one is never less graceful than the default.
+_RPC_GRACE_S = 5.0
 # Teardown time EngineCore keeps past the drain budget (NIXL, device memory,
 # shm), as the default 5 s join gave it before.
 _ENGINE_TEARDOWN_S = 5.0
@@ -83,25 +86,27 @@ async def _wait_for_requests(rpcs: asyncio.Future, async_llm: AsyncLLM) -> None:
 async def _drain_and_stop(server, async_llm: AsyncLLM, shutdown_timeout: int) -> None:
     """Stop the gRPC server and AsyncLLM within ``--shutdown-timeout``.
 
-    0 keeps the abort behavior: in-flight RPCs get 5 s, then EngineCore gets
-    its default join. Otherwise the server refuses new RPCs at once and
-    EngineCore keeps serving until the in-flight requests are done; RPCs still
-    running at the deadline are cancelled and abort their requests. EngineCore
+    0 keeps the abort behavior: in-flight RPCs get ``_RPC_GRACE_S``, then
+    EngineCore gets its default join. Otherwise the server refuses new RPCs at
+    once and EngineCore keeps serving until the in-flight requests are done;
+    RPCs still running at the deadline (``--shutdown-timeout``, but no less
+    than ``_RPC_GRACE_S``) are cancelled and abort their requests. EngineCore
     then drains work that outlives an RPC, such as NIXL prefill blocks the
     decode side has not read yet, until the same deadline plus
     ``_ENGINE_TEARDOWN_S`` for teardown.
     """
     loop = asyncio.get_running_loop()
     if shutdown_timeout == 0:
-        await server.stop(grace=5.0)
+        await server.stop(grace=_RPC_GRACE_S)
         logger.info("gRPC server stopped")
         await loop.run_in_executor(None, async_llm.shutdown)
         logger.info("AsyncLLM engine stopped")
         return
 
-    deadline = loop.time() + shutdown_timeout
+    grace = max(shutdown_timeout, _RPC_GRACE_S)
+    deadline = loop.time() + grace
     logger.info("Draining in-flight requests (shutdown_timeout=%ds)", shutdown_timeout)
-    rpcs = asyncio.ensure_future(server.stop(grace=shutdown_timeout))
+    rpcs = asyncio.ensure_future(server.stop(grace=grace))
     await _wait_for_requests(rpcs, async_llm)
     remaining = max(deadline - loop.time(), 0.0)
     await loop.run_in_executor(
