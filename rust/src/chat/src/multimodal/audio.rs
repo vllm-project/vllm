@@ -263,6 +263,15 @@ mod tests {
             mime_type: Some("audio/wav".to_string()),
             uuid: Some("audio-1".to_string()),
         }];
+        // Ensure all stage callsites are registered before installing the scoped subscriber.
+        info.prepare_multimodal(
+            parts.clone(),
+            &mut vec![AUDIO_PAD_ID],
+            ModelDtype::Float32,
+            None,
+        )
+        .await
+        .unwrap();
         async {
             info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
                 .instrument(mm_request_span("request-1"))
