@@ -45,7 +45,7 @@ class SpeculatorConfig:
     # (e.g. "speculator_options" for a custom speculator's own options).
     supported_options: ClassVar[frozenset[str]] = frozenset()
 
-    # Drafts from the target's hidden states (EAGLE-style).
+    # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
@@ -129,9 +129,6 @@ class SpeculatorConfig:
     @property
     def max_num_new_slots_for_drafting(self) -> int:
         """See `SpeculativeConfig.max_num_new_slots_for_drafting`."""
-        if self.spec_config.parallel_drafting:
-            # The existing query is reused; only masked queries need new slots.
-            return self.num_speculative_tokens - 1
         return 0
 
     def max_num_draft_seqs(self, max_num_batched_tokens: int) -> int | None:

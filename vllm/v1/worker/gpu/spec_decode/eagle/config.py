@@ -56,6 +56,14 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     def num_lookahead_tokens(self) -> int:
         return self.num_speculative_tokens
 
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        if self.spec_config.parallel_drafting:
+            # P-EAGLE (V1 model runner only): the existing query is reused; only
+            # masked queries need new slots.
+            return self.num_speculative_tokens - 1
+        return 0
+
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):
     base_method = "eagle3"
