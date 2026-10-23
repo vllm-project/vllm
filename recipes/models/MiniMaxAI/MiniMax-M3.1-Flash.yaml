@@ -2,7 +2,7 @@ meta:
   title: "MiniMax-M3.1-Flash"
   slug: "minimax-m3.1-flash"
   provider: "MiniMax"
-  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA GB200 or AMD MI355X, single node or prefill/decode disaggregated."
+  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X (single node or prefill/decode disaggregated), and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
   date_updated: 2026-10-23
   tasks:
@@ -24,6 +24,8 @@ model:
   docker_image:
     nvidia: "vllm/vllm-openai:minimax-m31-flash"
     amd: "vllm/vllm-openai-rocm:minimax-m31-flash"
+  install:
+    pip: false
   architecture: moe
   # From the model card (~428B total, 23B activated per token); the
   # safetensors headers count 427.05B (experts 413.1B, vision 0.9B).
@@ -34,8 +36,6 @@ model:
     # MSA's sparse_block_size is 128 — KV cache block size must match.
     - "--block-size"
     - "128"
-    - "--kv-cache-dtype"
-    - "nvfp4"
     - "--disable-hybrid-kv-cache-manager"
   base_env: {}
 
@@ -57,6 +57,9 @@ features:
     # fallback when no hardware_overrides.<gen> matches; both brands are
     # covered here).
     hardware_overrides:
+      # Not enabled on Hopper.
+      hopper:
+        args: []
       nvidia:
         args:
           - "--speculative-config"
@@ -69,9 +72,97 @@ features:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache."
     args:
       - "--language-model-only"
+  prefill_dbo_sp:
+    label: "DBO / SP prefill"
+    description: "AMD MI355X single node: faster long prefill steps. DBO (dual-batch overlap) splits a prefill step into two microbatches and runs one microbatch's all-reduce under the other's compute; decode steps are never split. SP (sequence-parallel prefill) keeps the residual stream sharded by tokens on steps of 4096+ tokens, so each layer's two all-reduces become an all-to-all and a reduce-scatter; it keeps a full o_proj copy per GPU (about 3.1 GB less KV cache)."
+    # Tested on the single-node TP4 engine only (not on a PD prefill node).
+    strategies: [single_node_tp]
+    default_mode: sp_dbo
+    # SP + DBO and SP were run on the default checkpoint only (MXFP8 MoE).
+    modes:
+      sp_dbo:
+        variants: [default]
+        label: "SP + DBO"
+        description: "SP prefill, and DBO on prefill steps of 16384+ tokens: each microbatch then has 8192+ tokens and stays on the SP path."
+        # DBO needs the V2 model runner: without it, --enable-dbo selects the
+        # V1 runner, which refuses the DSpark draft.
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "16384"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      dbo:
+        label: "DBO"
+        description: "DBO on prefill steps of 8192+ tokens, no SP."
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "8192"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      sp:
+        variants: [default]
+        label: "SP"
+        description: "SP prefill on steps of 4096+ tokens, no DBO."
+        args: []
+        env:
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+  mono_decode:
+    label: "Mono decode"
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
+    strategies: [single_node_tp]
+    modes:
+      # The kernels read the experts as AITER MXFP4 tables, which only the
+      # Quark export loads as; they need the AITER sparse PA path, i.e. FP8 KV
+      # and FP8 indexer K caches in the shuffled KV layout, and no piecewise
+      # graphs.
+      mono:
+        variants: [mxfp4]
+        args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"indexer_kv_dtype": "fp8"}'
+          - "--compilation-config"
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - "--gpu-memory-utilization"
+          - "0.85"
+        env:
+          VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+          VLLM_ROCM_MINIMAX_M3_MONO: "1"
+        # Measured on MI355X only.
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+          mi350x: unsupported
+      # No mono path for the other checkpoints: an empty mode, so enabling the
+      # feature there changes nothing (the recipe schema wants a mode per
+      # variant).
+      none:
+        variants: [default, fp8]
+        args: []
 
 opt_in_features:
   - text_only
+  - prefill_dbo_sp
+  - mono_decode
 
 variants:
   default:
@@ -87,27 +178,79 @@ variants:
       - gb300
       - b200
       - b300
-    # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes +
-    # 17.5 GB of other weights ≈ 444 GB, x 1.2 ≈ 533 GB.
-    vram_minimum_gb: 533
-    description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. GB200 runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
+    # NVFP4 experts as stored (Blackwell runs them natively): 413.1B x 0.53
+    # bytes + 17.5 GB of other weights ≈ 237 GB, x 1.2 ≈ 285 GB.
+    vram_minimum_gb: 285
+    description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. Blackwell runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
     hardware_overrides:
-      # GB200 runs the NVFP4 experts natively: 413.1B x 0.53 bytes + 17.5 GB
-      # ≈ 237 GB, x 1.2 ≈ 285 GB.
-      gb200:
-        vram_minimum_gb: 285
+      # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes
+      # + 17.5 GB ≈ 444 GB (measured 105.0 GiB per TP4 rank), x 1.2 ≈ 533 GB.
+      mi355x:
+        vram_minimum_gb: 533
+      # Only this checkpoint stores NVFP4 experts; the Quark export below
+      # already holds MXFP4 ones.
+      amd:
+        extra_args:
+          - "--quantization-config.moe"
+          - "mxfp8"
+
+  mxfp4:
+    # AMD's Quark export of the same model: routed experts in OCP MXFP4
+    # (static weights, dynamic MXFP4 activations); every other layer and the
+    # dspark/ draft as in the base checkpoint. 48 shards, 237.2 GB; measured
+    # 56.9 GiB per TP4 rank (244.5 GB), x 1.2 ≈ 293 GB.
+    model_id: "amd/MiniMax-M3.1-Flash-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (Quark)"
+    supported_hardware:
+      - mi355x
+    vram_minimum_gb: 293
+    description: "AMD Quark export: routed experts stored in OCP MXFP4 and run as W4A4 on the AITER MoE, with NVFP4 KV and indexer K caches. MI355X only."
+    hardware_overrides:
+      # The export's recommended MoE setup; the shared expert stays a separate
+      # MXFP8 MLP (no shared-expert fusion).
+      amd:
+        extra_args:
+          - "--moe-backend"
+          - "aiter"
+        extra_env:
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+
+  fp8:
+    # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
+    # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
+    # MXFP8 estimate above is used as an upper bound. Hopper only: on MI355X
+    # and Blackwell the brand overrides replace its FP8 caches with NVFP4.
+    precision: fp8
+    supported_hardware:
+      - "arch:sm90"
+    vram_minimum_gb: 533
+    tp: 8
+    description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype": "fp8"}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
 
 compatible_strategies:
   - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
 
-strategy_overrides:
-  single_node_tp:
-    # One GB200 tray, or half of an 8-GPU MI355X node.
-    tp: 4
 
 hardware_overrides:
-  nvidia:
+  blackwell:
     extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
       - "--attention-config"
       - '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}'
       - "--compilation-config"
@@ -116,13 +259,56 @@ hardware_overrides:
       VLLM_FLOAT32_MATMUL_PRECISION: "high"
   amd:
     extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
       - "--attention-config"
       - '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}'
-      - "--quantization-config.moe"
-      - "mxfp8"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+
+strategy_overrides:
+  # MI355X serves TP4 on half of an 8-GPU node; Hopper keeps the fp8 variant's TP8.
+  single_node_tp:
+    tp:
+      mi355x: 4
+  # MI355X 1P1D as in the guide's AMD PD section: one TP4 engine per role, on
+  # GPUs 0-3 of its node. Exact-GPU role blocks layer after the `amd` baseline
+  # and win the last-wins dedupe: the prefill node drops indexer_decode_cp (it
+  # never decodes) and offloads KV to host memory in 1 GiB HugeTLB pages; both
+  # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
+  # of one per layer.
+  pd_cluster:
+    prefill:
+      hardware_overrides:
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            - "--attention-config"
+            - '{"indexer_kv_dtype": "nvfp4"}'
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"num_threads":4}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":601295421440,"cpu_hugepage_block_size":"1GB","lazy_offload":false}}]}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
+    decode:
+      hardware_overrides:
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            # The validated AMD decode node runs vLLM's default graphs, not the
+            # strategy's FULL_DECODE_ONLY.
+            - "--compilation-config"
+            - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"num_threads":4}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
 
 guide: |
   ## Overview
@@ -142,8 +328,10 @@ guide: |
   ## Prerequisites
 
   - **AMD:** MI355X (gfx950), ROCm 7.2+, TP4.
-  - **NVIDIA:** GB200 (Blackwell), TP4 on half a node; NVFP4 MoE runs natively
-    on the FP4 tensor cores.
+  - **NVIDIA Blackwell:** GB200, GB300, B200 or B300, TP4; NVFP4 MoE runs
+    natively on the FP4 tensor cores.
+  - **NVIDIA Hopper:** H100 or H200, TP8 on a full node, with the FP8
+    variant: FP8 KV and indexer caches, NVFP4 MoE on Marlin.
   - **`--block-size 128` is mandatory** (MSA sparse/index cache).
 
   ## Launching the Server
@@ -170,6 +358,44 @@ guide: |
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
 
+  ### DBO and SP prefill (TP4, AMD MI355X)
+
+  Two opt-in switches make long prefill steps faster on the single-node MI355X
+  engine (the **DBO / SP prefill** feature in the command builder):
+
+  - **DBO** (dual-batch overlap): `--enable-dbo` splits a prefill step into two
+    microbatches and runs one microbatch's all-reduce under the other's compute.
+    `--dbo-decode-token-threshold 32768` keeps decode steps whole. DBO needs
+    `VLLM_USE_V2_MODEL_RUNNER=1`: without it, `--enable-dbo` selects the V1
+    runner, which refuses the DSpark draft.
+  - **SP** (sequence-parallel prefill): `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1`
+    keeps the residual stream sharded by tokens on steps of 4096+ tokens, so
+    each layer's two all-reduces become an all-to-all and a reduce-scatter. It
+    keeps a full `o_proj` copy per GPU, about 3.1 GB less KV cache.
+  - **SP + DBO**: set both, with `--dbo-prefill-token-threshold 16384`, so each
+    DBO microbatch has 8192+ tokens and stays on the SP path.
+
+  On the MXFP8 MoE, one 32K-token prefill takes 1035 ms plain, 655 ms with DBO
+  and 484 ms with SP + DBO. The server log confirms SP with
+  `MiniMax-M3 sequence-parallel prefill (from 4096 tokens, DBO microbatches from 8192): on`.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1 \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --enable-dbo \
+    --dbo-prefill-token-threshold 16384 \
+    --dbo-decode-token-threshold 32768 \
+    --disable-hybrid-kv-cache-manager
+  ```
+
   ### Single node (TP4, NVIDIA GB200)
 
   ```bash
@@ -190,6 +416,33 @@ guide: |
     `--quantization-config.moe` override is needed.
   - `use_prefill_query_quantization` quantizes the prefill query on the MSA
     indexer path (Q8KV4).
+
+  ### Single node (TP8, NVIDIA H100 / H200)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --tensor-parallel-size 8 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype fp8 \
+    --attention-config '{"indexer_kv_dtype": "fp8"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --max-model-len 262144 \
+    --max-num-seqs 80 \
+    --limit-mm-per-prompt '{"video": 0}' \
+    --gpu-memory-utilization 0.9 \
+    --no-enable-log-requests \
+    --disable-hybrid-kv-cache-manager \
+    --moe-backend marlin \
+    --enable-auto-tool-choice \
+    --tool-call-parser minimax_m3
+  ```
+
+  - Hopper has no FP4 tensor cores: the KV cache and the indexer K cache use
+    FP8, and the NVFP4 experts run on the Marlin MoE kernel.
+  - `--limit-mm-per-prompt '{"video": 0}'` turns off video inputs; images
+    still work.
+  - DSpark speculative decoding is not enabled on Hopper.
 
   ### Prefill/decode disaggregation (1P1D, TP4 + TP4, AMD MI355X)
 
