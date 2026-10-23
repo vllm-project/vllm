@@ -2623,7 +2623,7 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
     "model_name, expected_model_memory_gib",
     [
         # MoE models covering both linear and MoE paths, one per modeling backend
-        ("ibm-granite/granite-3.1-3b-a800m-instruct", 3.3),
+        (GRANITE_MODEL_NAME, 1.35),
         ("allenai/OLMoE-1B-7B-0125-Instruct", 6.7),
     ],
     ids=["moe", "moe_transformers"],

@@ -26,7 +26,7 @@ from ..utils import check_logprobs_close
 
 # Small MoE models that fit on a single GPU and exercise both linear + MoE,
 # one per modeling backend.
-MOE_MODEL = "ibm-granite/granite-3.1-3b-a800m-instruct"
+MOE_MODEL = "ibm-granite/granite-3.0-1b-a400m-base"
 TRANSFORMERS_MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
 # A small dense model (no MoE) to validate the linear-only path.
 DENSE_MODEL = "Qwen/Qwen3-0.6B"

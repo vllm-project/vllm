@@ -915,7 +915,7 @@ steps:
     - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
     - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
     - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
-    - VLLM_TEST_MODEL=ibm-granite/granite-3.1-3b-a800m-instruct VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
+    - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
   mirror:
     amd:
       label: ":amd: (MI300) Batch Invariance (Distributed)"
@@ -938,7 +938,7 @@ steps:
       - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
       - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
       - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
-      - VLLM_TEST_MODEL=ibm-granite/granite-3.1-3b-a800m-instruct VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
+      - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Acceptance Length (Large Models)"
   device: h200_35gb
