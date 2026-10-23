@@ -428,14 +428,20 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         query_start_loc = swa_metadata.query_start_loc[: num_reqs + 1]
         seq_lens = swa_metadata.seq_lens[:num_reqs]
         assert seq_lens.dtype == torch.int32
-        # SWA-only layers all build the same mixed sparse indices, so the first
-        # one caches them for the step; indexer layers depend on their own topk
-        # indices and stay uncached.
-        cached_sparse = (
-            swa_metadata.flashinfer_sparse_index_cache.get("swa_only")
-            if swa_only
-            else None
-        )
+        # Layers in one SWA metadata group share the physical slot mapping.
+        # Compressed layers add their index source to the key so all consumers
+        # of one source reuse this group's table.
+        if swa_only:
+            cache_key = "swa_only"
+        else:
+            assert self.index_source_layer_id is not None
+            cache_key = f"c{self.compress_ratio}a:{self.index_source_layer_id}"
+            if self.is_index_source:
+                prefix = f"c{self.compress_ratio}a:"
+                for key in tuple(swa_metadata.flashinfer_sparse_index_cache):
+                    if key.startswith(prefix):
+                        del swa_metadata.flashinfer_sparse_index_cache[key]
+        cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key)
         if cached_sparse is None:
             swa_block_span = _packed_block_span(swa_k_cache)
             compressed_block_span = _packed_block_span(compressed_kv_cache)
@@ -460,11 +466,10 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 compressed_block_span=compressed_block_span,
                 replay_start=swa_metadata.replay_start[:num_reqs],
             )
-            if swa_only:
-                swa_metadata.flashinfer_sparse_index_cache["swa_only"] = (
-                    sparse_indices,
-                    sparse_topk_lens,
-                )
+            swa_metadata.flashinfer_sparse_index_cache[cache_key] = (
+                sparse_indices,
+                sparse_topk_lens,
+            )
         else:
             sparse_indices, sparse_topk_lens = cached_sparse
         return compressed_kv_cache, seq_lens, sparse_indices, sparse_topk_lens
@@ -783,7 +788,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
-        num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         extra_sparse_indices = None
@@ -801,15 +805,8 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 raise RuntimeError(
                     "Compressed-layer decode requires top-k indices from the indexer."
                 )
-            # Local indices filled by the index-source layer's indexer.
-            is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            block_size = attn_metadata.block_size // self.compress_ratio
-            global_indices, extra_sparse_lengths = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
+            global_indices, extra_sparse_lengths = self._decode_global_topk(
+                swa_metadata, attn_metadata
             )
             extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
 

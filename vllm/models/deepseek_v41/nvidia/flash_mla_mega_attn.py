@@ -26,11 +26,7 @@ from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
-from vllm.models.deepseek_v41.common.ops import (
-    combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
-    dequantize_and_gather_k_cache,
-)
+from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v41.common.ops.fused_layout import (
     WV_GROUP_SIZE,
     o_fused_chunk_permutation,
@@ -340,16 +336,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if self.compress_ratio == 0:
             return None, None, None
         assert flashmla_metadata is not None
-        assert swa_metadata.is_valid_token is not None
-        assert self.topk_indices_buffer is not None
-        num_decode_tokens = swa_metadata.num_decode_tokens
-        indices, lens = compute_global_topk_indices_and_lens(
-            self.topk_indices_buffer[:num_decode_tokens],
-            swa_metadata.token_to_req_indices,
-            flashmla_metadata.block_table[: swa_metadata.num_decodes],
-            flashmla_metadata.block_size // self.compress_ratio,
-            swa_metadata.is_valid_token[:num_decode_tokens],
-        )
+        indices, lens = self._decode_global_topk(swa_metadata, flashmla_metadata)
         return self._compressed_kv_cache().unsqueeze(-2), indices, lens
 
     def _forward_decode_mega(
@@ -423,14 +410,21 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             has_compressed=not swa_only,
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
+        combined_indices_cache, combined_lens_cache = self._prefill_combined_indices(
+            swa_metadata,
+            topk_indices,
+            query_start_loc,
+            query_start_loc_cpu,
+            seq_lens,
+            gather_lens,
+            chunk_plan,
+            top_k,
+        )
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
+            (kv_ws,) = workspace_manager.get_simultaneous(
+                ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16)
             )
             if not swa_only:
                 assert flashmla_metadata is not None
@@ -459,18 +453,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             first, last = num_decodes + chunk_start, num_decodes + chunk_end
             qs = int(query_start_loc_cpu[first] - prefill_token_base)
             qe = int(query_start_loc_cpu[last] - prefill_token_base)
-            combined_indices, combined_lens = combine_topk_swa_indices(
-                topk_indices[qs:qe],
-                query_start_loc[first : last + 1],
-                seq_lens[chunk_start:chunk_end],
-                gather_lens[chunk_start:chunk_end],
-                self.window_size,
-                self.compress_ratio,
-                top_k,
-                chunk_m,
-                chunk_n,
-                out=(idx_ws[: qe - qs], lens_ws[: qe - qs]),
-            )
+            combined_indices = combined_indices_cache[qs:qe]
+            combined_lens = combined_lens_cache[qs:qe]
             chunk_out = _token_slice(out, token_base + qs, token_base + qe)
             # Mega attention over the gathered non-paged bf16 KV (RoPE already
             # applied), in place into this chunk's token range. `indices`
