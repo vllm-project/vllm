@@ -774,5 +774,6 @@ def minimax_m3_index_merge_candidates(
         MAX_TILES=MAX_K_TILES,
         SPIN=spin_limit,
         launch_pdl=use_pdl,
-        num_warps=rows if world == 2 else 4,
+        # Tagged words must have one polling thread per logical candidate.
+        num_warps=rows if world == 2 else 2 if tagged else 4,
     )
