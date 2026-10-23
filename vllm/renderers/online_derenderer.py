@@ -15,6 +15,8 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
+    get_chat_response_role,
+    get_echo_content,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -81,6 +83,7 @@ class OnlineDerenderer:
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
+        response_role: str = "assistant",
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -95,6 +98,7 @@ class OnlineDerenderer:
         self.renderer = renderer
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.response_role = response_role
 
         # EOS ids the engine stops on, loaded once like InputProcessor does.
         self._eos_token_id = renderer.get_eos_token_id()
@@ -174,6 +178,16 @@ class OnlineDerenderer:
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
         )
+
+    def _response_role(self, request: ChatCompletionRequest | None) -> str:
+        if request is None:
+            return self.response_role
+        return get_chat_response_role(request, self.response_role)
+
+    def _echo_content(self, request: ChatCompletionRequest | None, role: str) -> str:
+        if request is None or not request.echo:
+            return ""
+        return get_echo_content(request.messages, role)
 
     def _drop_stop_token(
         self,
@@ -333,6 +347,7 @@ class OnlineDerenderer:
         )
         top_limit = _chat_top_logprobs_limit(chat_request)
         return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
+        role = self._response_role(chat_request)
 
         for choice in generate_response.choices:
             if not choice.token_ids:
@@ -375,10 +390,11 @@ class OnlineDerenderer:
                     # The engine's ids are the full prompt; the caller's may
                     # be a suffix.
                     generate_response.prompt_token_ids or prompt_token_ids,
+                    role,
                 )
                 reasoning_tokens += choice_reasoning_tokens
             else:
-                message = ChatMessage(role="assistant", content=decoded_text)
+                message = ChatMessage(role=role, content=decoded_text)
 
             choices.append(
                 ChatCompletionResponseChoice(
@@ -401,6 +417,12 @@ class OnlineDerenderer:
             if self._include_reasoning_tokens_details
             else None
         )
+        
+        if chat_request is not None and chat_request.echo:
+            echo = self._echo_content(chat_request, role)
+            for chat_choice in choices:
+                chat_choice.message.content = echo + (chat_choice.message.content or "")
+
         return choices, prompt_logprobs, completion_tokens_details
 
     async def derender_text_choices(
@@ -436,9 +458,10 @@ class OnlineDerenderer:
     ) -> list[tuple[ChatMessage, str]]:
         tokenizer = self.renderer.get_tokenizer()
         results: list[tuple[ChatMessage, str]] = []
+        role = self._response_role(chat_request)
         for output in outputs:
             if self.parser is None or chat_request is None:
-                message = ChatMessage(role="assistant", content=output.text)
+                message = ChatMessage(role=role, content=output.text)
             else:
                 message, _ = self._parse_and_assemble(
                     tokenizer,
@@ -447,6 +470,7 @@ class OnlineDerenderer:
                     chat_request,
                     chat_request.chat_template_kwargs or {},
                     prompt_token_ids,
+                    role,
                     history_tool_call_count=history_tool_call_cnt,
                 )
             finish_reason = resolve_finish_reason(
@@ -520,6 +544,7 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest,
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
+        role: str,
         history_tool_call_count: int | None = None,
     ) -> tuple[ChatMessage, int]:
         """Parse decoded output text into an assistant `ChatMessage`.
@@ -532,12 +557,13 @@ class OnlineDerenderer:
                 `include_reasoning`.
             chat_template_kwargs: Already resolved template kwargs.
             prompt_token_ids: Prompt token IDs, if known.
+            role: Role of the returned message.
             history_tool_call_count: Tool calls in the conversation, for
                 requests that carry no messages. None derives it from
                 `chat_request`.
 
         Returns:
-            The assembled assistant message and the number of reasoning
+            The assembled message and the number of reasoning
             tokens the parser counts in `token_ids` (0 without a reasoning
             parser).
 
@@ -568,8 +594,8 @@ class OnlineDerenderer:
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=self.parser,
         )
-        message = ChatMessage(
-            role="assistant",
+        return ChatMessage(
+            role=role,
             reasoning=fields.reasoning,
             content=fields.content,
             tool_calls=fields.tool_calls,
@@ -675,11 +701,12 @@ class OnlineDerenderer:
     ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState]:
         """Process one GenerateStreamResponse chunk for streaming chat derender.
 
-        Unlike OpenAI's API, which always emits `role: "assistant"` on the
-        very first chunk, this emits it on the first chunk with a non empty
-        `choices` list. A leading usage only chunk therefore defers the
-        role to the following content chunk instead of sending an empty
-        role only delta.
+        Unlike OpenAI's API, which always emits the role on the very first
+        chunk, this emits it on the first chunk with a non empty `choices`
+        list. A leading usage only chunk therefore defers the role to the
+        following content chunk instead of sending an empty role only delta.
+        With `echo`, the echoed text leads that chunk's content, where
+        `/v1/chat/completions` sends it as its own chunk.
 
         Args:
             model: Model name for the response object.
@@ -780,8 +807,12 @@ class OnlineDerenderer:
                 }
             )
 
+            role: str | None = None
+            if include_role:
+                role = self._response_role(chat_request)
+                new_text = self._echo_content(chat_request, role) + new_text
             delta = DeltaMessage(
-                role="assistant" if include_role else None,
+                role=role,
                 content=new_text if new_text else None,
             )
             stream_choices.append(
@@ -979,7 +1010,9 @@ class OnlineDerenderer:
                         last_tool_call_ids.append(tc.id)
 
             if not role_sent:
-                delta_message.role = "assistant"
+                delta_message.role = self._response_role(chat_request)
+                if echo := self._echo_content(chat_request, delta_message.role):
+                    delta_message.content = echo + (delta_message.content or "")
                 role_sent = True
 
             stream_choices.append(
