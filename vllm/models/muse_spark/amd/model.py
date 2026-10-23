@@ -68,6 +68,7 @@ from vllm.transformers_utils.configs.muse_spark import (
     MuseSparkTextConfig,
 )
 
+from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
     MuseMoERunner,
     MuseSparkQuarkOCPMXFusedMoE,
@@ -625,22 +626,29 @@ class MuseSpark1xAttention(nn.Module):
             q, k = self.rotary_emb.forward_cuda(positions, q, k)
         return q, k, v, og
 
-    def forward(
+    def front(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """QKV+O-gate projection, QK-norm and RoPE; returns ``(q, k, v, o_gate)``."""
         qkv, _ = self.qkv_proj(hidden_states)
+        return self._qk_norm_rope_kv_insert(qkv, positions)
 
-        q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
-
+    def core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor | None,
+        v: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """The attention op over the KV cache."""
         # Withhold k/v so the attention layer does not rewrite the KV cache.
         if self.fused_qk_norm_rope_kv_insert:
-            attn_output = self.attn(q, None, None)
-        else:
-            attn_output = self.attn(q, k, v)
+            return self.attn(q, None, None)
+        return self.attn(q, k, v)
 
+    def back(self, attn_output: torch.Tensor, og: torch.Tensor | None) -> torch.Tensor:
+        """O-norm, O-gate and the output projection."""
         if self.fuse_o_norm_gate:
             assert og is not None
             attn_output = attn_output.reshape(-1, self.num_heads, self.head_dim)
@@ -668,6 +676,15 @@ class MuseSpark1xAttention(nn.Module):
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         output, _ = self.o_proj(attn_output)
         return output
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attention over an input the caller has already normalized."""
+        q, k, v, og = self.front(positions, hidden_states)
+        return self.back(self.core(q, k, v), og)
 
 
 class MuseSpark1xDecoderLayer(nn.Module):
@@ -797,12 +814,10 @@ class MuseSpark1xDecoderLayer(nn.Module):
             self.add_attn = MuseSpark1xResidualConnection()
             self.add_ffn = MuseSpark1xResidualConnection()
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        x: MuseSpark1xResidualStream | torch.Tensor,
-    ) -> MuseSpark1xResidualStream:
-        """Run attention and FFN; the FFN boundary is returned unblended."""
+    def attention_input(
+        self, x: MuseSpark1xResidualStream | torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Blend the previous layer's FFN boundary; returns ``(attn_in, stream)``."""
         if isinstance(x, torch.Tensor):
             stream = x
             attn_input = self.self_attn.pre_qkv_proj_norm(
@@ -813,8 +828,22 @@ class MuseSpark1xDecoderLayer(nn.Module):
                 x, self.self_attn.pre_qkv_proj_norm, out_dtype=self.default_dtype
             )
         assert stream.dtype == self.residual_dtype
+        return attn_input, stream
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        x: MuseSpark1xResidualStream | torch.Tensor,
+    ) -> MuseSpark1xResidualStream:
+        """Run attention and FFN; the FFN boundary is returned unblended."""
+        attn_input, stream = self.attention_input(x)
         attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
+        return self.after_attention(stream, attn_out)
+
+    def after_attention(
+        self, stream: torch.Tensor, attn_out: torch.Tensor
+    ) -> MuseSpark1xResidualStream:
+        """Attention boundary and FFN; the FFN boundary is returned unblended."""
         ffn_in, stream = norm_residual_then_norm(
             MuseSpark1xResidualStream(
                 stream=stream,
@@ -887,6 +916,8 @@ class MuseSpark1xModel(LlamaModel):
 
         self.fuse_across_layers = get_pp_group().world_size == 1
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
+        # Set after weight loading under --monokernel.
+        self.mono: MuseSparkMono | None = None
 
     def _make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
@@ -928,19 +959,27 @@ class MuseSpark1xModel(LlamaModel):
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
-        for idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer], start=self.start_layer
-        ):
-            x = layer(positions, x)
-            if not self.fuse_across_layers and isinstance(x, MuseSpark1xResidualStream):
-                x = norm_then_gated_residual(x)
-            if idx + 1 in self.aux_hidden_state_layers:
-                state = (
-                    norm_then_gated_residual(x)
-                    if isinstance(x, MuseSpark1xResidualStream)
-                    else x
-                )
-                aux_hidden_states.append(state)
+        mono_out = None
+        if self.mono is not None:
+            mono_out = self.mono.try_forward(self, positions, x, aux_hidden_states)
+        if mono_out is not None:
+            x = mono_out
+        else:
+            for idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer], start=self.start_layer
+            ):
+                x = layer(positions, x)
+                if not self.fuse_across_layers and isinstance(
+                    x, MuseSpark1xResidualStream
+                ):
+                    x = norm_then_gated_residual(x)
+                if idx + 1 in self.aux_hidden_state_layers:
+                    state = (
+                        norm_then_gated_residual(x)
+                        if isinstance(x, MuseSpark1xResidualStream)
+                        else x
+                    )
+                    aux_hidden_states.append(state)
 
         if not get_pp_group().is_last_rank:
             assert isinstance(x, torch.Tensor)  # fuse_across_layers is off here
@@ -1005,6 +1044,7 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             layer_type = self.decoder_layer_cls
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        self.vllm_config = vllm_config
 
         # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
         self.packed_modules_mapping = {  # type: ignore[misc]
@@ -1097,6 +1137,8 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.model.mono is not None:
+            self.model.mono.poll_health()
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
@@ -1104,6 +1146,8 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         return self._apply_output_transform(logits)
 
     def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.model.mono is not None:
+            self.model.mono.poll_health()
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
         return self._apply_output_transform(logits)
@@ -1159,6 +1203,11 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             n_gates,
         )
         return loaded
+
+    def process_weights_after_loading(self) -> None:
+        # The experts are in their kernel layout only after the per-layer
+        # quant finalize, which runs between load_weights and this hook.
+        maybe_attach_mono(self)
 
 
 __all__ = [
