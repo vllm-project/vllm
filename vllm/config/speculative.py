@@ -1771,7 +1771,7 @@ class SpeculativeConfig:
         rotary cos_sin_cache. A smaller checkpoint value (e.g. 2048 for
         yuhuili/EAGLE3-LLaMA3.1-Instruct-8B, or a DFlash or DSpark draft
         published against a shorter context than the target is served with)
-        makes that cache gather go out of bounds (#48894, #57941).
+        makes that cache gather go out of bounds.
 
         Only drafts whose RoPE types are all in _CACHE_ONLY_ROPE_TYPES are
         resized.
