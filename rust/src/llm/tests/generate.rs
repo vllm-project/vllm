@@ -1133,7 +1133,6 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
         lora_int_id: 1,
         lora_path: "/unused".to_string(),
         base_model_name: None,
-        tensorizer_config_dict: None,
         load_inplace: false,
         is_3d_lora_weight: false,
     });
