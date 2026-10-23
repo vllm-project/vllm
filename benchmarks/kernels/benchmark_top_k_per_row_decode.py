@@ -8,6 +8,7 @@ python3 benchmarks/kernels/benchmark_top_k_per_row_decode.py \
 """
 
 import argparse
+import functools
 import itertools
 import json
 
@@ -15,6 +16,7 @@ import torch
 
 import vllm._custom_ops  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
 from vllm.triton_utils import triton
 
 DISTRIBUTIONS = ("indexer", "fp8", "randn")
@@ -56,7 +58,19 @@ def run_aiter(logits, seq_lens, indices, k):
     rocm_aiter_ops.indexer_top_k_decode(logits, 1, seq_lens, indices, k)
 
 
-BACKENDS = {"native": run_native, "aiter": run_aiter}
+@functools.cache
+def persistent_workspace() -> torch.Tensor:
+    return torch.empty(RADIX_TOPK_WORKSPACE_SIZE, device="cuda", dtype=torch.uint8)
+
+
+def run_persistent(logits, seq_lens, indices, k):
+    # FULL graphs bound the row length by the padded width, not the batch max.
+    torch.ops._C.persistent_topk(
+        logits, seq_lens, indices, persistent_workspace(), k, logits.shape[1]
+    )
+
+
+BACKENDS = {"native": run_native, "aiter": run_aiter, "persistent": run_persistent}
 
 
 def check(logits, indices, k):
