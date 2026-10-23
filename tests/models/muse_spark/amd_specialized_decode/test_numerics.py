@@ -9,8 +9,10 @@ Each stage is checked tightly on its own inputs as the kernel saw them
 cannot hide behind upstream noise; the chain (``moe``, ``branch_out``) against
 vLLM's stock decode. Every case has an eps-scaled row (the attention output,
 the pooled rows, one route's expert rows) and one case all-zero norm weights
-(gain ``w + 1``). Then: the ranks agree bit for bit; one CUDA graph of two
-steps at two widths replayed 300 times, bit-identical; pad rows (NaN inputs)
+(gain ``w + 1``); the base case at every width 1 .. 8. Then: the ranks agree
+bit for bit; one CUDA graph of two steps at two widths replayed 300 times on
+two input sets written in place in turn, every replay bit for bit the eager
+step on its own set; pad rows (NaN inputs)
 come out as exact zeros and leave the live rows unchanged; an all-pad step
 completes. And the fail-stop: a stalled rank fails the step without a hang.
 """
@@ -49,6 +51,8 @@ COS_STAGE = 0.99999
 COS_CHAIN = 0.9999
 REL_CHAIN = 1e-2
 CASES = ("base", "eps", "zero_w")
+WIDTHS = tuple(range(1, spec.MAX_ROWS + 1))
+REPLAYS = 300
 EPS_EXPERT = 17  # the "eps" case's forced expert, its w2 scaled by 2^-EPS_W2_SHIFT
 # unscaled, a route's R at these weights has mean square ~370 (CPU reference,
 # 8 ranks): 2^-17 puts mean((R (w + 1))^2) at ~2e-8, i.e. at POST_EXP_EPS
@@ -290,14 +294,15 @@ def _weights(rank: int, device, case: str = "base") -> dict:
     return w
 
 
-def _inputs(rank: int, device, S: int, case: str = "base"):
-    """(core [S, CORE] bf16 of this rank, stream [S, H] fp32 replicated). The
+def _inputs(rank: int, device, S: int, case: str = "base", seed: int = 0):
+    """(core [S, CORE] bf16 of this rank, stream [S, H] fp32 replicated);
+    ``seed`` picks another set of the same width. The
     "eps" case scales row 0's core on every rank by 1e-4: mean(attn_out^2) ~
     POST_ATTN_EPS; and the last row's stream by 3e-3: with that case's beta ~
     2.4e-4 the pre-FFN norm's input alpha stream + beta y has mean square
     ~9e-6 ~ PRE_FFN_EPS."""
-    gc = torch.Generator(device=device).manual_seed(11 + S)
-    gr = torch.Generator(device=device).manual_seed(200 + 8 * S + rank)
+    gc = torch.Generator(device=device).manual_seed(11 + S + 1000 * seed)
+    gr = torch.Generator(device=device).manual_seed(200 + 8 * S + rank + 1000 * seed)
     core = torch.randn(S, CORE, generator=gr, device=device)
     if case == "eps":
         core[0] *= 1e-4
@@ -749,7 +754,10 @@ def _k2_worker(
     runner.set_wait_budget(STARTUP_WAIT_SECONDS)
     for case in CASES:
         w = _weights(rank, device, case)
-        for S in (1, 8):
+        # every served width (a partial, guarded second round of load_xq's
+        # groups and load_inter's ISC codes runs only at S = 5 .. 7); the eps
+        # and zero_w premises at both ends
+        for S in WIDTHS if case == "base" else (1, MT):
             core, stream = _inputs(rank, device, S, case)
             pad = _pad(device)
             stream_out, branch_out = _launch(runner, w, core, stream, pad)
@@ -791,27 +799,35 @@ def _k2_worker(
             assert (s_out == 0).all() and (b_out.float() == 0).all(), S
 
     # One CUDA graph of two steps at two widths (each step's epoch bump
-    # captured with it), replayed: every replay matches the first.
-    c1, s1 = _inputs(rank, device, 1)
-    c8, s8 = _inputs(rank, device, 8)
+    # captured with it), replayed on two input sets written in place in turn:
+    # every replay matches the eager step on its own set. A wait that took a
+    # stale tag of the same parity (two epochs back: the previous replay's)
+    # would read the other set's rows, which identical inputs would hide.
+    sets = [{S: _inputs(rank, device, S, seed=k) for S in (1, MT)} for k in (0, 1)]
     pad = _pad(device)
-    outs = {}
-    _launch(runner, w, c1, s1, pad)  # warm-up (code objects loaded)
-    _launch(runner, w, c8, s8, pad)
+    # the eager references (and the warm-ups: code objects loaded)
+    want = [{S: _launch(runner, w, *sets[k][S], pad) for S in (1, MT)} for k in (0, 1)]
+    ins = {S: tuple(t.clone() for t in sets[0][S]) for S in (1, MT)}
     torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
+    outs = {}
     with torch.cuda.graph(graph):
-        outs[1] = _launch(runner, w, c1, s1, pad)
-        outs[8] = _launch(runner, w, c8, s8, pad)
-    graph.replay()
-    torch.accelerator.synchronize()
-    want = {s: [t.clone() for t in o] for s, o in outs.items()}
-    for _ in range(300):
+        for S in (1, MT):
+            outs[S] = _launch(runner, w, *ins[S], pad)
+    bad = torch.zeros(REPLAYS, 2, 2, dtype=torch.bool, device=device)
+    for i in range(REPLAYS):
+        k = i % 2
+        for S in (1, MT):
+            for dst, src in zip(ins[S], sets[k][S]):
+                dst.copy_(src)
         graph.replay()
+        for j, S in enumerate((1, MT)):
+            for o, (got, ref_out) in enumerate(zip(outs[S], want[k][S])):
+                bad[i, j, o] = (got != ref_out).any()
     torch.accelerator.synchronize()
     with _tp_checks("the graph replays"):
-        for s, o in outs.items():
-            assert all(torch.equal(a, b) for a, b in zip(o, want[s])), s
+        # (replay, width index, output: stream_out 0 / branch_out 1)
+        assert not bad.any(), bad.nonzero()[:8].tolist()
     _assert_healthy(runner)
 
 

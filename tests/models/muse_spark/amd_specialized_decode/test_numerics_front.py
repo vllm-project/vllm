@@ -24,8 +24,9 @@ K2's ``stream_out`` cos > 0.99999 against the stock chain, ``branch_out`` cos
 rows and picks (Phase A's reference, ``test_numerics._check_step``), live
 rows; the ranks agree bit for bit; NaN pad rows (slot -1) leave the live rows
 and the cache unchanged and come out as zeros; one CUDA graph of the chain
-(K1, the stock core, K2) replayed 300 times bit-identical, the cache
-included; no wait gives up.
+(K1, the stock core, K2) replayed 300 times on two input sets written in
+place in turn, every replay (the cache included) bit for bit the eager chain
+on its own set; no wait gives up.
 """
 
 from types import SimpleNamespace
@@ -60,6 +61,7 @@ LENS = {
     8: (1, 16, 17, 255, 300, 2048, 2049, 2500),
 }
 PAD_ROWS = (5, 6, 7)  # the pad case's rows (S = 8)
+REPLAYS = 300  # the chain graph's replays
 COS_STREAM = 0.99999
 # branch_out against vLLM's experts on the kernel's own ffn_in rows and picks,
 # as Phase A (test_numerics._check_step, COS_CHAIN): not against the stock
@@ -153,10 +155,13 @@ def _with_table(fw: dict, table: torch.Tensor | None) -> dict:
     }
 
 
-def _step_inputs(device, S: int, pad_rows=()) -> tuple[torch.Tensor, torch.Tensor]:
+def _step_inputs(
+    device, S: int, pad_rows=(), seed: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
     """(branch bf16, stream fp32) [S, H], replicated (the previous layer's
-    deferred boundary); pad rows NaN."""
-    g = torch.Generator(device=device).manual_seed(11 + S)
+    deferred boundary); pad rows NaN; ``seed`` picks another set of the same
+    width."""
+    g = torch.Generator(device=device).manual_seed(11 + S + 1000 * seed)
     branch = torch.randn(S, H, generator=g, device=device) * 0.7
     stream = torch.randn(S, H, generator=g, device=device) * 2.0
     for t in pad_rows:
@@ -536,7 +541,13 @@ def _chain_worker(
         assert ref.cos(dirty[4][live], own[live]) > COS_BRANCH
 
     # one CUDA graph of the chain (epoch bump, K1, the stock core, K2) at two
-    # widths, replayed: every replay matches the first, the caches included
+    # widths, replayed on two input sets written in place in turn: every
+    # replay, the cache included, matches the eager chain on its own set. A
+    # K1 or K2 wait that took a stale tag of the same parity (two epochs back:
+    # the previous replay's) would read the other set's rows, which identical
+    # inputs would hide. The step's slots are fixed, so the cache after a
+    # replay is the pristine one with that set's K / V inserted.
+    sets = [{S: _step_inputs(device, S, seed=k) for S in (1, 8)} for k in (0, 1)]
     ins = {}
     for S, kind in ((1, "full"), (8, "sliding")):
         window = kind == "sliding"
@@ -547,36 +558,48 @@ def _chain_worker(
             _kv(rank, device),
             _case(S, device=device),
             window,
-            *_step_inputs(device, S),
+            *(t.clone() for t in sets[0][S]),
         )
 
-    def step(S):
+    def step(S, k=None):
+        """The chain on the graph's buffers, or (``k``) eagerly on set k and
+        a copy of the pristine cache. -> (outputs, cache)."""
         fw, table, kv, case, window, branch, stream = ins[S]
-        return _chain(runner, w, fw, table, kv, case, window, branch, stream)
+        if k is not None:
+            kv = kv.clone()
+            branch, stream = sets[k][S]
+        out = _chain(runner, w, fw, table, kv, case, window, branch, stream)
+        return out, kv
 
-    # warm-ups (the S = 1 NoPE K1 build compiles here: a cross-rank compile
-    # skew, so the startup budget), then the serving budget for the graph
-    step(1)
-    step(8)
+    # the eager references, also the warm-ups (the S = 1 NoPE K1 build
+    # compiles here: a cross-rank compile skew, so the startup budget), then
+    # the serving budget for the graph
+    want = [{S: step(S, k) for S in ins} for k in (0, 1)]
     torch.accelerator.synchronize()
     tn._assert_healthy(runner)
     runner.set_wait_budget(WAIT_SECONDS)
     graph = torch.cuda.CUDAGraph()
     outs = {}
     with torch.cuda.graph(graph):
-        outs[1] = step(1)
-        outs[8] = step(8)
-    graph.replay()
-    torch.accelerator.synchronize()
-    first = {S: [t.clone() for t in o] for S, o in outs.items()}
-    caches = {S: ins[S][2].clone() for S in ins}
-    for _ in range(300):
+        for S in ins:
+            outs[S] = step(S)[0]
+    # (replay, width index, output: stream_k1, qkvo, attn, stream_out,
+    # branch_out, then the cache)
+    bad = torch.zeros(REPLAYS, len(ins), 6, dtype=torch.bool, device=device)
+    for i in range(REPLAYS):
+        k = i % 2
+        for S in ins:
+            for dst, src in zip(ins[S][5:], sets[k][S]):
+                dst.copy_(src)
         graph.replay()
+        for j, S in enumerate(ins):
+            w_out, w_kv = want[k][S]
+            for o, (got, ref_out) in enumerate(zip(outs[S], w_out)):
+                bad[i, j, o] = (got != ref_out).any()
+            bad[i, j, 5] = (_bits(ins[S][2]) != _bits(w_kv)).any()
     torch.accelerator.synchronize()
     with tn._tp_checks("the chain's graph replays"):
-        for S, o in outs.items():
-            assert all(torch.equal(a, b) for a, b in zip(o, first[S])), S
-            assert torch.equal(_bits(ins[S][2]), _bits(caches[S])), S
+        assert not bad.any(), bad.nonzero()[:8].tolist()
     tn._assert_healthy(runner)
 
 

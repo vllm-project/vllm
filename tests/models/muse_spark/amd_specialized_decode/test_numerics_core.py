@@ -33,7 +33,8 @@ same two layers' gated chain, the stock core's max length the table's: a
 sliding layer's trimmed table caps it at the window on the device, as a
 captured decode does), captured on the persistent buffers; between
 replays the host advances ``seq_lens``, positions, slots and the block tables
-as MRV2 does (crossing pages and the sliding window); every replay equals an
+as MRV2 does (crossing pages and the sliding window) and writes the first
+layer's boundary inputs anew; every replay equals an
 eager run of the same step on the same contents, 300 replays, health zero.
 """
 
@@ -84,6 +85,9 @@ CASES = (
     ((2049, 17, 2064), 3),
     ((1, 16, 257, 2047, 2050, 4103), 8),
 )
+# the window's edges (``_window_edges``): 2048 a window of every key, 2049
+# key 0 just below it, 2064 the key below it on a nulled page (block 0, NaN)
+EDGE_CASE = ((2047, 2048, 2049, 2064), 4)
 # the replay graph's two requests: request 0 crosses the window (and a page
 # every 16 steps), request 1 is past it from the start
 REPLAY_START = (2030, 4090)
@@ -137,6 +141,20 @@ def _schedule(steps: int = REPLAYS) -> list[tuple[int, ...]]:
 def _pages(lens, nblocks: int, seed: int) -> list[list[int]]:
     g = torch.Generator().manual_seed(seed)
     return ref.assign_pages(lens, nblocks, generator=g)
+
+
+def _window_edges(kv: torch.Tensor, lens, pages) -> None:
+    """``EDGE_CASE``'s cache, in place: K scaled by 2^-4 (logits of std ~0.3
+    instead of ~5: a near-flat softmax) and the V of each request's oldest
+    window key (``max(L - WINDOW, 0)``) and of the key below it by 2^6, so a
+    core that drops the oldest key or reads one key too many moves the row by
+    O(1) on every seed, not only when that key happens to lead the softmax."""
+    kv[..., : spec.V_OFF] *= 2.0**-4
+    for L, row in zip(lens, pages):
+        lo = max(L - spec.WINDOW, 0)
+        for k in (lo - 1, lo):
+            if k >= 0:
+                kv[row[k // spec.KV_BLOCK], :, k % spec.KV_BLOCK, spec.V_OFF :] *= 64
 
 
 def _front_weights(rank: int, device) -> dict:
@@ -496,7 +514,7 @@ def _chain(
     w = tn._weights(rank, device)
     fw = _front_weights(rank, device)
     mrv2 = _fake_mrv2(device)
-    for ci, (lens, S) in enumerate(CASES):
+    for ci, (lens, S) in enumerate((*CASES, EDGE_CASE)):
         need = sum(-(-L // spec.KV_BLOCK) for L in lens)
         nblocks = need + 64
         pages = _pages(lens, nblocks, 100 + ci)
@@ -505,6 +523,8 @@ def _chain(
         for kind in KINDS:
             g = torch.Generator().manual_seed(1000 * ci + 7 * rank + LAYER[kind])
             kv = ref.kv_cache(nblocks, device=device, generator=g)
+            if (lens, S) == EDGE_CASE:
+                _window_edges(kv, lens, pages)
             kvs = (kv, kv.clone())
             gated = _gated_step(
                 front, runner, w, fw, kind, branch, stream, step, kvs[0]
@@ -649,6 +669,9 @@ def _replay(
     torch.accelerator.synchronize()
     for i, lens in enumerate(sched):
         mrv2.step(list(lens), {FULL: pages, SLIDING: pages}, S)  # in place
+        # the full layer's inputs change too (its K1 rows), not only its slot
+        for dst, src in zip((branch, stream), _boundary_inputs(device, S, 10 + i)):
+            dst.copy_(src)
         for name, fn in (("split", chain), ("gated", gated)):
             graphs[name].replay()
             torch.accelerator.synchronize()
