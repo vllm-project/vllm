@@ -1534,6 +1534,8 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+        self._limit_max_model_len_to_draft()
+
         if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
@@ -2840,11 +2842,16 @@ class VllmConfig:
 
         ec_config = self.ec_transfer_config
         kv_config = self.kv_transfer_config
+        is_ec_consumer = ec_config is not None and ec_config.is_ec_consumer
+        is_kv_consumer = kv_config is not None and kv_config.is_kv_consumer
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        mm_config.allow_missing_mm_embeddings = (
-            ec_config is not None and ec_config.is_ec_consumer
-        ) or (kv_config is not None and kv_config.is_kv_consumer)
+        # A language-model-only KV consumer (text-only P/D) stays text-only
+        # unless the user opts in with --enable-mm-embeds.
+        mm_config.allow_missing_mm_embeddings = is_ec_consumer or (
+            is_kv_consumer
+            and (not mm_config.language_model_only or mm_config.enable_mm_embeds)
+        )
         if not mm_config.allow_missing_mm_embeddings:
             return
 
@@ -2996,6 +3003,34 @@ class VllmConfig:
             return
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
+
+    def _limit_max_model_len_to_draft(self) -> None:
+        """Lower max_model_len to the draft model's when the V2 model runner
+        can't serve longer sequences.
+        """
+        spec_config = self.speculative_config
+        if (
+            spec_config is None
+            or spec_config.draft_model_config is None
+            or self.model_config is None
+            or not self.use_v2_model_runner
+            # The draft's positional capacity was raised to match the target.
+            or spec_config.draft_shares_target_positions()
+        ):
+            return
+        draft_max_model_len = spec_config.draft_model_config.max_model_len
+        target_max_model_len = self.model_config.max_model_len
+        if draft_max_model_len >= target_max_model_len:
+            return
+        logger.warning(
+            "The draft model's max_model_len (%d) is smaller than the target "
+            "model's (%d) and the V2 model runner can't skip speculation for "
+            "longer sequences; reducing max_model_len to %d.",
+            draft_max_model_len,
+            target_max_model_len,
+            draft_max_model_len,
+        )
+        self.model_config.max_model_len = draft_max_model_len
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
