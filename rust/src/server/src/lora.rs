@@ -105,7 +105,6 @@ impl LoadedLora {
             lora_int_id: self.lora_int_id,
             lora_path: self.lora_path.clone(),
             base_model_name: self.base_model_name.clone(),
-            tensorizer_config_dict: None,
             load_inplace: false,
             is_3d_lora_weight: self.is_3d_lora_weight,
         }
