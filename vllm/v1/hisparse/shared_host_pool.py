@@ -21,6 +21,7 @@ from cuda.bindings import driver
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -143,15 +144,17 @@ class HiSparseSharedHostPool:
                 driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
             )
         )
-        per_node = -(-self.size // len(nodes) // granularity) * granularity
+        per_node = round_up(cdiv(self.size, len(nodes)), granularity)
         chunk_sizes, remaining = [], self.size
         for node in nodes:
-            chunk_size = -(-min(per_node, remaining) // granularity) * granularity
-            remaining -= min(per_node, remaining)
+            if not remaining:
+                break
+            chunk_size = min(per_node, round_up(remaining, granularity))
             self._handles.append(
                 _check(driver.cuMemCreate(chunk_size, _host_prop(node), 0))
             )
             chunk_sizes.append(chunk_size)
+            remaining -= min(chunk_size, remaining)
         return chunk_sizes
 
     def _serve_fds(
