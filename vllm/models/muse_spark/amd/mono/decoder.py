@@ -14,6 +14,10 @@ parallelism; see README.md):
   8 / 16 rows: one K3 launch; 24-128 rows: HA, HM (the experts) and HB.
   vLLM's attention op on that q is layer i+1's attention.
 - layer 61: vLLM's attention op, then the stock tail.
+- fused attention (8, 16 and 24-32 rows): layer i's attention (i > 1) runs at
+  the head of K3_i / HA_i instead of vLLM's op,
+  from the previous launch's q and the layer's KV cache, block table and
+  seq_lens (``kernels/attn_frag.py``).
 
 Every rank must take the same path (the kernel waits on its peers), so the
 decision uses only rank-invariant data: the static deployment checked at
@@ -53,6 +57,10 @@ WORLD_SIZE = 8
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
+# Attention types whose verify attention runs inside the launch, per build.
+# Other builds and layer 1 run vLLM's attention op.
+FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
+SLIDING_WINDOW = (2047, 0)
 
 # The model shape the K3 build is specialized for.
 KERNEL_CONFIG: dict[str, float] = {
@@ -413,6 +421,36 @@ def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
     return None
 
 
+def attention_type(layer: nn.Module) -> str | None:
+    """``"swa"`` / ``"full"`` when the fused attention can run layer's
+    attention (vLLM's ``sliding_window`` (2047, 0) or none); else None."""
+    window = getattr(
+        getattr(layer.self_attn.attn, "impl", None), "sliding_window", None
+    )
+    if window == SLIDING_WINDOW:
+        return "swa"
+    if window in (None, (-1, -1)):
+        return "full"
+    return None
+
+
+def fused_attention_layers(
+    layers: Sequence[nn.Module], max_model_len: int, max_keys: int
+) -> dict[int, str]:
+    """Layers whose attention the launches can fuse: ``{i: type}``.
+
+    Empty when a request may hold more keys than a build stages block ids for.
+    """
+    if max_model_len > max_keys:
+        return {}
+    fused = {}
+    for i in range(FIRST_LAYER + 1, LAST_LAYER + 1):
+        kind = attention_type(layers[i])
+        if kind is not None:
+            fused[i] = kind
+    return fused
+
+
 def batch_refusal(
     num_tokens: int, forward_context: Any, layer_names: Sequence[str]
 ) -> str | None:
@@ -453,11 +491,12 @@ def batch_refusal(
 
 @dataclass(frozen=True)
 class MonoKernels:
-    """The FlyDSL kernel modules (``kernels.k3``, ``kernels.k5``, ``kernels.k5m``)."""
+    """The FlyDSL kernel modules (``kernels.k3``, ``k5``, ``k5m``, ``attn_frag``)."""
 
     k3: ModuleType
     k5: ModuleType
     k5m: ModuleType
+    attn_frag: ModuleType
 
 
 @dataclass(frozen=True)
@@ -467,6 +506,93 @@ class _LayerArgs:
     hb: tuple[int, ...]
     replicas: tuple[int, ...]
     next_rope: bool
+
+
+class _FusedAttention:
+    """The fused attention of one build: its output, scratch and descriptor
+    tables (``kernels/attn_frag.py``; row i = layer i).
+
+    A table holds pointers and counts only (q, KV cache, block table,
+    seq_lens, output, request count, scale). Tables are keyed by their
+    contents, so one is written once and never changes after a CUDA graph
+    captured a launch that reads it.
+    """
+
+    def __init__(
+        self,
+        attn_frag: ModuleType,
+        layers: dict[int, str],
+        scales: dict[int, float],
+        rows: int,
+        dims: MonoDims,
+        device: torch.device,
+    ) -> None:
+        self.af = attn_frag
+        self.layers = layers
+        self.scales = scales
+        self.out = torch.zeros(rows, dims.q_rows, dtype=torch.bfloat16, device=device)
+        self.part = torch.zeros(
+            attn_frag.part_bytes() // 4, dtype=torch.int32, device=device
+        )
+        self.words = attn_frag.TABLE_ROWS * attn_frag.DESC_WORDS
+        self.device = device
+        self.tables: dict[tuple, torch.Tensor] = {}
+        # Pinned sources of the table copies captured in CUDA graphs: a pinned
+        # allocation is not allowed while a stream captures.
+        pin = device.type == "cuda"
+        self._pinned = [
+            torch.zeros(self.words, dtype=torch.int64, pin_memory=pin) for _ in range(8)
+        ]
+        self._keep: list[torch.Tensor] = []
+
+    def table(
+        self, layers: Sequence[nn.Module], q_of: Any, num_reqs: int
+    ) -> torch.Tensor:
+        """The descriptor table of this step; ``q_of(i)`` = layer i's q."""
+        rows = {}
+        for i in self.layers:
+            md, _, kv_cache, _ = get_attention_context(
+                layers[i].self_attn.attn.layer_name
+            )
+            rows[i] = self.af.vllm_desc(
+                q_of(i),
+                kv_cache,
+                md.block_table,
+                md.seq_lens,
+                self.out,
+                self.part,
+                num_reqs,
+                self.scales[i],
+            )
+        key = tuple((i, *w) for i, w in rows.items())
+        table = self.tables.get(key)
+        if table is not None:
+            return table
+        host = torch.zeros(self.words, dtype=torch.int64)
+        n = self.af.DESC_WORDS
+        for i, w in rows.items():
+            host[i * n : (i + 1) * n] = torch.tensor(w, dtype=torch.int64)
+        table = torch.zeros(self.words, dtype=torch.int64, device=self.device)
+        capturing = self.device.type == "cuda" and (
+            torch.cuda.is_current_stream_capturing()
+        )
+        if capturing:
+            if not self._pinned:
+                raise RuntimeError(
+                    "Muse Spark monokernel: more fused-attention tables than "
+                    "pinned buffers"
+                )
+            pinned = self._pinned.pop()
+            pinned.copy_(host)
+            self._keep.append(pinned)
+            table.copy_(pinned, non_blocking=True)
+        else:
+            table.copy_(host)
+        self.tables[key] = table
+        return table
+
+    def row(self, table: torch.Tensor, i: int) -> int:
+        return table.data_ptr() + i * self.af.DESC_WORDS * table.element_size()
 
 
 class _Bucket:
@@ -491,6 +617,7 @@ class _Bucket:
             kernel.BLOCKS * kernel.TL_POINTS, dtype=torch.int64, device=device
         )
         self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
+        self.fa: _FusedAttention | None = None
 
     def _common(self) -> tuple[int, ...]:
         return (
@@ -525,12 +652,21 @@ class _K3Bucket(_Bucket):
         dims: MonoDims,
         device: torch.device,
         group: Any,
+        fa: _FusedAttention | None = None,
+        fused_kinds: Sequence[tuple[bool, str]] = (),
     ) -> None:
         w = dims.world_size
         super().__init__(k3, rows, k3.peer_layout(rows, w)[1], dims, device, group)
         self.launchers = {
             next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
             for next_rope in (True, False)
+        }
+        self.fa = fa
+        self.fused_launchers = {
+            (next_rope, kind): k3.build(
+                k3.build_vllm(S=rows, W=w, next_rope=next_rope, attn=kind)
+            )
+            for next_rope, kind in fused_kinds
         }
         self.scratch = torch.zeros(
             k3.scratch_layout(rows, w)[1] // 4 + 64, dtype=torch.int32, device=device
@@ -551,14 +687,32 @@ class _K3Bucket(_Bucket):
 
     def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
         q = o
+        fa = self.fa
+        table = None
+        if fa is not None:
+            table = fa.table(
+                layers,
+                lambda i: self.outs[(i - 1) % 2]["q"],
+                self.rows // ROWS_PER_REQUEST,
+            )
         for i in range(FIRST_LAYER, LAST_LAYER + 1):
-            if i > FIRST_LAYER:
-                o = layers[i].self_attn.core(q, None, None)
+            kind = fa.layers.get(i) if fa is not None else None
+            if fa is not None and kind is not None:
+                attn_o = fa.row(table, i)
+            else:
+                if i > FIRST_LAYER:
+                    o = layers[i].self_attn.core(q, None, None)
+                attn_o = o.data_ptr()
             kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
             a = mono.layer_args[i]
             out = self.outs[i % 2]
-            self.launchers[a.next_rope](
-                o.data_ptr(),
+            launch = (
+                self.launchers[a.next_rope]
+                if kind is None
+                else self.fused_launchers[(a.next_rope, kind)]
+            )
+            launch(
+                attn_o,
                 g.data_ptr(),
                 stream.data_ptr(),
                 *a.ha,
@@ -603,6 +757,8 @@ class _K5Bucket(_Bucket):
         dims: MonoDims,
         device: torch.device,
         group: Any,
+        fa: _FusedAttention | None = None,
+        fused_kinds: Sequence[str] = (),
     ) -> None:
         w = dims.world_size
         key = k5.build_vllm(S=rows, W=w, next_rope=True)
@@ -616,6 +772,11 @@ class _K5Bucket(_Bucket):
             False: k5.build(dataclasses.replace(key, next_rope=False))[1],
         }
         self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
+        self.fa = fa
+        self.fused_launch_a = {
+            kind: k5.build(k5.build_vllm(S=rows, W=w, next_rope=True, attn=kind))[0]
+            for kind in fused_kinds
+        }
         i32, f32, bf16 = torch.int32, torch.float32, torch.bfloat16
         self.scratch = torch.zeros(
             k5.scratch_layout(rows, w, key.bnd)[1] // 4 + 64, dtype=i32, device=device
@@ -648,13 +809,25 @@ class _K5Bucket(_Bucket):
         cur = torch.cuda.current_stream()
         s_in, s_full = stream, 1
         q = o
+        fa = self.fa
+        table = None
+        if fa is not None:
+            table = fa.table(
+                layers, lambda i: self.q[(i - 1) % 2], nrows // ROWS_PER_REQUEST
+            )
         for i in range(FIRST_LAYER, LAST_LAYER + 1):
-            if i > FIRST_LAYER:
-                o = layers[i].self_attn.core(q, None, None)
+            kind = fa.layers.get(i) if fa is not None else None
+            if fa is not None and kind is not None:
+                attn_o = fa.row(table, i)
+            else:
+                if i > FIRST_LAYER:
+                    o = layers[i].self_attn.core(q, None, None)
+                attn_o = o.data_ptr()
             kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
             a = mono.layer_args[i]
-            self.launch_a(
-                o.data_ptr(),
+            launch_a = self.launch_a if kind is None else self.fused_launch_a[kind]
+            launch_a(
+                attn_o,
                 g.data_ptr(),
                 s_in.data_ptr(),
                 *a.ha,
@@ -745,19 +918,41 @@ class MuseSparkMono:
         device: torch.device,
         dims: MonoDims,
         buckets: Sequence[int],
+        fused_attention: dict[int, str] | None = None,
     ) -> None:
         self.rank = rank
         self.dims = dims
         self.device = device
         self.refresh_weights(model)
-        self.buckets: dict[int, _Bucket] = {
-            b: (
-                _K3Bucket(kernels.k3, b, dims, device, group)
-                if b in K3_ROWS
-                else _K5Bucket(kernels.k5, kernels.k5m, b, dims, device, group)
-            )
-            for b in buckets
-        }
+        fused_attention = fused_attention or {}
+        self.buckets: dict[int, _Bucket] = {}
+        for b in buckets:
+            kinds = FUSED_ATTENTION.get(b, ())
+            layers = {i: t for i, t in fused_attention.items() if t in kinds}
+            fa = None
+            if layers:
+                scales = {
+                    i: float(model.layers[i].self_attn.attn.impl.scale) for i in layers
+                }
+                fa = _FusedAttention(kernels.attn_frag, layers, scales, b, dims, device)
+            if b in K3_ROWS:
+                k3_kinds = sorted(
+                    {(self.layer_args[i].next_rope, t) for i, t in layers.items()}
+                )
+                self.buckets[b] = _K3Bucket(
+                    kernels.k3, b, dims, device, group, fa, k3_kinds
+                )
+            else:
+                self.buckets[b] = _K5Bucket(
+                    kernels.k5,
+                    kernels.k5m,
+                    b,
+                    dims,
+                    device,
+                    group,
+                    fa,
+                    sorted(set(layers.values())),
+                )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
         self._engaged: set[int] = set()

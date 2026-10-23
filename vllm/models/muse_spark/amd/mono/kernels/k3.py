@@ -509,7 +509,8 @@ def build(key: Build):
         from . import attn_frag
 
         assert W == 8 and key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa")
+        # kvl = lbhnc: the vLLM build (bf16 LBHNC cache)
+        FA = attn_frag.make(S // 8, key.attn == "swa", kvl=key.kvl)
         FaLds = FA.Lds
         _KEYSTR = (
             _KEYSTR + FA.key
@@ -558,7 +559,9 @@ def build(key: Build):
     if (
         VQK or VKV
     ):  # the vLLM finish lives in the FUSE owners of stage_qkv8 (not in head_finish / the fused attention)
-        assert W == 8 and key.s3q & 1 and not key.attn, key
+        assert W == 8 and key.s3q & 1, key
+    # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
+    assert not key.attn or VQK == VKV, key
     XRS = key.xrs
     ONLY = _portion.stage_set(key.only, _portion.K3_STAGES, _portion.K3_DEPS)
 
@@ -4453,5 +4456,8 @@ def build_vllm(S=8, W=8, next_rope=True, **over):
     for f in ("shuffled_w", "shuffled_s"):
         if f in names:
             kw[f] = True
+    if over.get("attn"):
+        # the fused verify attention (vLLM's bf16 cache): o_proj weights after it, as SGLang ships
+        kw["attn_olate"] = True
     kw.update(over)
     return Build(**kw)
