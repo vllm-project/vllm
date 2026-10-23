@@ -35,9 +35,17 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
   }
 
   // Allow static fallback storage in addition to the 128 KiB dynamic buffer.
-  if (num_rows > 64 &&
-      max_seq_len >= vllm::sampled_topk::kMinSampledLength<TopK> &&
-      max_smem_per_block >= 144 * 1024) {
+#ifdef USE_ROCM
+  // On gfx950 one workgroup per row beats the multi-CTA kernel at nearly
+  // every batch size and length, and needs no workspace reset.
+  if (num_rows == 0) return;
+  const bool use_sampled = true;
+#else
+  const bool use_sampled =
+      num_rows > 64 &&
+      max_seq_len >= vllm::sampled_topk::kMinSampledLength<TopK>;
+#endif
+  if (use_sampled && max_smem_per_block >= 144 * 1024) {
     auto kernel = vllm::sampled_topk::sampled_topk_kernel<TopK>;
     constexpr size_t smem_size =
         vllm::filtered_topk::FILTERED_TOPK_SMEM_DYNAMIC;
