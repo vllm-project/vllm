@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Protocol, runtime_checkable
 
 import torch
@@ -180,11 +181,9 @@ _CAPTURE_FN_OWNER_ATTR = "_routed_experts_capturer"
 def _make_capture_fn(
     capturer: RoutedExpertsCapturer, layer_id: int
 ) -> Callable[[torch.Tensor], None]:
-    def capture(topk_ids: torch.Tensor) -> None:
-        capturer.capture(layer_id, topk_ids)
-
-    setattr(capture, _CAPTURE_FN_OWNER_ATTR, capturer)
-    return capture
+    capture_fn = partial(capturer.capture, layer_id)
+    setattr(capture_fn, _CAPTURE_FN_OWNER_ATTR, capturer)
+    return capture_fn
 
 
 def _reject_second_capturer(target: Any, attr: str) -> None:
