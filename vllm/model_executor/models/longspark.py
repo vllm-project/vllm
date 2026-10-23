@@ -47,6 +47,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.worker.gpu.spec_decode.longspark.kernels import (
     longspark_attention,
     longspark_paged_attention,
+    prepare_longspark_shifted_input,
 )
 
 
@@ -166,6 +167,29 @@ class _ParallelShiftedInput(nn.Module):
         target_embed_tokens: nn.Module,
     ) -> torch.Tensor:
         batch_size = token_ids.shape[0]
+        embedding_weight = getattr(target_embed_tokens, "weight", None)
+        if (
+            isinstance(embedding_weight, torch.Tensor)
+            and token_ids.is_cuda
+            and latest_target_state.is_cuda
+            and latest_target_state.dtype == torch.bfloat16
+            and embedding_weight.dtype == torch.bfloat16
+            and self.position_embedding.weight.dtype == torch.bfloat16
+            and embedding_weight.device == latest_target_state.device
+            and self.position_embedding.weight.device == latest_target_state.device
+            and embedding_weight.ndim == 2
+            and embedding_weight.shape[1] == latest_target_state.shape[-1]
+            and embedding_weight.stride(1) == 1
+            and self.position_embedding.weight.stride(1) == 1
+        ):
+            shifted_input = prepare_longspark_shifted_input(
+                token_ids,
+                latest_target_state,
+                embedding_weight,
+                self.position_embedding.weight,
+                self.mask_token_id,
+            )
+            return self.norm(self.proj(shifted_input))
         block_token_ids = torch.full(
             (batch_size, self.block_size),
             self.mask_token_id,
@@ -676,15 +700,53 @@ class LongSparkDraftModel(nn.Module):
         raw_caches: tuple[torch.Tensor, ...] | None = None,
         raw_block_tables: tuple[torch.Tensor, ...] | None = None,
         raw_seq_lens: torch.Tensor | None = None,
+        return_residual: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.target_embed_tokens is None:
+            raise RuntimeError("LongSpark target modules are not attached")
+        hidden_states = self.prepare_hidden(selected_hidden, token_ids)
+        return self.forward_layers(
+            hidden_states,
+            token_ids,
+            position_ids,
+            global_output,
+            raw_keys,
+            raw_values,
+            raw_mask,
+            raw_caches,
+            raw_block_tables,
+            raw_seq_lens,
+            return_residual,
+        )
+
+    def prepare_hidden(
+        self,
+        selected_hidden: torch.Tensor,
+        token_ids: torch.Tensor,
     ) -> torch.Tensor:
         if self.target_embed_tokens is None:
             raise RuntimeError("LongSpark target modules are not attached")
-        hidden_states = self.draft_state_encoder(selected_hidden)
-        hidden_states = self.parallel_shifted_input(
+        latest_target_state = self.draft_state_encoder(selected_hidden)
+        return self.parallel_shifted_input(
             token_ids,
-            hidden_states,
+            latest_target_state,
             self.target_embed_tokens,
         )
+
+    def forward_layers(
+        self,
+        hidden_states: torch.Tensor,
+        token_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        global_output: torch.Tensor,
+        raw_keys: torch.Tensor,
+        raw_values: torch.Tensor,
+        raw_mask: torch.Tensor,
+        raw_caches: tuple[torch.Tensor, ...] | None = None,
+        raw_block_tables: tuple[torch.Tensor, ...] | None = None,
+        raw_seq_lens: torch.Tensor | None = None,
+        return_residual: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         global_keys = self.global_queries[None].expand(
             token_ids.shape[0], -1, -1, -1, -1
         )
@@ -705,9 +767,15 @@ class LongSparkDraftModel(nn.Module):
                 None if raw_block_tables is None else raw_block_tables[layer_index],
                 raw_seq_lens,
             )
+        if return_residual:
+            return hidden_states, residual
         return hidden_states + residual
 
-    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_draft_logits(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if (
             self.target_final_norm is None
             or self.target_lm_head is None
@@ -726,10 +794,20 @@ class LongSparkDraftModel(nn.Module):
             and isinstance(target_eps, float)
             and hidden_states.is_contiguous()
         ):
-            normalized = torch.empty_like(hidden_states)
-            ops.rms_norm(normalized, hidden_states, target_weight.data, target_eps)
-            hidden_states = normalized
+            if residual is None:
+                normalized = torch.empty_like(hidden_states)
+                ops.rms_norm(normalized, hidden_states, target_weight.data, target_eps)
+                hidden_states = normalized
+            else:
+                ops.fused_add_rms_norm(
+                    hidden_states,
+                    residual,
+                    target_weight.data,
+                    target_eps,
+                )
         else:
+            if residual is not None:
+                hidden_states = hidden_states + residual
             hidden_states = target_norm(hidden_states)
         return self.target_logits_processor(self.target_lm_head, hidden_states)
 
@@ -743,23 +821,76 @@ class LongSparkDraftModel(nn.Module):
             hidden_states, self.target_logits_processor
         )
 
-    def fused_markov_weight(self) -> torch.Tensor | None:
-        """Return the plain Markov projection when direct fusion is equivalent."""
+    def fused_markov_weights(
+        self,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ] | None:
+        """Return exact weights and optional L2-sized retrieval factors."""
         processor = self.target_logits_processor
         head = self.parallel_markov_head.markov_w2
-        weight = head.weight
+        embedding_weight = self.parallel_markov_head.markov_w1.weight
+        projection_weight = head.weight
         if (
             processor is None
             or processor.scale != 1.0
             or processor.soft_cap is not None
             or processor.head_dtype not in (None, torch.bfloat16)
             or head.tp_size != 1
-            or weight.dtype != torch.bfloat16
-            or weight.shape
+            or embedding_weight.dtype != torch.bfloat16
+            or embedding_weight.shape
+            != (self.config.vocab_size, self.config.parallel_markov_rank)
+            or projection_weight.dtype != torch.bfloat16
+            or projection_weight.shape
             != (self.config.vocab_size, self.config.parallel_markov_rank)
         ):
             return None
-        return weight
+        candidate_embedding = candidate_projection = None
+        if projection_weight.is_cuda:
+            properties = torch.cuda.get_device_properties(projection_weight.device)
+            l2_bytes = int(getattr(properties, "L2_cache_size", 0))
+            bytes_per_rank = (
+                projection_weight.shape[0] * projection_weight.element_size()
+            )
+            # Leave room for base logits and candidate re-scoring so repeated
+            # projections remain resident instead of thrashing the full L2.
+            max_cached_rank = int(0.4 * l2_bytes / max(1, bytes_per_rank))
+            bounded_rank = min(
+                self.config.parallel_markov_rank - 1,
+                max_cached_rank,
+            )
+            candidate_rank = 32 * (bounded_rank // 32)
+            if candidate_rank >= 64:
+                with torch.no_grad():
+                    left, singular_values, right = torch.linalg.svd(
+                        projection_weight.float(), full_matrices=False
+                    )
+                    retained_energy = (
+                        singular_values[:candidate_rank].square().sum()
+                        / singular_values.square().sum()
+                    )
+                    if retained_energy.item() >= 0.60:
+                        candidate_projection = (
+                            left[:, :candidate_rank]
+                            * singular_values[:candidate_rank]
+                        ).to(torch.bfloat16)
+                        candidate_embedding = (
+                            embedding_weight
+                            @ right[:candidate_rank].t().to(torch.bfloat16)
+                        ).to(torch.bfloat16)
+                        candidate_projection = candidate_projection.contiguous()
+                        candidate_embedding = candidate_embedding.contiguous()
+                    del left, singular_values, right
+                    torch.cuda.empty_cache()
+        return (
+            embedding_weight,
+            projection_weight,
+            candidate_embedding,
+            candidate_projection,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return AutoWeightsLoader(self).load_weights(weights)

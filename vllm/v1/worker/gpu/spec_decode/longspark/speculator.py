@@ -53,7 +53,9 @@ from vllm.v1.worker.gpu.spec_decode.longspark.cudagraph import (
 from vllm.v1.worker.gpu.spec_decode.longspark.kernels import (
     fused_add_argmax,
     fused_markov_argmax,
+    fused_markov_refined_argmax,
     update_longspark_global_delta,
+    update_longspark_global_delta_batched,
 )
 from vllm.v1.worker.gpu.spec_decode.longspark.state import (
     merge_normalized_attention,
@@ -130,7 +132,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
             dtype=torch.int32,
             device=device,
         )
-        markov_projection_chunks = (self.vocab_size + 63) // 64
+        markov_projection_chunks = (self.vocab_size + 31) // 32
         self._markov_projection_partial_values = torch.empty(
             self.max_num_reqs,
             markov_projection_chunks,
@@ -143,15 +145,47 @@ class LongSparkSpeculator(DraftModelSpeculator):
             dtype=torch.int32,
             device=device,
         )
-        self._fused_markov_weight: torch.Tensor | None = None
+        self._markov_candidate_top_k = 32
+        markov_candidate_tiles = (markov_projection_chunks + 511) // 512
+        self._markov_candidate_tile_values = torch.empty(
+            self.max_num_reqs,
+            markov_candidate_tiles,
+            self._markov_candidate_top_k,
+            dtype=torch.float32,
+            device=device,
+        )
+        self._markov_candidate_tile_ids = torch.empty(
+            self.max_num_reqs,
+            markov_candidate_tiles,
+            self._markov_candidate_top_k,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._markov_candidate_ids = torch.empty(
+            self.max_num_reqs,
+            self._markov_candidate_top_k,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._fused_markov_weights: tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ] | None = None
 
         self.target_attn_layers: list[AttentionLayerBase] = []
         self.target_attn_layer_names: list[str] = []
         self.target_block_tables: tuple[torch.Tensor, ...] = ()
+        self._target_cache_addresses: tuple[int, ...] = ()
+        self._target_block_table_addresses: tuple[int, ...] = ()
+        self._target_cache_ptrs: torch.Tensor | None = None
+        self._target_block_table_ptrs: torch.Tensor | None = None
         self.num_full_scans = 0
         self.num_delta_updates = 0
         self.num_delta_rows = 0
         self.longspark_cudagraph_manager: LongSparkCudaGraphManager | None = None
+        self._global_update_stream = torch.cuda.Stream(device=device)
 
     def _validate_runtime_config(self, vllm_config: VllmConfig) -> None:
         config = self.draft_model_config.hf_config
@@ -200,7 +234,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         self._all_target_attn_layer_names = target_attn_layer_names
         model = load_longspark_model(target_model, self.vllm_config)
-        self._fused_markov_weight = model.fused_markov_weight()
+        self._fused_markov_weights = model.fused_markov_weights()
         return model
 
     def set_attn(
@@ -270,6 +304,40 @@ class LongSparkSpeculator(DraftModelSpeculator):
             raise RuntimeError(
                 f"LongSpark target layer has no KV-cache group: {error.args[0]}"
             ) from error
+        # KV caches are allocated after set_attn() and are rebound once more
+        # between CUDA-graph memory profiling and the real initialization.
+        # Build the device pointer tables lazily from the live tensors.
+        self._target_cache_addresses = ()
+        self._target_block_table_addresses = ()
+        self._target_cache_ptrs = None
+        self._target_block_table_ptrs = None
+
+    def _target_pointer_tables(self) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_addresses = tuple(
+            layer.kv_cache.data_ptr() for layer in self.target_attn_layers
+        )
+        table_addresses = tuple(table.data_ptr() for table in self.target_block_tables)
+        if (
+            self._target_cache_ptrs is None
+            or cache_addresses != self._target_cache_addresses
+        ):
+            self._target_cache_ptrs = torch.tensor(
+                cache_addresses,
+                dtype=torch.uint64,
+                device=self.device,
+            )
+            self._target_cache_addresses = cache_addresses
+        if (
+            self._target_block_table_ptrs is None
+            or table_addresses != self._target_block_table_addresses
+        ):
+            self._target_block_table_ptrs = torch.tensor(
+                table_addresses,
+                dtype=torch.uint64,
+                device=self.device,
+            )
+            self._target_block_table_addresses = table_addresses
+        return self._target_cache_ptrs, self._target_block_table_ptrs
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         supports_graph = (
@@ -404,7 +472,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
         attn_metadata: dict[str, Any],
         *,
         defer_decode: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    ) -> torch.Tensor | None:
         rebuild_rows: list[tuple[int, int, int]] = []
         prefill_delta_rows: list[tuple[int, int, int, int]] = []
         decode_batch_indices: list[int] = []
@@ -453,22 +521,27 @@ class LongSparkSpeculator(DraftModelSpeculator):
                 request_slots = torch.tensor(
                     decode_request_slots, dtype=torch.long, device=self.device
                 )
-            starts = self._state_committed_lens_gpu.index_select(0, request_slots)
-            ends = committed_lens.index_select(0, batch_indices)
             if defer_decode and len(decode_batch_indices) == input_batch.num_reqs:
-                deferred_update = (request_slots, starts, ends)
+                deferred_update = request_slots
             else:
+                starts = self._state_committed_lens_gpu.index_select(
+                    0, request_slots
+                )
+                ends = committed_lens.index_select(0, batch_indices)
                 self._update_global_decode_batch(
                     batch_indices, request_slots, starts, ends, attn_metadata
                 )
 
         # Publish the exact, rejection-adjusted lengths for the next decode
-        # step without making the target stream wait on a D2H transfer.
-        self._state_committed_lens_gpu.index_copy_(
-            0,
-            input_batch.idx_mapping[: input_batch.num_reqs],
-            committed_lens,
-        )
+        # step without making the target stream wait on a D2H transfer. Steady
+        # CUDA-graph decode folds this publish into graph input preparation,
+        # avoiding two index-selects plus a separate index-copy launch.
+        if deferred_update is None:
+            self._state_committed_lens_gpu.index_copy_(
+                0,
+                input_batch.idx_mapping[: input_batch.num_reqs],
+                committed_lens,
+            )
         return deferred_update
 
     def _scan_global_batch(
@@ -688,31 +761,62 @@ class LongSparkSpeculator(DraftModelSpeculator):
     def _sample_block(
         self,
         block_hidden: torch.Tensor,
+        block_residual: torch.Tensor | None,
         anchors: torch.Tensor,
         current_positions: torch.Tensor,
         num_reqs: int,
     ) -> None:
         idx_mapping = self.idx_mapping[:num_reqs]
         previous = anchors.long()
-        base_logits = self.model.compute_draft_logits(block_hidden)
+        base_logits = self.model.compute_draft_logits(block_hidden, block_residual)
         use_fused_projection = (
             self.draft_logits is None
             and not self.use_acceptance_estimator
-            and self._fused_markov_weight is not None
+            and self._fused_markov_weights is not None
         )
         for step in range(self.num_speculative_steps):
             logits = base_logits[:, step]
-            markov_embed = self.model.markov_embed(previous)
             if use_fused_projection:
-                sampled = fused_markov_argmax(
-                    logits,
-                    markov_embed,
-                    self._fused_markov_weight,
-                    partial_values=self._markov_projection_partial_values,
-                    partial_ids=self._markov_projection_partial_ids,
-                    output=self.draft_tokens[:num_reqs, step],
-                )
+                assert self._fused_markov_weights is not None
+                (
+                    embedding_weight,
+                    projection_weight,
+                    candidate_embedding,
+                    candidate_projection,
+                ) = self._fused_markov_weights
+                if (
+                    candidate_embedding is not None
+                    and candidate_projection is not None
+                ):
+                    sampled = fused_markov_refined_argmax(
+                        logits,
+                        previous,
+                        candidate_embedding,
+                        candidate_projection,
+                        embedding_weight,
+                        projection_weight,
+                        reverse=bool(step & 1),
+                        partial_values=self._markov_projection_partial_values,
+                        partial_ids=self._markov_projection_partial_ids,
+                        tile_values=self._markov_candidate_tile_values,
+                        tile_ids=self._markov_candidate_tile_ids,
+                        candidate_ids=self._markov_candidate_ids,
+                        output=self.draft_tokens[:num_reqs, step],
+                        top_k=self._markov_candidate_top_k,
+                    )
+                else:
+                    sampled = fused_markov_argmax(
+                        logits,
+                        previous,
+                        embedding_weight,
+                        projection_weight,
+                        reverse=bool(step & 1),
+                        partial_values=self._markov_projection_partial_values,
+                        partial_ids=self._markov_projection_partial_ids,
+                        output=self.draft_tokens[:num_reqs, step],
+                    )
             else:
+                markov_embed = self.model.markov_embed(previous)
                 markov_bias = self.model.markov_bias(markov_embed).to(logits.dtype)
                 if self.draft_logits is None and not self.use_acceptance_estimator:
                     sampled = fused_add_argmax(
@@ -762,39 +866,42 @@ class LongSparkSpeculator(DraftModelSpeculator):
         global_starts: torch.Tensor | None = None,
         global_ends: torch.Tensor | None = None,
     ) -> None:
+        update_stream = None
         if (
             global_request_slots is not None
             and global_starts is not None
             and global_ends is not None
         ):
             batch_indices = self._batch_indices[:num_reqs]
-            for layer_index, (layer, block_table) in enumerate(
-                zip(self.target_attn_layers, self.target_block_tables)
-            ):
-                update_longspark_global_delta(
-                    query=self.model.global_queries[layer_index],
-                    cache=layer.kv_cache,
-                    block_table=block_table,
+            target_cache_ptrs, target_block_table_ptrs = self._target_pointer_tables()
+            current_stream = torch.cuda.current_stream(self.device)
+            update_stream = self._global_update_stream
+            update_stream.wait_stream(current_stream)
+            with torch.cuda.stream(update_stream):
+                update_longspark_global_delta_batched(
+                    queries=self.model.global_queries,
+                    caches=tuple(layer.kv_cache for layer in self.target_attn_layers),
+                    cache_ptrs=target_cache_ptrs,
+                    block_tables=self.target_block_tables,
+                    block_table_ptrs=target_block_table_ptrs,
                     batch_indices=batch_indices,
                     request_slots=global_request_slots,
                     starts=global_starts,
                     ends=global_ends,
-                    state_output=self.global_output[:, layer_index],
-                    state_lse=self.global_lse[:, layer_index],
+                    state_output=self.global_output,
+                    state_lse=self.global_lse,
+                    batch_output=global_output,
                     max_delta_rows=self.max_accepted_tokens,
                 )
-            torch.index_select(
-                self.global_output,
-                0,
-                global_request_slots,
-                out=global_output,
-            )
         use_paged_raw = (
             len(self.target_attn_layers) == self.num_selected_layers
             and len(self.target_block_tables) == self.num_selected_layers
         )
-        block_hidden = self.model(
-            selected_hidden,
+        hidden_states = self.model.prepare_hidden(selected_hidden, anchors)
+        if update_stream is not None:
+            torch.cuda.current_stream(self.device).wait_stream(update_stream)
+        block_output = self.model.forward_layers(
+            hidden_states,
             anchors,
             position_ids,
             global_output,
@@ -808,8 +915,17 @@ class LongSparkSpeculator(DraftModelSpeculator):
             ),
             raw_block_tables=self.target_block_tables if use_paged_raw else None,
             raw_seq_lens=current_positions if use_paged_raw else None,
+            return_residual=True,
         )
-        self._sample_block(block_hidden, anchors, current_positions, num_reqs)
+        assert isinstance(block_output, tuple)
+        block_hidden, block_residual = block_output
+        self._sample_block(
+            block_hidden,
+            block_residual,
+            anchors,
+            current_positions,
+            num_reqs,
+        )
 
     @torch.inference_mode()
     def propose(
@@ -851,9 +967,14 @@ class LongSparkSpeculator(DraftModelSpeculator):
             seeds,
             dummy_run=dummy_run,
         )
-        selected_hidden = self._select_target_hidden(
-            input_batch, aux_hidden_states, num_rejected
-        )
+        if aux_hidden_states is None:
+            raise RuntimeError("LongSpark requires selected target hidden states")
+        if len(aux_hidden_states) != self.num_selected_layers:
+            raise RuntimeError(
+                "LongSpark expected "
+                f"{self.num_selected_layers} target hidden-state tensors, got "
+                f"{len(aux_hidden_states)}"
+            )
         request_slots = input_batch.idx_mapping[:num_reqs]
         graph_manager = self.longspark_cudagraph_manager
         graph_desc = (
@@ -928,18 +1049,25 @@ class LongSparkSpeculator(DraftModelSpeculator):
                 raw_mask = graph_inputs.raw_mask
                 global_output = graph_inputs.global_output
 
-        sampled_mask = num_sampled[:num_reqs] > 0
-        anchors = torch.where(
-            sampled_mask,
-            last_sampled.index_select(0, request_slots).squeeze(-1),
-            next_prefill_tokens[0].index_select(0, request_slots),
-        )
-        current_positions = committed_lens.long()
-        position_ids = (
-            current_positions[:, None]
-            + torch.arange(self.block_size, dtype=torch.long, device=self.device)[None]
+        current_positions = (
+            committed_lens if graph_desc is not None else committed_lens.long()
         )
         if graph_desc is None:
+            selected_hidden = self._select_target_hidden(
+                input_batch, aux_hidden_states, num_rejected
+            )
+            sampled_mask = num_sampled[:num_reqs] > 0
+            anchors = torch.where(
+                sampled_mask,
+                last_sampled.index_select(0, request_slots).squeeze(-1),
+                next_prefill_tokens[0].index_select(0, request_slots),
+            )
+            position_ids = (
+                current_positions[:, None]
+                + torch.arange(self.block_size, dtype=torch.long, device=self.device)[
+                    None
+                ]
+            )
             self._generate_draft(
                 selected_hidden,
                 anchors,
@@ -954,7 +1082,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
         else:
             assert graph_manager is not None
             assert deferred_update is not None
-            global_request_slots, global_starts, global_ends = deferred_update
+            global_request_slots = deferred_update
             captured_num_reqs = graph_desc.num_reqs
             assert captured_num_reqs is not None
             if captured_num_reqs > num_reqs:
@@ -965,17 +1093,19 @@ class LongSparkSpeculator(DraftModelSpeculator):
             graph_manager.replay(
                 graph_desc,
                 num_reqs=num_reqs,
-                selected_hidden=selected_hidden,
-                anchors=anchors,
-                position_ids=position_ids,
+                selected_hidden_states=aux_hidden_states,
+                query_start_loc=input_batch.query_start_loc,
+                num_rejected=num_rejected,
+                num_sampled=num_sampled,
+                last_sampled=last_sampled,
+                next_prefill_tokens=next_prefill_tokens[0],
                 global_output=global_output,
                 raw_keys=raw_keys,
                 raw_values=raw_values,
                 raw_mask=raw_mask,
                 current_positions=current_positions,
                 global_request_slots=global_request_slots,
-                global_starts=global_starts,
-                global_ends=global_ends,
+                state_committed_lens=self._state_committed_lens_gpu,
                 padding_request_slot=self.padding_state_slot,
             )
         return self.draft_tokens[:num_reqs]

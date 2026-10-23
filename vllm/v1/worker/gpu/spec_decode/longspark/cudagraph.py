@@ -9,10 +9,166 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+
+
+@triton.jit(
+    do_not_specialize=["num_reqs", "captured_num_reqs", "padding_request_slot"]
+)
+def _prepare_graph_inputs_kernel(
+    selected_hidden_ptrs,
+    query_start_loc,
+    num_rejected,
+    selected_hidden_out,
+    num_sampled,
+    last_sampled,
+    next_prefill_tokens,
+    anchors_out,
+    current_positions,
+    current_positions_out,
+    position_ids_out,
+    request_slots,
+    request_slots_out,
+    state_committed_lens,
+    starts_out,
+    ends_out,
+    num_reqs,
+    captured_num_reqs,
+    padding_request_slot,
+    current_position_stride: tl.constexpr,
+    request_slot_stride: tl.constexpr,
+    state_committed_len_stride: tl.constexpr,
+    query_start_stride: tl.constexpr,
+    rejected_stride: tl.constexpr,
+    sampled_stride: tl.constexpr,
+    last_sampled_stride: tl.constexpr,
+    next_prefill_stride: tl.constexpr,
+    SELECTED_LAYERS: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    COPY_BLOCK: tl.constexpr,
+    POSITION_BLOCK: tl.constexpr,
+    REQUEST_BLOCK: tl.constexpr,
+) -> None:
+    program = tl.program_id(0)
+    hidden_offsets = program * COPY_BLOCK + tl.arange(0, COPY_BLOCK)
+    selected_row_size = SELECTED_LAYERS * HIDDEN_SIZE
+    hidden_requests = hidden_offsets // selected_row_size
+    hidden_within_row = hidden_offsets % selected_row_size
+    hidden_layers = hidden_within_row // HIDDEN_SIZE
+    hidden_columns = hidden_within_row % HIDDEN_SIZE
+    captured_hidden = captured_num_reqs * selected_row_size
+    valid_hidden = hidden_offsets < num_reqs * selected_row_size
+    source_rows = (
+        tl.load(
+            query_start_loc + (hidden_requests + 1) * query_start_stride,
+            mask=valid_hidden,
+            other=1,
+        )
+        - tl.load(
+            num_rejected + hidden_requests * rejected_stride,
+            mask=valid_hidden,
+            other=0,
+        )
+        - 1
+    )
+    source_addresses = tl.load(
+        selected_hidden_ptrs + hidden_layers,
+        mask=valid_hidden,
+        other=0,
+    )
+    source = source_addresses.to(
+        tl.pointer_type(selected_hidden_out.dtype.element_ty)
+    )
+    hidden = tl.load(
+        source + source_rows * HIDDEN_SIZE + hidden_columns,
+        mask=valid_hidden,
+        other=0.0,
+    )
+    tl.store(
+        selected_hidden_out + hidden_offsets,
+        hidden,
+        mask=hidden_offsets < captured_hidden,
+    )
+
+    if program == 0:
+        position_offsets = tl.arange(0, POSITION_BLOCK)
+        position_requests = position_offsets // BLOCK_SIZE
+        position_steps = position_offsets % BLOCK_SIZE
+        captured_positions = position_offsets < captured_num_reqs * BLOCK_SIZE
+        valid_positions = position_requests < num_reqs
+        position_base = tl.load(
+            current_positions + position_requests * current_position_stride,
+            mask=valid_positions,
+            other=-position_steps,
+        )
+        tl.store(
+            position_ids_out + position_offsets,
+            position_base + position_steps,
+            mask=captured_positions,
+        )
+
+        request_offsets = tl.arange(0, REQUEST_BLOCK)
+        captured_requests = request_offsets < captured_num_reqs
+        valid_requests = request_offsets < num_reqs
+        request_slot = tl.load(
+            request_slots + request_offsets * request_slot_stride,
+            mask=valid_requests,
+            other=padding_request_slot,
+        )
+
+        sampled = tl.load(
+            num_sampled + request_offsets * sampled_stride,
+            mask=valid_requests,
+            other=0,
+        )
+        sampled_token = tl.load(
+            last_sampled + request_slot * last_sampled_stride,
+            mask=valid_requests,
+            other=0,
+        )
+        prefill_token = tl.load(
+            next_prefill_tokens + request_slot * next_prefill_stride,
+            mask=valid_requests,
+            other=0,
+        )
+        anchor = tl.where(sampled > 0, sampled_token, prefill_token)
+        tl.store(anchors_out + request_offsets, anchor, mask=captured_requests)
+
+        current_position = tl.load(
+            current_positions + request_offsets * current_position_stride,
+            mask=valid_requests,
+            other=1,
+        )
+        tl.store(
+            current_positions_out + request_offsets,
+            current_position,
+            mask=captured_requests,
+        )
+
+        tl.store(
+            request_slots_out + request_offsets,
+            request_slot,
+            mask=captured_requests,
+        )
+
+        start = tl.load(
+            state_committed_lens + request_slot * state_committed_len_stride,
+            mask=valid_requests,
+            other=0,
+        )
+        end = current_position
+        tl.store(starts_out + request_offsets, start, mask=captured_requests)
+        tl.store(ends_out + request_offsets, end, mask=captured_requests)
+        tl.store(
+            state_committed_lens + request_slot * state_committed_len_stride,
+            end,
+            mask=valid_requests,
+        )
 
 
 @dataclass
@@ -84,6 +240,18 @@ class LongSparkCudaGraphManager(CudaGraphManager):
         )
         self.static_inputs: dict[BatchExecutionDescriptor, _GraphInputs] = {}
         self._shared_inputs: _GraphInputs | None = None
+        self._selected_hidden_addresses: tuple[int, ...] = ()
+        self._selected_hidden_ptrs_host = torch.empty(
+            selected_layers,
+            dtype=torch.uint64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self._selected_hidden_ptrs = torch.empty(
+            selected_layers,
+            dtype=torch.uint64,
+            device=device,
+        )
 
     def _allocate_inputs(self, batch_size: int) -> _GraphInputs:
         return _GraphInputs(
@@ -189,6 +357,7 @@ class LongSparkCudaGraphManager(CudaGraphManager):
         super().release_graphs()
         self.static_inputs.clear()
         self._shared_inputs = None
+        self._selected_hidden_addresses = ()
 
     def select(self, num_reqs: int) -> BatchExecutionDescriptor | None:
         desc = self.dispatch(
@@ -208,25 +377,85 @@ class LongSparkCudaGraphManager(CudaGraphManager):
         desc: BatchExecutionDescriptor,
         *,
         num_reqs: int,
-        selected_hidden: torch.Tensor,
-        anchors: torch.Tensor,
-        position_ids: torch.Tensor,
+        selected_hidden_states: list[torch.Tensor],
+        query_start_loc: torch.Tensor,
+        num_rejected: torch.Tensor,
+        num_sampled: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
         global_output: torch.Tensor,
         raw_keys: torch.Tensor,
         raw_values: torch.Tensor,
         raw_mask: torch.Tensor,
         current_positions: torch.Tensor,
         global_request_slots: torch.Tensor,
-        global_starts: torch.Tensor,
-        global_ends: torch.Tensor,
+        state_committed_lens: torch.Tensor,
         padding_request_slot: int,
     ) -> None:
         inputs = self.static_inputs[desc]
         captured_num_reqs = desc.num_reqs
         assert captured_num_reqs is not None and captured_num_reqs >= num_reqs
-        inputs.selected_hidden[:num_reqs].copy_(selected_hidden)
-        inputs.anchors[:num_reqs].copy_(anchors)
-        inputs.position_ids[:num_reqs].copy_(position_ids)
+        if len(selected_hidden_states) != self.selected_layers:
+            raise ValueError("LongSpark selected hidden-state count does not match")
+        if any(
+            state.device != self.device
+            or state.dtype != self.dtype
+            or state.ndim != 2
+            or state.shape[1] != self.hidden_size
+            or not state.is_contiguous()
+            for state in selected_hidden_states
+        ):
+            raise ValueError("LongSpark selected hidden states have invalid layouts")
+        hidden_ptrs = tuple(state.data_ptr() for state in selected_hidden_states)
+        if hidden_ptrs != self._selected_hidden_addresses:
+            for index, address in enumerate(hidden_ptrs):
+                self._selected_hidden_ptrs_host[index] = address
+            self._selected_hidden_ptrs.copy_(
+                self._selected_hidden_ptrs_host,
+                non_blocking=True,
+            )
+            self._selected_hidden_addresses = hidden_ptrs
+        selected_row_size = self.selected_layers * self.hidden_size
+        copy_block = 256
+        position_block = triton.next_power_of_2(captured_num_reqs * self.block_size)
+        request_block = triton.next_power_of_2(captured_num_reqs)
+        copy_elements = captured_num_reqs * max(selected_row_size, self.block_size)
+        _prepare_graph_inputs_kernel[(triton.cdiv(copy_elements, copy_block),)](
+            self._selected_hidden_ptrs,
+            query_start_loc,
+            num_rejected,
+            inputs.selected_hidden,
+            num_sampled,
+            last_sampled,
+            next_prefill_tokens,
+            inputs.anchors,
+            current_positions,
+            inputs.current_positions,
+            inputs.position_ids,
+            global_request_slots,
+            inputs.global_request_slots,
+            state_committed_lens,
+            inputs.global_starts,
+            inputs.global_ends,
+            num_reqs,
+            captured_num_reqs,
+            padding_request_slot,
+            current_positions.stride(0),
+            global_request_slots.stride(0),
+            state_committed_lens.stride(0),
+            query_start_loc.stride(0),
+            num_rejected.stride(0),
+            num_sampled.stride(0),
+            last_sampled.stride(0),
+            next_prefill_tokens.stride(0),
+            SELECTED_LAYERS=self.selected_layers,
+            HIDDEN_SIZE=self.hidden_size,
+            BLOCK_SIZE=self.block_size,
+            COPY_BLOCK=copy_block,
+            POSITION_BLOCK=position_block,
+            REQUEST_BLOCK=request_block,
+            num_warps=4,
+        )
         # Some inputs may already have been gathered directly into graph-owned
         # storage. Avoid redundant device copies in that case.
         if inputs.global_output is not global_output:
@@ -237,18 +466,6 @@ class LongSparkCudaGraphManager(CudaGraphManager):
             inputs.raw_values[:num_reqs].copy_(raw_values)
         if inputs.raw_mask is not raw_mask:
             inputs.raw_mask[:num_reqs].copy_(raw_mask)
-        inputs.current_positions[:num_reqs].copy_(current_positions)
-        inputs.global_request_slots[:num_reqs].copy_(global_request_slots)
-        inputs.global_starts[:num_reqs].copy_(global_starts)
-        inputs.global_ends[:num_reqs].copy_(global_ends)
-        if captured_num_reqs > num_reqs:
-            inputs.selected_hidden[num_reqs:].zero_()
-            inputs.anchors[num_reqs:].zero_()
-            inputs.position_ids[num_reqs:].zero_()
-            inputs.current_positions[num_reqs:].fill_(1)
-            inputs.global_request_slots[num_reqs:].fill_(padding_request_slot)
-            inputs.global_starts[num_reqs:].zero_()
-            inputs.global_ends[num_reqs:].fill_(1)
         self.run_fullgraph(desc)
 
 
