@@ -312,6 +312,14 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
+    @property
+    def max_cache_hit_length(self) -> int:
+        # The last token is always recomputed to produce logits.
+        max_length = self.num_tokens - 1
+        if self.prefix_cache_hit_limit is not None:
+            max_length = min(max_length, self.prefix_cache_hit_limit)
+        return max_length
+
     def get_prefix_cache_hit_limit(self) -> int | None:
         """First prompt row that must be computed rather than read from the
         cache, i.e. the first scored row; None when no prompt rows are scored.
