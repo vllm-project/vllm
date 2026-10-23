@@ -122,6 +122,8 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan):
         query = (-query.float()).to(query.dtype)
         # Future keys must not win before the last query, including page padding.
         for req, length in enumerate(lengths):
+            if length == 0:
+                continue
             page = table[req, (length - 1) // 128]
             tail = (length - 1) % 128
             cache[page, tail:] = 0
