@@ -292,3 +292,18 @@ purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
   cap auto-serré 34,8. Q26 reste le levier structurel.
 - Charge 558 req/2 h dont 348 >100 K, pic 10/min. Commit 74,2 %.
   Pruner 0 err, nbaudit ok, condensation repli 3 étages key=OK.
+
+## 23/10 20:41Z — 19ᵉ wedge ; hit 91,74 % (record) ; la course rejoue : 9/9
+
+- **19ᵉ wedge 18:59:55** (restart 19:01:29), puis **100 min tenues**.
+  **Hit préfixe 91,74 %** (42,7 M/46,5 M) — nouveau record sur échantillon
+  réel ; KV 90,1 %, 0 préemption. Le cap pruner est **remonté à 45,9 GiB**
+  (disque invité revenu à 92 % / 84 GB) — l'auto-serrement desserre des deux
+  sens.
+- **NOUVEAU ENOENT à 18:50:24 = +24 s après le cycle pruner de 18:50 →
+  course à 9/9.** Détail qui alimente l'hypothèse de l'index mémoire : la
+  génération en cours avait démarré à 17:55 (55 min de vie au moment du
+  tir), le bloc visé datait d'avant 18:20 — soit l'âge de bloc ≥ 30 min
+  requis par le min-age du pruner, connu de l'index de la génération.
+- Purge `/dev/shm` : 14 fichiers / **17,28 GiB** (orphelins du restart
+  19:01) → 8,1 G. Commit 75,9 % ; 0×500 sur 564 req.
