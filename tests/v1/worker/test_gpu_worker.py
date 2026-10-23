@@ -43,7 +43,9 @@ def test_cpu_worker_without_triton(monkeypatch):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(config_module, "HAS_TRITON", False)
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
-    monkeypatch.setattr(cpu_worker, "get_visible_memory_node", lambda: [0])
+    monkeypatch.setattr(
+        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
+    )
     monkeypatch.setattr(
         cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
     )
