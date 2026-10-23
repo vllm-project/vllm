@@ -107,6 +107,8 @@ steps:
       - vllm/models/muse_spark/
       - vllm/transformers_utils/configs/muse_spark.py
       - vllm/v1/worker/gpu/model_states/
+      # test_runtime ties the Muse kernel suites' FakeMrv2 to block_table.py
+      - vllm/v1/worker/gpu/block_table.py
       - vllm/v1/attention/backends/rocm_aiter_fa.py
       - tests/models/muse_spark/
       - tests/models/hy_v4/test_triton_ihc.py

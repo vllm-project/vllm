@@ -4,7 +4,8 @@
 three refusal stages (config, loaded weights, KV caches), plan() routing
 (DSpark verify included) and the builds a kernel layer launches, mono-off
 inertness and the fail-stop vote. The kernel modules (``mono.layer``,
-``mono.k1``) are stubbed."""
+``mono.k1``) are stubbed. On a host with a device, also the kernel suites'
+``FakeMrv2`` against MRV2's ``BlockTables``."""
 
 import sys
 from types import SimpleNamespace
@@ -1418,6 +1419,76 @@ def test_plan_checks_the_metadata_pointers(monkeypatch):
     md.block_table = torch.zeros(8, 128, dtype=torch.int32)
     with pytest.raises(RuntimeError, match="moved off"):
         plan(view)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="MRV2's BlockTables lives on a device"
+)
+def test_fake_mrv2_matches_mrv2s_block_tables():
+    """``FakeMrv2`` (the kernel suites' MRV2 inputs, which import no MRV2
+    module) against MRV2's own ``BlockTables`` on the same requests, the
+    sliding group's reach from ``SlidingWindowSpec`` as model_runner passes
+    it: the gathered tables (sliding entries below the window nulled, pad
+    rows zeroed) agree on every entry a kernel can read, and the slot
+    mappings agree whole."""
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
+    from .reference import assign_pages
+
+    dev = torch.device("cuda")
+    reach = SlidingWindowSpec(
+        block_size=spec.KV_BLOCK,
+        num_kv_heads=spec.KV_HEADS,
+        head_size=spec.HEAD_DIM,
+        dtype=BF,
+        sliding_window=spec.WINDOW,
+    ).num_retained_tokens
+    max_blocks = 512
+    real = BlockTables(
+        block_sizes=[spec.KV_BLOCK] * 2,
+        max_num_reqs=spec.MAX_ROWS,
+        max_num_batched_tokens=spec.MAX_ROWS,
+        max_num_blocks_per_group=[max_blocks] * 2,
+        device=dev,
+        sliding_window_reach=[0, reach],
+    )
+    fake = FakeMrv2({"full": ["f"], "sw": ["s"]}, {"sw"}, max_blocks=max_blocks)
+    gen = torch.Generator().manual_seed(5)
+    # (lengths, q, width): the window's and pages' edges, pad rows, a uniform
+    # verify step (q = 4) across the window
+    for lens, q, width in (
+        ((1, 16, 17, 2047, 2048, 2049, 2064, 4103), 1, 8),
+        ((2065, 30), 1, 5),
+        ((2050, 2100), 4, 8),
+    ):
+        reqs = len(lens)
+        pages = {g: assign_pages(lens, 2048, generator=gen) for g in ("full", "sw")}
+        for r, L in enumerate(lens):
+            n = -(-L // spec.KV_BLOCK)
+            ids = tuple(pages[g][r][:n] for g in ("full", "sw"))
+            real.append_block_ids(r, ids, overwrite=True)
+        real.apply_staged_writes()
+        idx = torch.arange(reqs, dtype=torch.int64, device=dev)
+        computed = torch.zeros(spec.MAX_ROWS, dtype=torch.int32)
+        computed[:reqs] = torch.tensor([L - q for L in lens])
+        tables = real.gather_block_tables(
+            idx, width // q, num_computed_tokens=computed.to(dev)
+        )
+        qsl = torch.arange(reqs + 1, dtype=torch.int32) * q
+        pos = torch.zeros(spec.MAX_ROWS, dtype=torch.int64)
+        pos[: reqs * q] = torch.cat([torch.arange(L - q, L) for L in lens])
+        slots = real.compute_slot_mappings(idx, qsl.to(dev), pos.to(dev), width)
+        view = fake.step(list(lens), pages, width, q)
+        for gi, (g, name) in enumerate((("full", "f"), ("sw", "s"))):
+            got = tables[gi].cpu()
+            want = view.attn_metadata[name].block_table
+            assert got.shape == want.shape, (g, lens)
+            for r in range(width // q):
+                # a live row's entries past its last page are stale in both
+                n = -(-lens[r] // spec.KV_BLOCK) if r < reqs else max_blocks
+                assert torch.equal(got[r, :n], want[r, :n]), (g, lens, r)
+            assert torch.equal(slots[gi].cpu(), view.slot_mapping[name]), (g, lens)
 
 
 def test_executor_dspark_split_runs_gated(monkeypatch):
