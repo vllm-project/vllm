@@ -67,7 +67,9 @@ If your model is not in the above list, we will try to automatically convert the
 | `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
 
 !!! note
-    Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
+    Qwen3-ForcedAligner checkpoints reuse the `Qwen3ASRForConditionalGeneration` architecture
+    name in their config.json; vLLM automatically reroutes them to
+    `Qwen3ASRForcedAlignerForTokenClassification` (pooling).
     Please refer to [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py).
 
 ### Reward Models
