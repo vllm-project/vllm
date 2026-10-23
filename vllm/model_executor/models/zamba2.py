@@ -45,7 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
+from .interfaces import HasInnerState, IsHybrid
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -714,9 +714,6 @@ class Zamba2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        is_lora_enabled = bool(lora_config)
-        assert not is_lora_enabled
 
         self.config = config
 
@@ -833,7 +830,7 @@ class Zamba2Model(nn.Module):
         return hidden_states
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixCaching):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     """Zamba2 model with causal language modeling head.
 
     This class wraps the core Zamba2 model and adds:
@@ -896,6 +893,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             head_dim=hf_config.mamba_headdim,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
@@ -909,10 +907,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             vllm_config: Configuration containing model, cache, quantization,
                         LoRA and scheduler settings
             prefix: Optional prefix for parameter names
-
-        Raises:
-            AssertionError: If prefix caching is enabled
-                (not supported by Mamba)
 
         """
         config = vllm_config.model_config.hf_config

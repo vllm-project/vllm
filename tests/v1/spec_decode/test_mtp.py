@@ -43,7 +43,7 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
         index_kpool=4,
     )
     vllm_config = mock.MagicMock()
-    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.speculative_config.draft_model_config.hf_text_config = config
     vllm_config.scheduler_config.max_num_batched_tokens = 4
 
     with (
@@ -103,15 +103,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
-    target_indexer_layers: dict = {}
-    all_indexer_layers: dict = {}
 
-    mock_get_layers.side_effect = [
-        target_attn_layers,
-        target_indexer_layers,
-        all_attn_layers,
-        all_indexer_layers,
-    ]
+    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
     mock_pp_group = mock.MagicMock()
     mock_pp_group.world_size = 1
@@ -138,6 +131,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.lm_head == target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+    assert proposer._draft_attn_layer_names == {"draft_attn_1"}
+    assert all_attn_layers["draft_attn_1"].is_draft_layer is True
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])

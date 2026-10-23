@@ -3,12 +3,14 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
+/vllm/compilation/breakable_cudagraph.py @ZJY0516
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium @wzhao18
+/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18 @bnellnm
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
-/vllm/model_executor/layers/mamba @tdoublep @tomeras91
+/vllm/model_executor/layers/mamba @tdoublep @tomeras91 @ZJY0516
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/determinism/ @yewentao256
@@ -25,7 +27,7 @@
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
-/vllm/config/cache.py @heheda12345 @ivanium
+/vllm/config/cache.py @heheda12345 @ivanium @ZJY0516
 
 # Config utils
 /vllm/config/utils.py @hmellor
@@ -33,23 +35,48 @@
 /vllm/utils/argparse_utils.py
 
 # Entrypoints
-/vllm/entrypoints/anthropic @mgoin @DarkLight1337
+/vllm/entrypoints/anthropic @chaunceyjiang @mgoin @DarkLight1337
+/vllm/entrypoints/cohere @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
-/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/openai/chat_completion @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/completion @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/models @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
+/vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
+/vllm/entrypoints/pooling @noooop @DarkLight1337
+/vllm/entrypoints/rl @aoshen02 @njhill
+/vllm/entrypoints/scale_out @aoshen02 @noooop @DarkLight1337
 /vllm/entrypoints/speech_to_text @NickLucche
-/vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/serve/sagemaker @DarkLight1337
+/vllm/entrypoints/speech_to_text/realtime @njhill @NickLucche
 /vllm/entrypoints/serve @njhill
-/vllm/entrypoints/*.py @njhill
-/vllm/entrypoints/chat_utils.py @DarkLight1337
-/vllm/entrypoints/offline_utils.py @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
+/vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+
+/tests/entrypoints @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/entrypoints/anthropic @mgoin @DarkLight1337
+/tests/entrypoints/cohere @DarkLight1337
+/tests/entrypoints/cli @hmellor @mgoin @DarkLight1337
+/tests/entrypoints/openai/chat_completion @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/completion @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/models @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
+/tests/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
+/tests/entrypoints/pooling @noooop @DarkLight1337
+/tests/entrypoints/rl @aoshen02 @njhill
+/tests/entrypoints/scale_out @noooop @DarkLight1337
+/tests/entrypoints/speech_to_text @NickLucche
+/tests/entrypoints/speech_to_text/realtime @njhill @NickLucche
+/tests/entrypoints/serve @njhill
+/tests/entrypoints/serve/sagemaker @DarkLight1337
+/tests/entrypoints/llm @DarkLight1337
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 
 # Rust Frontend
 /rust/ @BugenZhao @njhill
 /rust/src/bench @esmeetu
+/rust/src/server/src/routes/inference @aoshen02 @BugenZhao @njhill
 /tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
 /.buildkite/test_areas/rust* @BugenZhao @njhill
@@ -63,6 +90,12 @@
 /vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /vllm/parser @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
+/tests/tokenizers_ @DarkLight1337 @njhill
+/tests/renderers @DarkLight1337 @njhill
+/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
 /vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
@@ -70,16 +103,18 @@
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy @wzhao18
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium @ZJY0516
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
 /vllm/v1/structured_output @mgoin @aarnphm @benchislett @arpera
-/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
+/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium @ZJY0516
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
+/vllm/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
+/vllm/v1/worker/mamba_utils.py @njhill @ZJY0516
 /vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 /vllm/v1/worker/encoder_cudagraph.py @shen-shanshan
 /vllm/v1/worker/encoder_cudagraph_defs.py @shen-shanshan
@@ -87,6 +122,8 @@
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
+/vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
+/vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
@@ -99,27 +136,23 @@
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
-/tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
+/tests/evals @mgoin @vadiklyutiy @AndreasKaratzas @ZJY0516
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
+/tests/kernels/moe @bnellnm
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 /tests/v1/structured_output @mgoin @aarnphm @arpera
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium @ZJY0516
 /tests/lora @jeejeelee
-/tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
+/tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91 @ZJY0516
 /tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC @orozery @ivanium @wzhao18
 /tests/v1/kv_offload @ApostaC @orozery
 /tests/v1/simple_kv_offload @ivanium
 /tests/v1/determinism @yewentao256
-/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
-/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
-/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
@@ -132,6 +165,9 @@
 /requirements/docs.txt @hmellor
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
+
+# Model recipes
+/recipes @esmeetu
 
 # Linting
 /tools/pre_commit/.markdownlint.yaml @hmellor
@@ -221,19 +257,14 @@ mkdocs.yaml @hmellor
 /examples/pooling @noooop
 /docs/models/pooling_models @noooop
 /tests/models/*/pooling* @noooop
-/tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/model_executor/layers/pooler @noooop
 
 # Reinforcement learning
 /vllm/distributed/weight_transfer @aoshen02
-/vllm/entrypoints/serve/dev/rlhf @njhill @aoshen02
 /tests/distributed/test_weight_transfer.py @aoshen02
-/tests/entrypoints/weight_transfer @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
-/tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
 /examples/rl @aoshen02
-/examples/features/pause_resume @aoshen02
 /docs/training/rlhf.md @aoshen02
 /docs/training/async_rl.md @aoshen02
 /docs/training/weight_transfer @aoshen02
