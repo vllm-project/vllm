@@ -101,6 +101,7 @@ class M2NManifestEntry:
     global_shape: tuple[int, ...]
     source_layout: M2NLayout
     local_tensor: Callable[[], Any]
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "global_shape", tuple(self.global_shape))
@@ -118,6 +119,10 @@ class M2NManifestEntry:
             raise TypeError(
                 f"manifest entry '{self.key}' local_tensor must be callable"
             )
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError(
+                f"manifest entry '{self.key}' allow_full_fallback must be a bool"
+            )
 
     @property
     def metadata(self) -> M2NParamMeta:
@@ -127,6 +132,7 @@ class M2NManifestEntry:
             self.dtype,
             self.global_shape,
             self.source_layout,
+            self.allow_full_fallback,
         )
 
 

@@ -17,6 +17,7 @@ import os
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -50,9 +51,32 @@ MAX_DEST_SHARDS = 64
 
 # Increment when the JSON init payload changes incompatibly. M2N peers must
 # agree on this before any rank constructs a NCCL communicator.
-M2N_WIRE_SCHEMA_VERSION = 3
+M2N_WIRE_SCHEMA_VERSION = 4
 
 _MULTI_COMM_LAUNCH_ENV = "NCCL_LAUNCH_ORDER_IMPLICIT"
+
+
+class M2NDestinationMode(str, Enum):
+    """How one logical checkpoint tensor is installed on a worker."""
+
+    IN_PLACE = "in_place"
+    SHARDED_STAGING = "sharded_staging"
+    FULL_FALLBACK = "full_fallback"
+
+
+def m2n_load_group(
+    mode: M2NDestinationMode | str, staging_group: int | None
+) -> int | None:
+    """Return the ordered model-load group, or ``None`` for in-place loads."""
+    resolved = M2NDestinationMode(mode)
+    if resolved is M2NDestinationMode.IN_PLACE:
+        return None
+    if resolved is M2NDestinationMode.FULL_FALLBACK:
+        # The model's fallback loader has no out-of-order input contract.
+        return -1
+    if not isinstance(staging_group, int) or isinstance(staging_group, bool):
+        raise ValueError("a staged destination needs an integer staging group")
+    return staging_group
 
 
 SUPPORTED_DTYPES: frozenset[torch.dtype] = frozenset(
@@ -460,10 +484,13 @@ class M2NParamMeta(ParamMeta):
     """
 
     source_layout: M2NLayout
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_layout, M2NLayout):
             raise TypeError("source_layout must be an M2NLayout")
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError("allow_full_fallback must be a bool")
 
 
 @dataclass(frozen=True)
@@ -475,6 +502,7 @@ class M2NWireParam:
     shape: tuple[int, ...]
     src_mesh_dims: tuple[int, int]
     src_placements: Placements | None
+    allow_full_fallback: bool = True
 
     def __post_init__(self) -> None:
         shape = tuple(self.shape)
@@ -500,6 +528,10 @@ class M2NWireParam:
                 cast(Placements, placements),
                 f"parameter '{self.name}' source placements",
             )
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError(
+                f"parameter '{self.name}' allow_full_fallback must be a bool"
+            )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "M2NWireParam":
@@ -510,6 +542,7 @@ class M2NWireParam:
             "shape",
             "src_mesh_dims",
             "src_placements",
+            "allow_full_fallback",
         }
         missing = fields - value.keys()
         extra = value.keys() - fields
@@ -532,6 +565,7 @@ class M2NWireParam:
             "src_placements": (
                 None if self.src_placements is None else list(self.src_placements)
             ),
+            "allow_full_fallback": self.allow_full_fallback,
         }
 
 
@@ -1078,109 +1112,6 @@ def check_source_plan_agreement(
             "nccl_m2n source preflight rejected before NCCL init: " + "; ".join(errors)
         )
     return canonical
-
-
-def agree_destination_placements(
-    group: "StatelessProcessGroup",
-    source_digest: str,
-    metas: Sequence[M2NParamMeta],
-    dst_mesh: M2NMesh,
-    local_plan: Sequence[tuple[Placements | None, bool]] | None,
-    local_error: str | None = None,
-) -> tuple[list[Placements | None], tuple[bool, ...], str]:
-    """Agree on placements and loader ordering before constructing any route.
-
-    Only workers supply destinations. Replicated direct and fallback tensors
-    have identical placements but different loading dependencies, so both
-    fields must agree before every rank derives its transfer schedule.
-    """
-    gathered = group.all_gather_obj(
-        {
-            "phase": "destination",
-            "source_digest": source_digest,
-            "mesh": (dst_mesh.dims, dst_mesh.start_rank),
-            "plan": local_plan,
-            "error": local_error,
-        }
-    )
-    errors: list[str] = []
-    canonical: list[tuple[Placements | None, bool]] | None = None
-    expected_fields = {"phase", "source_digest", "mesh", "plan", "error"}
-    if len(gathered) != group.world_size:
-        errors.append("destination all-gather returned the wrong number of ranks")
-    if (
-        dst_mesh.start_rank < 1
-        or dst_mesh.start_rank + dst_mesh.size != group.world_size
-    ):
-        errors.append("destination mesh must cover every inference worker")
-    for rank, item in enumerate(gathered):
-        try:
-            if (
-                not isinstance(item, Mapping)
-                or set(item) != expected_fields
-                or item["phase"] != "destination"
-            ):
-                raise ValueError("invalid destination envelope")
-            if item["source_digest"] != source_digest or item["mesh"] != (
-                dst_mesh.dims,
-                dst_mesh.start_rank,
-            ):
-                raise ValueError("destination mesh or source digest disagrees")
-            error = item["error"]
-            if error is not None:
-                if not isinstance(error, str) or not error:
-                    raise ValueError("invalid destination error")
-                raise ValueError(error)
-            plan = item["plan"]
-            if rank < dst_mesh.start_rank:
-                if plan is not None:
-                    raise ValueError("a trainer supplied a worker destination plan")
-                continue
-            if not isinstance(plan, (list, tuple)) or len(plan) != len(metas):
-                raise ValueError("destination plan length differs from the manifest")
-            parsed: list[tuple[Placements | None, bool]] = []
-            for entry in plan:
-                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
-                    raise ValueError("invalid destination plan entry")
-                placement, direct = entry
-                if not isinstance(direct, bool):
-                    raise TypeError("destination direct flag must be a bool")
-                if placement is not None:
-                    if not isinstance(placement, (list, tuple)):
-                        raise TypeError("destination placements must be a sequence")
-                    placement = tuple(placement)
-                    check_placements(placement, "destination placements")
-                if not direct and placement is not None:
-                    raise ValueError("full fallback must have replicated placement")
-                parsed.append((placement, direct))
-            validate_transfer_plan(metas, dst_mesh, [p for p, _ in parsed])
-            if canonical is None:
-                canonical = parsed
-            elif parsed != canonical:
-                raise ValueError("inference workers resolved different destinations")
-        except (TypeError, ValueError) as exc:
-            errors.append(f"rank {rank}: {exc}")
-    if errors:
-        raise RuntimeError(
-            "nccl_m2n destination preflight rejected before NCCL init: "
-            + "; ".join(errors)
-        )
-    assert canonical is not None
-    payload = json.dumps(
-        {
-            "schema_version": M2N_WIRE_SCHEMA_VERSION,
-            "source_digest": source_digest,
-            "destination_mesh": (dst_mesh.dims, dst_mesh.start_rank),
-            "destinations": canonical,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return (
-        [placement for placement, _ in canonical],
-        tuple(direct for _, direct in canonical),
-        hashlib.sha256(payload).hexdigest(),
-    )
 
 
 def check_runtime_ready_agreement(

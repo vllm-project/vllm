@@ -14,46 +14,63 @@ This backend depends on the `nccl-extensions` Python package (and its `nccl4py` 
 
 The backend imports the runtime lazily, so vLLM is unaffected unless you select it.
 
-For multiple trainer source groups, set `NCCL_LAUNCH_ORDER_IMPLICIT=1` before
-starting every trainer and inference process. vLLM checks this collectively
-before creating communicators. A single source group does not require it.
+When a source topology needs more than one transfer communicator, set
+`NCCL_LAUNCH_ORDER_IMPLICIT=1` before starting every trainer and inference
+process. The communicators use independent CUDA streams; NCCL requires this
+mode for deterministic cross-communicator launch ordering. vLLM checks the
+setting collectively before communicator initialization. The legacy
+single-source-group transfer uses one communicator and does not require it.
 
 ## How It Works
 
-1. All trainers and inference workers join one `StatelessProcessGroup` for
-   metadata. Trainers declare the ordered parameter manifest, each parameter's
-   source layout, and its owning source group. Workers resolve direct or
-   full-fallback destinations. All ranks agree on those placements and loading
-   choices before creating any NCCL communicator.
-2. vLLM creates one `nccl.core.Communicator` per source group. Its local ranks
-   contain the ordered owning trainers followed by every inference worker.
-   Trainers outside that group do not join its communicator. Every metadata
-   rank processes the fixed communicator list in order, then one combined
-   agreement reports initialization success or failure.
-3. Each round uses one M2N reshard per parameter on its owning group's transfer
-   route. Separate routes use separate CUDA streams and a deterministic bounded
-   schedule. Direct destinations need no loader dependency; fallback tensors
-   retain global manifest loading order. The worker must be inside
-   `update_weights` while the trainers send; the trainer engine handles that
-   concurrency.
+1. A `StatelessProcessGroup` exchanges metadata and the NCCL unique IDs, one
+   per transfer communicator. During this metadata-only phase, trainers agree
+   on each parameter's source layout and workers resolve their rank-local
+   destinations. Every participant agrees on the complete ordered source and
+   destination plans before entering NCCL initialization. The final plan hash
+   covers parameter ownership, source and destination layouts, rank-local
+   loading decisions, and ordered transfer-communicator membership.
+2. After plan agreement, vLLM creates one transfer communicator per source
+   group. Each communicator contains that ordered trainer group followed by all
+   inference workers. A parameter is sent on exactly one communicator; trainer
+   ranks that do not own that parameter never join its data-plane communicator.
+   Every metadata rank processes the fixed communicator list in order. Only
+   listed members initialize each NCCL communicator; nonmembers still process
+   its UID bootstrap. All ranks then exchange one combined
+   startup result.
+3. Each round, both sides replay the same bounded transfer schedule. Parameters
+   keep their manifest order within a communicator, while independent
+   communicators use separate CUDA streams. Every member enters its reshards in
+   the same order, so the worker must be inside `update_weights` while the
+   trainer sends. The trainer engine handles that concurrency itself.
 
-The schedule can submit work from multiple source groups before waiting, while
-retaining at most one pending full-fallback buffer per route. It preserves
-parameter order within each route. It does not insert a barrier after every
-parameter: fallback buffers are synchronized before `load_weights` reads them,
-and route streams are drained at the end of the transfer.
+   Each launch wave submits the next parameter from every unblocked source
+   group before waiting. Staged load callbacks retain only their declared
+   semantic order, while full-fallback inputs retain global manifest order.
+   This lets pipeline source groups advance together without allocating one
+   receive buffer per parameter. Before a completed semantic group releases
+   its staging buffers, every transfer stream is ordered after the model
+   loader's current CUDA stream so asynchronous loads cannot race with reuse.
 
 ### Destination resolution
 
-A parameter is resharded **directly into the live vLLM parameter** when its checkpoint name maps 1:1 onto a model parameter whose shape is either identical to the checkpoint shape (replicated) or differs on exactly one dim by the tensor-parallel factor. That rank then only ever receives its own shard.
+A parameter uses one collectively agreed destination mode:
 
-Anything else falls back to receiving the full tensor and letting `load_weights` do the sharding, exactly as the NCCL engine does for every parameter. The fallback covers:
+- **In place:** M2N writes a validated exact-name live vLLM parameter.
+- **Rank-local staging:** a model module declares the local shard it owns and a callback that installs it into model-native storage. M2N transfers only that shard to the worker.
+- **Full fallback:** when the producer explicitly permits it, M2N reconstructs the complete logical tensor on each worker and passes it through `load_weights`.
 
-- fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`), whose checkpoint names do not name a model parameter
-- quantized models, where the weight loader does more than a sharded copy
-- pipeline-parallel inference deployments (trainer pipeline parallelism is supported)
+The first model-native integration is unquantized `RoutedExperts`. It receives only locally owned expert shards and uses the existing loading path to place logical gate/up and down projections into fused `w13_weight` and `w2_weight` storage. This is an example of the generic destination contract, not a model-name rule in the transport engine.
 
-Correctness never depends on a parameter resolving. The engine logs how many parameters took each path at init.
+Other fused parameters, quantized models, inference pipeline-parallel
+deployments, or modules without a semantic target use full fallback only when
+the source permits it. Otherwise initialization fails before the data-plane
+communicator is created.
+
+`plan_summary()` reports the agreed communicator membership and ordered transfer
+waves using source-manifest parameter indices. It also reports how many
+parameters and logical bytes use each destination mode, and the aggregate
+receiver payload implied by the plan.
 
 ## Configuration
 
@@ -83,7 +100,7 @@ from vllm.distributed.weight_transfer import (
 from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
-# Called on every trainer rank; rank 0 is the sender.
+# Called on every trainer rank; rank 0 coordinates the round.
 engine = WeightTransferTrainerFactory.trainer_init(
     init_info=M2NTrainerInitInfo(
         master_address=master_address,
@@ -100,11 +117,12 @@ engine = WeightTransferTrainerFactory.trainer_init(
 engine.send_weights()
 ```
 
-`send_weights()` drives one complete round — `start_weight_update`,
-`update_weights`, `finish_weight_update`. Trainer rank zero coordinates worker
-RPCs and distributes the dispatch and outcome to every trainer rank. Only the
-trainers in a parameter's canonical source group send it. The update RPC runs
-on a helper thread so worker receives and trainer sends can proceed together.
+`send_weights()` drives the whole round — `start_weight_update`,
+`update_weights`, `finish_weight_update`. Rank 0 coordinates the worker RPCs
+and trainer round control, while every source-group member submits its local
+shard. Every rank in a transfer communicator must be inside the same reshard, so
+`update_weights` has to be in flight while those trainer ranks send; the engine
+runs it on a helper thread so the trainer loop does not have to open-code that.
 
 Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass
 `M2NWeightSource` and supply layouts explicitly. A source may yield any
@@ -118,99 +136,82 @@ declared dtype and local shape.
 
 ### Partitioned trainer sources
 
-A custom producer overrides `source_topology()` and `iter_group()` when
-different trainer groups own different parameters. All trainer ranks report the
-same complete metadata manifest, even when they hold only part of it.
+`M2NWeightSource.source_topology()` separates parameter ownership from each
+parameter's mesh factorization. It returns an `M2NSourceTopology` with:
+
+- `groups`: ordered tuples of trainer rank IDs from the global metadata group.
+  Their order defines the source-mesh coordinates and becomes the
+  communicator-local source-rank order.
+- `param_groups`: one group index for every parameter in the global metadata
+  manifest.
+
+Every trainer rank still reports the same complete metadata manifest. A trainer
+rank assigned to a source group uses `iter_group(group_index)` to yield only
+that group's parameters, in their subsequence of global manifest order. A
+parameter belongs to exactly one canonical group. Source groups are non-empty
+and pairwise disjoint, so a trainer rank belongs to at most one group. Each
+parameter may use its own mesh and placements over its assigned group's ordered
+ranks, and the source-mesh size must equal that group size. Every declared group
+must own at least one parameter.
+vLLM does not infer trainer ownership from parameter names or from the
+inference pipeline topology.
+
+For example, a two-stage trainer whose source meshes each contain two ranks can
+declare:
 
 ```python
-from vllm.distributed.weight_transfer.m2n_source import (
-    M2NSourceTopology,
-    M2NWeightSource,
+from vllm.distributed.weight_transfer.m2n_source import M2NSourceTopology
+
+topology = M2NSourceTopology(
+    groups=((0, 1), (2, 3)),
+    # One entry per parameter in metadata() order.
+    param_groups=(0, 0, 1, 1),
 )
-
-
-class PipelineSource(M2NWeightSource):
-    def __init__(self, metadata, local_shards):
-        self._metadata = metadata
-        self._local_shards = local_shards
-
-    def metadata(self):
-        # Same four entries on every trainer rank, each with its own layout.
-        return list(self._metadata)
-
-    def source_topology(self):
-        return M2NSourceTopology(
-            groups=((0, 1), (2, 3)),
-            param_groups=(0, 0, 1, 1),
-        )
-
-    def held_names(self):
-        return self._local_shards.keys()
-
-    def __iter__(self):
-        raise RuntimeError("use iter_group for a partitioned source")
-
-    def iter_group(self, group_index):
-        topology = self.source_topology()
-        for meta, owner in zip(self._metadata, topology.param_groups):
-            if owner == group_index:
-                yield meta.name, self._local_shards[meta.name]
 ```
 
-The contract requires non-empty, pairwise-disjoint source groups. A trainer rank
-belongs to at most one group; a rank holding no transferable parameters may
-belong to none. Every parameter selects exactly one canonical group, and every
-declared group owns at least one parameter. Tied or replicated copies outside
-the canonical group are not transferred.
+This creates two data-plane communicators: `(0, 1, workers...)` and
+`(2, 3, workers...)`. It does not gather either stage onto trainer rank zero.
+Shared or tied parameters choose one canonical exporting group; extra local
+copies on other stages are not transferred.
 
-Each parameter's mesh starts at communicator-local rank zero and covers its
-group's ordered ranks. Different parameters within that group can use different
-mesh factorizations and placements. For example, a two-rank group can use
-`(1, 2)` for one parameter and `(2, 1)` for another. Group ranks need not be
-contiguous globally. vLLM does not infer trainer ownership from names or from
-the inference pipeline topology; the producer supplies it.
-
-Returning `None` from `source_topology()` preserves the existing behavior:
-every trainer belongs to one common group, and `iter_group(0)` delegates to the
-source's normal iterator. Multiple routes can use pre-shared NCCL unique IDs
-through `nccl_unique_ids_b64`, in route order; the singular field is valid only
-for a single route.
-
-`plan_summary()` reports communicator membership, the transfer schedule,
-destination choices, and planned receiver tensor bytes. Those byte counts are
-not measured network traffic.
-
-### Update failures
-
-Failures known to occur before trainer dispatch preserve communicators and
-reset update-local loader state. Failures after dispatch or during transfer
-abort all joined communicators without waiting on CUDA streams; callers must
-reinitialize transport before sending another update. Some live parameters may
-already have changed, so serving must remain paused until a complete update
-succeeds.
-
-A loader/finalizer failure after transfer completion resets loader state while
-preserving transport. The trainer coordinates one replay of the complete update
-from `start_weight_update()`. Healthy shutdown synchronizes outstanding work,
-destroys the M2N handle, and aborts the route communicators.
+Returning `None` from `source_topology()` preserves the legacy
+single-source-group behavior: all trainer ranks form one source group, and
+`iter_group(0)` delegates to the source's normal iterator.
 
 See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 
+- All parameters currently target the same inference-worker mesh. The source
+  and transfer-route contracts preserve room for per-parameter destination
+  meshes over the same worker subset, but per-parameter destination-mesh
+  selection is not implemented yet.
 - vLLM validates tensor-rank and dtype support while agreeing on the complete
   plan; the installed M2N runtime validates them again for each reshard.
-- Each parameter's source mesh must be 1-D or 2-D and cover its assigned ordered
-  source group, using communicator-local ranks starting at zero.
-- All parameters currently use one configured inference-worker mesh. Per-parameter
-  destination meshes over the same worker subset remain future work.
+- Each source mesh is 1-D or 2-D and uses communicator-local ranks starting at
+  zero. Its size must match its parameter's ordered source group; source groups
+  need not be contiguous in the global trainer-rank namespace.
 - `Partial` placements are not supported.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.
+- Model-native rank-local targets currently require an unquantized inference
+  deployment with PP=1. The first production consumer additionally requires TP1,
+  expert parallelism, and uniform contiguous expert ownership.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).
 - vLLM checks every parameter's shard overlap against conservative 16-source
   and 64-target capacities before committing the plan. The installed M2N
   runtime remains authoritative and validates each reshard again.
-- Each communicator holds an M2N runtime staging pool (~256 MiB by default:
-  4 channels x 64 MiB). Multiple routes increase this runtime allocation on
-  workers joining more than one communicator.
+- Each data-plane communicator holds a cached staging pool (~256 MiB by
+  default: 4 channels x 64 MiB), so trainer partitioning increases aggregate
+  M2N staging by the number of source-group communicators a process joins.
+- A failure known to occur before trainer dispatch preserves the transport and
+  discards only update-local staging. A failure after dispatch or during
+  transfer aborts every joined transfer communicator without first waiting on
+  CUDA streams; a subset of in-place destinations may already have changed and
+  must not be served. A loader/finalizer failure after transfer completion
+  preserves the transport, resets the worker's layerwise-loader and staging
+  state, and makes every trainer rank replay the complete update once from
+  `start_weight_update()`.
+- Collective preflight reports communicator-init calls that return an error,
+  but no control-plane protocol can recover a rank that is terminated or stuck
+  inside NCCL initialization. Deployment-level timeouts remain required.

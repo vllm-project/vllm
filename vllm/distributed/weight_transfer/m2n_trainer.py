@@ -40,7 +40,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NTransferWave,
     M2NWireParam,
     Placements,
-    agree_destination_placements,
     build_m2n_param_routes,
     build_m2n_transfer_routes,
     build_m2n_transfer_waves,
@@ -53,12 +52,17 @@ from vllm.distributed.weight_transfer.m2n_common import (
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
+    m2n_load_group,
     prepare_m2n_local_runtime,
     resolve_layout,
     source_plan_digest,
     to_mesh,
     to_placements,
     validate_local_buffer,
+)
+from vllm.distributed.weight_transfer.m2n_plan import (
+    M2NWireDestination,
+    agree_destination_plan,
 )
 from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -248,7 +252,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._metadata_group: StatelessProcessGroup | None = None
         self._num_trainer_ranks = 0
         self._trainer_rank = -1
-        self._destination_direct: tuple[bool, ...] = ()
+        self._destination_plan: list[M2NWireDestination] = []
         self._source_topology: M2NSourceTopology | None = None
         self._routes: tuple[M2NTransferRoute, ...] = ()
         self._param_routes: tuple[int, ...] = ()
@@ -352,15 +356,19 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             self._dst_mesh = M2NMesh(
                 init_info.destination_mesh_dims, init_info.num_trainer_ranks
             )
-            self._dst_placements, self._destination_direct, commit_token = (
-                agree_destination_placements(
-                    metadata_group,
-                    plan_digest,
-                    self._metas,
-                    self._dst_mesh,
-                    None,
-                )
+            self._destination_plan, commit_token = agree_destination_plan(
+                metadata_group,
+                source_digest=plan_digest,
+                params=self._wire_params,
+                metas=self._metas,
+                dst_mesh=self._dst_mesh,
+                local_plan=None,
+                local_error=None,
+                source_topology=self._source_topology,
             )
+            self._dst_placements = [
+                destination.placements for destination in self._destination_plan
+            ]
             self._destination_commit_token = commit_token
             assert self._source_topology is not None
             self._routes = build_m2n_transfer_routes(
@@ -372,7 +380,10 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             self._param_routes = build_m2n_param_routes(self._routes, len(self._metas))
             self._transfer_waves = build_m2n_transfer_waves(
                 self._routes,
-                tuple(None if direct else -1 for direct in self._destination_direct),
+                tuple(
+                    m2n_load_group(destination.mode, destination.staging_group)
+                    for destination in self._destination_plan
+                ),
             )
             unique_ids: tuple[bytes | None, ...] = (None,) * len(self._routes)
             data_plane_error: str | None = None
@@ -452,7 +463,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             )
             logger.info("nccl_m2n source plan digest: %s", plan_digest)
         except BaseException:
-            self._destination_direct = ()
+            self._destination_plan = []
             self._destination_commit_token = ""
             self._dst_placements = []
             self._dst_mesh = None
@@ -609,6 +620,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 shape=meta.shape,
                 src_mesh_dims=meta.source_layout.mesh.dims,
                 src_placements=meta.source_layout.placements,
+                allow_full_fallback=meta.allow_full_fallback,
             )
             for meta in self._metas
         ]
@@ -616,29 +628,20 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
     def plan_summary(self) -> dict[str, Any]:
         """Return the authenticated static plan as JSON-safe run metadata."""
-        if not self._destination_commit_token:
+        if not self._destination_commit_token or not self._destination_plan:
             raise RuntimeError("nccl_m2n transfer plan is not initialized")
         assert self._dst_mesh is not None
         assert self._source_topology is not None
         mode_counts: dict[str, int] = {}
         logical_bytes_by_mode: dict[str, int] = {}
         receiver_bytes_by_mode: dict[str, int] = {}
-        for meta, placements, direct in zip(
-            self._metas, self._dst_placements, self._destination_direct, strict=True
-        ):
-            mode = "in_place" if direct else "full_fallback"
+        for meta, destination in zip(self._metas, self._destination_plan, strict=True):
+            mode = destination.mode
             element_size = torch.empty((), dtype=meta.dtype).element_size()
             logical_bytes = math.prod(meta.shape) * element_size
-            shards = (
-                math.prod(
-                    size
-                    for size, dim in zip(self._dst_mesh.dims, placements)
-                    if dim >= 0
-                )
-                if placements is not None
-                else 1
+            receiver_bytes = (
+                math.prod(destination.local_shape) * element_size * self._dst_mesh.size
             )
-            receiver_bytes = logical_bytes // shards * self._dst_mesh.size
             mode_counts[mode] = mode_counts.get(mode, 0) + 1
             logical_bytes_by_mode[mode] = (
                 logical_bytes_by_mode.get(mode, 0) + logical_bytes
@@ -1123,7 +1126,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             except BaseException:
                 logger.exception("failed to destroy nccl_m2n handle")
         self._source_topology = None
-        self._destination_direct = ()
+        self._destination_plan = []
         self._destination_commit_token = ""
         self._dst_placements = []
         self._dst_mesh = None
@@ -1148,7 +1151,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._transfer_waves = ()
         self._source_topology = None
         self._metadata_group = None
-        self._destination_direct = ()
+        self._destination_plan = []
         self._destination_commit_token = ""
         self._dst_placements = []
         self._dst_mesh = None

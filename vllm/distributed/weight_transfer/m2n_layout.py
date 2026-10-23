@@ -3,28 +3,29 @@
 """Destination-layout resolution for the NCCL M2N weight transfer backend.
 
 For every incoming checkpoint parameter the worker needs a destination buffer
-plus its placement over the inference mesh. Two outcomes are possible:
+plus its placement over the inference mesh. Three outcomes are possible:
 
-* **direct** — when the model is not quantized, the parameter maps 1:1 onto a
+* **in-place** — when the model is not quantized, the parameter maps 1:1 onto a
   live vLLM parameter and its loader is a small, known-safe copy or tensor-
   parallel loader. The loader's declared input/output dimension determines the
   placement; shapes are validation, not an inference mechanism. The reshard
   writes straight into the live parameter, so each rank receives only its own
   shard and nothing is copied afterwards.
-* **fallback** — anything else. The reshard delivers the whole tensor to every
-  rank and `load_weights` does the sharding, exactly as the broadcast NCCL
-  backend does. Fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`)
-  take this path: the checkpoint name does not name a vLLM parameter, so there
-  is nothing to resolve against.
+* **sharded staging** — a model module exposes the logical shard owned by this
+  rank and an update-scoped callback that consumes it through the module's
+  native loading path. M2N transfers only that shard into bounded staging.
+* **full fallback** — when explicitly allowed, the reshard delivers the whole
+  tensor to every rank and `load_weights` performs the model-specific loading,
+  matching the broadcast NCCL backend.
 
-Correctness never depends on a parameter resolving — the fallback is always
-available and is the same path the existing backend uses.
+Parameters that require owner-local transfer fail closed when neither an
+in-place nor a semantic sharded destination can be resolved.
 """
 
 import inspect
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import cast
 
@@ -36,9 +37,16 @@ from vllm.distributed.weight_transfer.m2n_common import (
     MESH_NDIMS,
     REPLICATE,
     REPLICATED,
+    M2NDestinationMode,
     Placements,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.sharded_weight import (
+    ShardedWeightRequest,
+    ShardedWeightSpec,
+    ShardedWeightTarget,
+    resolve_sharded_weight_target,
+)
 
 logger = init_logger(__name__)
 
@@ -60,20 +68,24 @@ def _destination_placements(shard_dim: int) -> Placements:
     return cast(Placements, tuple(placements))
 
 
-@dataclass
+@dataclass(frozen=True)
 class M2NDestination:
-    """Where one checkpoint parameter lands on this worker."""
+    """Immutable worker-local plan for one logical checkpoint tensor."""
 
     name: str
+    mode: M2NDestinationMode
     placements: Placements | None
-    """Placement over the inference mesh, or `REPLICATED` for the fallback."""
-    tensor: torch.Tensor | None
-    """The live parameter view to reshard into, or None for the fallback path
-    (the engine allocates a full replica per round and calls `load_weights`)."""
+    local_shape: tuple[int, ...]
+    tensor: torch.Tensor | None = field(compare=False, repr=False)
+    """Stable live destination for in-place updates; omitted from wire plans."""
+    sharded_spec: ShardedWeightSpec | None = None
+    staging_group: int | None = None
+    staging_slot: int | None = None
+    staging_group_size: int | None = None
 
     @property
     def direct(self) -> bool:
-        return self.tensor is not None
+        return self.mode is M2NDestinationMode.IN_PLACE
 
 
 def _base_loader_shard_dim(
@@ -162,6 +174,27 @@ def _validated_shard_dim(
     return declared_dim
 
 
+def _validate_semantic_target(
+    request: ShardedWeightRequest,
+    target: ShardedWeightTarget,
+    *,
+    shard_axis_size: int,
+    destination_shard_index: int,
+) -> None:
+    spec = target.spec
+    if spec.num_shards != shard_axis_size:
+        raise ValueError(
+            f"semantic target for '{request.name}' uses {spec.num_shards} "
+            f"shards, but the destination mesh shard axis has {shard_axis_size}"
+        )
+    if spec.shard_index != destination_shard_index:
+        raise ValueError(
+            f"semantic target for '{request.name}' reports shard index "
+            f"{spec.shard_index}, but this M2N rank maps to "
+            f"{destination_shard_index}"
+        )
+
+
 def resolve_parameter_destinations(
     model: torch.nn.Module,
     names: Sequence[str],
@@ -171,17 +204,28 @@ def resolve_parameter_destinations(
     num_workers: int,
     shard_axis_size: int,
     allow_direct: bool,
+    destination_shard_index: int,
+    allow_full_fallback: Sequence[bool],
 ) -> list[M2NDestination]:
-    """Build this worker's destination plan, one entry per checkpoint parameter.
+    """Resolve semantic targets, then conservative exact-name destinations."""
+    if not (len(names) == len(dtypes) == len(shapes)):
+        raise ValueError("destination inputs must have the same length")
+    fallback_allowed = tuple(allow_full_fallback)
+    if len(fallback_allowed) != len(names) or any(
+        not isinstance(value, bool) for value in fallback_allowed
+    ):
+        raise ValueError("allow_full_fallback must contain one bool per destination")
+    if shard_axis_size <= 0 or num_workers % shard_axis_size:
+        raise ValueError(
+            f"destination shard axis {shard_axis_size} must divide "
+            f"{num_workers} workers"
+        )
+    if not 0 <= destination_shard_index < shard_axis_size:
+        raise ValueError(
+            f"destination shard index {destination_shard_index} must be in "
+            f"[0, {shard_axis_size})"
+        )
 
-    Placements are relative to the inference mesh: axis 0 replicates and axis 1
-    shards. `allow_direct=False` forces every parameter onto the fallback path;
-    the engine sets it for pipeline-parallel or quantized deployments, where a
-    parameter's local shape is not simply the checkpoint shape split across the
-    shard axis. Parameters below a model type with known model-level checkpoint
-    preprocessing also fall back, since bypassing `load_weights` would skip the
-    transformation.
-    """
     params = dict(model.named_parameters()) if allow_direct else {}
     blocked_param_ids = {
         id(param)
@@ -191,7 +235,76 @@ def resolve_parameter_destinations(
     }
 
     destinations: list[M2NDestination] = []
-    for name, dtype, shape in zip(names, dtypes, shapes):
+    closed_retention_keys: set[object] = set()
+    active_retention_key: object | None = None
+    active_staging_slot = -1
+    active_staging_group_size = 0
+
+    def close_staging_group() -> None:
+        nonlocal active_retention_key
+        if active_retention_key is None:
+            return
+        actual_size = active_staging_slot + 1
+        if actual_size != active_staging_group_size:
+            raise ValueError(
+                "semantic destination group starting at "
+                f"'{destinations[-actual_size].name}' contains "
+                f"{actual_size} tensors, but its provider requires "
+                f"{active_staging_group_size}"
+            )
+        closed_retention_keys.add(active_retention_key)
+        active_retention_key = None
+
+    for name, dtype, shape_value, fallback_ok in zip(
+        names, dtypes, shapes, fallback_allowed
+    ):
+        shape = tuple(shape_value)
+        request = ShardedWeightRequest(name, dtype, shape)
+        target = resolve_sharded_weight_target(model, request)
+        # Resolve first so malformed recognized tensors still fail closed.
+        if not allow_direct:
+            target = None
+        if target is not None:
+            _validate_semantic_target(
+                request,
+                target,
+                shard_axis_size=shard_axis_size,
+                destination_shard_index=destination_shard_index,
+            )
+            retention_key = target.retention_key
+            if retention_key != active_retention_key:
+                close_staging_group()
+                if retention_key in closed_retention_keys:
+                    raise ValueError(
+                        f"semantic destination group for '{name}' is not "
+                        "contiguous in transfer order"
+                    )
+                active_retention_key = retention_key
+                active_staging_slot = 0
+                active_staging_group_size = target.retention_group_size
+            else:
+                if target.retention_group_size != active_staging_group_size:
+                    raise ValueError(
+                        f"semantic destination group for '{name}' disagrees on "
+                        "its required tensor count"
+                    )
+                active_staging_slot += 1
+            destinations.append(
+                M2NDestination(
+                    name=name,
+                    mode=M2NDestinationMode.SHARDED_STAGING,
+                    placements=_destination_placements(target.spec.shard_dim),
+                    local_shape=target.spec.local_shape,
+                    tensor=None,
+                    sharded_spec=target.spec,
+                    staging_group=len(closed_retention_keys),
+                    staging_slot=active_staging_slot,
+                    staging_group_size=active_staging_group_size,
+                )
+            )
+            continue
+
+        close_staging_group()
         param = params.get(name)
         dim = None
         if (
@@ -208,35 +321,65 @@ def resolve_parameter_destinations(
                 )
 
         if dim is None:
-            # A replicated parameter is identical on every rank, so it needs no
-            # placement of its own — REPLICATED lets resolve_layout spread it
-            # over all the workers regardless of how the mesh is factored.
-            destinations.append(M2NDestination(name, REPLICATED, None))
-        elif dim == REPLICATE:
-            assert param is not None
-            destinations.append(M2NDestination(name, REPLICATED, param.data))
-        else:
-            assert param is not None
+            if not fallback_ok:
+                raise ValueError(
+                    f"parameter '{name}' requires a sharded destination, but "
+                    "the model did not provide one"
+                )
             destinations.append(
-                M2NDestination(name, _destination_placements(dim), param.data)
+                M2NDestination(
+                    name=name,
+                    mode=M2NDestinationMode.FULL_FALLBACK,
+                    placements=REPLICATED,
+                    local_shape=shape,
+                    tensor=None,
+                )
             )
+            continue
 
-    # Layerwise reload finalizes a module as a unit. Mixing direct and fallback
-    # parameters within one module can copy stale storage over the direct load.
-    fallback_modules = {
+        assert param is not None
+        destinations.append(
+            M2NDestination(
+                name=name,
+                mode=M2NDestinationMode.IN_PLACE,
+                placements=(
+                    REPLICATED if dim == REPLICATE else _destination_placements(dim)
+                ),
+                local_shape=tuple(param.shape),
+                tensor=param.data,
+            )
+        )
+
+    close_staging_group()
+
+    # Layerwise reload restores model-format tensors as a unit. Mixing direct
+    # and model-loader parameters within one module can copy stale storage
+    # over a direct load.
+    reload_modules = {
         name.rpartition(".")[0]
         for name, destination in zip(names, destinations)
         if not destination.direct and name in params
     }
-    destinations = [
-        M2NDestination(destination.name, REPLICATED, None)
-        if destination.direct
-        and destination.name.rpartition(".")[0] in fallback_modules
-        else destination
-        for destination in destinations
-    ]
+    for index, destination in enumerate(destinations):
+        if destination.direct and destination.name.rpartition(".")[0] in reload_modules:
+            if not fallback_allowed[index]:
+                raise ValueError(
+                    f"parameter '{destination.name}' cannot share a module "
+                    "with a model-loader destination without a full fallback"
+                )
+            destinations[index] = M2NDestination(
+                name=destination.name,
+                mode=M2NDestinationMode.FULL_FALLBACK,
+                placements=REPLICATED,
+                local_shape=tuple(shapes[index]),
+                tensor=None,
+            )
 
     num_direct = sum(d.direct for d in destinations)
+    num_staged = sum(
+        destination.mode is M2NDestinationMode.SHARDED_STAGING
+        for destination in destinations
+    )
     parameter_bytes = [
         math.prod(shape) * dtype.itemsize for dtype, shape in zip(dtypes, shapes)
     ]
@@ -249,11 +392,13 @@ def resolve_parameter_destinations(
     direct_byte_percentage = 100 * direct_bytes / total_bytes if total_bytes else 0
     logger.info(
         "nccl_m2n destination plan: %d/%d parameters resharded directly into "
-        "the model, %d via full-tensor fallback; direct byte coverage: "
+        "the model, %d via sharded staging, %d via full-tensor fallback; "
+        "direct byte coverage: "
         "%d/%d bytes (%.1f%%)",
         num_direct,
         len(destinations),
-        len(destinations) - num_direct,
+        num_staged,
+        len(destinations) - num_direct - num_staged,
         direct_bytes,
         total_bytes,
         direct_byte_percentage,

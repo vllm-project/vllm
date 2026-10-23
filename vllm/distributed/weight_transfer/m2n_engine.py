@@ -11,7 +11,8 @@ what the broadcast NCCL backend forces it to do.
 
 The destination is planned per parameter. A plan is either entirely direct
 (M2N writes live model storage), or it uses the model's layerwise reload
-lifecycle with full checkpoint-format fallback for unresolved parameters.
+lifecycle, with bounded EP-local staging for semantic fused-MoE consumers and
+full checkpoint-format fallback for everything else.
 
 Members of each route participate in its reshards in the same authenticated
 order. A bounded wave schedule keeps launch order identical across routes
@@ -37,6 +38,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     DESTINATION_SHARD_AXIS,
     M2N_WIRE_SCHEMA_VERSION,
     MESH_NDIMS,
+    M2NDestinationMode,
     M2NLayout,
     M2NMesh,
     M2NParamMeta,
@@ -44,7 +46,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NTransferRoute,
     M2NWireParam,
     Placements,
-    agree_destination_placements,
     build_m2n_param_routes,
     build_m2n_transfer_routes,
     build_m2n_transfer_waves,
@@ -57,16 +58,24 @@ from vllm.distributed.weight_transfer.m2n_common import (
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
+    m2n_load_group,
     prepare_m2n_local_runtime,
     resolve_layout,
     source_plan_digest,
     to_mesh,
     to_placements,
-    validate_transfer_plan,
 )
 from vllm.distributed.weight_transfer.m2n_layout import (
     M2NDestination,
     resolve_parameter_destinations,
+)
+from vllm.distributed.weight_transfer.m2n_plan import (
+    M2NWireDestination,
+    agree_destination_plan,
+)
+from vllm.distributed.weight_transfer.m2n_staging import (
+    M2NStagingPool,
+    M2NStagingRequirement,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
@@ -74,6 +83,11 @@ from vllm.distributed.weight_transfer.nccl_common import (
     worker_init_metadata_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.sharded_weight import (
+    ShardedWeightRequest,
+    ShardedWeightTarget,
+    resolve_sharded_weight_target,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -334,6 +348,9 @@ class M2NWeightTransferEngine(
         self._dst_mesh: M2NMesh | None = None
         self._parameter_destinations: list[M2NDestination] = []
         self._uses_load_weights = False
+        self._destination_shard_index: int | None = None
+        self._staging_pool: M2NStagingPool | None = None
+        self._staged_targets: dict[int, ShardedWeightTarget] = {}
         self._next_parameter_index = 0
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
@@ -391,7 +408,7 @@ class M2NWeightTransferEngine(
             init_info.rank_offset,
         )
 
-        local_plan: list[tuple[Placements | None, bool]] | None = None
+        local_wire_plan: list[M2NWireDestination] | None = None
         destination_error: str | None = None
         try:
             self._dst_mesh = M2NMesh(
@@ -403,22 +420,33 @@ class M2NWeightTransferEngine(
                 num_workers=num_workers,
             )
             agreement_mesh = self._dst_mesh
-            local_plan = [
-                (destination.placements, destination.direct)
-                for destination in self._parameter_destinations
+            assert self._destination_shard_index is not None
+            shard_axis_size = self._dst_mesh.dims[DESTINATION_SHARD_AXIS]
+            local_wire_plan = [
+                M2NWireDestination.from_destination(
+                    destination,
+                    dtype_name=wire_param.dtype_name,
+                    destination_shard_index=self._destination_shard_index,
+                    shard_axis_size=shard_axis_size,
+                )
+                for wire_param, destination in zip(
+                    wire_params, self._parameter_destinations
+                )
             ]
         except Exception as exc:
             destination_error = f"{type(exc).__name__}: {exc}"
             self._clear_destination_plan()
 
         try:
-            agree_destination_placements(
+            agree_destination_plan(
                 metadata_group,
-                plan_digest,
-                self._metas,
-                agreement_mesh,
-                local_plan,
-                destination_error,
+                source_digest=plan_digest,
+                params=wire_params,
+                source_topology=source_topology,
+                metas=self._metas,
+                dst_mesh=agreement_mesh,
+                local_plan=local_wire_plan,
+                local_error=destination_error,
             )
             unique_id_bytes: tuple[bytes | None, ...] = ()
             data_plane_error: str | None = None
@@ -511,6 +539,8 @@ class M2NWeightTransferEngine(
         self._dst_mesh = None
         self._parameter_destinations = []
         self._uses_load_weights = False
+        self._destination_shard_index = None
+        self._staging_pool = None
 
     def _prepare_source_plan(
         self,
@@ -541,6 +571,7 @@ class M2NWeightTransferEngine(
                 dtype,
                 param.shape,
                 layout,
+                param.allow_full_fallback,
             )
             expected_local_shape(meta)
             self._metas.append(meta)
@@ -567,9 +598,11 @@ class M2NWeightTransferEngine(
                 f"{self._dst_mesh.start_rank + num_workers})"
             )
         shard_axis_size = self._dst_mesh.dims[DESTINATION_SHARD_AXIS]
+        self._destination_shard_index = local_worker_rank % shard_axis_size
         # A quantized weight loader may dequantize / transpose / requantize, and
         # under PP a rank's local shape is not the checkpoint shape split over
-        # the shard axis. Both require the full-tensor fallback.
+        # the shard axis. Both disable raw and semantic sharded destinations, so
+        # take the full-tensor fallback.
         allow_direct = (
             getattr(self.model_config, "quantization", None) is None
             and self.parallel_config.pipeline_parallel_size == 1
@@ -585,26 +618,40 @@ class M2NWeightTransferEngine(
             num_workers=self._dst_mesh.size,
             shard_axis_size=shard_axis_size,
             allow_direct=allow_direct,
+            destination_shard_index=self._destination_shard_index,
+            allow_full_fallback=[meta.allow_full_fallback for meta in self._metas],
         )
         self._uses_load_weights = any(
-            not destination.direct for destination in self._parameter_destinations
+            destination.mode is not M2NDestinationMode.IN_PLACE
+            for destination in self._parameter_destinations
         )
-        validate_transfer_plan(
-            self._metas,
-            self._dst_mesh,
-            [destination.placements for destination in self._parameter_destinations],
+        requirements = [
+            M2NStagingRequirement(
+                group=cast(int, destination.staging_group),
+                slot=cast(int, destination.staging_slot),
+                dtype=meta.dtype,
+                shape=destination.local_shape,
+            )
+            for meta, destination in zip(self._metas, self._parameter_destinations)
+            if destination.mode is M2NDestinationMode.SHARDED_STAGING
+        ]
+        self._staging_pool = (
+            M2NStagingPool(requirements, self.device) if requirements else None
         )
 
     def start_weight_update(self) -> None:
-        """Enter one update and initialize the fallback loader when needed."""
+        """Enter one update and bind semantic callbacks to this generation."""
         self._require_initialized()
         try:
+            if self._staging_pool is not None:
+                self._staging_pool.start_update()
             if self._uses_load_weights:
                 from vllm.model_executor.model_loader.reload import (
                     initialize_layerwise_reload,
                 )
 
                 initialize_layerwise_reload(self.model)
+            self._bind_staged_targets()
         except BaseException:
             try:
                 self._reset_failed_update()
@@ -630,8 +677,11 @@ class M2NWeightTransferEngine(
                 )
 
                 finalize_layerwise_reload(self.model, self.model_config)
-                # Complete loader copies before a later update reuses storage.
+                # Complete copies from retained staging inputs before reuse.
                 torch.accelerator.synchronize()
+            if self._staging_pool is not None:
+                self._staging_pool.release_retained_after_finalize()
+                self._staging_pool.finish_update()
 
             self._clear_update_bindings()
         except BaseException as exc:
@@ -647,16 +697,59 @@ class M2NWeightTransferEngine(
             ) from exc
 
     def _reset_failed_update(self) -> None:
-        """Reset loader state without touching M2N transport."""
+        """Reset loader and staging state without touching M2N transport."""
         if self._uses_load_weights:
             from vllm.model_executor.model_loader.reload import (
                 abort_layerwise_reload,
             )
 
-            # Finish loader copies before restoring tensors for a new update.
+            # Loader callbacks can enqueue reads from retained staging buffers.
+            # Finish them before restoring tensors and releasing those buffers.
             torch.accelerator.synchronize()
             abort_layerwise_reload(self.model)
         self._discard_update()
+
+    def _bind_staged_targets(self) -> None:
+        """Re-resolve update-scoped consumers after layerwise initialization."""
+        group_to_key: dict[int, object] = {}
+        key_to_group: dict[object, int] = {}
+        for index, (meta, destination) in enumerate(
+            zip(self._metas, self._parameter_destinations)
+        ):
+            if destination.mode is not M2NDestinationMode.SHARDED_STAGING:
+                continue
+            request = ShardedWeightRequest(meta.name, meta.dtype, meta.shape)
+            target = resolve_sharded_weight_target(self.model, request)
+            if target is None:
+                raise RuntimeError(
+                    f"staged destination {meta.name!r} disappeared after "
+                    "initialize_layerwise_reload"
+                )
+            if target.spec != destination.sharded_spec:
+                raise RuntimeError(
+                    f"staged destination {meta.name!r} changed geometry after "
+                    "initialize_layerwise_reload"
+                )
+            group = cast(int, destination.staging_group)
+            group_size = cast(int, destination.staging_group_size)
+            if target.retention_group_size != group_size:
+                raise RuntimeError(
+                    f"staged destination {meta.name!r} changed retention group "
+                    f"size from {group_size} to {target.retention_group_size}"
+                )
+            key = target.retention_key
+            if group in group_to_key and group_to_key[group] != key:
+                raise RuntimeError(
+                    f"staged destination group {group} changed retention owner"
+                )
+            if key in key_to_group and key_to_group[key] != group:
+                raise RuntimeError(
+                    f"retention owner for {meta.name!r} spans planned groups "
+                    f"{key_to_group[key]} and {group}"
+                )
+            group_to_key[group] = key
+            key_to_group[key] = group
+            self._staged_targets[index] = target
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Preserve pre-transfer failures; abort failures after transfer starts."""
@@ -704,7 +797,7 @@ class M2NWeightTransferEngine(
         waves = build_m2n_transfer_waves(
             self._routes,
             [
-                None if destination.direct else -1
+                m2n_load_group(destination.mode, destination.staging_group)
                 for destination in self._parameter_destinations
             ],
             active_indices=range(start, end),
@@ -724,7 +817,7 @@ class M2NWeightTransferEngine(
                     meta = self._metas[index]
                     destination = self._parameter_destinations[index]
 
-                    if destination.direct:
+                    if destination.mode is M2NDestinationMode.IN_PLACE:
                         buffer = self._resolve_direct_buffer(meta, destination)
                         transfer_started = True
                         self._reshard(
@@ -738,9 +831,18 @@ class M2NWeightTransferEngine(
                         processed += 1
                         continue
 
-                    buffer = torch.empty(
-                        meta.shape, dtype=meta.dtype, device=self.device
-                    )
+                    if destination.mode is M2NDestinationMode.FULL_FALLBACK:
+                        buffer = torch.empty(
+                            meta.shape, dtype=meta.dtype, device=self.device
+                        )
+                    else:
+                        assert self._staging_pool is not None
+                        buffer = self._staging_pool.acquire(
+                            group=cast(int, destination.staging_group),
+                            slot=cast(int, destination.staging_slot),
+                            dtype=meta.dtype,
+                            shape=destination.local_shape,
+                        )
                     # Retain ownership before launching. If reshard raises,
                     # abort must complete before this buffer can be released.
                     pending_buffers[index] = buffer
@@ -769,8 +871,30 @@ class M2NWeightTransferEngine(
                         "nccl_m2n transfer schedule consumed parameter "
                         f"{meta.name!r} before issuing it"
                     ) from exc
+                if destination.mode is M2NDestinationMode.FULL_FALLBACK:
+                    processed += 1
+                    yield meta.name, buffer
+                    continue
+
+                assert self._staging_pool is not None
+                target = self._staged_targets[index]
+                group = cast(int, destination.staging_group)
+                slot = cast(int, destination.staging_slot)
+                group_size = cast(int, destination.staging_group_size)
+                if target.load(buffer):
+                    if slot != group_size - 1:
+                        raise RuntimeError(
+                            f"staged consumer for {meta.name!r} released group "
+                            f"{group} at slot {slot}, before planned final slot "
+                            f"{group_size - 1}"
+                        )
+                    # Model loaders may enqueue reads of the staging inputs.
+                    # Order every possible reuse stream after those reads.
+                    consumer_stream = torch.cuda.current_stream(self.device)
+                    for transfer_stream in self._route_streams.values():
+                        transfer_stream.wait_stream(consumer_stream)
+                    self._staging_pool.release_group(group)
                 processed += 1
-                yield meta.name, buffer
 
             if pending_buffers:
                 raise RuntimeError(
@@ -779,7 +903,7 @@ class M2NWeightTransferEngine(
             self._synchronize_route_streams()
 
         has_fallback = any(
-            not self._parameter_destinations[index].direct
+            self._parameter_destinations[index].mode is M2NDestinationMode.FULL_FALLBACK
             for index in range(start, end)
         )
         try:
@@ -819,19 +943,10 @@ class M2NWeightTransferEngine(
                 f"in-place destination {parameter_name!r} changed dtype from "
                 f"{meta.dtype} to {buffer.dtype}"
             )
-        assert self._dst_mesh is not None
-        local_shape = expected_local_shape(
-            M2NParamMeta(
-                meta.name,
-                meta.dtype,
-                meta.shape,
-                M2NLayout(self._dst_mesh, destination.placements),
-            )
-        )
-        if tuple(buffer.shape) != local_shape:
+        if tuple(buffer.shape) != destination.local_shape:
             raise RuntimeError(
                 f"in-place destination {parameter_name!r} changed shape from "
-                f"{local_shape} to {tuple(buffer.shape)}"
+                f"{destination.local_shape} to {tuple(buffer.shape)}"
             )
         if not buffer.is_contiguous():
             raise RuntimeError(
@@ -885,11 +1000,14 @@ class M2NWeightTransferEngine(
                 stream.synchronize()
 
     def _clear_update_bindings(self) -> None:
+        self._staged_targets.clear()
         self._next_parameter_index = 0
 
     def _discard_update(self) -> None:
-        """Discard only update-local progress after a failed update."""
+        """Release only update-local staging after a failed update."""
         self._clear_update_bindings()
+        if self._staging_pool is not None:
+            self._staging_pool.discard_update()
 
     def _require_initialized(self) -> None:
         if self._handle is None or not self._model_update_groups:
