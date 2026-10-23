@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import itertools
 import time
 from collections import defaultdict, deque
@@ -56,10 +57,13 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
+    KVQuantMode,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
+    iter_layer_specs,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -2777,6 +2781,21 @@ class Scheduler(SchedulerInterface):
         return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
+        params = request.sampling_params
+        if (
+            params is not None
+            and params.prompt_logprob_token_ids is not None
+            and not request.skip_reading_prefix_cache
+            and not self._supports_target_token_prefix_reuse(request)
+        ):
+            logger.warning_once(
+                "Prefix-cache reads are not supported for target-token scoring "
+                "in this configuration; recomputing the full prompt."
+            )
+            # Resolve the fallback before a connector can truncate the prompt.
+            request.sampling_params = copy.copy(params)
+            request.sampling_params.skip_reading_prefix_cache = True
+            request.skip_reading_prefix_cache = True
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -2808,6 +2827,42 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+    def _supports_target_token_prefix_reuse(self, request: Request) -> bool:
+        groups = self.kv_cache_config.kv_cache_groups
+        params = request.sampling_params
+        assert params is not None and params.prompt_logprob_token_ids is not None
+        return (
+            self.connector is None
+            and self.aux_output_connector is None
+            and len(groups) == 1
+            and all(
+                isinstance(spec, FullAttentionSpec)
+                and spec.sliding_window is None
+                and spec.attention_chunk_size is None
+                and not spec.non_causal
+                # A worker may resolve "auto" to quantized KV at model load.
+                and spec.kv_quant_mode == KVQuantMode.NONE
+                for spec in iter_layer_specs(groups[0].kv_cache_spec)
+            )
+            and self.hash_block_size == self.block_size
+            # Target scoring with quantized KV needs separate numerical validation.
+            and self.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+            and self.vllm_config.speculative_config is None
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.data_parallel_size == 1
+            and not self.is_encoder_decoder
+            and not request.mm_features
+            and request.prompt_token_ids is not None
+            and request.prompt_embeds is None
+            and request.lora_request is None
+            and not request.resumable
+            and request.max_tokens == 1
+            and params.prompt_logprobs is None
+            and len(params.prompt_logprob_token_ids) > 0
+        )
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

@@ -62,6 +62,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVQuantMode,
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -3192,6 +3193,98 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_target_token_scoring_fallback_precedes_connector_admission(is_async):
+    """Connectors see no-read before admission, without mutating caller params."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=48, is_async=is_async),
+        block_size=16,
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=1)[0]
+    params = request.sampling_params
+    params.prompt_logprob_start = 31
+    params.prompt_logprob_token_ids = [[10]] * 32
+    assert params.skip_reading_prefix_cache is False
+    admission = []
+    scheduler.connector.on_new_request = lambda req: admission.append(
+        (req.skip_reading_prefix_cache, req.get_skip_reading_prefix_cache())
+    )
+    scheduler.add_request(request)
+    assert admission == [(True, True)]
+    assert params.skip_reading_prefix_cache is False
+    assert request.sampling_params is not params
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 64
+    assert request.num_computed_tokens == 64
+
+
+@pytest.mark.parametrize(
+    "fallback",
+    [
+        "none",
+        "ordinary",
+        "empty",
+        "resumable",
+        "decode",
+        "sliding_window",
+        "non_causal",
+        "hybrid",
+        "kv_quantization",
+        "resolved_kv_quantization",
+        "weight_quantization",
+        "data_parallel",
+        "aux",
+    ],
+)
+def test_target_token_scoring_admission_policy(fallback):
+    scheduler = create_scheduler(enable_prefix_caching=True, block_size=16)
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=1)[0]
+    params = request.sampling_params
+    params.prompt_logprob_start = 31
+    params.prompt_logprob_token_ids = [[10]] * 32
+    if fallback == "ordinary":
+        params.prompt_logprobs = 0
+    elif fallback == "empty":
+        params.prompt_logprob_start = 63
+        params.prompt_logprob_token_ids = []
+    elif fallback == "resumable":
+        request.resumable = True
+    elif fallback == "decode":
+        request.max_tokens = 2
+    elif fallback in ("sliding_window", "non_causal"):
+        group = scheduler.kv_cache_config.kv_cache_groups[0]
+        group.kv_cache_spec = dataclasses.replace(
+            group.kv_cache_spec,
+            **{fallback: 16 if fallback == "sliding_window" else True},
+        )
+    elif fallback == "hybrid":
+        scheduler.kv_cache_config.kv_cache_groups *= 2
+    elif fallback == "kv_quantization":
+        scheduler.cache_config.cache_dtype = "fp8"
+    elif fallback == "resolved_kv_quantization":
+        # A worker can resolve an auto KV dtype from the checkpoint after
+        # engine configuration. Admission must also check its actual spec.
+        assert scheduler.cache_config.cache_dtype == "auto"
+        group = scheduler.kv_cache_config.kv_cache_groups[0]
+        group.kv_cache_spec = dataclasses.replace(
+            group.kv_cache_spec,
+            dtype=torch.float8_e4m3fn,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+    elif fallback == "weight_quantization":
+        scheduler.vllm_config.model_config.quantization = "fp8"
+    elif fallback == "data_parallel":
+        scheduler.parallel_config.data_parallel_size = 2
+    elif fallback == "aux":
+        scheduler.aux_output_connector = Mock()
+    scheduler.add_request(request)
+    expected_skip = fallback not in ("none", "weight_quantization")
+    assert request.skip_reading_prefix_cache is expected_skip
+    assert request.get_skip_reading_prefix_cache() is expected_skip
+    assert params.skip_reading_prefix_cache is False
 
 
 @pytest.mark.parametrize("is_async", [False, True])
