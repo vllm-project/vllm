@@ -35,6 +35,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
@@ -157,9 +158,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_size: int,
         remote_dcp_size: int = 1,
+        local_region_ids: Sequence[int] | None = None,
     ) -> None:
         super()._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, remote_dcp_size
+            nixl_agent_meta, remote_tp_size, remote_dcp_size, local_region_ids
         )
         assert self.transfer_topo is not None
         if (
@@ -561,10 +563,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        local_region_groups = self.region_group_ids
-        remote_region_groups = self.dst_region_group_ids[engine_id]
-        groups_differ = local_region_groups != remote_region_groups
-        if groups_differ and not self._transfer_layer_group_ids:
+        if not self._dst_pairs[engine_id].groups_match:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -707,15 +706,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 f"{len(remote_block_ids[i])} remote blocks"
             )
 
-        # Get descs ids.
+        # Get descs ids. Pair k writes local region pairs.local[k] into remote
+        # region pairs.remote[k] at its cache group's blocks.
+        pairs = self._dst_pairs[dst_engine_id]
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
             region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
-            region_group_ids=self.dst_region_group_ids[dst_engine_id],
-            uses_region_group_mapping=self.dst_uses_region_group_mapping[dst_engine_id],
+            pairs=(pairs.remote, pairs.group),
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -723,8 +723,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             region_num_blocks=self.dst_region_num_blocks[self.engine_id],
-            region_group_ids=self.region_group_ids,
-            uses_region_group_mapping=self._uses_region_group_mapping,
+            pairs=(pairs.local, pairs.group),
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

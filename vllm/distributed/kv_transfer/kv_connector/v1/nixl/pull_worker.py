@@ -187,6 +187,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
+        pairs = self._dst_pairs[engine_id]
         if not local_block_ids:
             # Region expansion cannot index empty groups. Pass empty specs to
             # _read_blocks so its existing cache-hit notification path runs.
@@ -194,7 +195,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif local_region_groups != remote_region_groups:
+        elif not pairs.groups_match:
+            # The two sides put some layer in different cache groups: read each
+            # region at its own blocks.
+            if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
+                raise NotImplementedError(
+                    "Different NIXL cache-group layouts need the same KV regions "
+                    "on both sides"
+                )
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -497,23 +505,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
+        # Get descs ids. Pair k reads remote region pairs.remote[k] into local
+        # region pairs.local[k], at its cache group's blocks (its own regions'
+        # blocks for region-mapped reads).
+        pairs = self._dst_pairs[dst_engine_id]
+        by_region = read_spec.block_ids_by_region
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
             region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
-            region_group_ids=(
-                list(range(self.num_regions))
-                if read_spec.block_ids_by_region
-                else (self.dst_region_group_ids.get(dst_engine_id) or None)
-            ),
-            uses_region_group_mapping=(
-                self.num_regions > 1
-                if read_spec.block_ids_by_region
-                else self.dst_uses_region_group_mapping[dst_engine_id]
-            ),
+            pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -521,16 +524,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
-            region_group_ids=(
-                list(range(self.num_regions))
-                if read_spec.block_ids_by_region
-                else (self.region_group_ids or None)
-            ),
-            uses_region_group_mapping=(
-                self.num_regions > 1
-                if read_spec.block_ids_by_region
-                else self._uses_region_group_mapping
-            ),
+            pairs=(pairs.local, pairs.local if by_region else pairs.group),
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

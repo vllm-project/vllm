@@ -605,6 +605,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
         self.dst_region_group_ids[self.engine_id] = self.region_group_ids
         self.dst_region_mem_types[self.engine_id] = self.region_mem_types
+        self._set_region_layers([["layer0"]])
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
 
@@ -644,6 +645,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     region_num_blocks=self.region_num_blocks,
                     region_group_ids=self.region_group_ids,
                     region_mem_types=self.region_mem_types,
+                    region_members=self.region_members,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
