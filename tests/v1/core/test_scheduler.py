@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
@@ -4608,6 +4609,10 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
     assert output.stop_reason is None
+    assert output.error == RequestError(
+        code="validation_error",
+        message="Invalid structured outputs: forced FSM compilation error",
+    )
 
     healthy_request = create_requests(num_requests=1, req_ids=["healthy-request"])[0]
     scheduler.add_request(healthy_request)
@@ -4649,7 +4654,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
@@ -5070,6 +5075,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
     )
     scheduler.need_mamba_block_aligned_split = True
     scheduler.use_eagle = True
+    scheduler.use_eagle_block_drop = True
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
@@ -7368,6 +7374,72 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
 
 
+@pytest.mark.parametrize(
+    "replay_tokens,window_loaded,local_hit",
+    [(128, False, True), (128, False, False), (0, False, False), (128, True, False)],
+)
+def test_ec_connector_waits_for_embeddings_in_prefix_replay(
+    replay_tokens, window_loaded, local_hit
+):
+    """A replayed image must finish loading before its request is admitted."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=None if local_hit else mock_kv(640, is_async=False),
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.prefix_replay_tokens = replay_tokens
+    scheduler.prefix_replay_group_ids = (0,)
+    if not local_hit:
+        scheduler.connector.get_loaded_kv_cache_group_ids = Mock(
+            return_value=(0,) if window_loaded else ()
+        )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=819,
+        mm_positions=[[PlaceholderRange(offset=383, length=184)]],
+    )
+    if local_hit:
+        (seed,) = create_requests(
+            num_requests=1,
+            num_tokens=819,
+            mm_positions=[[PlaceholderRange(offset=383, length=184)]],
+            req_ids=["seed"],
+        )
+        scheduler.kv_cache_manager.allocate_slots(seed, 640)
+        scheduler.kv_cache_manager.cache_blocks(seed, 640)
+        scheduler.kv_cache_manager.free(seed)
+    loaded = set()
+
+    def ensure_cache_available(request, num_computed_tokens):
+        return all(
+            feature.mm_position.offset + feature.mm_position.length
+            <= num_computed_tokens
+            or feature.identifier in loaded
+            for feature in request.mm_features
+        )
+
+    scheduler.ec_connector.ensure_cache_available = ensure_cache_available
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    if replay_tokens and not window_loaded:
+        assert request.request_id not in output.num_scheduled_tokens
+        assert not scheduler.encoder_cache_manager.cached
+        loaded.add(request.mm_features[0].identifier)
+        output = scheduler.schedule()
+
+    (admitted,) = output.scheduled_new_reqs
+    expected_start = 640 - (0 if window_loaded else replay_tokens)
+    assert admitted.num_computed_tokens == expected_start
+    assert output.num_scheduled_tokens[request.request_id] == 819 - expected_start
+    assert not output.scheduled_encoder_inputs
+    if replay_tokens and not window_loaded:
+        _assert_right_ec_connector_metadata(output, request.mm_features)
+
+
 def test_ec_connector_defers_running_request_for_async_reload():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
@@ -8120,3 +8192,72 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def _skip_drafts_per_step(
+    num_requests: int, num_tokens: int, max_tokens: int, num_steps: int = 2
+) -> list[bool]:
+    """SchedulerOutput.skip_drafts for each step, with 64-token chunks."""
+    scheduler = create_scheduler(num_speculative_tokens=2, max_num_batched_tokens=64)
+    # As for a drafter on the V2 model runner (the ngram config reserves no
+    # lookahead slots, which disables the check).
+    scheduler.can_skip_drafts = True
+    for request in create_requests(num_requests, num_tokens, max_tokens=max_tokens):
+        scheduler.add_request(request)
+    skip_drafts = []
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        skip_drafts.append(output.skip_drafts)
+        req_ids = list(output.num_scheduled_tokens)
+        requests = [scheduler.requests[req_id] for req_id in req_ids]
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[
+                [] if r.num_computed_tokens < r.num_tokens else [100] for r in requests
+            ],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_runner_output)
+    return skip_drafts
+
+
+def test_skip_drafts_only_when_no_request_can_use_them():
+    # A non-final chunk drafts nothing; a final chunk that samples the last of
+    # max_tokens finishes the request.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=1) == [True, True]
+    # The final chunk's drafts are verified by the next decode step.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=2) == [True, False]
+    # One request finishes its prompt next to the other's non-final chunk.
+    assert _skip_drafts_per_step(2, num_tokens=40, max_tokens=2, num_steps=1) == [False]
+
+
+def test_drafts_unused_with_async_placeholders():
+    """The predicate must assume that all in-flight drafts are rejected."""
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+
+    # Non-final prefill chunk: no sample, drafts unusable.
+    assert scheduler._drafts_unused(request, 0, 8)
+    # Final prefill chunk with max_tokens=3: drafts usable.
+    assert not scheduler._drafts_unused(request, 0, 16)
+
+    # Sync decode: 2 of 3 output tokens verified; this step must finish.
+    request.append_output_token_ids(100)
+    request.append_output_token_ids(101)
+    assert scheduler._drafts_unused(request, 17, 1)
+    # Only 1 verified output: this step may or may not finish.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.append_output_token_ids(100)
+    assert not scheduler._drafts_unused(request, 16, 1)
+
+    # Async decode, 1 verified output and one in-flight step (1 sample +
+    # 1 draft placeholder): worst case still reaches 3 = max_tokens.
+    request.num_output_placeholders = 2
+    assert scheduler._drafts_unused(request, 18, 3)
+    # 0 verified outputs: worst case gives only 2 tokens, not guaranteed.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.num_output_placeholders = 2
+    assert not scheduler._drafts_unused(request, 17, 3)
