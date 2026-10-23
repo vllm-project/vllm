@@ -216,8 +216,6 @@ class DeepseekV41ModelState(DefaultModelState):
             max_local_reqs, dtype=torch.int32, device=device
         )
         self._replay_start_staging = UvaBufferPool(max_local_reqs, torch.int32)
-        if self.pcp_size > 1:
-            self._pcp_replay_start = UvaBufferPool(max_local_reqs, torch.int32)
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
@@ -226,6 +224,12 @@ class DeepseekV41ModelState(DefaultModelState):
             model, "decoder_replay_layers", None
         )
         if self.decoder_replay_layers is not None:
+            if self.pcp_size > 1:
+                assert self.decoder_replay_layers.window >= 2 * self.pcp_size, (
+                    "PCP replay requires window >= 2 * PCP size so each trimmed "
+                    "request is represented on every rank."
+                )
+                self._pcp_replay_start = UvaBufferPool(max_local_reqs, torch.int32)
             # Requests whose every prompt row is read (prompt logprobs) never trim.
             self._keeps_rows_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
             self._dropped_before = UvaBufferPool(max_local_reqs + 1, torch.int32)
@@ -250,7 +254,6 @@ class DeepseekV41ModelState(DefaultModelState):
             self._replay_attn_groups: (
                 tuple[list[list[AttentionGroup]], list[list[AttentionGroup]]] | None
             ) = None
-            assert self.decoder_replay_layers.window >= 2 * self.pcp_size
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -493,51 +496,48 @@ class DeepseekV41ModelState(DefaultModelState):
             return
 
         num_reqs = input_batch.num_reqs
+        idx_mapping_np = input_batch.idx_mapping_np[:num_reqs]
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        kept_lens = np.where(
-            self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
-            query_lens,
-            np.minimum(query_lens, layers.window),
-        )
-        # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
-        # nothing reads it and its idx_mapping hits stale slots, so keep one row.
         seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
-        is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
-            (seq_lens == query_lens).all()
-        )
-        if is_dummy and capture_desc is None:
-            kept_lens = np.zeros_like(kept_lens)
-            kept_lens[0] = 1
-        # Dummy batches (captures, an idle DP rank's) are not prefills: they
-        # keep their rows unless a rank trims.
-        needs_replay_batch = force_replay_batch or bool(
-            (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
-        )
-        num_tokens = int(kept_lens.sum())
-        num_padded = num_tokens
+        keeps_rows = self._keeps_rows_np[idx_mapping_np]
+        pcp = input_batch.pcp
         kv_start: np.ndarray | None = None
-        if input_batch.pcp is not None:
-            # Keep this rank's share of each request's global window. A trimmed
-            # request has rows on every rank (window >= 2 * pcp_size), so every
-            # rank pads to the same global kept count.
-            pcp = input_batch.pcp
-            idx_mapping_np = input_batch.idx_mapping_np[:num_reqs]
+        num_padded: int | None = None
+        if pcp is not None:
+            # Every trimmed request spans all ranks, so each rank can derive
+            # the same global kept count from its local request segments.
             global_dropped_lens = np.where(
-                self._keeps_rows_np[idx_mapping_np],
-                0,
-                np.maximum(pcp.global_query_lens - layers.window, 0),
+                keeps_rows, 0, np.maximum(pcp.global_query_lens_np - layers.window, 0)
             )
             kv_start = np.where(
-                global_dropped_lens > 0, pcp.global_seq_lens - layers.window, 0
+                global_dropped_lens > 0,
+                pcp.global_seq_lens_cpu_upper_bound_np - layers.window,
+                0,
             )
             kept_lens = np.clip(seq_lens - kv_start, 0, query_lens)
-            num_tokens = int(kept_lens.sum())
-            num_padded = pcp.global_num_tokens - int(
-                sum(dict(zip(idx_mapping_np, global_dropped_lens)).values())
-            )
+            _, first_indices = np.unique(idx_mapping_np, return_index=True)
+            num_dropped_tokens = int(global_dropped_lens[first_indices].sum())
+            num_padded = pcp.global_num_tokens - num_dropped_tokens
             needs_replay_batch = (
                 force_replay_batch or num_padded < input_batch.num_tokens_after_padding
             )
+        else:
+            kept_lens = np.where(
+                keeps_rows, query_lens, np.minimum(query_lens, layers.window)
+            )
+            # Idle DP batches have stale request slots and no context; keep one row.
+            is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
+                (seq_lens == query_lens).all()
+            )
+            if is_dummy and capture_desc is None:
+                kept_lens = np.zeros_like(kept_lens)
+                kept_lens[0] = 1
+            needs_replay_batch = force_replay_batch or bool(
+                (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
+            )
+        num_tokens = int(kept_lens.sum())
+        if num_padded is None:
+            num_padded = num_tokens
         dp_tokens = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             needs_replay_batch, dp_tokens = self._agree_across_dp(

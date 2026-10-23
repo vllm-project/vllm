@@ -28,11 +28,13 @@ logger = init_logger(__name__)
 class PCPBatchMetadata:
     """Per-step metadata of a PCP rank-local batch."""
 
+    # Unpadded token count before PCP partitioning. Under adaptive verification,
+    # this can be smaller than the sum of global_query_lens_np.
     global_num_tokens: int
-    # [num_reqs] each row's request's global query len and seq_lens upper bound.
-    global_query_lens: np.ndarray
-    global_seq_lens: np.ndarray
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
+    # [num_reqs], aligned with local request segments; requests may repeat.
+    global_query_lens_np: np.ndarray
+    global_seq_lens_cpu_upper_bound_np: np.ndarray
+    # [num_reqs_after_padding], set only under PCP+DCP.
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
 
@@ -704,10 +706,10 @@ class PCPManager:
             dcp_local_seq_lens=None,
             pcp=PCPBatchMetadata(
                 global_num_tokens=global_batch.num_tokens,
-                global_query_lens=num_scheduled_tokens[
+                global_query_lens_np=num_scheduled_tokens[
                     local_to_global_batch_req_idx_np
                 ],
-                global_seq_lens=global_batch.seq_lens_cpu_upper_bound.numpy()[
+                global_seq_lens_cpu_upper_bound_np=global_batch.seq_lens_cpu_upper_bound.numpy()[
                     local_to_global_batch_req_idx_np
                 ],
                 dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
