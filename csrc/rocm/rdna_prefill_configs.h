@@ -2,9 +2,9 @@
 // compiled; a call whose shape has no entry runs on Triton.
 #pragma once
 
-#include "rdna_singleseq_attn_types.h"
+#include "rdna_attn_types.h"
 
-namespace rdna_singleseq {
+namespace rdna {
 
 struct PrefillConfig {
   // The shape a build serves.
@@ -468,4 +468,4 @@ inline constexpr PrefillConfig kPrefillConfigs[] = {
 };
 // clang-format on
 
-}  // namespace rdna_singleseq
+}  // namespace rdna

@@ -2,9 +2,9 @@
 // compiled; a call whose shape has no entry runs on Triton.
 #pragma once
 
-#include "rdna_singleseq_attn_types.h"
+#include "rdna_attn_types.h"
 
-namespace rdna_singleseq {
+namespace rdna {
 
 struct DecodeConfig {
   // The shape a build serves.
@@ -705,4 +705,4 @@ inline constexpr DecodeConfig kDecodeConfigs[] = {
 };
 // clang-format on
 
-}  // namespace rdna_singleseq
+}  // namespace rdna

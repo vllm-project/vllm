@@ -14,7 +14,7 @@ from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 
-hip = pytest.importorskip("vllm.v1.attention.ops.rocm_rdna_singleseq_hip")
+hip = pytest.importorskip("vllm.v1.attention.ops.rocm_rdna_hip")
 
 HQ, HKV, HEAD_DIM = 32, 16, 256
 # Relative error bound per dtype.
@@ -183,8 +183,8 @@ def test_decode_configs_are_well_formed():
 def test_every_listed_variant_is_built_in():
     _skip_unless_gfx1151()
     # Raises if a build has no instantiation unit.
-    assert torch.ops._rocm_C.rdna_singleseq_decode_configs()
-    assert torch.ops._rocm_C.rdna_singleseq_decode_batch_configs()
+    assert torch.ops._rocm_C.rdna_decode_configs()
+    assert torch.ops._rocm_C.rdna_decode_batch_configs()
     missing = [v.name for v in hip.variants() if hip.load(v) is None]
     assert not missing, f"{len(missing)} variants not in _rocm_C, e.g. {missing[0]}"
 
@@ -302,8 +302,8 @@ def test_other_dtype_is_refused_not_miscomputed(dtype):
 
 
 def _impl():
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqAttentionImpl as Impl,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaAttentionImpl as Impl,
     )
 
     return Impl.__new__(Impl)
@@ -392,23 +392,23 @@ def test_non_decode_batches_fall_back_to_triton(nseq, tokens, max_q, reason):
 
 
 @pytest.mark.parametrize("gfx1151", [True, False])
-def test_singleseq_is_opt_in(gfx1151, monkeypatch):
+def test_rdna_is_opt_in(gfx1151, monkeypatch):
     """The backend is never selected automatically."""
     import vllm.platforms.rocm as rocm
     from vllm.v1.attention.backends.registry import AttentionBackendEnum as B
 
     monkeypatch.setattr(rocm, "on_gfx1151", lambda: gfx1151)
     order = rocm._get_backend_priorities(use_mla=False, use_sparse=False)
-    assert B.ROCM_RDNA_SINGLESEQ_ATTN not in order
+    assert B.ROCM_RDNA_ATTN not in order
 
 
-def test_singleseq_valid_for_any_batch():
+def test_rdna_valid_for_any_batch():
     """Valid whatever max_num_seqs, on Triton's packed HND cache."""
-    from vllm.v1.attention.backends import rocm_rdna_singleseq_attn as rdna
+    from vllm.v1.attention.backends import rocm_rdna_attn as rdna
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 
-    backend = rdna.RocmRdnaSingleSeqAttentionBackend
+    backend = rdna.RocmRdnaAttentionBackend
     reason = backend.supports_combination(
         HEAD_DIM, torch.float16, "auto", 16, False, False, False, False, None
     )
@@ -564,7 +564,7 @@ def test_prefill_configs_are_well_formed():
 def test_every_listed_prefill_variant_is_built_in():
     _skip_unless_gfx1151()
     # Raises if a build has no instantiation unit.
-    assert torch.ops._rocm_C.rdna_singleseq_prefill_configs()
+    assert torch.ops._rocm_C.rdna_prefill_configs()
     missing = [v for v in _prefill_rows() if hip.load_prefill(v) is None]
     assert not missing, f"{len(missing)} prefill variants not in _rocm_C"
 
@@ -909,8 +909,8 @@ def test_mixed_batch_mm_prefix_matches_reference():
     than a row holds, which leaves the decodes on the decode kernel."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadataBuilder,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadataBuilder,
     )
 
     _skip_unless_gfx1151()
@@ -928,7 +928,7 @@ def test_mixed_batch_mm_prefix_matches_reference():
         seq_lens_cpu_upper_bound=seq_lens,
         query_start_loc_cpu=starts,
     )
-    buf = RocmRdnaSingleSeqMetadataBuilder._mm_ranges_decode(
+    buf = RocmRdnaMetadataBuilder._mm_ranges_decode(
         types.SimpleNamespace(device=q.device, _mm_rows=4), md
     )
     assert buf is not None and buf[2, 0] == 0
@@ -1386,7 +1386,7 @@ def test_mm_query_overlap(ranges, seq_len, query_len, expected):
     """Only ranges holding the step's query tokens count."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import mm_query_overlap
+    from vllm.v1.attention.backends.rocm_rdna_attn import mm_query_overlap
 
     md = types.SimpleNamespace(
         mm_req_doc_ranges={0: ranges},
@@ -1423,8 +1423,8 @@ def test_mm_ranges_decode_buffer(ranges, seq_len, query_len, expected):
     so a replayed CUDA graph never reads an earlier step's ranges."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadataBuilder,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadataBuilder,
         mm_ranges_buffer,
     )
 
@@ -1436,7 +1436,7 @@ def test_mm_ranges_decode_buffer(ranges, seq_len, query_len, expected):
         seq_lens_cpu_upper_bound=None if seq_len is None else torch.tensor([seq_len]),
         query_start_loc_cpu=torch.tensor([0, query_len]),
     )
-    out = RocmRdnaSingleSeqMetadataBuilder._mm_ranges_decode(
+    out = RocmRdnaMetadataBuilder._mm_ranges_decode(
         types.SimpleNamespace(device=device, _mm_rows=1), md
     )
     if expected is None:
@@ -1455,8 +1455,8 @@ def test_mm_ranges_decode_buffer_rows():
     chunk holds, so it never empties the decodes' rows."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadataBuilder,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadataBuilder,
         mm_ranges_buffer,
     )
 
@@ -1470,7 +1470,7 @@ def test_mm_ranges_decode_buffer_rows():
         seq_lens_cpu_upper_bound=torch.tensor([205, 300, 400, 900]),
         query_start_loc_cpu=torch.tensor([0, 3, 6, 9, 509]),
     )
-    out = RocmRdnaSingleSeqMetadataBuilder._mm_ranges_decode(
+    out = RocmRdnaMetadataBuilder._mm_ranges_decode(
         types.SimpleNamespace(device=device, _mm_rows=4), md
     )
     assert buf[0, :3].tolist() == [1, 200, 209]
@@ -1485,8 +1485,8 @@ def test_mm_ranges_decode_builder_feeds_kernel(overshoot):
     drafts: the image then ends before the estimated query tokens."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadataBuilder,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadataBuilder,
     )
 
     v, module = _built(
@@ -1505,7 +1505,7 @@ def test_mm_ranges_decode_builder_feeds_kernel(overshoot):
         seq_lens_cpu_upper_bound=torch.tensor([seq_len + overshoot * (m - 1)]),
         query_start_loc_cpu=torch.tensor([0, m]),
     )
-    buf = RocmRdnaSingleSeqMetadataBuilder._mm_ranges_decode(
+    buf = RocmRdnaMetadataBuilder._mm_ranges_decode(
         types.SimpleNamespace(device=q.device, _mm_rows=1), md
     )
     assert buf is not None
@@ -1522,8 +1522,8 @@ def test_mm_ranges_decode_builder_feeds_batched_kernel(overshoot):
     seq_lens_cpu_upper_bound overshoots by M - 1 rejected drafts."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadataBuilder,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadataBuilder,
     )
 
     v, module = _built(batch=1, max_query_len=lambda m: m >= 4)
@@ -1542,7 +1542,7 @@ def test_mm_ranges_decode_builder_feeds_batched_kernel(overshoot):
         seq_lens_cpu_upper_bound=torch.tensor(lens) + overshoot * (m - 1),
         query_start_loc_cpu=torch.arange(len(lens) + 1) * m,
     )
-    buf = RocmRdnaSingleSeqMetadataBuilder._mm_ranges_decode(
+    buf = RocmRdnaMetadataBuilder._mm_ranges_decode(
         types.SimpleNamespace(device=q.device, _mm_rows=4), md
     )
     assert buf is not None
@@ -1570,8 +1570,8 @@ def test_forward_passes_mm_ranges_to_the_decode_kernel(nseq):
     not."""
     import types
 
-    from vllm.v1.attention.backends.rocm_rdna_singleseq_attn import (
-        RocmRdnaSingleSeqMetadata,
+    from vllm.v1.attention.backends.rocm_rdna_attn import (
+        RocmRdnaMetadata,
     )
 
     impl = _impl()
@@ -1584,7 +1584,7 @@ def test_forward_passes_mm_ranges_to_the_decode_kernel(nseq):
     )
     impl._prepare = lambda kv_cache, **kwargs: (module, (None,) * 4)
     buf = torch.zeros(4, 3, dtype=torch.int32)
-    md = RocmRdnaSingleSeqMetadata.__new__(RocmRdnaSingleSeqMetadata)
+    md = RocmRdnaMetadata.__new__(RocmRdnaMetadata)
     for name, value in {
         "num_actual_tokens": 2 * nseq,
         "seq_lens": torch.tensor([100] * nseq),

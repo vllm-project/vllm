@@ -43,27 +43,27 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
 
 // RDNA3.5 decode and prefill attention: the fields of every build (none off
 // gfx1151), and a launch of one build by its index.
-std::vector<int64_t> rdna_singleseq_decode_configs();
-std::vector<int64_t> rdna_singleseq_decode_batch_configs();
-void rdna_singleseq_decode_attn(int64_t config, torch::Tensor& q,
-                                torch::Tensor& kv_cache,
-                                torch::Tensor& block_table, torch::Tensor& out,
-                                torch::Tensor& acc, torch::Tensor& m,
-                                torch::Tensor& l, torch::Tensor& cnt,
-                                torch::Tensor& seq_lens, double scale,
-                                const std::optional<torch::Tensor>& mm_ranges,
-                                bool batched);
+std::vector<int64_t> rdna_decode_configs();
+std::vector<int64_t> rdna_decode_batch_configs();
+void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
+                      torch::Tensor& block_table, torch::Tensor& out,
+                      torch::Tensor& acc, torch::Tensor& m, torch::Tensor& l,
+                      torch::Tensor& cnt, torch::Tensor& seq_lens, double scale,
+                      const std::optional<torch::Tensor>& mm_ranges,
+                      bool batched);
 
-std::vector<int64_t> rdna_singleseq_prefill_configs();
-std::vector<int64_t> rdna_singleseq_prefill_batch_configs();
-void rdna_singleseq_prefill_attn(
-    int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
-    torch::Tensor& block_table, torch::Tensor& out, torch::Tensor& partial_o,
-    torch::Tensor& partial_ml, torch::Tensor& counters, torch::Tensor& seq_lens,
-    int64_t max_seq_len, double scale,
-    const std::optional<torch::Tensor>& mm_ranges,
-    const std::optional<torch::Tensor>& plan,
-    const std::optional<torch::Tensor>& query_start_loc, int64_t head_group);
+std::vector<int64_t> rdna_prefill_configs();
+std::vector<int64_t> rdna_prefill_batch_configs();
+void rdna_prefill_attn(int64_t config, torch::Tensor& q,
+                       torch::Tensor& kv_cache, torch::Tensor& block_table,
+                       torch::Tensor& out, torch::Tensor& partial_o,
+                       torch::Tensor& partial_ml, torch::Tensor& counters,
+                       torch::Tensor& seq_lens, int64_t max_seq_len,
+                       double scale,
+                       const std::optional<torch::Tensor>& mm_ranges,
+                       const std::optional<torch::Tensor>& plan,
+                       const std::optional<torch::Tensor>& query_start_loc,
+                       int64_t head_group);
 
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
