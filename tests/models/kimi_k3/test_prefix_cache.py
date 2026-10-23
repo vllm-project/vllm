@@ -44,7 +44,7 @@ BASE_ARGS = [
     "--language-model-only",
     "--load-format",
     "dummy",
-    "--no-enable-flashinfer-autotune",
+    "--disable-flashinfer-autotune",
     "--enable-prompt-tokens-details",
     # Default max_num_seqs OOMs one GPU during warmup.
     "--max-num-seqs",
