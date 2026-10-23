@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import itertools
 import logging
 import os
@@ -86,6 +87,13 @@ _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
 # Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
 # one only costs that peer a LAYOUT_MISS and one layout resend.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
+
+
+def remote_prefix_hash(token_ids: Collection[int], n: int) -> str:
+    """Hash of the first n token ids, sent by the router as remote_prefix_hash."""
+    prefix = np.asarray(list(itertools.islice(token_ids, n)), dtype=np.int64)
+    return hashlib.blake2b(prefix.tobytes(), digest_size=16).hexdigest()
+
 
 try:
     from mooncake.engine import TransferEngine
@@ -698,6 +706,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
+        # Per-transfer expiry for hold_kv sends, in seconds.
+        self.send_timeouts: dict[TransferId, float] = {}
 
     def add_new_req(
         self,
@@ -708,6 +718,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
     ):
         transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
+            # A prefiller that also sends to D pulls under a separate id.
+            transfer_id = kv_transfer_params.get("pull_transfer_id") or transfer_id
             remote_engine_id = kv_transfer_params["remote_engine_id"]
             self.reqs_to_recv[remote_engine_id][request_id] = PullReqMeta(
                 d_req_id=request_id,
@@ -718,6 +730,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
+            if kv_transfer_params.get("hold_timeout_s") is not None:
+                self.send_timeouts[transfer_id] = float(
+                    kv_transfer_params["hold_timeout_s"]
+                )
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
@@ -1041,6 +1057,7 @@ class MooncakeConnectorScheduler:
         if (
             params is not None
             and params.get("do_remote_decode")
+            and not params.get("hold_kv")
             and (self._has_mamba or self._bounded_replay)
         ):
             self._truncate_mamba_request_for_prefill(request)
@@ -1077,7 +1094,15 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
             token_ids = request.prompt_token_ids or []
-            count = self._get_remote_prefill_token_count(len(token_ids)) - (
+            num_remote_tokens = len(token_ids)
+            if params.get("remote_num_tokens") is not None:
+                # The remote holds KV (and recurrent state) for exactly this
+                # many leading prompt tokens, e.g. a finished hold_kv decode.
+                if not self._remote_prefix_matches(request, params):
+                    return 0, False
+                count = int(params["remote_num_tokens"]) - num_computed_tokens
+                return (count, True) if count > 0 else (0, False)
+            count = self._get_remote_prefill_token_count(num_remote_tokens) - (
                 num_computed_tokens
             )
             if count > 0:
@@ -1085,6 +1110,24 @@ class MooncakeConnectorScheduler:
 
         # No remote prefill for this request.
         return 0, False
+
+    @staticmethod
+    def _remote_prefix_matches(request: "Request", params: dict[str, Any]) -> bool:
+        """Whether the prompt starts with the tokens the remote holds."""
+        ok = params.get("_remote_prefix_ok")
+        if ok is None:
+            n = int(params["remote_num_tokens"])
+            token_ids = request.prompt_token_ids or []
+            expected = params.get("remote_prefix_hash")
+            ok = len(token_ids) >= n and remote_prefix_hash(token_ids, n) == expected
+            if not ok:
+                logger.warning(
+                    "Remote prefix hash mismatch for %s (%d tokens); computing locally",
+                    request.request_id,
+                    n,
+                )
+            params["_remote_prefix_ok"] = ok
+        return ok
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -1127,7 +1170,8 @@ class MooncakeConnectorScheduler:
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
-        elif params.get("do_remote_decode"):
+        # Not elif: a kv_both prefiller may load a prefix and also send.
+        if params.get("do_remote_decode"):
             assert not self.is_kv_consumer
             if not params.get("transfer_id"):
                 logger.warning("Missing transfer_id in kv_transfer_params from router!")
@@ -1196,14 +1240,18 @@ class MooncakeConnectorScheduler:
             assert not self.is_kv_producer
             self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False
-            return False, None
+            if not params.get("do_remote_decode"):
+                return False, None
 
         if not params.get("do_remote_decode"):
             return False, None
 
         assert not self.is_kv_consumer
 
-        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+        held = request.status == RequestStatus.FINISHED_LENGTH_CAPPED or (
+            params.get("hold_kv") and request.status == RequestStatus.FINISHED_STOPPED
+        )
+        if not held:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(params["transfer_id"])
@@ -2694,9 +2742,10 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
-                send_meta.expire_time = (
-                    time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+                timeout = metadata.send_timeouts.get(
+                    transfer_id, envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
+                send_meta.expire_time = time.perf_counter() + timeout
                 send_meta.ready.set()
             else:
                 # From update_state_after_alloc(),
