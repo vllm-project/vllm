@@ -72,6 +72,22 @@ __device__ __forceinline__ float toFloat(T value) {
 }
 
 #ifndef USE_ROCM
+// A hash-routed token id must index tid2eid ([vocab_size, k]). An id outside
+// it is a producer bug (it was a sampled id equal to vocab_size); gathering
+// with it routes on garbage, so stop with a clear message instead.
+__device__ __forceinline__ void check_hash_token_id(int64_t token_id,
+                                                    int64_t hash_table_rows,
+                                                    bool print) {
+  if (token_id < 0 || token_id >= hash_table_rows) {
+    if (print) {
+      printf("hash MoE routing: token id %lld is outside tid2eid [0, %lld)\n",
+             static_cast<long long>(token_id),
+             static_cast<long long>(hash_table_rows));
+    }
+    VLLM_DEVICE_TRAP();
+  }
+}
+
 // Adapted from:
 // https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/csrc/deepseek_v4/hash_topk.cuh
 template <typename OutIndType, typename HashIndType>
@@ -84,14 +100,9 @@ __launch_bounds__(128) __global__ void dsv4HashTopkSoftplusSqrt(
   const int lane = threadIdx.x % 32;
   if (warp >= num_rows) return;
   const int64_t token_id = load_index_as_int64(input_ids, warp);
-  // token_id is data: padded / not-yet-written rows of the input_ids buffer can
-  // hold an out-of-range value. tid2eid is [vocab_size, 6], so an unbounded
-  // token_id gathers outside the table and yields a garbage expert id, which is
-  // then used to index the gating logits (and is written to topk_ids for the
-  // downstream MoE kernels) -- an illegal access that takes down every rank.
-  const bool token_in_range = token_id >= 0 && token_id < hash_table_rows;
-  const bool is_pad_row =
-      (is_padding != nullptr && is_padding[warp]) || !token_in_range;
+  const bool is_pad_row = is_padding != nullptr && is_padding[warp];
+  // Padding rows never read tid2eid; every other row must index it.
+  if (!is_pad_row) check_hash_token_id(token_id, hash_table_rows, lane == 0);
   // Image tokens carry five consecutive in-vocab sentinel ids starting at
   // image_sentinel_lo (0 = disabled); they skip the tid2eid lookup and
   // select experts by score + bias_vl instead. Ids above the sentinel block
@@ -319,7 +330,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     return;
   }
   const bool row_is_active = finished ? !finished[thread_row] : true;
-  bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+  const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
   // Image tokens carry five consecutive in-vocab sentinel ids starting at
   // image_sentinel_lo (0 = disabled); they select experts with bias_vl
@@ -420,12 +431,15 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   // (sentinel ids) fall through to the score-based top-k path with bias_vl.
   const bool hash_row = USE_HASH && !use_vl_bias;
   if (hash_row) {
-    // See the note in dsv4HashTopkSoftplusSqrt: token_id is data and an
-    // out-of-range value gathers outside tid2eid ([vocab_size, k]).
-    const bool token_in_range = token_id >= 0 && token_id < hash_table_rows;
+    // Padding rows never read tid2eid; every other row must index it.
+    if (!is_pad_row) {
+      check_hash_token_id(token_id, hash_table_rows,
+                          threadIdx.x % THREADS_PER_ROW == 0);
+    }
+    // Padding rows may hold any id but still pass through the expert writes
+    // below; point them at row 0 so they never read outside the table.
     const int64_t token_expert_offset =
-        token_in_range ? token_id * static_cast<int64_t>(k) : 0;
-    is_pad_row = is_pad_row || !token_in_range;
+        is_pad_row ? 0 : token_id * static_cast<int64_t>(k);
     if (!is_pad_row) {
 #pragma unroll
       for (int ii = 0; ii < VPT; ++ii) {

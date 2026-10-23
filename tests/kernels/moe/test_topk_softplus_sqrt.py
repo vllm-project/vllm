@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from tests.kernels.utils import assert_kernel_traps
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -738,3 +739,51 @@ def test_dsv4_fast_topk_bias_vl():
     assert topk_ids.dtype == torch.int64
     torch.testing.assert_close(topk_ids_ref.to(torch.int64), topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA hash kernels")
+@pytest.mark.parametrize("renormalize", [True, False])  # DSv4 fast path / generic
+def test_hash_routing_traps_on_token_id_outside_table(renormalize: bool):
+    """Flagged padding rows may hold any id; every other id must index tid2eid.
+
+    An id outside the table is a producer bug (it was a sampled id equal to
+    vocab_size): gathering with it routed on garbage experts.
+    """
+    num_tokens, num_experts, topk, vocab = 4, 256, 6, 100
+    tid2eid = torch.randint(0, num_experts, (vocab, topk), dtype=torch.int32)
+    tid2eid = tid2eid.cuda()
+    input_ids = torch.tensor([1, 2, 3, 10**6], dtype=torch.int32, device="cuda")
+    is_padding = torch.tensor([False, False, False, True], device="cuda")
+    logits = torch.randn(num_tokens, num_experts, device="cuda")
+    weights = torch.empty(num_tokens, topk, device="cuda")
+    indices = torch.empty(num_tokens, topk, dtype=torch.int32, device="cuda")
+    token_expert = torch.empty(num_tokens, topk, dtype=torch.int32, device="cuda")
+
+    ops.topk_hash_softplus_sqrt(
+        weights,
+        indices,
+        token_expert,
+        logits,
+        renormalize,
+        1.0,
+        None,
+        input_ids,
+        tid2eid,
+        is_padding,
+    )
+    torch.testing.assert_close(
+        indices[:3].sort(dim=-1).values,
+        tid2eid[input_ids[:3].long()].sort(dim=-1).values,
+    )
+
+    assert_kernel_traps(f"""
+        import vllm._custom_ops as ops
+        tid2eid = torch.randint(0, 256, (100, 6), dtype=torch.int32, device="cuda")
+        ids = torch.tensor([1, 100], dtype=torch.int32, device="cuda")
+        args = [torch.empty(2, 6, device="cuda"),
+                torch.empty(2, 6, dtype=torch.int32, device="cuda"),
+                torch.empty(2, 6, dtype=torch.int32, device="cuda"),
+                torch.randn(2, 256, device="cuda")]
+        ops.topk_hash_softplus_sqrt(*args, {renormalize}, 1.0, None, ids, tid2eid,
+                                    torch.zeros(2, dtype=torch.bool, device="cuda"))
+    """)
