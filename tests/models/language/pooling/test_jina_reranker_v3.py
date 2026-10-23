@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
+from vllm.exceptions import VLLMValidationError
 
 model_name = "jinaai/jina-reranker-v3"
 query = "What are the health benefits of green tea?"
@@ -53,6 +54,7 @@ def test_offline(vllm_runner, monkeypatch):
         _test_offline_1_v_1(llm)
         _test_offline_1_v_n(llm)
         _test_offline_n_v_n(llm)
+        _test_offline_truncation(llm)
         _test_offline_token_embed_illegal_inputs(llm)
         assert llm.model_config.embedding_size == EMBEDDING_SIZE
 
@@ -65,6 +67,7 @@ def test_online():
         _test_online_1_v_n(server)
         _test_online_n_v_n(server)
         _test_online_instruction(server)
+        _test_online_truncation(server)
         _test_online_token_embed_illegal_inputs(server)
 
 
@@ -143,6 +146,37 @@ def _test_offline_token_embed_illegal_inputs(llm):
         ValueError, match="The JinaForRanking model only supports text as input."
     ):
         llm.encode([1, 2, 3], pooling_task="token_embed")
+
+
+def _test_offline_truncation(llm):
+    prompts = documents[:2] + [query]
+    (output,) = llm.encode(prompts, pooling_task="token_embed")
+    token_ids = output.prompt_token_ids
+    tokenizer = llm.get_tokenizer()
+    doc_marker = tokenizer.convert_tokens_to_ids("<|embed_token|>")
+    query_marker = tokenizer.convert_tokens_to_ids("<|rerank_token|>")
+    for side in ("left", "right"):
+        kwargs = {
+            "truncate_prompt_tokens": len(token_ids) - 1,
+            "truncation_side": side,
+        }
+        (truncated,) = llm.encode(
+            prompts, pooling_task="token_embed", tokenization_kwargs=kwargs
+        )
+        expected_ids = token_ids[1:] if side == "left" else token_ids[:-1]
+        assert truncated.prompt_token_ids == expected_ids
+        assert truncated.outputs.data.shape == (len(prompts), EMBEDDING_SIZE)
+
+        kwargs["truncate_prompt_tokens"] = (
+            len(token_ids) - token_ids.index(doc_marker) - 1
+            if side == "left"
+            else token_ids.index(query_marker)
+        )
+        with pytest.raises(
+            VLLMValidationError, match="removed query or document markers"
+        ) as exc_info:
+            llm.encode(prompts, pooling_task="token_embed", tokenization_kwargs=kwargs)
+        assert exc_info.value.parameter == "truncate_prompt_tokens"
 
 
 def _get_score_response(server, query, document, **extra_body):
@@ -304,6 +338,39 @@ def _test_online_instruction(server):
     assert [r.relevance_score for r in kwargs_rerank.results] == pytest.approx(
         [r.relevance_score for r in instruction_rerank.results], abs=TOL
     )
+
+
+def _test_online_truncation(server):
+    docs = documents[:2]
+    for endpoint, inputs, result_key in (
+        ("pooling", {"input": docs + [query], "task": "token_embed"}, "data"),
+        ("score", {"queries": query, "documents": docs}, "data"),
+        ("rerank", {"query": query, "documents": docs}, "results"),
+    ):
+        payload = {"model": model_name, **inputs}
+        response = requests.post(server.url_for(endpoint), json=payload)
+        response.raise_for_status()
+        num_tokens = response.json()["usage"]["prompt_tokens"]
+        for side in ("left", "right"):
+            payload.update(truncate_prompt_tokens=num_tokens - 1, truncation_side=side)
+            response = requests.post(server.url_for(endpoint), json=payload)
+            response.raise_for_status()
+            result = response.json()
+            assert result["usage"]["prompt_tokens"] == num_tokens - 1
+            if endpoint == "pooling":
+                assert torch.as_tensor(result["data"][0]["data"]).shape == (
+                    len(docs) + 1,
+                    EMBEDDING_SIZE,
+                )
+            else:
+                assert len(result[result_key]) == len(docs)
+
+            payload["truncate_prompt_tokens"] = 1
+            response = requests.post(server.url_for(endpoint), json=payload)
+            assert response.status_code == 400
+            error = response.json()["error"]
+            assert "removed query or document markers" in error["message"]
+            assert error["param"] == "truncate_prompt_tokens"
 
 
 def _test_online_token_embed_illegal_inputs(server):
