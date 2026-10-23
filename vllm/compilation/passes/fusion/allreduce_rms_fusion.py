@@ -1573,7 +1573,7 @@ class AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
     """AllReduce + fused-add RMSNorm feeding an MXFP4 dynamic-quant linear.
 
     Matches ``all_reduce -> fused_add_rms_norm -> gemm_with_dynamic_quant``
-    (``AiterMxfp4LinearKernel`` with ``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1``)
+    (``AiterMxfp4LinearKernel`` with ``use_asm_gemm``)
     and lowers it to ``rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm``, which
     moves the per-1x32 activation quant into the all-reduce epilogue at
     decode. The normed activation stays a pattern output, so bf16 consumers
@@ -1720,7 +1720,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "FP8 quant fusion."
             )
         supports_mxfp4_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+            rocm_aiter_ops.is_asm_fp4_gemm_supported()
             and ca_comm.build_supports_gemma_mxfp4_quant()
         )
 
