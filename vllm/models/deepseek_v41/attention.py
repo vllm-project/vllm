@@ -490,13 +490,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 candidate_write=is_candidate_source,
             )
 
-        self._prepare_and_attn_fn = self._prepare_and_attn
-        if not vllm_config.use_v2_model_runner:
-            # MRV1's piecewise capture only tolerates the wide eager region: with
-            # the narrow one the attention input preparation stays in the captured
-            # graph and MRV1 produces garbage (#51430).
-            self._prepare_and_attn_fn = self._prepare_and_attn_eager
-
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -536,13 +529,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
-        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
-            logger.warning_once(
-                "SWA bounded replay needs model runner V2 (only it skips the "
-                "paged-KV writes of replayed tokens); the sliding-window cache "
-                "takes part in prefix caching instead."
-            )
-            swa_bounded_replay = False
         if (
             swa_bounded_replay
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -689,7 +675,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
-        self._prepare_and_attn_fn(
+        self._prepare_and_attn(
             hidden_states,
             qr,
             kv,
@@ -815,34 +801,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
         return qr, None, kv
-
-    @eager_break_during_capture
-    def _prepare_and_attn_eager(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor | QuantizedActivation,
-        kv: torch.Tensor,
-        qr_scale: torch.Tensor | None,
-        kv_score: torch.Tensor,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        attn_out: "torch.Tensor | QuantizedActivation",
-    ) -> None:
-        """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
-
-        The nested ``_sparse_indexer_and_attn`` break runs inline, since
-        ``add_eager`` clears ``_capturing`` before invoking this.
-        """
-        self._prepare_and_attn(
-            hidden_states,
-            qr,
-            kv,
-            qr_scale,
-            kv_score,
-            indexer_weights,
-            positions,
-            attn_out,
-        )
 
     def _prepare_and_attn(
         self,

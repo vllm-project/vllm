@@ -686,16 +686,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            self.indexer is None
-            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
-            or not current_platform.enable_multi_stream_overlap(
-                self.aux_stream_list, get_forward_context().attn_metadata
-            )
+        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
         ):
             # Sequential fallback: no forks outside the capture region, where
-            # HIP event sync is unreliable; MRV1 keeps the input prep in its
-            # wide eager region (#51430).
+            # HIP event sync is unreliable.
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:

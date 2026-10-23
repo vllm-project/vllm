@@ -51,7 +51,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric

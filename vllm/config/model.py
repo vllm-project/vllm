@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 else:
     PreTrainedConfig = Any
 

@@ -7,31 +7,14 @@ Port of the reference ``inference/engram.py`` + ``Engram`` /
 checkpoint layout). Engram modules live on the backbone layers listed in
 ``engram_layer_ids`` only.
 
-Two pieces of cross-forward state are needed because vLLM streams tokens
-chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
-``p-1..p-3``:
+An n-gram at position ``p`` needs the token ids at ``p-1..p-3`` while vLLM
+streams tokens chunk-by-chunk:
 
 - ``token_map``: token id -> compressed vocab id, built once from the
   model's tokenizer at init (deterministic; asserted against
   ``engram_compressed_vocab_size``).
-- ``hash_cache``: one int32 slot per KV slot of the first local layer's
-  sliding-window cache, holding the compressed id (or DEAD) of the token
-  last written to that slot. Slots are stable per (request, position) —
-  the block table pins a position to a physical slot, prefix-cache hits
-  reuse both the physical blocks and the identical token ids, and
-  spec-decode rollbacks rewrite the same slots — so lookbacks read back
-  exactly what the owning request wrote. Lookback depth (3) is far inside
-  the sliding window (128), so window eviction never frees a block a
-  live lookback still needs.
-
-  Slots are not part of the KV cache, so KV loaded from another instance
-  (P/D, offload connectors) leaves them unwritten. The runner therefore
-  passes ``lookback_token_ids``, the ids just before each request's chunk
-  start, which take precedence over the slots. The V2 runner reads them
-  from its device-resident token history and needs no slot cache; the V1
-  runner's CPU token table holds placeholders for generated tokens under
-  async scheduling, so it passes prompt positions only and keeps the slot
-  cache for the rest.
+- ``lookback_token_ids``: the ids just before each request's chunk start,
+  which the runner reads from its device-resident token history.
 """
 
 import ctypes
@@ -250,40 +233,11 @@ class EngramLayout:
         return cls(config)
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def _write_hash_cache_kernel(
-    input_ids,
-    token_map,
-    dead_mask,
-    slot_mapping,
-    cache,
-    num_tokens,
-    input_stride,
-    mask_stride,
-    slot_stride,
-    BLOCK_SIZE: tl.constexpr,
-    dead_id,
-):
-    token_idx = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    slot = tl.load(
-        slot_mapping + token_idx * slot_stride, token_idx < num_tokens, other=-1
-    ).to(tl.int64)
-    valid = (token_idx < num_tokens) & (slot >= 0)
-    token = tl.load(input_ids + token_idx * input_stride, valid, other=0)
-    value = tl.load(token_map + token, valid, other=0)
-    dead = tl.load(dead_mask + token_idx * mask_stride, valid, other=False)
-    value = tl.where(dead, dead_id, value)
-    tl.store(cache + slot, value, valid)
-
-
 # Keep request shapes out of the cache key so one warmed variant covers runtime batches.
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
-        "num_slots",
         "num_query_rows",
-        "num_table_rows",
-        "max_blocks",
     ]
 )
 def _hash_ids_kernel(
@@ -291,28 +245,20 @@ def _hash_ids_kernel(
     token_map,
     dead_mask,
     positions,
-    block_table,
     query_start_loc,
     multipliers,
     primes,
     offsets,
-    cache,
     lookback_token_ids,
     lookback_dead_mask,
     output,
     num_tokens,
-    num_slots,
     pad_id,
     input_stride,
     mask_stride,
     position_stride,
-    table_stride,
-    table_col_stride,
     query_stride,
     num_query_rows,
-    num_table_rows,
-    max_blocks,
-    cache_block_size,
     MAX_NGRAM: tl.constexpr,
     num_heads,
     BLOCK_T: tl.constexpr,
@@ -382,28 +328,8 @@ def _hash_ids_kernel(
         )
         window_source = tl.where(window_dead, dead_id, window_source)
 
-        if cache is not None:
-            clamped = tl.minimum(
-                tl.maximum(lookback, 0), max_blocks * cache_block_size - 1
-            )
-            block_row = tl.minimum(req, num_table_rows - 1)
-            needs_cache = valid & ~in_batch & ~known
-            block = tl.load(
-                block_table
-                + block_row * table_stride
-                + (clamped // cache_block_size) * table_col_stride,
-                needs_cache,
-                other=0,
-            ).to(tl.int64)
-            slot = tl.minimum(
-                tl.maximum(block * cache_block_size + clamped % cache_block_size, 0),
-                num_slots - 1,
-            )
-            fallback = tl.load(cache + slot, needs_cache, other=0)
-        else:
-            fallback = tl.full((BLOCK_T,), pad_id, tl.int32)
         source = tl.where(
-            in_batch, batch_source, tl.where(known, window_source, fallback)
+            in_batch, batch_source, tl.where(known, window_source, pad_id)
         ).to(tl.int64)
         blocked |= (lookback < 0) | (source == dead_id)
         value = tl.where(blocked, pad_id, source)
@@ -424,9 +350,7 @@ def _hash_ids_kernel(
 class NgramHashState(nn.Module):
     """Maps each position to the hash ids of the n-grams ending there.
 
-    Stateless on the V2 runner, which supplies every lookback token id. On
-    the V1 runner it also keeps `hash_cache`, the slot-keyed rolling store
-    of compressed ids (see module docstring), for generated tokens.
+    Stateless: the runner supplies every lookback token id.
     """
 
     def __init__(
@@ -438,11 +362,7 @@ class NgramHashState(nn.Module):
         super().__init__()
         self.layout = layout
         self.swa_cache_module = swa_cache_module
-        self.block_size: int = swa_cache_module.block_size
         self.lookback_depth: int = layout.max_ngram_size - 1
-        self.use_slot_cache: bool = not vllm_config.use_v2_model_runner
-        self._cache: torch.Tensor | None = None
-        self._kv_cache_ref: weakref.ReferenceType[torch.Tensor] | None = None
 
         model_config = vllm_config.model_config
         from transformers import AutoTokenizer
@@ -478,35 +398,14 @@ class NgramHashState(nn.Module):
         )
 
     def ensure_cache(self) -> bool:
-        """Lazily size the slot-keyed cache from the bound SWA KV cache.
-
-        Returns False while the KV cache is unbound (profile run); the caller
-        skips engram hashing then. Without the slot cache only that check
-        remains.
-        """
-        kv_cache = self.swa_cache_module.kv_cache
-        if kv_cache.numel() == 0:
-            self._cache = None
-            self._kv_cache_ref = None
-            return False
-        if not self.use_slot_cache:
-            return True
-        if self._kv_cache_ref is not None and self._kv_cache_ref() is kv_cache:
-            return True
-        # Graph memory profiling binds a temporary, smaller KV cache first.
-        # Rebinding must discard its hash history without retaining KV storage.
-        self._cache = torch.zeros(
-            kv_cache.shape[0] * self.block_size,
-            dtype=torch.int32,
-            device=kv_cache.device,
-        )
-        self._kv_cache_ref = weakref.ref(kv_cache)
-        return True
+        """Return False while the KV cache is unbound (profile run); the caller
+        skips engram hashing then."""
+        return self.swa_cache_module.kv_cache.numel() > 0
 
     def dummy_hashes(
         self, input_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Participate in DP lookups without valid rows or hash-cache updates."""
+        """Participate in DP lookups without valid rows."""
         num_tokens = input_ids.shape[0]
         num_layers, max_ngram = self.multipliers.shape
         num_heads = self.primes.shape[-1]
@@ -526,15 +425,12 @@ class NgramHashState(nn.Module):
         dead_mask: torch.Tensor,
         lookback_token_ids: torch.Tensor,
         lookback_dead_mask: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-        block_table: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute [tokens, layers, hash columns] int32 n-gram hashes.
 
         History comes from the current chunk, then the runner's lookback
-        window, then the optional V1 slot cache. V2 needs only one launch.
+        window.
         """
-        cache = self._cache if self.use_slot_cache else None
         num_tokens = input_ids.shape[0]
         num_layers, max_ngram = self.multipliers.shape
         num_heads = self.primes.shape[-1]
@@ -543,50 +439,25 @@ class NgramHashState(nn.Module):
         )
         if num_tokens == 0:
             return output
-        if self.use_slot_cache:
-            assert cache is not None and slot_mapping is not None
-            assert block_table is not None
-            # Finish writes before other thread blocks read fallback history.
-            _write_hash_cache_kernel[(triton.cdiv(num_tokens, 256),)](
-                input_ids,
-                self.token_map,
-                dead_mask,
-                slot_mapping,
-                cache,
-                num_tokens,
-                input_ids.stride(0),
-                dead_mask.stride(0),
-                slot_mapping.stride(0),
-                256,
-                DEAD_ID,
-            )
         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](
             input_ids,
             self.token_map,
             dead_mask,
             positions,
-            block_table,
             query_start_loc,
             self.multipliers,
             self.primes,
             self.offsets,
-            cache,
             lookback_token_ids,
             lookback_dead_mask,
             output,
             num_tokens,
-            cache.shape[0] if cache is not None else 0,
             self.pad_id,
             input_stride=input_ids.stride(0),
             mask_stride=dead_mask.stride(0),
             position_stride=positions.stride(0),
-            table_stride=block_table.stride(0) if block_table is not None else 0,
-            table_col_stride=block_table.stride(1) if block_table is not None else 0,
             query_stride=query_start_loc.stride(0),
             num_query_rows=query_start_loc.numel() - 1,
-            num_table_rows=block_table.shape[0] if block_table is not None else 0,
-            max_blocks=block_table.shape[1] if block_table is not None else 0,
-            cache_block_size=self.block_size,
             MAX_NGRAM=max_ngram,
             num_heads=num_heads,
             BLOCK_T=32,

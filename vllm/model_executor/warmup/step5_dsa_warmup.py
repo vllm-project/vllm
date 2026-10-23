@@ -8,13 +8,12 @@ for multi-group caches, staged prefill pages) would otherwise JIT on the first
 prefill longer than top-k regions. Under DP every rank stalls on that rank.
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -50,7 +49,7 @@ def step5_dsa_warmup(worker: "Worker") -> None:
     logger.info("Warming up Step5 DSA scored prefill with %d tokens.", num_tokens)
     if runner.max_num_reqs >= 2:
         run_mixed_prefill_decode_warmup(
-            cast("GPUModelRunner", runner),
+            runner,
             worker.execute_model,
             worker.sample_tokens,
             num_tokens,

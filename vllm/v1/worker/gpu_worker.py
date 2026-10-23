@@ -10,7 +10,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -119,13 +119,9 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 
-def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
-    return (
-        2
-        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
-        else 1
-    )
+    return 2 if spec_config is not None and spec_config.use_dspark() else 1
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -158,8 +154,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -203,9 +198,8 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and not HAS_TRITON:
-            raise ValueError("Model Runner V2 requires Triton.")
+        if not HAS_TRITON:
+            raise ValueError("vLLM's model runner requires Triton.")
 
         super().__init__(
             vllm_config=vllm_config,
@@ -509,8 +503,6 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
-            if self.use_v2_model_runner:
-                logger.info_once("Using V2 Model Runner")
             warn_if_flashinfer_kernels_missing()
 
             # Set random seed.
@@ -558,7 +550,7 @@ class Worker(WorkerBase):
         init_workspace_manager(
             self.device,
             num_ubatches,
-            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            _num_workspace_lanes(self.vllm_config),
             # Scratch holds no state across steps: discard it on sleep.
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
@@ -569,21 +561,13 @@ class Worker(WorkerBase):
 
     def _make_model_runner(self) -> "GPUModelRunner":
         """Construct the platform's model runner; subclasses override this."""
-        if self.use_v2_model_runner:
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import (
-                    MMEncoderModelRunner as GPUModelRunnerV2,
-                )
-            else:
-                from vllm.v1.worker.gpu.model_runner import (  # type: ignore[assignment]
-                    GPUModelRunner as GPUModelRunnerV2,
-                )
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            # HACK(woosuk): This is a temporary fix to avoid type errors.
-            return GPUModelRunnerV2(self.vllm_config, self.device)  # type: ignore
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+            return MMEncoderModelRunner(self.vllm_config, self.device)
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-        return GPUModelRunnerV1(self.vllm_config, self.device)
+        return GPUModelRunner(self.vllm_config, self.device)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
@@ -925,10 +909,8 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
-        if not self.use_v2_model_runner:
-            return self._compile_or_warm_up_model()
-        # MRV2 warmup forwards record expert load like real ones.
-        with self.model_runner.eplb.suppress():  # type: ignore
+        # Warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():
             return self._compile_or_warm_up_model()
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
@@ -975,12 +957,9 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:  # noqa: SIM102
-            if self.vllm_config.kernel_config.enable_jit_warmup:
-                # A workspace resize after capture frees what the graphs point at.
-                warmup_kernels(
-                    self.model_runner, self.execute_model, self.sample_tokens
-                )
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            # A workspace resize after capture frees what the graphs point at.
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1061,28 +1040,6 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
-            # V1: Warm up sampler and preallocate memory buffer for logits and other
-            # sampling related tensors of max possible shape to avoid memory
-            # fragmentation issue.
-            # NOTE: This is called after `capture_model` on purpose to prevent
-            # memory buffers from being cleared by `torch.accelerator.empty_cache`.
-            max_num_reqs = min(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-            )
-
-            # We skip EPLB here since we don't want to record dummy metrics
-            hidden_states, last_hidden_states = self.model_runner._dummy_run(
-                num_tokens=max_num_reqs,
-                skip_eplb=True,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            )
-            if self.model_runner.is_pooling_model:
-                self.model_runner._dummy_pooler_run(hidden_states)
-            else:
-                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
-
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(
@@ -1133,11 +1090,8 @@ class Worker(WorkerBase):
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         """Let the configured profiler observe CUDA graph capture."""
-        if not self.use_v2_model_runner:
-            return nullcontext()
         if self.profiler is None:
-            model_runner = cast("GPUModelRunnerV2", self.model_runner)
-            if not model_runner.needs_cudagraph_capture():
+            if not self.model_runner.needs_cudagraph_capture():
                 return nullcontext()
             self.profiler = create_graph_capture_profiler(
                 self.profiler_config, global_rank=self.rank
@@ -1354,12 +1308,8 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if (
-                self.use_v2_model_runner
-                and self.model_runner.is_pooling_model
-                and output is None
-            ):
-                output = self.model_runner.pool()  # type: ignore
+            if self.model_runner.is_pooling_model and output is None:
+                output = self.model_runner.pool()
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
@@ -1381,8 +1331,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()  # type: ignore
+        if self.model_runner.is_pooling_model:
+            return self.model_runner.pool()
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

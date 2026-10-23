@@ -180,11 +180,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         # update_block_table() keeps the source group's batch-level FULL graph
-        # buffers, so only MRV2, which also reuses metadata at capture, may use
-        # it.
+        # buffers, which is safe because the runner reuses metadata at capture.
         self.supports_update_block_table = (
-            vllm_config.use_v2_model_runner
-            and device.type == "cuda"
+            device.type == "cuda"
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
         )

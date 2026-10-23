@@ -304,9 +304,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
-- Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
-- Global custom logits processors are unavailable because Model Runner V2 does
-  not support them.
+- Global custom logits processors are not supported.

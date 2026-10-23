@@ -7,7 +7,7 @@ Trace replay forces the engine to emit a predetermined token sequence during dec
 
 ## Requirements
 
-Trace replay reserves a per-request trace buffer, so it is off by default. Enable it with `--enable-trace-replay` (or `LLM(..., enable_trace_replay=True)`). It is only supported by model runner V2; requests are rejected when either condition is not met.
+Trace replay reserves a per-request trace buffer, so it is off by default. Enable it with `--enable-trace-replay` (or `LLM(..., enable_trace_replay=True)`). Requests that ask for trace replay are rejected when it is not enabled.
 
 ## Usage
 

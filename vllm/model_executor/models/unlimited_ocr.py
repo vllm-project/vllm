@@ -34,15 +34,6 @@ is incompatible (its ViT path asserts on the varlen cu_seqlens metadata that thi
 CLIP encoder never builds). We default the encoder to FlashAttention and
 transparently fall back to it if FlashInfer is requested.
 
-To suppress repetition on long documents, use ``NGramPerReqLogitsProcessor`` from
-this module (same request-level processor as DeepSeek-OCR) with::
-
-    SamplingParams(
-        temperature=0.0,
-        max_tokens=8192,
-        extra_args={"ngram_size": 35, "window_size": 128},
-    )
-
 Image processing
 ----------------
 Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), i.e.
@@ -90,11 +81,9 @@ from .deepseek_ocr import (
     DeepseekOCRForCausalLM,
     DeepseekOCRMultiModalProcessor,
     DeepseekOCRProcessingInfo,
-    NGramPerReqLogitsProcessor,
 )
 
 __all__ = [
-    "NGramPerReqLogitsProcessor",
     "UnlimitedOCRForCausalLM",
 ]
 

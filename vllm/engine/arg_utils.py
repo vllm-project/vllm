@@ -134,7 +134,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:

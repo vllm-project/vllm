@@ -30,11 +30,6 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             raise ValueError(
                 "extract_hidden_states requires num_speculative_tokens to be 1"
             )
-        if self.speculative_config.disable_padded_drafter_batch:
-            raise ValueError(
-                "disable_padded_drafter_batch is not supported with "
-                "extract_hidden_states method"
-            )
 
         self.supports_mm_inputs = False
         layer_ids = getattr(

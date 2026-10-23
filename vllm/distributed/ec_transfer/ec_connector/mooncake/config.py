@@ -106,8 +106,6 @@ class MooncakeECConfig:
                 raise ValueError(
                     "cross_encoder_cache requires an Encoder-only producer"
                 )
-            if not vllm_config.use_v2_model_runner:
-                raise ValueError("cross_encoder_cache requires Model Runner V2")
             if vllm_config.lora_config is not None:
                 raise ValueError("cross_encoder_cache does not support LoRA")
             mm_config = vllm_config.model_config.multimodal_config

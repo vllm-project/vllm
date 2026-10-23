@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed import (
@@ -56,7 +55,6 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.eplb_utils import preserve_serving_state
-from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
 logger = init_logger(__name__)
@@ -434,22 +432,13 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        manager = getattr(self.worker.model_runner, "cudagraph_manager", None)
-        speculator = getattr(self.worker.model_runner, "speculator", None)
-        if manager is not None:
-            # MRV2 captures through CudaGraphManager instead of wrapping the
-            # model, so neither wrapper branch below ever fires.
-            manager.release_graphs()
-            for attr in vars(speculator).values() if speculator else ():
-                if isinstance(attr, CudaGraphManager):
-                    attr.release_graphs()
-
-        elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            self.worker.model_runner.model.clear_graphs()
+        runner = self.worker.model_runner
+        if runner.cudagraph_manager is not None:
+            runner.cudagraph_manager.release_graphs()
+        speculator = runner.speculator
+        for attr in vars(speculator).values() if speculator else ():
+            if isinstance(attr, CudaGraphManager):
+                attr.release_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
@@ -709,17 +698,12 @@ class ElasticEPScalingExecutor:
         runner = self.worker.model_runner
         all2all_manager = get_ep_all2all_manager()
         reuse_kernel = self._can_reuse_fused_moe_kernel()
-        serving_state = (
-            preserve_serving_state(runner)
-            if self.worker.use_v2_model_runner
-            else runner.preserve_serving_state()
-        )
         with (
             skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
             self._suppress_eplb(),
-            serving_state,
+            preserve_serving_state(runner),
         ):
             runner._dummy_run(
                 runner.max_num_tokens,

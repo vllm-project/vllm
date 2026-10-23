@@ -44,8 +44,6 @@ anyio==4.14.2
     #   watchfiles
 apache-tvm-ffi==0.1.13.post3
     # via xgrammar
-arctic-inference==0.2.0
-    # via -r requirements/test/xpu.in
 astor==0.8.1
     # via depyf
 attrs==26.1.0
