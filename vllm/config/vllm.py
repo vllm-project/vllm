@@ -3336,7 +3336,7 @@ class VllmConfig:
     def finalize_kv_cache_layout(
         self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Finalize layout-dependent config in the core and workers before profiling."""
+        """Finalize layout-dependent config once in the engine core before profiling."""
         if (
             not kv_cache_groups
             or self.kv_transfer_config is None

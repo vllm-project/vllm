@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -110,11 +110,13 @@ class WorkerBase:
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
     def set_kv_cache_layout(
-        self, kv_cache_layout: str, global_kv_cache_groups: list[KVCacheGroupSpec]
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
     ) -> None:
-        """Adopt the core's KV cache layout and finalize config from its groups."""
+        """Assign the KV cache layout and CP interleave size resolved by the core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
-        self.vllm_config.finalize_kv_cache_layout(global_kv_cache_groups)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
