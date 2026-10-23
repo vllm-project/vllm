@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
-    VLLM_HTTP_MAX_JSON_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
+    VLLM_HTTP_MAX_REQUEST_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -1135,10 +1135,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
     ),
-    # Maximum HTTP request body size in bytes accepted by the API server.
-    # Only enforced by the Rust frontend; the Python frontend has no limit.
-    "VLLM_HTTP_MAX_JSON_BODY_SIZE": lambda: int(
-        os.environ.get("VLLM_HTTP_MAX_JSON_BODY_SIZE", str(32 * 1024 * 1024))
+    # Maximum request body size in bytes accepted by the HTTP API server; 0
+    # removes the limit. Only enforced by the Rust frontend; the Python
+    # frontend has no limit.
+    "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": lambda: int(
+        os.environ.get("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", str(32 * 1024 * 1024))
     ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent
@@ -2409,7 +2410,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
-        "VLLM_HTTP_MAX_JSON_BODY_SIZE",
+        "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",

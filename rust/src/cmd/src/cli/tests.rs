@@ -232,6 +232,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -444,17 +445,40 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert_eq!(
+        config.api_server_options.request_body_limit_bytes,
+        Some(32 * 1024 * 1024)
+    );
 
-    // Set through `VLLM_LOG_STATS_INTERVAL` and
-    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, which bind these hidden flags.
+    // Set through `VLLM_LOG_STATS_INTERVAL`,
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, and
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
         "--disable-request-id-randomization",
         "1",
+        "--http-max-request-body-size",
+        "1048576",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert_eq!(
+        config.api_server_options.request_body_limit_bytes,
+        Some(1024 * 1024)
+    );
+    let config = parse(&["--http-max-request-body-size", "0"]);
+    assert_eq!(config.api_server_options.request_body_limit_bytes, None);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--http-max-request-body-size",
+        "32MiB",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -470,14 +494,25 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert_eq!(
+        args.api_server_options().request_body_limit_bytes,
+        Some(32 * 1024 * 1024)
+    );
 
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert_eq!(
+        args.api_server_options().request_body_limit_bytes,
+        Some(1024 * 1024)
+    );
+    let args = apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "0")]).unwrap();
+    assert_eq!(args.api_server_options().request_body_limit_bytes, None);
 
     let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
     assert_eq!(args.log_stats_interval(), None);
@@ -485,11 +520,15 @@ fn args_json_reads_env_only_settings_from_env() {
     let errors = [
         apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
+        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
     ];
     expect![[r#"
         [
             "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
+            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
         ]
     "#]]
     .assert_debug_eq(&errors);
@@ -1267,6 +1306,7 @@ fn frontend_args_accept_json() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2183,6 +2223,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2346,6 +2387,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],
@@ -2454,6 +2498,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],
@@ -2650,6 +2697,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],
