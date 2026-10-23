@@ -105,9 +105,6 @@ variants:
     # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
     # MXFP8 estimate above is used as an upper bound.
     precision: fp8
-    supported_hardware:
-      - h100
-      - h200
     vram_minimum_gb: 533
     tp: 8
     description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
@@ -118,25 +115,16 @@ variants:
       - '{"indexer_kv_dtype": "fp8"}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
-      - "--moe-backend"
-      - "marlin"
-      - "--max-model-len"
-      - "262144"
-      - "--max-num-seqs"
-      - "80"
-      - "--limit-mm-per-prompt"
-      - '{"video": 0}'
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--no-enable-log-requests"
 
 compatible_strategies:
   - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
 
-strategy_overrides:
-  single_node_tp:
-    # One GB200 tray, or half of an 8-GPU node; the fp8 variant sets TP8.
-    tp: 4
 
 hardware_overrides:
   blackwell:
