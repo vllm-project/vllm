@@ -266,7 +266,7 @@ class BlockPool:
             request.block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = block_hashes[num_cached_blocks:]
+        new_block_hashes = block_hashes[num_cached_blocks:num_full_blocks]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -379,8 +379,11 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        *,
+        start_block: int = 0,
+        num_cached_tokens: int | None = None,
     ) -> None:
-        """Generate BlockStored events for blocks reused from prefix cache.
+        """Generate BlockStored events for a contiguous span of reused blocks.
 
         Unlike cache_full_blocks(), this does NOT modify block state —
         the blocks are already cached. It only generates events so that
@@ -391,60 +394,82 @@ class BlockPool:
             num_cached_blocks: Number of blocks that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+            start_block: First reused block, for a GPU run in a mixed prefix.
+            num_cached_tokens: Absolute end of the reused prefix, bounding a
+                partial tail. Full blocks and a partial tail emit separately.
 
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
 
-        block_hashes = resolve_block_hashes(
-            request.block_hashes, self.hash_block_size, block_size
-        )
-
-        # Collect external hashes and extra_keys for cached blocks.
-        cached_hashes: list[ExternalBlockHash] = []
-        extra_keys_list: list[tuple[Any, ...] | None] = []
-        curr_mm_idx = 0
-        for i in range(num_cached_blocks):
-            block_start = i * block_size
-            block_end = block_start + block_size
-            cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+        start_token_idx = start_block * block_size
+        end_token_idx = (start_block + num_cached_blocks) * block_size
+        if num_cached_tokens is not None:
+            end_token_idx = min(
+                end_token_idx,
+                num_cached_tokens,
+                len(request.block_hashes) * self.hash_block_size,
             )
-            extra_keys_list.append(extra_keys)
-
-        if not cached_hashes:
+        if end_token_idx <= start_token_idx:
             return
 
-        # Prefix-cache hits always form a contiguous prefix starting at block 0,
-        # so the first (and thus the whole group's) parent block hash is None.
-        parent_block_hash: ExternalBlockHash | None = None
-        start_token_idx = 0
-        end_token_idx = num_cached_blocks * block_size
-
-        logger.debug(
-            "EmitCachedBlock event: block_size=%d, "
-            "num_cached_blocks=%d, parent_block_hash=%s, "
-            "token_ids_len=%d, group_idx=%s",
-            block_size,
-            num_cached_blocks,
-            parent_block_hash,
-            len(request.all_token_ids[start_token_idx:end_token_idx]),
-            kv_cache_group_id,
-        )
-
-        self.kv_event_queue.append(
-            self._build_block_stored_event(
-                request,
-                block_hashes=cached_hashes,
-                parent_block_hash=parent_block_hash,
-                start_token_idx=start_token_idx,
-                end_token_idx=end_token_idx,
-                block_size=block_size,
-                kv_cache_group_id=kv_cache_group_id,
-                extra_keys_list=extra_keys_list,
+        full_end_token_idx = end_token_idx // block_size * block_size
+        spans = [(start_token_idx, full_end_token_idx, block_size)]
+        if full_end_token_idx < end_token_idx:
+            spans.append(
+                (
+                    full_end_token_idx,
+                    end_token_idx,
+                    end_token_idx - full_end_token_idx,
+                )
             )
-        )
+
+        curr_mm_idx = 0
+        for start, end, event_block_size in spans:
+            if start == end:
+                continue
+            cached_hashes: list[ExternalBlockHash] = []
+            extra_keys_list: list[tuple[Any, ...] | None] = []
+            for block_start in range(start, end, event_block_size):
+                block_end = block_start + event_block_size
+                hash_idx = block_end // self.hash_block_size - 1
+                cached_hashes.append(
+                    maybe_convert_block_hash(request.block_hashes[hash_idx])
+                )
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, block_start, block_end, curr_mm_idx
+                )
+                extra_keys_list.append(extra_keys)
+
+            parent_hash_idx = start // self.hash_block_size - 1
+            parent_block_hash = (
+                maybe_convert_block_hash(request.block_hashes[parent_hash_idx])
+                if start
+                else None
+            )
+
+            logger.debug(
+                "EmitCachedBlock event: block_size=%d, "
+                "num_cached_blocks=%d, parent_block_hash=%s, "
+                "token_ids_len=%d, group_idx=%s",
+                event_block_size,
+                len(cached_hashes),
+                parent_block_hash,
+                end - start,
+                kv_cache_group_id,
+            )
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=cached_hashes,
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=start,
+                    end_token_idx=end,
+                    block_size=event_block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=extra_keys_list,
+                )
+            )
 
     def cache_partial_block(
         self,
