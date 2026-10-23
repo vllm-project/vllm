@@ -69,7 +69,7 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 64
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
