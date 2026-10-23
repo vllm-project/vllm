@@ -17,7 +17,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_nvfp4_kv_head_dim_512
 from vllm.utils.torch_utils import (
@@ -279,6 +279,7 @@ def _run_trtllm_integration(
     model_name=MODEL,
     head_size=None,
     block_size=BLOCK_SIZE,
+    num_spec_tokens=0,
 ):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
@@ -293,6 +294,10 @@ def _run_trtllm_integration(
     )
     vllm_config.attention_config.use_trtllm_attention = True
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    if num_spec_tokens:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=num_spec_tokens
+        )
 
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config
@@ -426,8 +431,9 @@ def _run_trtllm_integration(
         )
 
         # Verify the correct TRTLLM metadata types were produced.
-        has_prefills = any(ql > 1 for ql in batch_spec.query_lens)
-        has_decodes = any(ql == 1 for ql in batch_spec.query_lens)
+        decode_threshold = 1 + num_spec_tokens
+        has_prefills = any(ql > decode_threshold for ql in batch_spec.query_lens)
+        has_decodes = any(ql <= decode_threshold for ql in batch_spec.query_lens)
 
         if has_prefills:
             assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
@@ -564,6 +570,63 @@ def test_trtllm_gen_nvfp4_kv_head_dim_512_integration(batch_spec_name: str):
         head_size=512,
         block_size=64,  # Gemma 4 page size
     )
+
+
+@needs_flashinfer_nvfp4_head_dim_512
+@pytest.mark.usefixtures("workspace_init")
+@torch.inference_mode()
+def test_trtllm_gen_nvfp4_kv_head_dim_512_spec_decode():
+    """PrimTS decodes uniform multi-token (MTP verification) queries."""
+    _run_trtllm_integration(
+        BatchSpec(seq_lens=[128, 256, 512], query_lens=[3, 3, 3]),
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+        head_size=512,
+        block_size=64,
+        num_spec_tokens=2,
+    )
+
+
+@needs_flashinfer_nvfp4_head_dim_512
+@torch.inference_mode()
+def test_prims_ts_draft_decode_metadata_refreshes_seq_lens(monkeypatch):
+    """Fused draft steps advance seq_lens in place; PrimTS reads a clamped copy
+    that update_draft_decode_metadata() must refresh."""
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.supports_trtllm_attention",
+        unittest.mock.Mock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        partial(_mock_get_per_layer_parameters, head_size=512),
+    )
+    vllm_config = create_vllm_config(
+        model_name=MODEL_NVFP4, block_size=64, num_gpu_blocks=NUM_GPU_BLOCKS
+    )
+    vllm_config.cache_config.cache_dtype = "nvfp4"
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    kv_cache_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=512,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["test_layer_0"], vllm_config, device
+        )
+    assert builder.supports_draft_decode_metadata_update
+
+    step = create_common_attn_metadata(BATCH_SPECS["decode_only"], 64, device)
+    metadata = builder.build(common_prefix_len=0, common_attn_metadata=step)
+    step.seq_lens.add_(1)
+    builder.update_draft_decode_metadata(metadata)
+    assert isinstance(metadata.decode, FlashInferTrtllmAPIDecode)
+    assert torch.equal(metadata.decode.seq_lens, step.seq_lens)
 
 
 @torch.inference_mode()
