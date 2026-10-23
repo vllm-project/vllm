@@ -772,7 +772,6 @@ steps:
       - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
     matrix:
       - "cuda-13-0"
-      - "cuda-13-0-ubuntu-24-04"
       - "rocm"
       - "rocm72"
       - "xpu"
