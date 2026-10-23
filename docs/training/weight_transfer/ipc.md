@@ -157,10 +157,10 @@ worker to participate.
 
 - **Colocated only.** Each trainer rank shares memory with the inference worker
   on its own GPU; trainer and inference on separate GPUs need another backend.
-- **No pipeline-parallel trainers.** Every trainer rank serves its colocated
-  worker the whole model, so every rank must own every parameter. A source whose
-  ranks own different parameters (pipeline stages, or experts held by only some
-  ranks) is rejected at `trainer_init`.
+- **Pipeline-parallel trainers are not supported yet (work in progress).** Every
+  trainer rank serves its colocated worker the whole model, so every rank must
+  own every parameter. A source whose ranks own different parameters (pipeline
+  stages, or experts held by only some ranks) is rejected at `trainer_init`.
 - **A full copy per GPU.** Each rank materializes every parameter in full on its
   GPU. Unpacked, the whole model stays resident until the round finishes; set
   `packed=True` to bound it to one chunk.

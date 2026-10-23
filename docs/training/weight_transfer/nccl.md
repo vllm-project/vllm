@@ -275,9 +275,10 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 
 ## Limitations
 
-- **No pipeline-parallel trainers.** Rank 0 is the only sender, so it must own
-  every parameter (see [One sender](#one-sender)). A source whose ranks own
-  different parameters is rejected at the first `send_weights`.
+- **Pipeline-parallel trainers are not supported yet (work in progress).** Rank 0
+  is the only sender, so it must own every parameter (see
+  [One sender](#one-sender)). A source whose ranks own different parameters is
+  rejected at the first `send_weights`.
 - **Full tensors on the wire.** Rank 0 materializes each parameter in full and
   every worker receives all of it, whatever its tensor-parallel shard. For
   large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or
