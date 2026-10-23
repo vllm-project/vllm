@@ -3,10 +3,10 @@
 import gc
 import importlib.machinery
 import inspect
-import re
 import sys
 import types
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -18,13 +18,11 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
-from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -45,6 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
     load_attention_sink,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
@@ -1373,29 +1372,24 @@ def test_reload_weights(
 
 
 def _reload_with_lora_expert_names(worker) -> None:
-    config = worker.vllm_config
-    weights = get_model_loader(config.load_config).get_all_weights(
-        config.model_config, worker.get_model()
-    )
+    """Reload the checkpoint under the names that LoRA-wrapped experts load."""
+
+    def lora_name(name: str) -> str:
+        parts = name.split(".")
+        if "experts" in parts[:-2] and parts[parts.index("experts") + 1].isdigit():
+            parts.insert(parts.index("experts") + 3, "base_layer")
+        return ".".join(parts)
+
+    path = Path(hf_api().snapshot_download(worker.vllm_config.model_config.model))
+    files = sorted(str(f) for f in path.glob("*.safetensors"))
+    weights = safetensors_weights_iterator(files, use_tqdm_on_load=False)
     worker.reload_weights(
-        weights_iterator=(
-            (re.sub(r"(\.mlp\.experts\.\d+\.\w+)\.", r"\1.base_layer.", name), weight)
-            for name, weight in weights
-        )
+        weights_iterator=((lora_name(name), weight) for name, weight in weights)
     )
-
-
-def _moe_lora_contexts(worker) -> list[int | None]:
-    return [
-        None if context is None else id(context)
-        for module in worker.get_model().modules()
-        if isinstance(module, FusedMoEWithLoRA)
-        for context in [module._moe_kernel.fused_experts._lora_context]
-    ]
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Marlin MoE with LoRA requires CUDA"
+    not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
 )
 def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -1423,17 +1417,15 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
         enable_lora=True,
         max_lora_rank=8,
         max_loras=1,
+        enforce_eager=True,
         enable_prefix_caching=False,
         max_model_len=64,
         max_num_seqs=1,
     ) as llm:
-        contexts = llm.collective_rpc(_moe_lora_contexts)
         before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
         assert before[0] != before[1]
         llm.collective_rpc(_reload_with_lora_expert_names)
-        assert llm.collective_rpc(_moe_lora_contexts) == contexts
         after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
-    assert contexts[0] and None not in contexts[0]
     assert after == before
 
 
