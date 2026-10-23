@@ -38,6 +38,8 @@ class PromptLogprobsWorker:
         self.max_num_reqs = max_num_reqs
         self.device = device
         self.logprobs_mode = logprobs_mode
+        # profile_run measures one logits row per request.
+        self.chunk_size = min(CHUNK_SIZE, max_num_reqs)
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -102,8 +104,8 @@ class PromptLogprobsWorker:
             lo = max(req.start, chunk_start)
             hi = min(chunk_end, prompt_len - 1)
             base = int(input_batch.query_start_loc_np[i]) - chunk_start
-            for a in range(lo, hi, CHUNK_SIZE):
-                b = min(a + CHUNK_SIZE, hi)
+            for a in range(lo, hi, self.chunk_size):
+                b = min(a + self.chunk_size, hi)
                 logits = logits_fn(hidden_states[base + a : base + b])
                 ids = req.token_ids[a - req.start : b - req.start]
                 req.scores[a - req.start : b - req.start] = (
@@ -169,6 +171,7 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                chunk_size=self.chunk_size,
             )
         )
 
@@ -286,6 +289,7 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    chunk_size: int = CHUNK_SIZE,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -294,8 +298,8 @@ def compute_prompt_logprobs_with_chunking(
     ranks = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
+    for start_idx in range(0, prompt_token_ids.shape[0], chunk_size):
+        end_idx = start_idx + chunk_size
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
         requested_num = (
