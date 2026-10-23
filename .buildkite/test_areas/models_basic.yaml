@@ -122,8 +122,11 @@ steps:
   source_file_dependencies:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
+  - tests/models/minimax_m3/test_index_cache_overrides.py
+  - vllm/model_executor/models/config.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -154,6 +157,17 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s models/inkling/rocm
+
+- label: ":nvidia: (B200) Flint"
+  key: flint-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+    - uv pip install --system 'gguf>=0.19.0'
+    - pytest -v -s models/flint
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
