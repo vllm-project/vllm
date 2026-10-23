@@ -327,7 +327,7 @@ def build(key: Build):
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa", kvl="lbhnc")
+        FA = attn_frag.make(S // 8, key.attn == "swa")
         FaLds = FA.Lds
         _KEYSTR = (
             _KEYSTR + FA.key
@@ -1452,7 +1452,7 @@ def build(key: Build):
         else:
             # attn_o is the fragment's descriptor; ng polls the merged rows (tagged pairs)
             attn_o, ao_t = FA.run(
-                attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek(), True, layer
+                attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek()
             )
             ao = (ao_t, health)
             o_ops = o_loads(w_o, bid, lane, wave)

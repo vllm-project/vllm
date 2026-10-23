@@ -373,7 +373,7 @@ def build(key: Build):
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa", kvl="lbhnc")
+        FA = attn_frag.make(S // 8, key.attn == "swa")
         FaLds = FA.Lds
         _KEYSTR = (
             _KEYSTR + FA.key
@@ -2252,8 +2252,6 @@ def build(key: Build):
                 lane,
                 wave,
                 sl.fa_.peek(),
-                True,
-                layer,
             )
             ao = (ao_t, health)
         o_ops = o_loads(w_o, bid, lane, wave)
