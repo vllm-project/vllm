@@ -66,6 +66,7 @@ class ToolCallSlot:
         "_args_parts",
         "_args_joined",
         "name_sent",
+        "properties",
         "string_keys",
         "_streamed_parts",
         "_streamed_joined",
@@ -79,6 +80,7 @@ class ToolCallSlot:
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
+        self.properties: dict | None = None
         self.string_keys: set[str] | None = None
         self._streamed_parts: list[str] = []
         self._streamed_joined: str | None = ""
@@ -645,7 +647,7 @@ class ParserEngine(Parser):
     def _streaming_safe_args(
         self,
         args_json: str,
-        func_name: str,
+        properties: dict | None,
         string_keys: set[str] | None,
     ) -> tuple[str, bool]:
         """Correct *args_json* and return its safe streamed prefix.
@@ -656,9 +658,7 @@ class ParserEngine(Parser):
         holds however the model formats its JSON.  Trailing literals are
         treated as still growing: they are only corrected once delimited.
         """
-        rewritten = _ArgsRewriter(
-            args_json, find_tool_properties(self._tools, func_name), final=False
-        ).rewrite()
+        rewritten = _ArgsRewriter(args_json, properties, final=False).rewrite()
         return self._safe_arg_prefix(rewritten, string_keys)
 
     def _is_valid_tool_name(self, name: str) -> bool:
@@ -1151,9 +1151,8 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
-        slot.string_keys = self._streamable_string_keys(
-            find_tool_properties(self._tools, name)
-        )
+        slot.properties = find_tool_properties(self._tools, name)
+        slot.string_keys = self._streamable_string_keys(slot.properties)
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -1209,9 +1208,8 @@ class ParserEngine(Parser):
             if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
-                slot.string_keys = self._streamable_string_keys(
-                    find_tool_properties(self._tools, name)
-                )
+                slot.properties = find_tool_properties(self._tools, name)
+                slot.string_keys = self._streamable_string_keys(slot.properties)
                 self._ensure_tool_id(slot, name)
                 deltas.append(
                     DeltaToolCall(
@@ -1301,7 +1299,7 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         # Reached only once the name was accepted, so slot.name is set.
         safe_json, value_streams = self._streaming_safe_args(
-            current_json, slot.name, slot.string_keys
+            current_json, slot.properties, slot.string_keys
         )
 
         if not safe_json:
