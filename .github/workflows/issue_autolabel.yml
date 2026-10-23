@@ -232,6 +232,12 @@ jobs:
               minimax: {
                 substrings: [{ term: "minimax", searchIn: "title" }],
               },
+              M3: {
+                regexPatterns: [{ pattern: "\\bminimax[-\\s_]?m3\\b(?![._]\\d)", flags: "gi", searchIn: "title" }],
+              },
+              "M3.1": {
+                regexPatterns: [{ pattern: "\\bminimax[-\\s_]?m3[._]1\\b(?![._]\\d)", flags: "gi", searchIn: "title" }],
+              },
               inkling: {
                 keywords: [{ term: "Inkling", searchIn: "title" }],
               },
