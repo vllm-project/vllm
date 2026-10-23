@@ -215,11 +215,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         self, e: GenerationError
     ) -> str:
         """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
+        return self.create_streaming_error_response(e)
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
@@ -359,6 +355,32 @@ def decode_token_ids(
         token_str = next(decoded)
         out.append((token_str, list(token_str.encode("utf-8", errors="replace"))))
     return out
+
+
+def chat_top_logprobs_limit(
+    top_logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/chat/completions`
+    returns, in the engine's order (sampled token first): the first
+    ``top_logprobs``, none when it is unset, and all of them (``None``) for
+    ``top_logprobs=-1`` or ``logprob_token_ids`` (``return_all``). Shared with
+    chat derender so the two cannot drift."""
+    if return_all or top_logprobs == -1:
+        return None
+    return top_logprobs or 0
+
+
+def completion_top_logprobs_limit(
+    logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/completions` returns:
+    the first ``logprobs + 1`` (the OpenAI completions convention), and all of
+    them (``None``) for ``logprobs=-1``, ``logprob_token_ids`` (``return_all``)
+    or when ``logprobs`` is unset. Shared with completions derender so the two
+    cannot drift."""
+    if return_all or logprobs is None or logprobs == -1:
+        return None
+    return max(logprobs + 1, 0)
 
 
 def clamp_prompt_logprobs(
