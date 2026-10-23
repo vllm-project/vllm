@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
@@ -28,6 +30,7 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    run_proposal: bool = False,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -50,7 +53,7 @@ def _run_prepare(
         seq_lens_cpu_upper_bound=torch.tensor([target_positions[-1] + 1]),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
-        idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
+        idx_mapping=torch.tensor([2], dtype=torch.int64, device=device),
     )
     query_slot_mapping = torch.full(
         (max_num_tokens,), -2, dtype=torch.int64, device=device
@@ -119,14 +122,37 @@ def _run_prepare(
         max_model_len=128,
         sample_from_anchor=True,
     )
+    if run_proposal:
+        draft.pcp_manager = object()
+        draft.block_tables.gather_block_tables = lambda *args, **kwargs: None
+        draft.query_cudagraph_manager = SimpleNamespace(
+            run_fullgraph=lambda *args: None
+        )
+        draft._prepare_graph_replay = lambda *args: None
+        draft._prepare_eplb_forward = lambda *args: None
+        draft.supports_decode_metadata_update = True
+        draft.draft_tokens = torch.full(
+            (max_num_reqs, num_speculative_steps), -1, dtype=torch.int64, device=device
+        )
+        draft.draft_logits = torch.full(
+            (max_num_reqs, num_speculative_steps, 8), -1.0, device=device
+        )
     with (
         patch(
             "vllm.v1.worker.gpu.spec_decode.dflash.speculator.dispatch_cg_and_sync_dp",
-            side_effect=InputsPrepared,
+            side_effect=None if run_proposal else InputsPrepared,
+            return_value=(
+                SimpleNamespace(
+                    num_tokens=num_speculative_steps,
+                    num_reqs=1,
+                    cg_mode=CUDAGraphMode.FULL,
+                ),
+                None,
+            ),
         ),
-        pytest.raises(InputsPrepared),
+        nullcontext() if run_proposal else pytest.raises(InputsPrepared),
     ):
-        DFlashSpeculator.propose(
+        draft_tokens = DFlashSpeculator.propose(
             draft,
             input_batch,
             {},
@@ -151,7 +177,31 @@ def _run_prepare(
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
         seeds=seeds.cpu(),
+        draft_tokens=draft_tokens.cpu() if run_proposal else None,
+        draft_logits=draft.draft_logits.cpu() if run_proposal else None,
     )
+
+
+def test_pcp_proposal_sync_preserves_request_state_slots():
+    """A request at slot 2 receives its proposal distribution after batch shrinkage."""
+    root_tokens = torch.tensor([[11, 12, 13]], device="cuda")
+    root_logits = torch.arange(24, device="cuda", dtype=torch.float32).view(1, 3, 8)
+    broadcasts = iter([root_tokens, root_logits])
+    group = SimpleNamespace(
+        broadcast=lambda tensor, src: tensor.copy_(next(broadcasts))
+    )
+    with patch(
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator.get_pcp_group",
+        return_value=group,
+    ):
+        out = _run_prepare(
+            target_positions=[10, 11, 12, 13],
+            block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+            run_proposal=True,
+        )
+    torch.testing.assert_close(out.draft_tokens, root_tokens.cpu())
+    torch.testing.assert_close(out.draft_logits[2], root_logits[0].cpu())
+    assert (out.draft_logits[[0, 1, 3]] == -1).all()
 
 
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
