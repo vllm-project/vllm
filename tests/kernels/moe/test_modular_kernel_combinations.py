@@ -997,15 +997,25 @@ def _aiter_padding_matrix_worker(
         return
 
     if is_mxfp4:
-        # atol=1e-1 dwarfs the ~1e-2 reference signal, so a magnitude-only
-        # guard can't catch a sign-flipped (same-magnitude) mk_out. Cosine
-        # similarity can: gfx950 measures 0.79-0.99 correct vs. <=0.01 corrupted.
+        # Cosine similarity catches a sign-flipped (same-magnitude) mk_out
+        # that a magnitude-only guard can't: gfx950 measures 0.79-0.99
+        # correct vs. <=0.01 corrupted. It's scale-invariant though, so the
+        # magnitude guard below still runs too -- atol=1e-1 dwarfs the
+        # ~1e-2 reference signal, making check_accuracy alone too loose to
+        # catch a uniform magnitude error (e.g. rank_worker's documented
+        # ~5x-small AITER_MXFP4_BF16 bug, hypothetically recurring here).
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out.flatten().float(), ref_out.flatten().float(), dim=0
         )
         assert cos_sim > 0.5, (
             f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
             "degenerate/decorrelated, not just numerically imprecise."
+        )
+        ref_scale = ref_out.abs().mean()
+        mk_scale = mk_out.abs().mean()
+        assert mk_scale > 0.5 * ref_scale, (
+            f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+            f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
         )
         # Looser tolerance than the fp8/unquantized case below: matches
         # rank_worker's main mxfp4 sweep's atol/rtol.
@@ -1301,9 +1311,13 @@ def _aiter_token_padding_worker(
         return
 
     if config.weight_dtype == "mxfp4":
-        # atol=1e-1 dwarfs the ~1e-2 reference signal, so a magnitude-only
-        # guard can't catch a sign-flipped (same-magnitude) mk_out. Cosine
-        # similarity can: gfx950 measures 0.79-0.99 correct vs. <=0.01 corrupted.
+        # Cosine similarity catches a sign-flipped (same-magnitude) mk_out
+        # that a magnitude-only guard can't: gfx950 measures 0.79-0.99
+        # correct vs. <=0.01 corrupted. It's scale-invariant though, so the
+        # magnitude guard below still runs too -- atol=1e-1 dwarfs the
+        # ~1e-2 reference signal, making check_accuracy alone too loose to
+        # catch a uniform magnitude error (e.g. rank_worker's documented
+        # ~5x-small AITER_MXFP4_BF16 bug, hypothetically recurring here).
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out[real_rows].flatten().float(),
             ref_out[real_rows].flatten().float(),
@@ -1312,6 +1326,12 @@ def _aiter_token_padding_worker(
         assert cos_sim > 0.5, (
             f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
             "degenerate/decorrelated, not just numerically imprecise."
+        )
+        ref_scale = ref_out[real_rows].abs().mean()
+        mk_scale = mk_out[real_rows].abs().mean()
+        assert mk_scale > 0.5 * ref_scale, (
+            f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+            f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
         )
         # Looser tolerance than the fp8/unquantized case below: matches
         # rank_worker's main mxfp4 sweep's atol/rtol.
