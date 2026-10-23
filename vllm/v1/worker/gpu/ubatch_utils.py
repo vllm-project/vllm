@@ -422,6 +422,9 @@ class UBatchRunner:
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
+                    additional_kwargs={
+                        "routed_experts_token_offset": ubatch_slice.token_slice.start
+                    },
                 )
             )
         return forward_contexts

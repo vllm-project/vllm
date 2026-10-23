@@ -633,6 +633,21 @@ def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
     assert (capturer.device_buffer[stop - start :, 0] == -1).all()
 
 
+def test_routed_experts_capturer_dbo_microbatches_keep_their_rows():
+    """Each DBO microbatch writes at its token offset, not over the first one."""
+    capturer = _capturer_with_buffer(dp_rank=1)
+    topk = torch.arange(8, dtype=torch.int32).reshape(4, 2)
+    for start in (0, 2):
+        ctx = _forward_context(
+            dp_metadata=DPMetadata(num_tokens_across_dp_cpu=torch.tensor([2, 2])),
+            additional_kwargs={"routed_experts_token_offset": start},
+        )
+        with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+            capturer.capture(0, topk[start : start + 2])
+    torch.testing.assert_close(capturer.device_buffer[:4, 0], topk)
+    assert (capturer.device_buffer[4:, 0] == -1).all()
+
+
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)

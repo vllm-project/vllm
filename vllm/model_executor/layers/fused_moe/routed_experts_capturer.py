@@ -91,8 +91,12 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        ctx = get_forward_context()
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        offset = ctx.additional_kwargs.get("routed_experts_token_offset", 0)
+        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
+            local_topk_ids
+        )
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
