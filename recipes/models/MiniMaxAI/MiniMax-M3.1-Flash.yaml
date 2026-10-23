@@ -145,9 +145,13 @@ features:
         env:
           VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
           VLLM_ROCM_MINIMAX_M3_MONO: "1"
+        # Measured on MI355X only.
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+          mi350x: unsupported
       # No mono path for the other checkpoints: an empty mode, so enabling the
       # feature there changes nothing (the recipe schema wants a mode per
       # variant).
