@@ -23,7 +23,8 @@ so that:
   ``torch.accelerator.current_stream().synchronize()`` can't be patched.
 
 Copies made while torch.compile is tracing or a CUDA graph is being captured
-are left alone.
+are left alone, as are H2D copies into an existing tensor that would need a
+staging buffer larger than ``_MAX_STAGED_BYTES`` (e.g. KV cache swaps).
 """
 
 import threading
@@ -54,6 +55,8 @@ _pending_lock = threading.Lock()
 _pending: list[Future] = []
 # Raw handles of the streams registered via register_d2h_stream().
 _d2h_streams: set[int] = set()
+# Upper bound on the staging buffer an H2D copy into an existing tensor may use.
+_MAX_STAGED_BYTES = 32 << 20
 
 
 def register_d2h_stream(stream: torch.cuda.Stream) -> None:
@@ -70,6 +73,10 @@ def _staging_stream(device_index: int) -> torch.cuda.Stream:
 @cache
 def _d2h_stream(device_index: int) -> torch.cuda.Stream:
     return torch.cuda.Stream(device_index)
+
+
+def _nbytes(t: torch.Tensor) -> int:
+    return t.numel() * t.element_size()
 
 
 def _bypass() -> bool:
@@ -136,7 +143,7 @@ def _wait_pending() -> None:
 
 def _copy_(self: torch.Tensor, src: torch.Tensor, non_blocking: bool = False):
     if non_blocking and not _bypass():
-        if self.is_cuda and src.is_cpu:
+        if self.is_cuda and src.is_cpu and _nbytes(src) <= _MAX_STAGED_BYTES:
             return _h2d(src, self.device, out=self)
         if (
             self.is_cpu
