@@ -16,6 +16,7 @@ import torch
 from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     LinearMethodBase,
+    register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -41,6 +42,7 @@ def block_hadamard_rotate(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tens
     return rotated.flatten(-2).to(x.dtype)
 
 
+@register_weight_loader_v2_supported_method
 class InputHadamardLinearMethod(LinearMethodBase):
     """Wraps a linear method and rotates the layer input by an orthonormal
     block Hadamard matrix before the wrapped `apply`, in the manner of
@@ -60,8 +62,6 @@ class InputHadamardLinearMethod(LinearMethodBase):
     def __init__(
         self, quant_method: LinearMethodBase, size: int, rotate_weight: bool
     ) -> None:
-        if size <= 0 or size & (size - 1):
-            raise ValueError(f"Hadamard size must be a power of two, got {size}")
         self.quant_method = quant_method
         self.size = size
         self.rotate_weight = rotate_weight
@@ -85,7 +85,7 @@ class InputHadamardLinearMethod(LinearMethodBase):
                 f"Input size per partition {input_size_per_partition} is not "
                 f"divisible by the Hadamard size {self.size}."
             )
-        # This class is in WEIGHT_LOADER_V2_SUPPORTED; hand v1 to wrapped
+        # This class is registered for weight_loader_v2; hand v1 to wrapped
         # methods that are not, as CompressedTensorsLinearTransformMethod does.
         if self.quant_method.__class__.__name__ not in WEIGHT_LOADER_V2_SUPPORTED:
             extra_weight_attrs["weight_loader"] = layer.weight_loader

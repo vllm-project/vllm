@@ -267,19 +267,17 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
-        if spec.hadamard_size is not None:
-            if spec.hadamard_size <= 0 or spec.hadamard_size & (spec.hadamard_size - 1):
-                raise ValueError(
-                    f"hadamard_size must be a power of two, got {spec.hadamard_size}"
-                )
-            # TODO: InputHadamardLinearMethod is format-agnostic; allow the
-            # remaining linear methods and MoE once validated.
-            if cls not in _ONLINE_HADAMARD_LINEAR_METHODS:
-                raise NotImplementedError(
-                    f"hadamard_size is not yet supported for online {cls.__name__}; "
-                    "supported: "
-                    f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
-                )
+        # TODO: InputHadamardLinearMethod is format-agnostic; allow the
+        # remaining linear methods and MoE once validated.
+        if (
+            spec.hadamard_size is not None
+            and cls not in _ONLINE_HADAMARD_LINEAR_METHODS
+        ):
+            raise NotImplementedError(
+                f"hadamard_size is not yet supported for online {cls.__name__}; "
+                "supported: "
+                f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
+            )
         return cls
 
     def resolve_quant_method_cls(

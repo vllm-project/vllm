@@ -51,7 +51,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
-    "InputHadamardLinearMethod",
     "QutlassNvFP4LinearMethod",
     "AutoAWQMarlinLinearMethod",
     "AutoAWQLinearMethod",

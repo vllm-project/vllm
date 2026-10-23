@@ -95,6 +95,13 @@ class QuantSpec:
     unchanged up to quantization error, which the rotation shrinks by spreading
     outliers across each block. Linear layers only; validated with MXFP4."""
 
+    @field_validator("hadamard_size")
+    @classmethod
+    def _check_hadamard_size(cls, size: int | None) -> int | None:
+        if size is not None and (size <= 0 or size & (size - 1)):
+            raise ValueError(f"hadamard_size must be a power of two, got {size}")
+        return size
+
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:
             if quant_key is None:

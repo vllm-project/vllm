@@ -272,11 +272,8 @@ def test_mxfp4_hadamard32_target_resolves_to_rotated_mxfp4_linear():
 
 @pytest.mark.parametrize("size", [0, 24, 33])
 def test_hadamard_size_must_be_power_of_two(size):
-    config = OnlineQuantizationConfig(
-        quant_config_args(linear={"weight": kMxfp4Static, "hadamard_size": size})
-    )
     with pytest.raises(ValueError, match="power of two"):
-        config.resolve_quant_method_cls(LinearBase, "model.layers.0.mlp.down_proj")
+        quant_config_args(linear={"weight": kMxfp4Static, "hadamard_size": size})
 
 
 @pytest.mark.parametrize(
