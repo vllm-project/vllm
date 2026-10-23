@@ -182,6 +182,7 @@ class AdaptiveVerificationManager:
         # arrived; older copies hold a previous request's confidences.
         self._step = 0
         self._copy_step = [0, 0]
+        # int64 so step counts never overflow (~29M years at 10k steps/s).
         self._added_step = np.zeros(max_num_reqs, dtype=np.int64)
 
     def add_request(self, req_idx: int) -> None:
