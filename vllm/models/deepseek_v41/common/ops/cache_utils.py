@@ -917,9 +917,18 @@ def _compute_global_topk_indices_and_lens_kernel(
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
 # flashmla/csrc/sm100/prefill/sparse/fwd/head{64,128}/phase1.cuh). B_TOPK is
 # 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
-# The extra slots stay as -1 sentinels and `combined_lens` caps the valid
-# range via `topk_length`, so padding is a no-op at kernel level.
+# The kernel writes -1 sentinels into the extra slots and `combined_lens` caps
+# the valid range via `topk_length`, so padding is a no-op at kernel level.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
+_SPARSE_PREFILL_SENTINEL_BLOCK = 512
+
+
+def _combined_topk_width(topk: int, window_size: int) -> int:
+    return (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
 
 
 def combine_topk_swa_indices(
@@ -937,15 +946,10 @@ def combine_topk_swa_indices(
     num_tokens = topk_indices.shape[0]
     # The width is fixed per model so the caller-provided workspace stays
     # valid on every batch.
-    combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
-        // _SPARSE_PREFILL_TOPK_ALIGNMENT
-        * _SPARSE_PREFILL_TOPK_ALIGNMENT
-    )
+    combined_topk = _combined_topk_width(topk, window_size)
     if out is None:
-        combined_indices = torch.full(
+        combined_indices = torch.empty(
             (num_tokens, combined_topk),
-            fill_value=-1,
             dtype=torch.int32,
             device=topk_indices.device,
         )
@@ -954,7 +958,6 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
-        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -968,6 +971,8 @@ def combine_topk_swa_indices(
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        COMBINED_TOP_K=combined_topk,
+        SENTINEL_BLOCK=_SPARSE_PREFILL_SENTINEL_BLOCK,
     )
     return combined_indices, combined_lens
 
@@ -1037,6 +1042,7 @@ class CombineTopkSwaIndicesKernel(
         COMPRESS_RATIO: int
         WINDOW_SIZE: int
         PADDED_TOP_K: int
+        COMBINED_TOP_K: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -1063,6 +1069,8 @@ class CombineTopkSwaIndicesKernel(
         COMPRESS_RATIO: tl.constexpr,
         WINDOW_SIZE: tl.constexpr,
         PADDED_TOP_K: tl.constexpr,
+        COMBINED_TOP_K: tl.constexpr,
+        SENTINEL_BLOCK: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -1133,6 +1141,13 @@ class CombineTopkSwaIndicesKernel(
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
+            for tail_start in tl.range(combined_len, COMBINED_TOP_K, SENTINEL_BLOCK):
+                tail = tail_start + tl.arange(0, SENTINEL_BLOCK)
+                tl.store(
+                    combined_indices_ptr + token_idx * combined_indices_stride + tail,
+                    -1,
+                    mask=tail < COMBINED_TOP_K,
+                )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1158,6 +1173,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=compress_ratio,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=padded_topk,
+            COMBINED_TOP_K=_combined_topk_width(topk, WINDOW_SIZE),
             input_variant=input_variant,
         )
 
@@ -1192,6 +1208,8 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
             PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            COMBINED_TOP_K=compile_key.COMBINED_TOP_K,
+            SENTINEL_BLOCK=_SPARSE_PREFILL_SENTINEL_BLOCK,
             grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
         )
 
@@ -1209,6 +1227,8 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int,
         COMPRESS_RATIO: int,
         WINDOW_SIZE: int,
+        COMBINED_TOP_K: int,
+        SENTINEL_BLOCK: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
         self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
@@ -1226,6 +1246,8 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
+            COMBINED_TOP_K=COMBINED_TOP_K,
+            SENTINEL_BLOCK=SENTINEL_BLOCK,
         )
 
 
