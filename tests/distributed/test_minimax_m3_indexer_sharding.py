@@ -169,6 +169,10 @@ def _check_indexer_forwards(config, device, rank, comm):
             )
     assert all(builder.unified_scores_buffer is not None for builder in builders[:2])
     assert builders[2].unified_scores_buffer is None
+    prefill_storage = (
+        builders[2].prefill_scores_buffer.data_ptr(),
+        builders[2].prefill_candidates_buffer.data_ptr(),
+    )
 
     active_layers = 5
 
@@ -299,6 +303,13 @@ def _check_indexer_forwards(config, device, rank, comm):
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
         assert metadata[2].unified_scores is None
+        if metadata[2].prefill_msa is not None:
+            prefill = metadata[2].prefill_msa
+            assert (
+                prefill.local_scores.untyped_storage().data_ptr(),
+                prefill.candidate_buffers.untyped_storage().data_ptr(),
+            ) == prefill_storage
+            assert all(arm.is_contiguous() for arm in prefill.candidate_buffers)
         expected_decode = {
             (4, 4, 1027, 127): (2, 8),
             (1, 2, 3, 4): (1, 1),
