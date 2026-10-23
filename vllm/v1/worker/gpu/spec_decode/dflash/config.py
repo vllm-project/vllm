@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
-    builtin_method = "dflash"
+    base_method = "dflash"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
     )
@@ -29,8 +29,8 @@ class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
 
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
-        assert cls.builtin_method is not None
-        wrap_eagle_hf_config(spec, cls.builtin_method)
+        assert cls.base_method is not None
+        wrap_eagle_hf_config(spec, cls.base_method)
         spec.parallel_drafting = True
 
     @property

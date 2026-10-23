@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
-    builtin_method = "dspark"
+    base_method = "dspark"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )

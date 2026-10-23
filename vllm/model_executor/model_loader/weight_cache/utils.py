@@ -40,7 +40,7 @@ def is_draft_model_cacheable(speculative_config: SpeculativeConfig | None) -> bo
     """Whether the daemon serves the speculative draft as a separate role."""
     return (
         speculative_config is not None
-        and speculative_config.builtin_method in WEIGHT_CACHE_DRAFT_METHODS
+        and speculative_config.base_method in WEIGHT_CACHE_DRAFT_METHODS
         and speculative_config.draft_model_config is not None
     )
 

@@ -22,7 +22,7 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
 
 
 class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
-    builtin_method = "eagle"
+    base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
     uses_target_hidden_states = True
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
@@ -43,8 +43,8 @@ class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
             spec.draft_model_config.hf_config,
             spec.target_model_config.max_model_len,
         )
-        assert cls.builtin_method is not None
-        wrap_eagle_hf_config(spec, cls.builtin_method)
+        assert cls.base_method is not None
+        wrap_eagle_hf_config(spec, cls.base_method)
 
     @property
     def num_lookahead_tokens(self) -> int:
@@ -52,7 +52,7 @@ class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
 
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):
-    builtin_method = "eagle3"
+    base_method = "eagle3"
 
     @classmethod
     def matches(cls, spec: SpeculativeConfig) -> bool:

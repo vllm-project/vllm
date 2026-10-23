@@ -22,7 +22,7 @@ class UnsupportedSpeculatorConfig(SpeculatorConfig):
 
 
 class SuffixSpeculatorConfig(UnsupportedSpeculatorConfig):
-    builtin_method = "suffix"
+    base_method = "suffix"
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
@@ -36,7 +36,7 @@ class SuffixSpeculatorConfig(UnsupportedSpeculatorConfig):
 class V1CustomProposerConfig(UnsupportedSpeculatorConfig):
     """A V1 custom proposer, loaded from the module path in `model`."""
 
-    builtin_method = "custom_class"
+    base_method = "custom_class"
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:

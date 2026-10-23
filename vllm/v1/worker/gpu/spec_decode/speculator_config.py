@@ -38,7 +38,7 @@ class SpeculatorConfig:
 
     # For in-tree speculators, the `SpeculativeConfig.method` that enables it.
     # For out-of-tree custom speculators, the method of the built-in one it subclasses.
-    builtin_method: ClassVar[str | None] = None
+    base_method: ClassVar[str | None] = None
     # Fully-qualified name of the V2 `BaseSpeculator` subclass, if any.
     speculator_class: ClassVar[str | None] = None
     # Method-specific `SpeculativeConfig` options that this speculator accepts
@@ -203,7 +203,7 @@ class CheckpointSpeculatorConfig(SpeculatorConfig):
 
         config_cls = _resolve_checkpoint_config_class(spec, cls)
         if spec.method is None:
-            spec.method = config_cls.builtin_method  # type: ignore[assignment]
+            spec.method = config_cls.base_method  # type: ignore[assignment]
 
         config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
@@ -394,7 +394,7 @@ def _resolve_checkpoint_config_class(
             recognized_cls = _recognize_checkpoint_config_class(spec_config)
             if not (
                 # The same built-in speculator (or one based on it).
-                recognized_cls.builtin_method == configured_cls.builtin_method
+                recognized_cls.base_method == configured_cls.base_method
                 if recognized_cls is not None
                 else configured_cls.matches(spec_config)
             ):
@@ -432,7 +432,7 @@ def _checkpoint_mismatch_message(
 ) -> str:
     draft = spec_config.draft_model_config
     if recognized_cls is not None:
-        recognized = recognized_cls.builtin_method
+        recognized = recognized_cls.base_method
         looks = f"looks like a {recognized!r} checkpoint"
         hint = f" Use method={recognized!r} if that is what you intended."
     else:

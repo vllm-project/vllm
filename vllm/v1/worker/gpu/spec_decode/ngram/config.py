@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 class NgramSpeculatorConfig(SpeculatorConfig):
-    builtin_method = "ngram"
+    base_method = "ngram"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
     )
@@ -17,7 +17,7 @@ class NgramSpeculatorConfig(SpeculatorConfig):
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
-        return cls.builtin_method
+        return cls.base_method
 
     @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
@@ -48,4 +48,4 @@ class NgramSpeculatorConfig(SpeculatorConfig):
 
 
 class NgramGPUSpeculatorConfig(NgramSpeculatorConfig):
-    builtin_method = "ngram_gpu"
+    base_method = "ngram_gpu"
