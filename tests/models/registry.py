@@ -1348,6 +1348,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3.5-35B-A3B",
         max_model_len=4096,
     ),
+    "Qwen3_5ForSlotDecision": _HfExamplesInfo(
+        "baselabs/elephant-1",
+        extras={"mammoth": "baselabs/mammoth-1"},
+        max_model_len=4096,
+    ),
     "Qwen4ExpForConditionalGeneration": _HfExamplesInfo(
         "",
         is_available_online=False,

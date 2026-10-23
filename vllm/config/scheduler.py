@@ -52,6 +52,10 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    user_specified_max_num_batched_tokens: bool = False
+    """Whether max_num_batched_tokens was set by the user rather than defaulted
+    by `EngineArgs.create_engine_config`."""
+
     max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
