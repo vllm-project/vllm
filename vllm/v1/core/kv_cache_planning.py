@@ -1841,5 +1841,6 @@ def finalize_extensible_kv_cache(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+    if scheduler_kv_cache_config.kv_cache_groups:
+        update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
     return num_blocks

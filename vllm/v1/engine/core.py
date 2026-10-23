@@ -380,6 +380,22 @@ class EngineCore:
         committable_blocks = self.model_executor.initialize_from_config(
             kv_cache_configs
         )
+        compilation_times = []
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            compilation_times = self.model_executor.compile_or_warm_up_model(
+                committable_blocks
+            )
+        if extensible:
+            num_blocks = finalize_extensible_kv_cache(
+                vllm_config,
+                kv_cache_configs,
+                scheduler_kv_cache_config,
+                compilation_times,
+                commit_granule,
+            )
+            self.model_executor.extend_kv_cache(num_blocks)
+        # Under the extensible KV cache, workers create the connector in
+        # `extend_kv_cache`, so ask for its block count only afterwards.
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
@@ -395,20 +411,6 @@ class EngineCore:
             vllm_config.cache_config.simple_cpu_offload_num_blocks = (
                 aligned_num_cpu_blocks
             )
-        compilation_times = []
-        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            compilation_times = self.model_executor.compile_or_warm_up_model(
-                committable_blocks
-            )
-        if extensible:
-            num_blocks = finalize_extensible_kv_cache(
-                vllm_config,
-                kv_cache_configs,
-                scheduler_kv_cache_config,
-                compilation_times,
-                commit_granule,
-            )
-            self.model_executor.extend_kv_cache(num_blocks)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
