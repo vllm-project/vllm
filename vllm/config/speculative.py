@@ -3,7 +3,9 @@
 
 import copy
 import functools
+import json
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -16,6 +18,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
+from vllm.transformers_utils.repo_utils import try_get_local_file
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1449,6 +1452,7 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                         self.target_model_config.max_model_len,
                     )
+                    self._log_eagle_draft_rope()
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
@@ -1777,6 +1781,90 @@ class SpeculativeConfig:
             target_max_model_len,
         )
         draft_hf_config.max_position_embeddings = target_max_model_len
+
+    def _log_eagle_draft_rope(self) -> None:
+        def effective_rope_parameters(config: PreTrainedConfig) -> Any:
+            parameters = getattr(config, "rope_parameters", None) or {}
+            if not isinstance(parameters, Mapping) or any(
+                isinstance(value, Mapping) for value in parameters.values()
+            ):
+                return parameters
+            # Qwen decoder layers apply this default after config initialization.
+            # Speculators identifies its underlying model by architecture.
+            default_theta = (
+                1000000.0
+                if config.model_type in ("qwen2", "qwen3")
+                or any(
+                    architecture in ("Eagle3Qwen3ForCausalLM", "PeagleQwen3ForCausalLM")
+                    for architecture in (config.architectures or [])
+                )
+                else 10000.0
+            )
+            return {
+                "rope_theta": default_theta,
+                "rope_type": "default",
+                **parameters,
+            }
+
+        draft_config = get_hf_text_config(self.draft_model_config.hf_config)
+        target_config = get_hf_text_config(self.target_model_config.hf_config)
+        draft_rope = effective_rope_parameters(draft_config)
+        target_rope = effective_rope_parameters(target_config)
+        logger.info(
+            "EAGLE draft model RoPE parameters: %s (target model: %s).",
+            draft_rope,
+            target_rope,
+        )
+        if not isinstance(draft_rope, Mapping) or not isinstance(target_rope, Mapping):
+            return
+        if any(
+            isinstance(value, Mapping)
+            for params in (draft_rope, target_rope)
+            for value in params.values()
+        ):
+            return
+        draft_theta = draft_rope.get("rope_theta", 10000.0)
+        target_theta = target_rope.get("rope_theta", 10000.0)
+        if (
+            draft_theta != 10000.0
+            or draft_rope.get("rope_type", "default") != "default"
+            or draft_theta == target_theta
+            or self.model is None
+        ):
+            return
+
+        # Transformers fills in RoPE defaults, so inspect the cached checkpoint
+        # to distinguish omitted parameters from intentional training settings.
+        config_path = try_get_local_file(self.model, "config.json", self.revision)
+        if not isinstance(config_path, Path):
+            return
+        try:
+            with config_path.open() as file:
+                checkpoint_config = json.load(file)
+        except (OSError, ValueError):
+            return
+        if not isinstance(checkpoint_config, Mapping):
+            return
+        for raw_config in (
+            checkpoint_config,
+            checkpoint_config.get("model", {}),
+            checkpoint_config.get("text_config", {}),
+            checkpoint_config.get("transformer_layer_config", {}),
+        ):
+            if isinstance(raw_config, Mapping) and any(
+                raw_config.get(key) is not None
+                for key in ("rope_theta", "rope_scaling", "rope_parameters")
+            ):
+                return
+        logger.warning(
+            "EAGLE draft checkpoint %s does not specify RoPE parameters and "
+            "resolves to rope_theta=%s, while the target model uses "
+            "rope_theta=%s. Verify that these defaults match the draft's "
+            "training configuration; draft RoPE is not inherited from the target.",
+            self.model,
+            draft_theta,
+            target_theta,
+        )
 
     @staticmethod
     def _verify_and_get_draft_tp(

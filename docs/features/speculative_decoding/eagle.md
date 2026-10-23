@@ -58,6 +58,21 @@ for output in outputs:
 
 ## Pre-Trained Eagle Draft Models
 
+EAGLE and EAGLE-3 use the draft checkpoint's own RoPE configuration. The draft's
+RoPE base and scaling are not inherited from the target model. For example, a
+Llama draft that omits RoPE parameters defaults to `rope_theta=10000`, even if
+the target uses `rope_theta=500000`. Model-specific defaults apply when no RoPE
+base has been resolved; for example, Qwen3 decoder layers use
+`rope_theta=1000000`, including PEagle drafts.
+
+At startup, vLLM logs the draft and target RoPE parameters. If the cached draft
+configuration omits RoPE parameters, its single RoPE base defaults to `10000`,
+and the target's base differs, vLLM also emits a warning. Check that the resolved
+parameters match the draft's training configuration before changing them: a
+different base may be intentional for that checkpoint.
+Explicit RoPE settings in a Speculators checkpoint's `transformer_layer_config`
+are also recognized and do not trigger the missing-parameters warning.
+
 A variety of EAGLE draft models are available on the Hugging Face hub:
 
 * [RedHatAI/speculator-models](https://huggingface.co/collections/RedHatAI/speculator-models)

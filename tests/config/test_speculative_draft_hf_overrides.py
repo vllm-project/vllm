@@ -12,13 +12,18 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+import json
+import logging
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import Glm5NextConfig, PreTrainedConfig
+from transformers import Glm5NextConfig, LlamaConfig, PreTrainedConfig, Qwen3Config
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.config import patch_rope_parameters
+from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
@@ -288,3 +293,220 @@ def test_glm5_next_mtp_override_promotes_index_share():
     assert draft_config.architectures == ["Glm5NextMTPModel"]
     assert draft_config.n_predict == 1
     assert draft_config.index_share_for_mtp_iteration is True
+
+
+def _make_rope_speculative_config(
+    tmp_path, draft_hf, target_hf, method, *, parallel_drafting=False
+):
+    draft = MagicMock(
+        model=str(tmp_path),
+        hf_config=draft_hf,
+        architectures=draft_hf.architectures,
+        max_model_len=128,
+    )
+    draft.registry.inspect_model_cls.return_value = (None, "Eagle3LlamaForCausalLM")
+    draft.get_vocab_size.return_value = draft_hf.vocab_size
+    target = MagicMock(
+        hf_config=target_hf,
+        max_model_len=128,
+        quantization=None,
+        hf_overrides={},
+    )
+    target.get_vocab_size.return_value = target_hf.vocab_size
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft):
+        return SpeculativeConfig(
+            model=str(tmp_path),
+            method=method,
+            num_speculative_tokens=3,
+            parallel_drafting=parallel_drafting,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "draft_model"])
+@pytest.mark.parametrize(
+    ("draft_rope", "target_theta", "expect_warning"),
+    [
+        ({}, 500000.0, True),
+        ({}, 10000.0, False),
+        ({"rope_theta": 10000.0}, 500000.0, False),
+        ({"rope_theta": 500000.0}, 500000.0, False),
+        (
+            {"rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"}},
+            500000.0,
+            False,
+        ),
+        (
+            {"rope_scaling": {"rope_theta": 10000.0, "rope_type": "default"}},
+            500000.0,
+            False,
+        ),
+        (
+            {},
+            {
+                "rope_theta": 1000000.0,
+                "full_attention": {"rope_theta": 1000000.0, "rope_type": "default"},
+                "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"},
+            },
+            False,
+        ),
+    ],
+)
+def test_eagle_draft_rope_diagnostics(
+    tmp_path, caplog, monkeypatch, method, draft_rope, target_theta, expect_warning
+):
+    """Report the effective RoPE without changing the draft's training settings."""
+    raw_config = {
+        "model_type": "llama",
+        "architectures": ["LlamaForCausalLM"],
+        **draft_rope,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(raw_config))
+    draft_hf = LlamaConfig(**raw_config)
+    original_rope = deepcopy(draft_hf.rope_parameters)
+    target_hf = (
+        PreTrainedConfig(rope_parameters=target_theta, vocab_size=draft_hf.vocab_size)
+        if isinstance(target_theta, dict)
+        else LlamaConfig(rope_theta=target_theta)
+    )
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.INFO, logger="vllm.config.speculative"):
+        config = _make_rope_speculative_config(tmp_path, draft_hf, target_hf, method)
+
+    assert config.draft_model_config.hf_config.rope_parameters == original_rope
+    messages = [record.getMessage() for record in caplog.records]
+    is_eagle = method in ("eagle", "eagle3")
+    assert any("draft model RoPE" in message for message in messages) is is_eagle
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "RoPE" in record.getMessage()
+    ]
+    assert bool(warnings) is (expect_warning and is_eagle)
+    if warnings:
+        assert "10000" in warnings[0]
+        assert "500000" in warnings[0]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("cached_config", [None, "invalid JSON", "[]"])
+def test_eagle_rope_diagnostics_tolerate_unavailable_checkpoint(
+    tmp_path, caplog, monkeypatch, cached_config
+):
+    """Diagnostics must work even if the source config is no longer readable."""
+    if cached_config is not None:
+        (tmp_path / "config.json").write_text(cached_config)
+    draft_hf = LlamaConfig(architectures=["LlamaForCausalLM"])
+    target_hf = LlamaConfig(rope_theta=500000.0)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.INFO, logger="vllm.config.speculative"):
+        config = _make_rope_speculative_config(tmp_path, draft_hf, target_hf, "eagle3")
+
+    assert config.draft_model_config.hf_config.rope_parameters["rope_theta"] == 10000.0
+    assert any("draft model RoPE" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.cpu_test
+def test_eagle_rope_diagnostics_respect_runtime_override(tmp_path, caplog, monkeypatch):
+    """A nondefault resolved base is not a missing-checkpoint fallback."""
+    (tmp_path / "config.json").write_text('{"model_type": "llama"}')
+    draft_hf = LlamaConfig(architectures=["LlamaForCausalLM"], rope_theta=750000.0)
+    target_hf = LlamaConfig(rope_theta=500000.0)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.INFO, logger="vllm.config.speculative"):
+        config = _make_rope_speculative_config(tmp_path, draft_hf, target_hf, "eagle3")
+
+    assert config.draft_model_config.hf_config.rope_parameters["rope_theta"] == 750000.0
+    assert any("750000" in record.getMessage() for record in caplog.records)
+    assert not any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("speculators_model_type", ["eagle3", "peagle"])
+@pytest.mark.parametrize(
+    ("rope_parameters", "expected_theta"),
+    [(None, 1000000.0), ({"rope_type": "default"}, 10000.0)],
+)
+def test_eagle_rope_diagnostics_use_qwen3_defaults(
+    tmp_path,
+    caplog,
+    monkeypatch,
+    rope_parameters,
+    expected_theta,
+    speculators_model_type,
+):
+    """Report Qwen3's effective base without rewriting normalized parameters."""
+    layer_config = {
+        "model_type": "qwen3",
+        "vocab_size": 32000,
+        "max_position_embeddings": 128,
+    }
+    if rope_parameters is not None:
+        layer_config["rope_parameters"] = rope_parameters
+    raw_config = {
+        "speculators_model_type": speculators_model_type,
+        "transformer_layer_config": layer_config,
+    }
+    if speculators_model_type == "peagle":
+        raw_config["mask_token_id"] = 0
+    (tmp_path / "config.json").write_text(json.dumps(raw_config))
+    draft_hf = SpeculatorsConfig.from_pretrained(tmp_path)
+    target_hf = Qwen3Config(rope_theta=1000000.0, vocab_size=32000)
+    original_draft = deepcopy(draft_hf.to_dict())
+    original_target = deepcopy(target_hf.to_dict())
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.INFO, logger="vllm.config.speculative"):
+        config = _make_rope_speculative_config(
+            tmp_path,
+            draft_hf,
+            target_hf,
+            "eagle3",
+            parallel_drafting=speculators_model_type == "peagle",
+        )
+
+    diagnostic = next(
+        record for record in caplog.records if "draft model RoPE" in record.getMessage()
+    )
+    assert diagnostic.args[0]["rope_theta"] == expected_theta
+    assert diagnostic.args[1]["rope_theta"] == 1000000.0
+    assert not any(record.levelno == logging.WARNING for record in caplog.records)
+    assert config.draft_model_config.hf_config.to_dict() == original_draft
+    assert target_hf.to_dict() == original_target
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "explicit_rope",
+    [
+        {"rope_theta": 10000.0},
+        {"rope_scaling": {"rope_theta": 10000.0, "rope_type": "default"}},
+        {"rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"}},
+    ],
+)
+def test_eagle_rope_diagnostics_recognize_speculators_rope(
+    tmp_path, caplog, monkeypatch, explicit_rope
+):
+    """Explicit Speculators training settings must not trigger a missing-key warning."""
+    raw_config = {
+        "speculators_model_type": "eagle3",
+        "transformer_layer_config": {
+            "model_type": "llama",
+            "vocab_size": 32000,
+            "max_position_embeddings": 128,
+            **explicit_rope,
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(raw_config))
+    draft_hf = SpeculatorsConfig.from_pretrained(tmp_path)
+    patch_rope_parameters(draft_hf)
+    original_draft = deepcopy(draft_hf.to_dict())
+    target_hf = LlamaConfig(rope_theta=500000.0)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.INFO, logger="vllm.config.speculative"):
+        config = _make_rope_speculative_config(tmp_path, draft_hf, target_hf, "eagle3")
+
+    assert any("draft model RoPE" in record.getMessage() for record in caplog.records)
+    assert not any(record.levelno == logging.WARNING for record in caplog.records)
+    assert config.draft_model_config.hf_config.to_dict() == original_draft
