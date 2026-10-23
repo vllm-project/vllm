@@ -13,8 +13,6 @@ Requirements:
 - `distributed_executor_backend="ray"` — the workers must be Ray actors
 - Ray `>= 2.56.0` on both the trainer and the workers
 - `nixl` installed in the environment shared by trainer and workers
-- Weight loaders that stay inside the supported op set (below)
-- EPLB (`enable_eplb=true`) is rejected: it rearranges experts at runtime, which invalidates the recorded plan
 
 ## How It Works
 
@@ -118,6 +116,13 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 | `buffer_presize_gb` | 0.0 | Pre-size each buffer slot, in GiB. Set it to cover the largest atomic slice |
 | `gather_lookahead` | 1 | Gathered-but-unfreed layers the gather loop runs ahead by |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
+
+## Limitations
+
+- **Separate fleets only.** The trainer and the inference workers run on different GPUs; colocated setups need [IPC](ipc.md).
+- **No EPLB.** `enable_eplb=true` is rejected: it rearranges experts at runtime, which invalidates the recorded plan.
+- **Supported loader ops only.** A weight loader that needs real data at init raises (see [the op set](#slices-are-tracked-through-vllms-own-weight-loaders)).
+- Names that share a layer index must be contiguous in `metadata` order.
 
 ## Examples
 

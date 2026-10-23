@@ -271,11 +271,10 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
-        rank: int = 0,
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
-        super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
+        super().__init__(client=client, source=source, is_sender=is_sender)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
@@ -307,7 +306,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             client=client,
             source=source,
             is_sender=init_info.is_sender,
-            rank=init_info.rank,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
         )

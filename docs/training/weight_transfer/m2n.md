@@ -91,7 +91,7 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 
 - vLLM validates tensor-rank and dtype support while agreeing on the complete
   plan; the installed M2N runtime validates them again for each reshard.
-- Every parameter must be owned by all trainer ranks, in rank order (`owners` unset or `(0, ..., T-1)`), with a 1-D or 2-D mesh. Partitioned owners, such as one group per pipeline stage, are rejected at init.
+- **No pipeline-parallel trainers.** Every parameter must be owned by all trainer ranks, in rank order (`owners` unset or `(0, ..., T-1)`), with a 1-D or 2-D mesh. Partitioned owners, such as one group per pipeline stage, are rejected at init.
 - `Partial` placements cannot be sent as shards. `ModuleSource` declares such a parameter replicated and gathers it in `iter_local()`.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.

@@ -153,6 +153,20 @@ For different parameter subsets per worker, `update_info` may be a list indexed
 by worker rank. This form is IPC-only because collective backends require every
 worker to participate.
 
+## Limitations
+
+- **Colocated only.** Each trainer rank shares memory with the inference worker
+  on its own GPU; trainer and inference on separate GPUs need another backend.
+- **No pipeline-parallel trainers.** Every trainer rank serves its colocated
+  worker the whole model, so every rank must own every parameter. A source whose
+  ranks own different parameters (pipeline stages, or experts held by only some
+  ranks) is rejected at `trainer_init`.
+- **A full copy per GPU.** Each rank materializes every parameter in full on its
+  GPU. Unpacked, the whole model stays resident until the round finishes; set
+  `packed=True` to bound it to one chunk.
+- The handle all-gather runs over the default process group, which must be
+  exactly the colocated trainer ranks.
+
 ## Examples
 
 - [RLHF with IPC weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_ipc.py) - **Start here.** Server and training model share a single GPU; HTTP control plane, CUDA IPC data plane. Launches and tears down its own server

@@ -273,6 +273,17 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 
 [`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
 
+## Limitations
+
+- **No pipeline-parallel trainers.** Rank 0 is the only sender, so it must own
+  every parameter (see [One sender](#one-sender)). A source whose ranks own
+  different parameters is rejected at the first `send_weights`.
+- **Full tensors on the wire.** Rank 0 materializes each parameter in full and
+  every worker receives all of it, whatever its tensor-parallel shard. For
+  large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or
+  [NCCL M2N](m2n.md).
+- Sparse NCCL's pipeline-parallel behavior is untested.
+
 ## Examples
 
 - [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
