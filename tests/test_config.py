@@ -3974,6 +3974,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.model = local_cache
     mock_draft.hf_config.model_type = "deepseek_mtp"
     mock_draft.hf_config.n_predict = None
+    mock_draft.hf_config.max_position_embeddings = 4096
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 
