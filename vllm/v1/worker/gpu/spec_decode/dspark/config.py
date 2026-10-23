@@ -7,6 +7,7 @@ from vllm.config.speculative import (
     _validate_qwen3_omni_dspark,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
@@ -27,6 +28,15 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     def matches(cls, spec: "SpeculativeConfig") -> bool:
         # e.g. deepseek-ai/dspark_qwen3_8b_block7
         return "dspark" in spec.draft_model_config.model.lower()
+
+    @classmethod
+    def accepts_checkpoint(cls, recognized_cls: type[SpeculatorConfig]) -> bool:
+        # DeepSeek-V4 checkpoints carry DSpark stages, but the draft config
+        # presents them as MTP.
+        return (
+            super().accepts_checkpoint(recognized_cls)
+            or recognized_cls.base_method == "mtp"
+        )
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:

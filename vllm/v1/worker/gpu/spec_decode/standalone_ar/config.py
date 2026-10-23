@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
-
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     DraftModelSpeculatorConfig,
 )
-
-if TYPE_CHECKING:
-    from vllm.config import SpeculativeConfig
 
 
 class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
@@ -18,15 +13,8 @@ class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
     )
     draft_has_own_vocab = True
-    # Rejects recognized drafters (e.g. MTP heads).
-    validates_checkpoint = True
     # An independent model with its own positional limit.
     shares_target_positions = False
-
-    @classmethod
-    def matches(cls, spec: "SpeculativeConfig") -> bool:
-        # Any draft model checkpoint.
-        return True
 
     @property
     def num_lookahead_tokens(self) -> int:

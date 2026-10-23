@@ -3006,16 +3006,13 @@ class VllmConfig:
         spec_config = self.speculative_config
         if (
             spec_config is None
-            or spec_config.draft_model_config is None
             or self.model_config is None
             or not self.use_v2_model_runner
-            # The draft's positional capacity was raised to match the target.
-            or spec_config.draft_shares_target_positions()
         ):
             return
-        draft_max_model_len = spec_config.draft_model_config.max_model_len
+        draft_max_model_len = spec_config.speculator_config.max_model_len
         target_max_model_len = self.model_config.max_model_len
-        if draft_max_model_len >= target_max_model_len:
+        if draft_max_model_len is None or draft_max_model_len >= target_max_model_len:
             return
         logger.warning(
             "The draft model's max_model_len (%d) is smaller than the target "

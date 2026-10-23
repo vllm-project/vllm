@@ -1415,7 +1415,7 @@ class SpeculativeConfig:
         target_max_model_len: int,
     ) -> None:
         """Raise the max_position_embeddings of a draft that shares the
-        target's positional space (see `SpeculatorConfig`'s
+        target's positional space (see `DraftModelSpeculatorConfig`'s
         `shares_target_positions`) up to the target's.
 
         The proposer feeds the draft positions up to the target's
@@ -1725,15 +1725,6 @@ class SpeculativeConfig:
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""
         return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
-
-    def draft_shares_target_positions(self) -> bool:
-        """Whether the draft's max_position_embeddings is raised to the
-        target's max_model_len, so its length doesn't limit the target's."""
-        return (
-            self.speculator_config.shares_target_positions
-            and self.draft_model_config is not None
-            and _rope_only_sizes_cache(self.draft_model_config.hf_config)
-        )
 
     def use_dflash(self) -> bool:
         return self.base_method == "dflash"
