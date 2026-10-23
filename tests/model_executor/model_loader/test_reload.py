@@ -18,6 +18,8 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
+from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -45,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     load_attention_sink,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -1382,29 +1385,55 @@ def _reload_with_lora_expert_names(worker) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
-        "RedHatAI/Qwen3-30B-A3B-NVFP4",
-    ],
+def _moe_lora_contexts(worker) -> list[int | None]:
+    return [
+        None if context is None else id(context)
+        for module in worker.get_model().modules()
+        if isinstance(module, FusedMoEWithLoRA)
+        for context in [module._moe_kernel.fused_experts._lora_context]
+    ]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MoE with LoRA requires CUDA"
 )
-def test_reload_weights_with_lora_moe(model, vllm_runner, monkeypatch):
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    prompts = ["The capital of France is the city of Paris"]
-    masks = ["The capital of France is"]
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    lora_path = hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+    prompts = [
+        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+    ]
+
+    def prompt_logprobs(llm, lora_id):
+        lora_request = LoRARequest("sql", lora_id, lora_path) if lora_id else None
+        output = llm.generate_greedy_logprobs(
+            prompts,
+            max_tokens=1,
+            num_logprobs=None,
+            num_prompt_logprobs=0,
+            lora_request=lora_request,
+        )[0]
+        return [next(iter(token.values())).logprob for token in output[3][1:]]
+
     with vllm_runner(
-        model_name=model,
+        model_name="RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
         enable_lora=True,
-        lora_target_modules=["experts"],
         max_lora_rank=8,
+        max_loras=1,
         enable_prefix_caching=False,
-        max_model_len=32,
+        max_model_len=64,
         max_num_seqs=1,
     ) as llm:
-        before = llm.generate_prompt_perplexity(prompts, mask=masks)[0]
+        contexts = llm.collective_rpc(_moe_lora_contexts)
+        before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
+        assert before[0] != before[1]
         llm.collective_rpc(_reload_with_lora_expert_names)
-        after = llm.generate_prompt_perplexity(prompts, mask=masks)[0]
+        assert llm.collective_rpc(_moe_lora_contexts) == contexts
+        after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
+    assert contexts[0] and None not in contexts[0]
     assert after == before
 
 

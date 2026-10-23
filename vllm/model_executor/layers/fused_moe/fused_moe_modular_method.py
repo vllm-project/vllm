@@ -90,7 +90,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             (self.moe_kernel.prepare_finalize, new_kernel.prepare_finalize),
         ):
             context = getattr(old, "_lora_context", None)
-            if context is not None and hasattr(new, "set_lora_context"):
+            if context is not None:
+                assert hasattr(new, "set_lora_context")
                 new.set_lora_context(context)
         self.moe_kernel.impl = new_kernel.impl
         self.old_quant_method.moe_kernel = self.moe_kernel
