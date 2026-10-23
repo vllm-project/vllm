@@ -200,6 +200,9 @@ class BatchSharder:
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
         )
         max_num_logits_per_req = int(num_logits_per_req_np.max()) if num_reqs else 1
+        local_seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
+            torch.from_numpy(local_req_indices_np)
+        ]
 
         # Shard the input batch GPU tensors.
         sorted_logits_indices = torch.empty(
@@ -211,21 +214,15 @@ class BatchSharder:
         local_logits_indices = torch.empty(
             num_local_logits, dtype=torch.int64, device=self.device
         )
-        local_idx_mapping = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
+        local_idx_mapping = input_batch.idx_mapping.new_empty(num_local_reqs)
+        local_cu_num_logits = input_batch.cu_num_logits.new_empty(num_local_reqs + 1)
+        local_expanded_idx_mapping = input_batch.expanded_idx_mapping.new_empty(
+            num_local_logits
         )
-        local_cu_num_logits = torch.empty(
-            num_local_reqs + 1, dtype=torch.int32, device=self.device
+        local_expanded_local_pos = input_batch.expanded_local_pos.new_empty(
+            num_local_logits
         )
-        local_expanded_idx_mapping = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_expanded_local_pos = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_seq_lens = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
-        )
+        local_seq_lens = input_batch.seq_lens.new_empty(num_local_reqs)
         if num_reqs > 0:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,
@@ -269,6 +266,7 @@ class BatchSharder:
             expanded_idx_mapping=local_expanded_idx_mapping,
             expanded_local_pos=local_expanded_local_pos,
             seq_lens=local_seq_lens,
+            seq_lens_cpu_upper_bound=local_seq_lens_cpu_upper_bound,
             logits_indices=local_logits_indices,
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,
@@ -277,9 +275,7 @@ class BatchSharder:
         )
         local_grammar_output = None
         if grammar_output is not None:
-            local_grammar_output = _shard_grammar_output(
-                grammar_output, input_batch, local_req_ids
-            )
+            local_grammar_output = _shard_grammar_output(grammar_output, local_req_ids)
         metadata = BatchShardMetadata(
             tp_size=tp_size,
             num_logits_per_rank=num_logits_per_rank_np.tolist(),
@@ -316,28 +312,26 @@ def all_to_all_logits(
 
 def _shard_grammar_output(
     grammar_output: GrammarOutput,
-    input_batch: InputBatch,
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
-    cu_num_logits_np = input_batch.cu_num_logits_np
-
-    local_ids: list[str] = []
-    keep_indices: list[int] = []
-    cursor = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        req_idx = req_id_to_idx[req_id]
-        num_req_logits = int(cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx])
-        if req_id in owned:
-            local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + num_req_logits))
-        cursor += num_req_logits
-    if not local_ids:
+    grammar_req_ids = grammar_output.structured_output_request_ids
+    keep = [i for i, req_id in enumerate(grammar_req_ids) if req_id in owned]
+    if not keep:
         return None
+    local_ids = [grammar_req_ids[i] for i in keep]
+    # Each request owns a fixed-width block of rows.
+    bitmask = grammar_output.grammar_bitmask
+    blocks = bitmask.reshape(len(grammar_req_ids), -1, bitmask.shape[-1])
+    local_bitmask = blocks[keep].reshape(-1, bitmask.shape[-1])
+    # num_acceptable_drafts is ordered with structured_output_request_ids.
+    num_acceptable = grammar_output.num_acceptable_drafts
+    if num_acceptable is not None:
+        num_acceptable = [num_acceptable[i] for i in keep]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
-        grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        grammar_bitmask=local_bitmask,
+        num_acceptable_drafts=num_acceptable,
     )
 
 
@@ -613,8 +607,6 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
-        assert local_output.num_sampled is not None
-        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req

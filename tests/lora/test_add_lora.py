@@ -38,7 +38,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
     for lora_request in lora_requests:
         lora_int_id = lora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),  # type: ignore
+            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),
             sampling_params=sampling_params,
             lora_request=lora_request,
             request_id=f"test{lora_int_id}",
@@ -55,8 +55,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
 
 @pytest.mark.asyncio
 async def test_add_lora(chatglm3_lora_files):
-    """
-    The add_lora function is used to preload some LoRA adapters into the
+    """The add_lora function is used to preload some LoRA adapters into the
     engine in anticipation of future requests using these adapters. To test
     this functionality, we use the async engine to process some requests - We
     do it twice, once with add_lora() preloading and once without.
