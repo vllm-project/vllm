@@ -10,7 +10,7 @@ pub(crate) mod token_ids;
 
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs};
 use sampling::{SamplingParamsError, validate_resolved_sampling_params};
-use token_ids::{validate_prompt_token_ids, validate_vocab_range};
+use token_ids::{TokenIdsError, validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
 };
@@ -297,30 +297,40 @@ fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> 
 /// middle of generated text (this accounts for tokenizers that use an
 /// `add_prefix_space` convention).
 ///
-/// Reference: <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/sampling_params.py#L555-L594>
+/// Reference: <https://github.com/vllm-project/vllm/blob/c722f3a5368a9eed2b90c1a14b8eaf17acba3e93/vllm/sampling_params.py#L805-L848>
 fn tokenize_bad_words(
     bad_words: Option<&[String]>,
     tokenizer: &dyn Tokenizer,
 ) -> Result<Option<Vec<Vec<u32>>>> {
-    let bad_words = bad_words.filter(|w| !w.is_empty());
+    let bad_words = bad_words.unwrap_or_default();
+    // Python rejects an empty word when it validates the request, before any
+    // word is tokenized.
+    if bad_words.iter().any(String::is_empty) {
+        return Err(TokenIdsError::EmptyBadWord.into());
+    }
     let mut all_token_ids = Vec::new();
 
-    for bad_word in bad_words.into_iter().flatten() {
+    for bad_word in bad_words {
+        // Like Python, both encodings drop the word's leading whitespace.
+        let bad_word = bad_word.trim_start();
+
         // Without a leading space we always keep the encoding.
         // With a leading space we only keep it when the prefix-space variant produces a
         // distinct first token but the same sequence length — this mirrors the Python
         // dedup condition that avoids redundant entries.
         let without_space = tokenizer.encode(bad_word, false)?;
-        let with_space = tokenizer.encode(&format!(" {}", bad_word.trim_start()), false)?;
+        let with_space = tokenizer.encode(&format!(" {bad_word}"), false)?;
 
-        if !without_space.is_empty() {
-            all_token_ids.push(without_space);
-        }
-        if !with_space.is_empty()
-            && all_token_ids.last().is_some_and(|prev: &Vec<u32>| {
-                with_space[0] != prev[0] && with_space.len() == prev.len()
-            })
-        {
+        // Only the unprefixed encoding is required; an empty prefixed one is
+        // skipped.
+        let Some(&first) = without_space.first() else {
+            return Err(TokenIdsError::EmptyBadWordTokenization.into());
+        };
+        let keep_with_space = !with_space.is_empty()
+            && with_space[0] != first
+            && with_space.len() == without_space.len();
+        all_token_ids.push(without_space);
+        if keep_with_space {
             all_token_ids.push(with_space);
         }
     }
@@ -1443,6 +1453,50 @@ mod tests {
             error,
             Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_tokenizes_bad_words_like_python() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("blocked", 300)
+            .with_regular_token(" blocked", 301);
+        let lower = |bad_words: Vec<String>| {
+            lower_sampling_params(
+                SamplingParams {
+                    bad_words: Some(bad_words),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                3,
+                &tokenizer,
+            )
+            .map(|params| params.bad_words_token_ids)
+            .map_err(|error| error.to_string())
+        };
+
+        let words =
+            |words: &[&str]| -> Vec<String> { words.iter().map(|word| word.to_string()).collect() };
+
+        let cases = [
+            // Leading whitespace is dropped before both encodings.
+            (words(&[" blocked"]), Ok(Some(vec![vec![300], vec![301]]))),
+            (
+                words(&["blocked", ""]),
+                Err("bad_words cannot contain an empty string."),
+            ),
+            (
+                words(&["blocked", "  "]),
+                Err("bad_words entries must tokenize to at least one token."),
+            ),
+        ];
+        for (i, (bad_words, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                lower(bad_words),
+                expected.map_err(str::to_string),
+                "case {i}"
+            );
+        }
     }
 
     #[test]

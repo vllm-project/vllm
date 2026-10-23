@@ -19,6 +19,10 @@ pub enum TokenIdsError {
     EmptyAllowedTokenIds,
     #[error("bad_words_token_ids must not contain empty sequences")]
     EmptyBadWordSequence,
+    #[error("bad_words cannot contain an empty string.")]
+    EmptyBadWord,
+    #[error("bad_words entries must tokenize to at least one token.")]
+    EmptyBadWordTokenization,
     #[error("Too many bad words: {count}. The max number is {max}.")]
     TooManyBadWords { count: usize, max: usize },
     #[error("Too many total bad word tokens: {count}. The max is {max}.")]
