@@ -170,10 +170,11 @@ def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
     Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
     lightning-indexer top-k block selection; the rest reuse the selection the
     preceding compute layer wrote into the shared ``topk_indices_buffer`` this
-    same forward pass. This cuts the indexer score + top-k cost ~``freq``x with
-    negligible accuracy impact (adjacent sparse layers pick nearly the same
-    blocks; ATOM validated GSM8K with freq=4). Gated by ``use_index_cache``;
-    enable via ``--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'``.
+    same forward pass. This cuts the indexer score + top-k cost ~``freq``x but
+    approximates the per-layer selection, so validate accuracy on long-context
+    inputs. Gated by ``use_index_cache`` in the text config; enable via
+    ``--hf-overrides '{"text_config": {"use_index_cache": true,
+    "index_topk_freq": 4}}'``.
     """
     if not getattr(config, "use_index_cache", False):
         return False
@@ -1502,25 +1503,26 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         decode = self.specialized_decode
+        # EAGLE3 is not yet compatible with pipeline parallel
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         if decode is None:
-            # EAGLE3 is not yet compatible with pipeline parallel
-            aux_hidden_states = self._maybe_add_hidden_state(
-                [], 0, hidden_states, residual
-            )
             for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
                 hidden_states, residual = layer(positions, hidden_states, residual)
                 self._maybe_add_hidden_state(
                     aux_hidden_states, idx + 1, hidden_states, residual
                 )
         else:
-            aux_hidden_states = []
             step = decode.plan(positions, intermediate_tensors)
             failure: Exception | None = None
             try:
-                for layer in self.layers[self.start_layer : self.end_layer]:
+                layers = self.layers[self.start_layer : self.end_layer]
+                for idx, layer in enumerate(layers):
                     kernel = step.layer(layer.layer_id) if step else None
                     hidden_states, residual = (kernel or layer)(
                         positions, hidden_states, residual
+                    )
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states, idx + 1, hidden_states, residual
                     )
             except Exception as err:
                 failure = err
