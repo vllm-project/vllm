@@ -8,7 +8,6 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -75,14 +74,9 @@ class Executor(ABC):
                 )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
-                from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
+            from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
-                executor_class = RayExecutorV2
-            else:
-                from vllm.v1.executor.ray_executor import RayDistributedExecutor
-
-                executor_class = RayDistributedExecutor
+            executor_class = RayExecutorV2
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -161,6 +155,23 @@ class Executor(ABC):
 
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
+
+    def get_simple_cpu_offload_num_blocks(self) -> int | None:
+        values: list[int | None] = self.collective_rpc(
+            "get_simple_cpu_offload_num_cpu_blocks"
+        )
+        nums = [value for value in values if value is not None]
+        if not nums:
+            return None
+        aligned = min(nums)
+        if len(set(nums)) > 1:
+            logger.warning(
+                "SimpleCPUOffload workers reported mismatched num_cpu_blocks %s; "
+                "using min=%d",
+                nums,
+                aligned,
+            )
+        return aligned
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")

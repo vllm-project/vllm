@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
@@ -19,6 +19,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
@@ -69,13 +70,16 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.platforms.rocm import get_cdna_version
 
-        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
-        # would silently keep their FP8 one.
+        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
+        # DSA models would silently keep their FP8 one.
         model_config = vllm_config.model_config
-        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+        if model_config is None or model_config.hf_config.model_type not in (
+            "deepseek_v4",
+            "deepseek_v41",
+        ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                "DeepSeek-V4.1-Flash."
+                "DeepSeek-V4 and DeepSeek-V4.1."
             )
         if get_cdna_version() != 4:
             raise ValueError(
@@ -204,6 +208,61 @@ class PrepareUniformDecodeKernel(
         )
 
 
+def balanced_prefill_row_shard(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    compress_ratio: int,
+    tp_size: int,
+    min_rows: int,
+) -> list[int] | None:
+    """Return contiguous TP row counts balanced by indexer MQA work."""
+    num_rows = int(query_lens_cpu.sum())
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
+        return None
+
+    query_lens = query_lens_cpu.to(torch.int64)
+    first_key = torch.repeat_interleave(
+        seq_lens_cpu.to(torch.int64) - query_lens + 1, query_lens
+    )
+    row_in_request = torch.arange(num_rows) - torch.repeat_interleave(
+        torch.cumsum(query_lens, 0) - query_lens, query_lens
+    )
+    cost = torch.cumsum((first_key + row_in_request) // compress_ratio, 0)
+    total = int(cost[-1]) if cost.numel() else 0
+    if total <= 0:
+        return None
+
+    targets = torch.arange(1, tp_size) * total // tp_size
+    bounds = [0, *torch.searchsorted(cost, targets).tolist(), num_rows]
+    # Keep >= 1 row per rank (the floor above leaves ample room); this also
+    # handles repeated costs from pool compression.
+    for i in range(1, tp_size):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
+    for i in range(tp_size - 1, 0, -1):
+        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
+
+
+def tp_prefill_row_sharding_supported(
+    vllm_config: VllmConfig,
+    dcp_world_size: int,
+    use_pcp: bool,
+    tp_size: int,
+) -> bool:
+    """Whether replicated prefill rows may be sharded across TP ranks."""
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        current_platform.is_cuda()
+        and dcp_world_size == 1
+        and not use_pcp
+        and tp_size > 1
+        and not envs.VLLM_DISABLE_PYNCCL
+        and not envs.VLLM_USE_NCCL_SYMM_MEM
+        and not envs.VLLM_BATCH_INVARIANT
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+    )
+
+
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -299,12 +358,6 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # The ROCm flattened-query support above is validated for the
-        # DeepSeek-V4 adaptive DSpark path only.
-        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
-
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -409,6 +462,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seq_lens: torch.Tensor
     token_to_seq: torch.Tensor
     total_seq_lens: int
+    # Host upper bound on cu_seqlen_ke - cu_seqlen_ks, sizing the compressed
+    # DeepGEMM prefill logits.
+    max_seqlen_k: int
     token_start: int
     token_end: int
     num_reqs: int
@@ -555,7 +611,7 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    *(get_compress_ratios(hf_text_config) or (1,)),
                     getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
@@ -654,6 +710,8 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
+    # Per-TP-rank contiguous row counts, or None for the replicated path.
+    row_shard_sizes: list[int] | None = None
 
 
 @dataclass
@@ -857,15 +915,16 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
     # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
-    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
+    # The flashmla_sparse backend uses a workspace size of factor * max_model_len.
     # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
-    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
-    # within the flashmla_sparse workspace.
+    # (576 * 2 // 132) * factor (40 at factor 5) to maximize this workspace
+    # size while still fitting within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    return max_model_len * (576 * 2 // 132) * factor
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
@@ -889,7 +948,10 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and "DeepseekV4ForCausalLM" in model_config.architectures
+        and (
+            "DeepseekV4ForCausalLM" in model_config.architectures
+            or "DeepseekV41ForCausalLM" in model_config.architectures
+        )
     )
 
 
@@ -941,6 +1003,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.tp_size = parallel_config.tensor_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
@@ -1512,6 +1575,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
+            row_shard_sizes = None
+            if tp_prefill_row_sharding_supported(
+                self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
+            ):
+                row_shard_sizes = balanced_prefill_row_shard(
+                    seq_lens_cpu[num_decodes:],
+                    prefill_query_lens_cpu,
+                    self.compress_ratio,
+                    self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
+                )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
                 max_prefill_seq_len=(
@@ -1519,6 +1593,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     if num_prefills > 0
                     else 0
                 ),
+                row_shard_sizes=row_shard_sizes,
             )
 
         decode_metadata = None
@@ -1884,6 +1959,7 @@ def build_prefill_chunk_metadata(
         cu_seq_lens=cu_seq_lens,
         token_to_seq=token_to_seq,
         total_seq_lens=total_seq_lens,
+        max_seqlen_k=int(compressed_seq_lens_cpu[start_idx:end_idx].max()),
         block_table=block_table[start_idx:end_idx],
         token_start=token_start,
         token_end=token_end,

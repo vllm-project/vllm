@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
 import numpy as np
@@ -23,6 +23,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -1511,10 +1514,42 @@ class BeamSearchParams(
     ignore_eos: bool = False
     temperature: float = 0.0
     length_penalty: float = 1.0
+    """Exponent on the number of generated tokens (including a final EOS) that
+    normalizes a beam's cumulative log-probability when ranking beams, as in
+    Transformers. Values above 0 favor longer beams, below 0 shorter ones."""
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True
     watermarking: bool | None = None
+    allowed_token_ids: list[int] | None = None
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+
+    def configure_logprobs(
+        self, sampling_params: SamplingParams, config: "VllmConfig"
+    ) -> None:
+        ids = self.allowed_token_ids
+        if ids is None:
+            return
+        if not ids:
+            raise ValueError("Beam search allowed_token_ids must not be empty")
+        if self.structured_outputs is not None:
+            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            raise ValueError(
+                "Beam allowlists with structured outputs are not supported"
+            )
+        if config.speculative_config is not None:
+            # Rejection sampling does not yet fully support exact-ID logprobs.
+            raise ValueError(
+                "Beam allowlists with speculative decoding are not supported"
+            )
+        if config.model_config.is_diffusion:
+            # The diffusion sampler does not consume logprob_token_ids.
+            raise ValueError("Beam allowlists with diffusion models are not supported")
+        if not config.use_v2_model_runner:
+            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
+            raise ValueError("Beam allowlists require the V2 model runner")
+        # Score the original distribution without applying a sampling mask.
+        sampling_params.logprobs = None
+        sampling_params.logprob_token_ids = ids

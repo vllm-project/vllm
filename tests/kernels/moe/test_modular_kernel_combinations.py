@@ -16,7 +16,13 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterExperts,
+    AiterFp8BlockExperts,
+    AiterFp8ChannelExperts,
+    AiterFp8TensorExperts,
+    AiterUnquantizedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
@@ -80,17 +86,19 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     indirectly through the general quant-config sweep.
     See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
-    if config.quant_config is None:
+    if config.weight_dtype is None:
         w_key, a_key = None, None
+    elif config.weight_dtype == "mxfp4":
+        w_key, a_key = config.mxfp4_quant_key_pair()
     else:
         w_key, a_key = config.fp8_quant_key_pair()
 
     assert fe_cls._supports_quant_scheme(w_key, a_key), (
         f"AITER case (weight_key={w_key}, activation_key={a_key}) reached "
-        "the modular-kernel harness, but AiterExperts._supports_quant_scheme "
+        f"the modular-kernel harness, but {fe_cls.__name__}._supports_quant_scheme "
         "does not declare it supported."
     )
     print(f"[AITER case] weight_key={w_key}, activation_key={a_key}")
@@ -101,12 +109,12 @@ def assert_aiter_activation_case(config: Config) -> None:
     AiterExperts being reached only indirectly through the general
     activation sweep. See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
     assert fe_cls._supports_activation(config.activation), (
         f"AITER case activation={config.activation} reached the "
-        "modular-kernel harness, but AiterExperts._supports_activation "
+        f"modular-kernel harness, but {fe_cls.__name__}._supports_activation "
         "does not declare it supported."
     )
     print(f"[AITER case] activation={config.activation}")
@@ -151,13 +159,18 @@ def rank_worker(
             rank_tensors = RankTensors.make(config, pgi)
 
             # Skip unsupported: AITER block-scaled MoE does not
-            # support apply_router_weight_on_input (topk=1 path).
+            # support apply_router_weight_on_input (topk=1 path). The W4A16
+            # MXFP4 AITER kernel (unquantized activation, mxfp4 weight) hits
+            # this same gap -- observed to hang/fault the GPU at topk=1 on
+            # gfx950 -- even though it isn't represented via
+            # config.quant_block_shape. W4A4 (mxfp4 activation too) is
+            # unaffected, so this is scoped to the W4A16 case specifically.
             # https://github.com/ROCm/aiter/issues/2418
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
-                and config.fused_experts_type is AiterExperts
-                and config.quant_block_shape is not None
+                and issubclass(config.fused_experts_type, AiterExperts)
+                and (config.quant_block_shape is not None or config.is_w4a16_mxfp4)
             ):
                 print(
                     f"Skipping[{pgi.rank}]: m={m}, topk={topk}"
@@ -172,7 +185,7 @@ def rank_worker(
             # https://github.com/vllm-project/vllm/issues/57029
             if (
                 config.world_size > 1
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and getattr(config.prepare_finalize_type, "__name__", "")
                 in ("DeepEPHTPrepareAndFinalize", "MoriPrepareAndFinalize")
             ):
@@ -193,7 +206,7 @@ def rank_worker(
             with set_current_vllm_config(vllm_config):
                 ref_out = reference_moe_impl(config, weights, rank_tensors)
 
-            if config.quant_dtype == "nvfp4":
+            if config.quant_dtype == "nvfp4" or config.weight_dtype == "mxfp4":
                 atol = 1e-1 if config.K < 4096 else 2e-1
                 rtol = 1e-1 if config.K < 4096 else 2e-1
             else:
@@ -210,10 +223,35 @@ def rank_worker(
 
             is_aiter_fp8 = (
                 _cp.is_rocm()
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_config is not None
             )
-            if is_aiter_fp8:
+
+            # AITER_MXFP4_BF16 silently computes the wrong thing for
+            # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
+            # on hardware), instead of raising. Only smoke-test until the
+            # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
+            if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
+                assert mk_out.shape == ref_out.shape, (
+                    f"AiterMxfp4Experts output shape {mk_out.shape} != "
+                    f"reference shape {ref_out.shape}."
+                )
+                assert torch.isfinite(mk_out).all(), (
+                    "AiterMxfp4Experts (W4A16) produced non-finite output."
+                )
+            elif is_aiter_fp8:
+                # MXFP4's small output magnitude lets an all-zero output pass
+                # the tolerance below outright; guard against a degenerate
+                # real output doing the same. Excludes topk==1, a separate,
+                # pre-existing apply_router_weight_on_input/reference gap.
+                if config.weight_dtype == "mxfp4" and config.topk != 1:
+                    ref_scale = ref_out.abs().mean()
+                    mk_scale = mk_out.abs().mean()
+                    assert mk_scale > 0.5 * ref_scale, (
+                        f"AITER MXFP4 output magnitude (mean "
+                        f"|mk_out|={mk_scale:.6f}) looks degenerate/zeroed "
+                        f"vs. reference (mean |ref_out|={ref_scale:.6f})."
+                    )
                 check_accuracy(ref_out, mk_out, atol=atol, rtol=rtol, percent=0.9)
             else:
                 torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
@@ -254,25 +292,39 @@ DTYPEs = [torch.bfloat16]
 MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
+    MoEActivation.SWIGLUOAI,
 ]
 
 
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
-    if info.needs_matching_quant:
-        # The triton kernels expect both per-act-token-quant and
-        # per-out-ch-quant or neither.
-        unsupported_quant_config = (
-            config.is_per_act_token_quant + config.is_per_out_ch_quant
-        ) == 1
-        if unsupported_quant_config:
-            return True
+    # The triton kernels expect per-out-ch-quant weights to be paired with
+    # per-act-token-quant activations.
+    if (
+        info.needs_matching_quant
+        and config.is_per_out_ch_quant
+        and not config.is_per_act_token_quant
+    ):
+        return True
+
+    # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
+    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
+    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
+    # heuristic dispatch" at runtime despite being declared supported by
+    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = (
+        issubclass(config.fused_experts_type, AiterExperts) and config.is_w4a16_mxfp4
+    )
+    if config.activation == MoEActivation.SWIGLUOAI:
+        return not is_w4a16_mxfp4
+    if is_w4a16_mxfp4:
+        return True
 
     if config.activation != MoEActivation.SILU:
-        if config.fused_experts_type is not AiterExperts:
+        if not issubclass(config.fused_experts_type, AiterExperts):
             return True  # AITER-only for this axis, for now
-        if config.quant_dtype is not None:
+        if config.weight_dtype is not None:
             return True  # unquantized-only for this axis, for now
 
     return False
@@ -591,7 +643,7 @@ def test_aiter_moe_sorting_backend_dispatch_env_matrix(
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]
@@ -671,7 +723,7 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]
@@ -736,6 +788,20 @@ _PADDING_QUANT_IDS = [
     "fp8_tensor_token",
     "fp8_block_token",
 ]
+
+
+def _padding_matrix_fe_cls(
+    quant_config: TestMoEQuantConfig | None,
+) -> type[AiterExperts]:
+    """Map a _PADDING_QUANT_CONFIGS entry to the AiterExperts leaf class that
+    supports it (mirrors Config.fp8_quant_key_pair's scheme derivation)."""
+    if quant_config is None:
+        return AiterUnquantizedExperts
+    if quant_config.block_shape is not None:
+        return AiterFp8BlockExperts
+    if quant_config.per_out_ch_quant:
+        return AiterFp8ChannelExperts
+    return AiterFp8TensorExperts
 
 
 def _slice_gate_up_rows(t: torch.Tensor, real_per_half: int) -> torch.Tensor:
@@ -950,7 +1016,7 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
         dtype=torch.bfloat16,
         quant_config=quant_config,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
         hidden_dim_unpadded=_PADDING_K_UNPADDED if pad_hidden else None,
         intermediate_size_per_partition_unpadded=(
@@ -1113,7 +1179,7 @@ def test_aiter_moe_token_padding_garbage_rows(
         dtype=torch.bfloat16,
         quant_config=quant_config,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
     )
     assert config.is_valid()[0]

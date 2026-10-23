@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -13,7 +13,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
-    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+    from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -152,8 +152,11 @@ class TokenizeParams:
     Usually, this refers to the model's context length.
     """
 
-    max_output_tokens: int = 0
-    """Maximum requested number of output tokens."""
+    max_output_tokens: int | None = 0
+    """Maximum requested output tokens; ``None`` means no explicit limit.
+
+    Zero indicates a request that does not need generated tokens, such as pooling.
+    """
 
     pad_prompt_tokens: int | None = None
     """
@@ -551,6 +554,20 @@ class TokenizeParams:
 
         return tokens
 
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: TokensPrompt,
+    ) -> TokensPrompt: ...
+
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: EmbedsPrompt,
+    ) -> EmbedsPrompt: ...
+
     def apply_post_tokenization(
         self,
         tokenizer: TokenizerLike | None,
@@ -562,9 +579,9 @@ class TokenizeParams:
         This method is run after tokenization occurs.
         """
         if "prompt_token_ids" in prompt:
-            prompt["prompt_token_ids"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
+            prompt["prompt_token_ids"] = self._validate_tokens(
                 tokenizer,
-                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
+                prompt["prompt_token_ids"],
             )
         if "prompt_embeds" in prompt:
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
