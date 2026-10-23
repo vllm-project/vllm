@@ -575,6 +575,9 @@ def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
     """Return the largest cache group's bytes per block."""
+    if _is_windowed_dspark_config(kv_cache_groups):
+        allocations = _windowed_dspark_allocations(kv_cache_groups)
+        return sum(page_size for page_size, _ in allocations)
     if not layout.is_block_outermost:
         # Each layer's block stride is its own padded page.
         return max(
@@ -639,6 +642,107 @@ def validate_kv_cache_layout(
         )
 
 
+def _is_windowed_dspark_draft_spec(spec: KVCacheSpec) -> bool:
+    return isinstance(spec, SlidingWindowMLASpec) and spec.non_causal_multi_token_decode
+
+
+def _get_windowed_dspark_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """One group for the target, one per window for sliding-window DSpark drafts.
+
+    The non-windowed target layers must form one uniform-type group (e.g. a
+    sparse MLA target with its indexer caches). See
+    ``_get_windowed_dspark_kv_cache_tensors`` for the allocation.
+    """
+    draft_specs: defaultdict[tuple[int, int], dict[str, KVCacheSpec]] = defaultdict(
+        dict
+    )
+    target_specs: dict[str, KVCacheSpec] = {}
+    for name, spec in kv_cache_spec.items():
+        if _is_windowed_dspark_draft_spec(spec):
+            key = (spec.block_size, spec.sliding_window)  # type: ignore[attr-defined]
+            draft_specs[key][name] = spec
+        else:
+            target_specs[name] = spec
+    if not draft_specs or not target_specs:
+        return None
+    target_group_spec = UniformTypeKVCacheSpecs.from_specs(target_specs)
+    if target_group_spec is None:
+        return None
+    groups = [KVCacheGroupSpec(list(target_specs), target_group_spec)]
+    for specs in draft_specs.values():
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(list(specs), group_spec))
+    return groups
+
+
+def _is_windowed_dspark_config(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    return len(kv_cache_groups) > 1 and all(
+        all(
+            _is_windowed_dspark_draft_spec(spec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        )
+        for group in kv_cache_groups[1:]
+    )
+
+
+def _windowed_dspark_allocations(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[tuple[int, list[str]]]:
+    """Give every target layer a contiguous cache; draft layers alias one with
+    the same page size, else get their own.
+
+    Draft and target groups have separate block tables over one block pool, so
+    their live pages never overlap. Contiguous per-layer caches keep the sparse
+    MLA indexer's flat row view valid.
+    """
+    allocations: list[tuple[int, list[str]]] = [
+        (_get_per_layer_spec(kv_cache_groups[0], name).page_size_bytes, [name])
+        for name in kv_cache_groups[0].layer_names
+    ]
+    for group in kv_cache_groups[1:]:
+        free = allocations.copy()
+        for name in group.layer_names:
+            page_size = _get_per_layer_spec(group, name).page_size_bytes
+            shared = next((a for a in free if a[0] == page_size), None)
+            if shared is None:
+                allocations.append((page_size, [name]))
+            else:
+                shared[1].append(name)
+                free.remove(shared)
+    return allocations
+
+
+def _get_windowed_dspark_kv_cache_tensors(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    allocations = _windowed_dspark_allocations(kv_cache_groups)
+    bytes_per_block = sum(page_size for page_size, _ in allocations)
+    num_blocks = may_override_num_blocks(
+        vllm_config, available_memory // bytes_per_block
+    )
+    size = bytes_per_block * num_blocks
+    tensors: list[KVCacheTensor] = []
+    offset = 0
+    for page_size, layer_names in allocations:
+        tensors.extend(
+            KVCacheTensor(
+                size=size,
+                layers=[name],
+                layer_stride=page_size * num_blocks,
+                block_stride=page_size,
+                offset=offset,
+            )
+            for name in layer_names
+        )
+        offset += page_size * num_blocks
+    return num_blocks, tensors
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -671,6 +775,19 @@ def get_kv_cache_config_from_groups(
         host_budget = get_hisparse_host_pool_bytes(vllm_config)
         return get_hisparse_kv_cache_config(
             vllm_config, kv_cache_groups, available_memory, host_budget
+        )
+
+    if _is_windowed_dspark_config(kv_cache_groups):
+        num_blocks, kv_cache_tensors = _get_windowed_dspark_kv_cache_tensors(
+            vllm_config, kv_cache_groups, available_memory
+        )
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=(
+                vllm_config.cache_config.prefix_cache_retention_interval
+            ),
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
@@ -1145,6 +1262,8 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
+    elif dspark_groups := _get_windowed_dspark_groups(kv_cache_spec):
+        return dspark_groups
     # Hidden-state layers use their own block table and must not be absorbed
     # into a compatible attention bucket.
     hidden_specs = {

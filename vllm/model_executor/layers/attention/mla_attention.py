@@ -503,6 +503,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
+        if sliding_window is not None and kv_cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
+            raise ValueError(
+                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
+            )
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
@@ -518,6 +525,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                has_sliding_window=sliding_window is not None,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -1391,6 +1399,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return SlidingWindowMLASpec(
                 **common_kwargs,
                 sliding_window=self.sliding_window,
+                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
             )
         spec = MLAAttentionSpec(
             **common_kwargs,

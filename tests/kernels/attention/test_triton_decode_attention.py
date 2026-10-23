@@ -395,3 +395,72 @@ def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
     # Same compute order; the last request only differs in its logits offset.
     assert torch.equal(o[-1:], o_last)
     assert torch.equal(lse[-1:], lse_last)
+
+
+@pytest.mark.parametrize(
+    "H_Q,H_KV,D_QK,D_V,is_mla",
+    [
+        (16, 1, 576, 512, True),  # MLA path (grouped kernel, v = trans(k))
+        (32, 32, 128, 128, False),  # MHA path (normal kernel)
+    ],
+)
+@pytest.mark.parametrize("sliding_window", [5, 64, 2055])
+def test_decode_attention_sliding_window(H_Q, H_KV, D_QK, D_V, is_mla, sliding_window):
+    """Each row attends to its last ``sliding_window`` keys only, also when the
+    window splits unevenly over the KV splits (stage 2 must skip the same empty
+    splits as stage 1)."""
+    PAGE_SIZE = 16
+    num_pages = 2048
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    num_kv_splits = 4
+    seq_lens = torch.tensor([3, 70, 1027, 4100], device=DEVICE_TYPE)
+    B = seq_lens.numel()
+    max_pages = cdiv(int(seq_lens.max()), PAGE_SIZE)
+    req_to_page = torch.randperm(num_pages, device=DEVICE_TYPE)[: B * max_pages]
+    req_to_page = req_to_page.view(B, max_pages)
+
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k_buffer = torch.randn(
+        num_pages, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    v_buffer = (
+        k_buffer[..., :D_V]
+        if is_mla
+        else torch.randn(
+            num_pages, PAGE_SIZE, H_KV, D_V, dtype=dtype, device=DEVICE_TYPE
+        )
+    )
+    o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    attn_logits = torch.empty(
+        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+    )
+    decode_attention_fwd(
+        q,
+        k_buffer,
+        v_buffer,
+        o,
+        lse,
+        req_to_page,
+        seq_lens,
+        attn_logits,
+        num_kv_splits,
+        sm_scale,
+        PAGE_SIZE,
+        is_mla=is_mla,
+        sliding_window=sliding_window,
+    )
+
+    for b in range(B):
+        seq_len = int(seq_lens[b])
+        token_ids = torch.arange(max(seq_len - sliding_window, 0), seq_len)
+        pages = req_to_page[b, token_ids // PAGE_SIZE]
+        k = k_buffer[pages, token_ids % PAGE_SIZE].float()  # [T, H_KV, D_QK]
+        v = v_buffer[pages, token_ids % PAGE_SIZE].float()
+        group = H_Q // H_KV
+        k = k.repeat_interleave(group, dim=1)
+        v = v.repeat_interleave(group, dim=1)
+        scores = torch.einsum("hd,thd->ht", q[b].float(), k) * sm_scale
+        ref = torch.einsum("ht,thd->hd", scores.softmax(dim=-1), v)
+        torch.testing.assert_close(o[b].float(), ref, atol=2e-2, rtol=2e-2)

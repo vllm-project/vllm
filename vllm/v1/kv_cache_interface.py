@@ -1013,6 +1013,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
     bounded_replay: bool = False
+    # See MLAAttentionSpec.non_causal_multi_token_decode (windowed DSpark drafts).
+    non_causal_multi_token_decode: bool = False
 
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -1045,6 +1047,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kv_quant_mode_set = {spec.kv_quant_mode for spec in specs}
+        alignment_set = {spec.alignment for spec in specs}
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
@@ -1055,10 +1059,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(extra_retained_set) == 1
             and len(bounded_replay_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kv_quant_mode_set) == 1
+            and len(alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
+            "window size, retained token count, replay policy, KV quant mode "
+            "and alignment."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -1077,6 +1084,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
+            kv_quant_mode=kv_quant_mode_set.pop(),
+            alignment=alignment_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
 
     def is_uniform_with_collection(
