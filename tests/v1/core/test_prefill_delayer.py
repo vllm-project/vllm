@@ -113,19 +113,17 @@ def test_local_state():
     assert local_state(scheduler, BUDGET) == [0, 0, 1, 0, 0, 0]
 
 
-def test_scheduler_holds_prefill_without_local_decodes():
-    """Unlike the cadence, a HOLD defers prefill on a rank with no running
-    requests, so that it runs with the other ranks' prefill."""
+def test_scheduler_hold_skips_rank_without_local_decodes():
+    """A HOLD defers prefill only on a rank with a decode to run. A rank with
+    nothing else to schedule prefills anyway: left with an empty batch while it
+    still has requests, it runs both the empty batch and a dummy batch in one
+    step while its DP peers run one, and the engine hangs."""
     scheduler = create_scheduler()
     scheduler.dp_prefill_delayer = True
     (request,) = create_requests(num_requests=1, num_tokens=8, req_ids=["r0"])
     scheduler.add_request(request)
 
     output = scheduler.schedule(throttle_prefills=True)
-    assert "r0" not in output.num_scheduled_tokens
-    assert not scheduler.ran_prefill
-
-    output = scheduler.schedule()
     assert "r0" in output.num_scheduled_tokens
     assert scheduler.ran_prefill
 
