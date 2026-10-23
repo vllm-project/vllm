@@ -23,13 +23,12 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.kv_cache_interface import (
-        AttentionSpec,
         KVCacheLayout,
         KVCacheSpec,
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(StrEnum):
@@ -681,6 +680,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         if (
             self.vllm_config.parallel_config.decode_context_parallel_size > 1
             and not supports_dcp_with_varlen
+            # Replicated draft caches do not see DCP.
+            and not (
+                isinstance(self.kv_cache_spec, AttentionSpec)
+                and not self.kv_cache_spec.dcp_sharded
+            )
         ):
             self.reorder_batch_threshold = 1
 
