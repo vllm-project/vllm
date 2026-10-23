@@ -45,8 +45,8 @@ def beam_output_gate(
     *,
     num_heads: int,
     head_dim: int,
-    floor: float,
-    temperature: float,
+    floor: float = 0.0,
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """Fuse gate operations while retaining activation-dtype rounding."""
     output = torch.empty_like(attn_output)
