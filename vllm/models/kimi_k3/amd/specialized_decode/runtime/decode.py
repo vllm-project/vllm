@@ -45,7 +45,7 @@ Kernel = WholeLayer | FfnLayer
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows of whole uniform spec-verify requests."""
+    """A planned step: ``width`` rows of whole uniform decode requests."""
 
     width: int
     attn_metadata: Mapping[str, Any]  # by layer name
@@ -57,19 +57,39 @@ class Step(NamedTuple):
         return None if kernel is None else partial(kernel.launch, self)
 
 
-def step_reason(attn_metadata, kda_prefix: str, width: int) -> str | None:
+def step_reason(attn_metadata, kda_prefix: str, width: int, q: int) -> str | None:
     """None if a step's KDA metadata (identical on every TP rank) is a pure
-    spec-verify step of whole uniform requests filling ``width`` rows, else why
-    not."""
+    uniform regular-decode or spec-verify step filling ``width`` rows, else why
+    not. ``q`` is the deployment's configured rows per request."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
     m: Any = attn_metadata.get(kda_prefix)
-    if m is None or m.spec_sequence_masks is None:
-        return "not spec-verify"
-    if m.num_prefills or m.num_decodes or m.num_spec_decodes < 1:
+    if m is None:
+        return "no metadata"
+    if m.num_prefills:
         return "not pure decode"
-    q = m.spec_state_indices_tensor.size(-1)
-    if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != width:
+    if m.num_spec_decodes:
+        if m.num_decodes or m.spec_sequence_masks is None:
+            return "not pure decode"
+        actual_q = m.spec_state_indices_tensor.size(-1)
+        if (
+            actual_q != q
+            or m.uniform_spec_sequence_length != actual_q
+            or m.num_spec_decodes * actual_q != width
+        ):
+            return "not uniform"
+        return None
+    if q != 1:
+        return "not spec-verify"
+    if m.num_decodes < 1:
+        return "not pure decode"
+    state_indices = m.non_spec_state_indices_tensor
+    if (
+        state_indices is None
+        or state_indices.ndim != 1
+        or m.num_decodes != width
+        or state_indices.size(0) != width
+    ):
         return "not uniform"
     return None
 
@@ -160,7 +180,7 @@ class SpecializedDecode:
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
         - widths without kernels (more than MAX_TOKENS rows);
-        - steps that are not pure spec-verify steps of whole uniform requests
+        - steps that are not pure, uniform regular-decode or spec-verify steps
           (``step_reason``).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
@@ -181,7 +201,7 @@ class SpecializedDecode:
         if kernels is None:
             return None
         md = context.attn_metadata
-        if step_reason(md, self.runner.kda_prefix, width) is not None:
+        if step_reason(md, self.runner.kda_prefix, width, self.config.q) is not None:
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:

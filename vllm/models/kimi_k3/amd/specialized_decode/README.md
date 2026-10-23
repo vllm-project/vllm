@@ -1,12 +1,14 @@
 # Kimi-K3 specialized decode (MI355X)
 
 An opt-in decode path for Kimi-K3 at TP8 on MI355X (gfx950), following RFC #60904.
-A pure spec-verify step of at most 8 rows runs each MoE decoder layer as persistent
-FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside the stock
-layer loop. The TP all-reduces run in-kernel over peer memory.
+A pure, uniform decode step of at most 8 rows runs each MoE decoder layer as
+persistent FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside
+the stock layer loop. This includes ordinary one-token decode when speculation
+is disabled and spec verification when it is configured. The TP all-reduces run
+in-kernel over peer memory.
 
-- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
-  gated RMSNorm), then K2.
+- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, causal convolution, KDA
+  recurrence, gated RMSNorm), then K2.
 - **FFN layers** (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
@@ -19,26 +21,28 @@ or re-quantized.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <Kimi-K3> -tp 8 \
-  --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}' \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
+
+`--speculative-config` is optional. With DSpark, at most 7 speculative tokens
+are supported.
 
 There are no other options. `decode_backend=auto` (the default) runs vLLM's decode.
 
 ## Supported deployments
 
-TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
-decoding with at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32
-recurrent KDA states.
+TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, either ordinary
+decode or speculative decoding with at most 7 speculative tokens, Model Runner
+V2, BF16 conv / FP32 recurrent KDA states.
 
 If you request the specialized decode for anything else, startup fails with one
 `ValueError` that lists every unsupported setting:
 
 - **Config, in the model's `__init__`:** pipeline, data, expert or prefill
   context parallelism, EPLB, DBO, LoRA, KV connectors, routed-expert capture,
-  sleep mode, CPU weight offload, weight updates, no speculative decoding,
-  adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
-  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
+  sleep mode, CPU weight offload, weight updates, adaptive verification, dynamic
+  speculative decoding, ReplaySSM / RecoverSSM, the V1 model runner,
+  `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes, and the MoE backend (`AITER_MXFP4_BF16`, K3
   SiTU).
@@ -48,8 +52,9 @@ Every TP rank agrees on each verdict before anything collective runs.
 
 ## Steps
 
-`plan()` runs once per step. It picks the kernels for a pure spec-verify step of
-whole uniform requests whose width is one of the built widths: every multiple of
+`plan()` runs once per step. It picks the kernels for a pure, uniform decode step
+whose width is one of the built widths. Without speculation, those are widths 1
+through 8. With speculation, they are every multiple of
 `num_speculative_tokens + 1` up to 8 rows. Every other step runs vLLM's layers:
 prefill, mixed, wider and PIECEWISE steps.
 
