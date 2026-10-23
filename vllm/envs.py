@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1264,6 +1265,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
+    ),
+    # Muse Spark MXFP4 on ROCm at TP > 1 without EP: run the MoE down
+    # projection of eager batches of >= 1024 tokens column-sharded, from a
+    # second copy of w2 (about 16 GiB per GPU at TP8), instead of
+    # reduce-scattering every route's partial sums. Set to 0 to keep the
+    # reduce-scatter and give that memory to the KV cache.
+    "VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN": lambda: (
+        os.getenv("VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN", "True").lower()
+        in ("true", "1")
     ),
     # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
