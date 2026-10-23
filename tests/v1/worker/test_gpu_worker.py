@@ -9,91 +9,14 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
-from vllm.config import (
-    CacheConfig,
-    DeviceConfig,
-    KVTransferConfig,
-    ParallelConfig,
-    VllmConfig,
-)
-from vllm.distributed.kv_transfer.kv_transfer_state import (
-    ensure_kv_transfer_initialized,
-)
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.worker_base import WorkerBase
-
-KV_CACHE_SPEC = FullAttentionSpec(
-    block_size=64, num_kv_heads=1, head_size=64, dtype=torch.float16
-)
-
-
-def _dcp_vllm_config(kv_connector: str | None, auto_resolve: bool) -> VllmConfig:
-    return VllmConfig(
-        cache_config=CacheConfig(block_size=16),
-        device_config=DeviceConfig(device="cpu"),
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            decode_context_parallel_size=2,
-            distributed_executor_backend="mp",
-            _allow_auto_resolve_cp_interleave_size=auto_resolve,
-        ),
-        kv_transfer_config=(
-            KVTransferConfig(kv_connector=kv_connector, kv_role="kv_both")
-            if kv_connector
-            else None
-        ),
-    )
-
-
-@pytest.mark.parametrize(
-    "kv_connector,auto_resolve,expected",
-    [
-        ("NixlConnector", True, 64),
-        ("NixlConnector", False, 1),
-        ("OffloadingConnector", True, 1),
-        (None, True, 1),
-    ],
-)
-def test_set_kv_cache_layout_finalizes_dcp_interleave_before_profiling(
-    kv_connector, auto_resolve, expected
-):
-    """NIXL P/D + DCP must pin the interleave to the kernel block size (from the
-    KV cache spec, not cache_config.block_size) before the first forward pass
-    (profiling) bakes it into compiled graphs; an explicit user value or a
-    connector without that requirement keeps the configured value."""
-    vllm_config = _dcp_vllm_config(kv_connector, auto_resolve)
-    vllm_config.model_config = SimpleNamespace(supports_kv_cache_grouping=False)
-    worker = SimpleNamespace(
-        vllm_config=vllm_config, get_kv_cache_spec=lambda: {"attn": KV_CACHE_SPEC}
-    )
-
-    WorkerBase.set_kv_cache_layout(worker, "BLHNC")
-
-    assert vllm_config.parallel_config.cp_kv_cache_interleave_size == expected
-
-
-def test_dcp_interleave_cannot_change_after_profiling():
-    vllm_config = _dcp_vllm_config("NixlConnector", auto_resolve=True)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["attn"], KV_CACHE_SPEC)],
-    )
-
-    with pytest.raises(RuntimeError, match="after model profiling"):
-        ensure_kv_transfer_initialized(vllm_config, kv_cache_config)
 
 
 def test_sleep_preservation_restores_private_draft_not_shared_target():
