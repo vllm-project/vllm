@@ -371,7 +371,7 @@ class MooncakeStoreScheduler:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        # Handle cached (running, or MRV1 resumed-from-preemption) requests
+        # Handle cached (running) requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):

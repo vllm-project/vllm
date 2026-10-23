@@ -28,10 +28,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Same entry-points group as
-# vllm.v1.sample.logits_processor.LOGITSPROCS_GROUP; duplicated here so this
-# module stays importable without the V1 sampler machinery.
 LOGITSPROCS_GROUP = "vllm.logits_processors"
+
+STR_POOLING_REJECTS_LOGITSPROCS = (
+    "Pooling models do not support custom logits processors."
+)
 
 
 def _load_v2_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
@@ -167,8 +168,6 @@ def build_custom_logits_processors(
         RuntimeError: if an FQCN fails to import.
 
     """
-    from vllm.v1.sample.logits_processor import STR_POOLING_REJECTS_LOGITSPROCS
-
     if is_pooling_model:
         if custom_logitsprocs:
             raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)

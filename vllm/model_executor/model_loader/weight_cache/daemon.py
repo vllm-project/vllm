@@ -297,8 +297,8 @@ class WeightCacheDaemon:
             )
             assert self.model is not None, "warmup ran before load_model"
             runner.load_model(model=self.model)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            # The runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=True)
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",

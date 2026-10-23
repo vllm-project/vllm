@@ -86,7 +86,6 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
 
 
 def _setup_env() -> None:
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Each case's eager pass compiles exactly the shapes it needs.
     os.environ.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")

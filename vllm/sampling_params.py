@@ -1539,9 +1539,6 @@ class BeamSearchParams(
         if config.model_config.is_diffusion:
             # The diffusion sampler does not consume logprob_token_ids.
             raise ValueError("Beam allowlists with diffusion models are not supported")
-        if not config.use_v2_model_runner:
-            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
-            raise ValueError("Beam allowlists require the V2 model runner")
         # Score the original distribution without applying a sampling mask.
         sampling_params.logprobs = None
         sampling_params.logprob_token_ids = ids

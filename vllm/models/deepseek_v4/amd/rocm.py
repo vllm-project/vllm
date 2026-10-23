@@ -875,7 +875,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._run_parallel_input_projections(hidden_states)
             )
             qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 qr,
                 kv,
@@ -909,7 +909,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 None,
                 None,
@@ -962,14 +962,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             finally:
                 self.aux_stream_list = saved_streams
-            return
-
-        # Re-check: forward's gate ran inside a captured segment that
-        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
-        ):
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer

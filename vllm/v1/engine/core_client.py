@@ -1616,12 +1616,9 @@ class DPAsyncMPClient(AsyncMPClient):
             can_reuse_fused_moe_kernel,
         )
 
-        # MRV2 re-warms through the request pool, so running requests must
+        # The runner re-warms through the request pool, so running requests must
         # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
+        if not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config):
             return "wait"
         return "keep"
 

@@ -51,8 +51,6 @@ apache-tvm-ffi==0.1.11
     # via
     #   -c requirements/cuda.txt
     #   xgrammar
-arctic-inference==0.1.1
-    # via -r requirements/test/cuda.in
 argcomplete==3.5.1
     # via datamodel-code-generator
 astor==0.8.1

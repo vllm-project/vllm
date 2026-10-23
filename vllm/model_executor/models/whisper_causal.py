@@ -268,7 +268,7 @@ def create_whisper_attention_backend_with_block_pooling(
 
     # NOTE: We need a custom impl so we can use the transformed slot_mapping
     # computed by `WhisperCausalAttentionWithBlockPoolingBuilder` instead of
-    # the one from `forward_context.slot_mapping` (gpu_model_runner).
+    # the one from `forward_context.slot_mapping` (model runner).
     # This follows the same pattern as CrossAttentionImpl.
     class WhisperCausalAttentionWithBlockPoolingImpl(underlying_impl):  # type: ignore[valid-type,misc]
         def forward(

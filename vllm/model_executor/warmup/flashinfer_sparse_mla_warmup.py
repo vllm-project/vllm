@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warmup and autotune helpers for FlashInfer sparse MLA backends."""
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -19,8 +19,7 @@ from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2GPUModelRunner
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -114,11 +113,6 @@ def _clamp_warmup_tokens(num_tokens: int, max_tokens: int) -> int:
     return max(0, min(num_tokens, max_tokens))
 
 
-def _uses_v2_model_runner(runner: "GPUModelRunner") -> bool:
-    vllm_config = getattr(runner, "vllm_config", None)
-    return bool(getattr(vllm_config, "use_v2_model_runner", False))
-
-
 def _run_flashinfer_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
@@ -148,13 +142,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     world = get_world_group()
     is_leader = world.rank_in_group == 0
 
-    dummy_run_kwargs = dict(
-        num_tokens=num_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        force_attention=True,
-        create_mixed_batch=True,
-    )
+    dummy_run_kwargs = dict(num_tokens=num_tokens, skip_eplb=True, is_profile=True)
 
     if use_flashinfer_autotune_v2(runner):
         return _run_sparse_mla_decode_autotune_v2(
@@ -173,10 +161,9 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     with torch.inference_mode():
         warmup_executed = True
         if is_leader:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-                v2_runner = cast("V2GPUModelRunner", runner)
+            if runner.max_num_reqs >= 2:
                 warmup_executed = run_mixed_prefill_decode_warmup(
-                    v2_runner,
+                    runner,
                     worker.execute_model,
                     worker.sample_tokens,
                     num_tokens,
@@ -187,10 +174,9 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 with flashinfer_autotune(True, cache=str(cache_path)):
                     runner._dummy_run(**dummy_run_kwargs)
         else:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-                v2_runner = cast("V2GPUModelRunner", runner)
+            if runner.max_num_reqs >= 2:
                 warmup_executed = run_mixed_prefill_decode_warmup(
-                    v2_runner,
+                    runner,
                     worker.execute_model,
                     worker.sample_tokens,
                     num_tokens,
@@ -258,10 +244,9 @@ def _run_sparse_mla_decode_autotune_v2(
         )
 
     with torch.inference_mode():
-        if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-            v2_runner = cast("V2GPUModelRunner", runner)
+        if runner.max_num_reqs >= 2:
             warmup_executed = run_mixed_prefill_decode_warmup(
-                v2_runner,
+                runner,
                 worker.execute_model,
                 worker.sample_tokens,
                 num_tokens,
@@ -331,20 +316,13 @@ def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     )
     mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(worker, mixed_tokens)
     if not mixed_warmup_done:
-        if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-            v2_runner = cast("V2GPUModelRunner", runner)
+        if runner.max_num_reqs >= 2:
             run_mixed_prefill_decode_warmup(
-                v2_runner,
+                runner,
                 worker.execute_model,
                 worker.sample_tokens,
                 mixed_tokens,
                 req_id_prefix="_sparse_mla_v2_warmup",
             )
         else:
-            runner._dummy_run(
-                num_tokens=mixed_tokens,
-                skip_eplb=True,
-                is_profile=True,
-                force_attention=True,
-                create_mixed_batch=True,
-            )
+            runner._dummy_run(num_tokens=mixed_tokens, skip_eplb=True, is_profile=True)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -16,7 +16,6 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -71,20 +70,5 @@ class WorkerSentinel:
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
         model_runner.execute_model_state = None
-        if self.worker.use_v2_model_runner:
-            runner = cast("GPUModelRunnerV2", model_runner)
-            for req_id in list(runner.req_states.req_id_to_index):
-                runner._remove_request(req_id)
-        else:
-            model_runner.kv_connector_output = None
-
-            input_batch = model_runner.input_batch
-            cached_req_ids = list(input_batch.req_id_to_index)
-            for req_id in cached_req_ids:
-                model_runner.requests.pop(req_id, None)
-                model_runner.num_prompt_logprobs.pop(req_id, None)
-                input_batch.remove_request(req_id)
-
-            input_batch.condense()
-            input_batch.refresh_metadata()
-            input_batch.req_prompt_embeds.clear()
+        for req_id in list(model_runner.req_states.req_id_to_index):
+            model_runner._remove_request(req_id)

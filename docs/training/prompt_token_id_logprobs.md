@@ -51,7 +51,6 @@ lists of Python ints are much slower to copy and serialize. With a logits
 
 ## Requirements
 
-- The V2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
 - The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 

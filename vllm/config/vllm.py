@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -24,7 +24,6 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
@@ -51,7 +50,7 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
-from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
+from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
@@ -112,8 +111,6 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
     """Architectures defaulting to breakable CUDA graphs on this platform."""
-    from vllm.platforms import current_platform
-
     if current_platform.is_rocm():
         # Breakable CUDA graphs currently regress performance on ROCm for
         # models that can use torch.compile piecewise graphs instead. Do not
@@ -178,7 +175,6 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
-    from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
     # The fused all-reduce + RMSNorm path is not batch-invariant
@@ -590,11 +586,7 @@ class VllmConfig:
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
-            if self.use_v2_model_runner:
-                return pp_size + 1
-            # V1 Model Runner does not fully support async scheduling with PP.
-            if pp_size <= 1:
-                return 2
+            return pp_size + 1
         return pp_size
 
     @property
@@ -698,8 +690,6 @@ class VllmConfig:
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
         """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
-        from vllm.platforms import current_platform
-
         model_config = self.model_config
         return (
             model_config is not None
@@ -709,45 +699,6 @@ class VllmConfig:
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and current_platform.is_cuda_alike()
         )
-
-    @property
-    def use_v2_model_runner(self) -> bool:
-        if self.attention_config.hisparse_config is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    "HiSparse requires Model Runner V2; remove "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
-        if getattr(self, "watermark_config", None) is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                logger.info_once(
-                    "Watermarking requires Model Runner V2 and overrides "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
-        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-        if use_v2_model_runner is not None:
-            return use_v2_model_runner
-
-        if not HAS_TRITON and not current_platform.is_unspecified():
-            logger.warning_once(
-                "Model Runner V2 requires Triton; using the V1 model runner instead."
-            )
-            return False
-
-        unsupported = self._get_v2_model_runner_unsupported_features()
-        if unsupported:
-            logger.warning_once(
-                "Model Runner V2 does not yet support %s; using the V1 model "
-                "runner instead.",
-                ", ".join(unsupported),
-            )
-            return False
-
-        return True
 
     def _is_dflash_candidate_draft(self) -> bool:
         """Whether the DFlash draft has a candidate head, by the architecture the
@@ -791,7 +742,6 @@ class VllmConfig:
         Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
         at capture; lm_head runs outside compiled forward and does not benefit."""
         from vllm.model_executor.determinism import batch_invariant_configs as bi
-        from vllm.platforms import current_platform
 
         model = self.model_config
         if (
@@ -900,8 +850,6 @@ class VllmConfig:
         model_config: ModelConfig, load_config: LoadConfig
     ) -> QuantizationConfig | None:
         """Get the quantization config."""
-        from vllm.platforms import current_platform
-
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
@@ -1049,47 +997,6 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
-    def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
-        speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
-            or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            or self.use_v2_model_runner
-        ):
-            return
-
-        logger.warning_once(
-            "Dynamic speculative decoding changes the target verification "
-            "length at runtime. Overriding cudagraph_mode from %s to "
-            "PIECEWISE for reliability. Use VLLM_USE_V2_MODEL_RUNNER=1 "
-            "if you want to use full CUDA graphs.",
-            self.compilation_config.cudagraph_mode.name,
-        )
-        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
-    def _maybe_disable_dynamic_sd_for_v1(self) -> None:
-        speculative_config = self.speculative_config
-        # V2 truncates drafts centrally. V1 requires proposer support.
-        if (
-            speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
-            or self.use_v2_model_runner
-            or speculative_config.method
-            in ("ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash")
-        ):
-            return
-
-        logger.warning_once(
-            "Dynamic speculative decoding is not supported with the '%s' "
-            "speculative method on Model Runner V1. "
-            "Disabling num_speculative_tokens_per_batch_size "
-            "and falling back to static num_speculative_tokens=%d.",
-            speculative_config.method,
-            speculative_config.num_speculative_tokens,
-        )
-        speculative_config.num_speculative_tokens_per_batch_size = None
-
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1171,18 +1078,6 @@ class VllmConfig:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
             return
-        from vllm.platforms import current_platform
-
-        # In-tree platforms only wire AuxOutput to MRV2. TPU and out-of-tree
-        # platforms bring their own model runners and validate AuxOutput
-        # support themselves.
-        if not self.use_v2_model_runner and not (
-            current_platform.is_tpu() or current_platform.is_out_of_tree()
-        ):
-            raise ValueError(
-                "AuxOutput Connector requires Model Runner V2; set "
-                "VLLM_USE_V2_MODEL_RUNNER=1."
-            )
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
         if not self.model_config.is_moe:
@@ -1288,8 +1183,6 @@ class VllmConfig:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
             return
-        if not self.use_v2_model_runner:
-            raise ValueError("sampling distribution replay requires Model Runner V2")
         speculative_config = self.speculative_config
         if (
             speculative_config is not None
@@ -1319,8 +1212,6 @@ class VllmConfig:
         model_config = self.model_config
         if model_config is None or not model_config.enable_trace_replay:
             return
-        if not self.use_v2_model_runner:
-            raise ValueError("trace replay requires Model Runner V2")
 
     def _check_supports_watermarking(
         self,
@@ -1616,7 +1507,6 @@ class VllmConfig:
                     model_type,
                 )
 
-        from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
@@ -1628,23 +1518,6 @@ class VllmConfig:
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
 
-        # Async scheduling incompatibilities specific to the V1 model runner.
-        v1_async_sched_incompat: str | None = None
-        if not self.use_v2_model_runner:
-            spec_config = self.speculative_config
-            if spec_config is not None and (
-                spec_config.method not in get_args(EagleModelTypes)
-                and spec_config.method not in get_args(NgramGPUTypes)
-                and spec_config.method not in ("draft_model", "dspark", "dflash")
-            ):
-                v1_async_sched_incompat = (
-                    f"{spec_config.method}-based speculative decoding"
-                )
-            elif spec_config is not None and spec_config.disable_padded_drafter_batch:
-                v1_async_sched_incompat = "disable_padded_drafter_batch=True"
-            elif self.parallel_config.pipeline_parallel_size > 1:
-                v1_async_sched_incompat = "pipeline parallelism"
-
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             if uses_rocm_deepep_ht_dbo:
@@ -1652,11 +1525,6 @@ class VllmConfig:
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
                     "select a different all2all backend."
-                )
-            if v1_async_sched_incompat is not None:
-                raise ValueError(
-                    "Async scheduling is not supported by the V1 model runner "
-                    f"with {v1_async_sched_incompat}."
                 )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -1686,13 +1554,6 @@ class VllmConfig:
                     "Async scheduling is disabled for ROCm DeepEP "
                     "high-throughput DBO because that combination can corrupt "
                     "DP+EP generation accuracy."
-                )
-                self.scheduler_config.async_scheduling = False
-            elif v1_async_sched_incompat is not None:
-                logger.warning_once(
-                    "Async scheduling is disabled because the V1 model runner "
-                    "does not support it with %s.",
-                    v1_async_sched_incompat,
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1840,8 +1701,6 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
-        self._maybe_disable_dynamic_sd_for_v1()
-        self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
             self.attention_config.sparse_mla_prefill_workspace_factor is None
@@ -2069,11 +1928,8 @@ class VllmConfig:
         self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
-        if self.use_v2_model_runner:
-            self._disable_cudagraphs_for_v2_stock_torch_compile()
-            self._validate_v2_model_runner()
-        else:
-            self._validate_v1_model_runner()
+        self._disable_cudagraphs_for_stock_torch_compile()
+        self._validate_model_runner()
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
@@ -2901,8 +2757,6 @@ class VllmConfig:
         if mm_config.get_mm_processor_device_type() is not None:
             return
 
-        from vllm.platforms import current_platform
-
         device_type = current_platform.device_type
         if device_type in ("", "cpu"):
             return
@@ -2957,8 +2811,6 @@ class VllmConfig:
         if ec_config is None or not ec_config.is_encode_only:
             return
 
-        from vllm.platforms import current_platform
-
         device_type = current_platform.device_type
         if (
             device_type != "cuda"
@@ -3002,103 +2854,19 @@ class VllmConfig:
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
 
-    def _get_v2_model_runner_unsupported_features(self) -> list[str]:
-        """Collect features not yet supported by the V2 model runner."""
+    def _get_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features the GPU model runner does not support."""
         unsupported: list[str] = []
-        speculative_config = self.speculative_config
 
-        # V2 does not implement the external_launcher (torchrun) PP-output
-        # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
+        # The runner does not broadcast PP outputs to keep torchrun ranks in sync.
         if (
             self.parallel_config.distributed_executor_backend == "external_launcher"
             and self.parallel_config.pipeline_parallel_size > 1
         ):
             unsupported.append("pipeline parallelism with external_launcher")
 
-        if speculative_config is not None:
-            if speculative_config.method in ("suffix", "custom_class"):
-                unsupported.append(f"speculative method '{speculative_config.method}'")
-
-            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
-            # DFlash and DSpark use parallel drafting natively in V2 via their
-            # own speculators.
-            if (
-                speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
-            ):
-                unsupported.append("parallel drafting for EAGLE speculative decoding")
-
-            # The V2 draft-model speculator has no token mapping between the
-            # draft and target vocabularies (TLI is TBD in #47172).
-            if getattr(speculative_config, "use_heterogeneous_vocab", False):
-                unsupported.append("heterogeneous-vocabulary draft models")
-
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
-
-        return unsupported
-
-    def _get_v1_model_runner_unsupported_features(self) -> list[str]:
-        unsupported: list[str] = []
-
-        # PCP runtime support is implemented only by the V2 model runner.
-        if self.parallel_config.prefill_context_parallel_size > 1:
-            unsupported.append("prefill context parallel")
-
-        # Note(arpera):
-        # MRV1 + PP>1 + async sched + structured output
-        # does not work in vLLM. For more info see:
-        # https://github.com/vllm-project/vllm/issues/45014
-        # Since recently MRV1 has been deprecated then
-        # there was decided not to fix the issue but instead
-        # to disallow such configuration.
-        # At the same time MRV2 works fine in this case.
-        if (
-            self.parallel_config.pipeline_parallel_size > 1
-            and self.scheduler_config.async_scheduling
-        ):
-            unsupported.append("pipeline parallelism with async scheduling")
-
-        # DSpark is implemented only by the V2 GPU model runner.
-        if self.speculative_config:
-            if self.speculative_config.method == "dspark":
-                unsupported.append("dspark speculative decoding")
-            elif self.speculative_config.is_xpress():
-                unsupported.append("xpress speculative decoding")
-            if self.speculative_config.enable_adaptive_verification:
-                unsupported.append("adaptive draft verification")
-            if self.speculative_config.draft_lm_head_quantization is not None:
-                unsupported.append("draft lm_head quantization")
-
-        # The attention-free Parse MTP draft requires the V2 speculator.
-        if self.speculative_config:
-            draft_config = self.speculative_config.draft_model_config
-            if draft_config is not None and "ParseAuxMTPModel" in (
-                draft_config.architectures or []
-            ):
-                unsupported.append("Parse 3.5 MTP")
-
-        # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
-        if self._dflash_needs_multi_kv_group():
-            unsupported.append("mixed sliding/full dflash drafts")
-
-        # DFlash candidate heads exist only in the V2 speculator. On
-        # V1 the same checkpoint drafts through DFlashProposer, which never
-        # calls it, so the draft would degrade to DFlash1 silently.
-        if self._is_dflash_candidate_draft():
-            unsupported.append("DFlash candidate-head drafts")
-
-        if self.model_config is not None and self.model_config.is_diffusion:
-            unsupported.append("diffusion models")
-
-        if self.parallel_config.enable_batch_sharded_sampling:
-            unsupported.append("batch-sharded sampling")
-
-        if self.model_config is not None and self.model_config.architecture in (
-            "Step5ForCausalLM",
-            "Step5ForConditionalGeneration",
-        ):
-            unsupported.append("Step5")
 
         return unsupported
 
@@ -3187,18 +2955,12 @@ class VllmConfig:
             )
 
     def _get_dbo_unsupported_features(self) -> list[str]:
-        """Collect what the V2 model runner cannot combine with DBO.
+        """Collect what the model runner cannot combine with DBO.
 
-        The V2 runner microbatches a plain decoder forward pass. Anything that
+        The runner microbatches a plain decoder forward pass. Anything that
         slices or replays the batch differently (drafting, adapters, pipeline
         stages, context parallelism, encoders) is not handled yet.
         """
-        # TODO: DBO with model runner V2 is under development.
-        # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
-        # Remove it when stable.
-        if envs.VLLM_USE_V2_MODEL_RUNNER is None:
-            return ["dual batch overlap"]
-
         unsupported: list[str] = []
         model_config = self.model_config
         parallel_config = self.parallel_config
@@ -3232,17 +2994,8 @@ class VllmConfig:
         if self.profiler_config.profiler != "proton":
             return
 
-        from vllm.platforms import current_platform
-
         if not current_platform.is_cuda():
             raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
-        if (
-            self.profiler_config.proton_graph_attribution
-            and not self.use_v2_model_runner
-        ):
-            raise ValueError(
-                "Proton CUDA graph attribution requires the V2 model runner."
-            )
 
         has_cuda_graphs = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -3266,13 +3019,9 @@ class VllmConfig:
                 "Enable attribution or use --enforce-eager."
             )
 
-    def _disable_cudagraphs_for_v2_stock_torch_compile(self) -> None:
-        """Run stock torch.compile without CUDA graphs in Model Runner V2.
-
-        V1 never wraps a stock-compiled model in CUDAGraphWrapper, so it runs
-        without CUDA graphs. V2's CUDA graph manager would otherwise capture
-        FULL graphs around the stock-compiled model, so disable them to match.
-        """
+    def _disable_cudagraphs_for_stock_torch_compile(self) -> None:
+        """Disable CUDA graphs, which the CUDA graph manager would otherwise
+        capture around the stock-compiled model."""
         compilation_config = self.compilation_config
         if (
             compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE
@@ -3280,27 +3029,19 @@ class VllmConfig:
         ):
             return
         logger.info_once(
-            "CUDA graphs are not supported with stock torch.compile in Model "
-            "Runner V2. Overriding cudagraph_mode %s to NONE.",
+            "CUDA graphs are not supported with stock torch.compile. "
+            "Overriding cudagraph_mode %s to NONE.",
             compilation_config.cudagraph_mode.name,
         )
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.max_cudagraph_capture_size = 0
         compilation_config.cudagraph_capture_sizes = []
 
-    def _validate_v2_model_runner(self) -> None:
-        """Check for features not yet supported by the V2 model runner."""
-        unsupported = self._get_v2_model_runner_unsupported_features()
+    def _validate_model_runner(self) -> None:
+        unsupported = self._get_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
-                f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
-            )
-
-    def _validate_v1_model_runner(self) -> None:
-        unsupported = self._get_v1_model_runner_unsupported_features()
-        if unsupported:
-            raise ValueError(
-                f"Model Runner V1 does not support: {', '.join(unsupported)}"
+                f"The GPU model runner does not support: {', '.join(unsupported)}"
             )
 
     def adjust_dcp_kv_cache_interleave_size(
@@ -3456,13 +3197,6 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if (
-                self.cache_config.mamba_cache_mode == "align"
-                and not self.use_v2_model_runner
-            ):
-                raise ValueError(
-                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
-                )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
@@ -3498,10 +3232,9 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif self.use_v2_model_runner:
+        else:
             raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
+                "Triton ReplaySSM is not supported; use --mamba-backend flashinfer"
             )
         if (
             self.kv_transfer_config is not None

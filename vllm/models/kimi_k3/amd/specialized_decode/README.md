@@ -18,7 +18,7 @@ or re-quantized.
 ## Enabling
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <Kimi-K3> -tp 8 \
+vllm serve <Kimi-K3> -tp 8 \
   --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}' \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
@@ -28,8 +28,8 @@ There are no other options. `decode_backend=auto` (the default) runs vLLM's deco
 ## Supported deployments
 
 TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
-decoding with at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32
-recurrent KDA states.
+decoding with at most 7 speculative tokens, BF16 conv / FP32 recurrent KDA
+states.
 
 KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
@@ -42,7 +42,7 @@ If you request the specialized decode for anything else, startup fails with one
   routed-expert capture, sleep mode, CPU weight offload, weight updates,
   no speculative decoding,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
-  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
+  `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes, and the MoE backend (`AITER_MXFP4_BF16`, K3
   SiTU).

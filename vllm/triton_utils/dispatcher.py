@@ -8,7 +8,6 @@ without modifying core code:
     from vllm.triton_utils.dispatcher import register_kernels
 
     register_kernels({
-        "vllm.v1.sample.rejection_sampler.expand_kernel": my_expand_impl,
         "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": my_memcpy_impl,
     })
 """
@@ -150,9 +149,9 @@ def register_kernels(overrides: Mapping[str, Callable[..., Any]]) -> None:
     Args:
         overrides: Mapping from fully qualified kernel name to the
             platform implementation. Kernel names look like
-            "vllm.v1.sample.rejection_sampler.expand_kernel"; for kernels
+            "vllm.v1.worker.mamba_utils.batch_memcpy_kernel"; for kernels
             owned by a JIT warmup class, include the attribute path, e.g.
-            "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel".
+            "module.KernelClass.kernel".
             Implementations are invoked like the kernels themselves, with
             the launch arguments in the original kernel's parameter order
             (or by keyword when their parameter names match the kernel's).

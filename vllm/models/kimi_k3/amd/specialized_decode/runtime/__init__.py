@@ -148,11 +148,6 @@ def unsupported(vllm_config) -> list[str]:
             "state (mamba cache dtype)",
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
-        # the model state hooks build the executor and bind it to each KV cache
-        (
-            not vllm_config.use_v2_model_runner,
-            "the V1 model runner (set VLLM_USE_V2_MODEL_RUNNER=1)",
-        ),
         # plan() and the layer kernels run in forward; a compiled forward would
         # trace them
         (

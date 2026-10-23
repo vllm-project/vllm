@@ -18,7 +18,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -89,26 +88,6 @@ class LoRAModelRunnerMixin:
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
             raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
-
-    def set_active_loras(
-        self,
-        input_batch: InputBatch,
-        num_scheduled_tokens: np.ndarray,
-        num_sampled_tokens: np.ndarray | None = None,
-        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
-    ) -> None:
-        if num_sampled_tokens is None:
-            num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
-
-        prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
-        token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
-        lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = (
-            input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
-        )
-        return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
-        )
 
     @contextmanager
     def maybe_setup_dummy_loras(

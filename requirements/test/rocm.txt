@@ -49,8 +49,6 @@ apache-tvm-ffi==0.1.11
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-arctic-inference==0.1.1
-    # via -r requirements/test/rocm.in
 argcomplete==3.6.3
     # via datamodel-code-generator
 astor==0.8.1

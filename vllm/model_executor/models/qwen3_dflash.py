@@ -149,16 +149,6 @@ def _resolve_layer_attention(
     if layer_types is not None:
         num_sliding = sum(lt == _SLIDING_ATTENTION for lt in layer_types)
         any_sliding = num_sliding > 0
-        # Mixed sliding/full attention needs multiple KV groups (V2 runner only).
-        if (
-            0 < num_sliding < len(layer_types)
-            and not get_current_vllm_config().use_v2_model_runner
-        ):
-            raise NotImplementedError(
-                "DFlash drafters with mixed sliding/full attention require "
-                "the V2 model runner; relaunch with "
-                "VLLM_USE_V2_MODEL_RUNNER=1."
-            )
 
     # ``use_swa`` forces SWA on every layer, even an all-full ``layer_types``.
     if layer_types is None or (use_swa and not any_sliding):
