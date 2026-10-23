@@ -4,6 +4,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -47,7 +50,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -509,6 +512,48 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize("platform_enum", list(PlatformEnum))
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_model_runner_default_preserves_backend_fallback(
+    monkeypatch, platform_enum, has_triton
+):
+    platform = Platform()
+    platform._enum = platform_enum
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
+
+    config = VllmConfig()
+    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+
+
+def test_v2_frontend_config_can_be_created_without_triton():
+    # Start fresh so config imports observe the frontend's Triton availability.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import vllm.platforms as platforms
+                from vllm.platforms.interface import UnspecifiedPlatform
+
+                platforms._current_platform = UnspecifiedPlatform()
+                platforms._current_platform.device_type = "cpu"
+                import vllm.triton_utils
+
+                os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+                vllm.triton_utils.HAS_TRITON = False
+                from vllm.config import VllmConfig
+
+                config = VllmConfig()
+                assert config.use_v2_model_runner
+            """),
+        ],
+        check=True,
+    )
 
 
 def test_hisparse_requires_v2_model_runner():
@@ -3929,6 +3974,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.model = local_cache
     mock_draft.hf_config.model_type = "deepseek_mtp"
     mock_draft.hf_config.n_predict = None
+    mock_draft.hf_config.max_position_embeddings = 4096
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 

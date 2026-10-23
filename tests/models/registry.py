@@ -265,6 +265,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV4ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
+    "DomynEdgeForCausalLM": _HfExamplesInfo(
+        "domyn/Domyn-Edge-Base",
+        trust_remote_code=True,
+        extras={"sft": "domyn/Domyn-Edge-SFT"},
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -1106,6 +1111,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         transformers_version_reason={
             "hf": "Custom processor code is not compatible with Transformers v5."
         },
+    ),
+    "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-OCR-1.0",
+        min_transformers_version="5.19.0",
+        is_available_online=False,
     ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
