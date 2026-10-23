@@ -112,7 +112,7 @@ on. This is the main rule to internalize:
 | Backend, inference side | `WeightTransferConfig(backend=...)` | A plain string selector — that is all this config holds |
 | Backend, trainer side | `init_info.backend` | A `ClassVar` on each init info; never passed by hand |
 | Wire params (`packed`, buffer sizes) | the backend's `TrainerInitInfo` | The trainer propagates them to the worker during `trainer_init`, so the two sides *cannot* disagree |
-| Weights to send | a [`WeightSource`](base.md#weightsource) | `ModuleSource(model)` covers plain and FSDP-sharded modules |
+| Weights to send | a [`WeightSource`](base.md#weightsource) | Usually written for your framework; `ModuleSource(model)` covers modules every rank holds whole (plain, FSDP, DTensor) |
 | Per-round payload | the backend's update info | Built by the engine (from `source.metadata()`, or from a delta backend's per-round payload); you never construct it |
 
 !!! note

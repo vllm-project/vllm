@@ -25,6 +25,11 @@ vice versa, so the registries stay independent.
 Engines get HF-format parameter names; whatever gathering, re-fusing,
 dequantizing or renaming that takes belongs inside the source.
 
+vLLM ships [`ModuleSource`](#modulesource) for modules that every rank holds
+whole. Beyond that, a source is typically something you write for your
+framework, since a pipeline stage, a rank's experts or a Megatron export each
+know their own layout best.
+
 A source has one metadata channel and one or two iteration modes:
 
 - **`metadata() -> list[ParamMeta]`**: every parameter of the whole model, on
