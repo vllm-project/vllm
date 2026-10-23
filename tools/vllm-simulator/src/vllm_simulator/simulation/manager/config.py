@@ -8,7 +8,7 @@ from vllm_simulator.simulation.types import SchedulerConfig
 from vllm_simulator.simulation.vllm.utils import resolve_scheduler_config
 from vllm_simulator.spec import AcceleratorInfo
 from vllm_simulator.time_predictor import (
-    AIConfiguratorTimePredictor,
+    AISimulateTimePredictor,
     InferTimePredictor,
 )
 from vllm_simulator.utils import get_logger
@@ -101,8 +101,8 @@ class ConfigManager:
         hw = cls.get_accelerator_info()
         sched_config = cls._scheduler_config
         predictor_config = cls._get_raw_config().get("predictor", {})
-        if predictor_config.get("name") == "aiconfigurator":
-            return AIConfiguratorTimePredictor(
+        if predictor_config.get("name") == "aisimulate":
+            return AISimulateTimePredictor(
                 model,
                 hw=hw,
                 config=sched_config,
@@ -168,5 +168,5 @@ class ConfigManager:
         else:
             raise ValueError(
                 f"Unknown predictor name: {predictor_config.get('name')}. "
-                "Supported: aiconfigurator, ml, replay, linear"
+                "Supported: aisimulate, ml, replay, linear"
             )

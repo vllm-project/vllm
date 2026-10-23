@@ -1,10 +1,12 @@
 """ML-trained per-iteration latency predictor.
 
-The predictor consumes the 18-feature sklearn bundle produced by the
-Qwen3.7-Max baseline training pipeline.  It intentionally has no dependency on
-the serving backend beyond the simulator's common ``ScheduleBatch`` interface.
+Build a prefill/decode sklearn bundle from collector exports with
+``MLTimePredictor.build_model_from_schedule_batch``. Training and inference
+share the simulator's common ``ScheduleBatch`` feature schema.
 """
 
+import gzip
+import json
 import math
 import os
 import typing
@@ -15,7 +17,11 @@ from sklearn.exceptions import InconsistentVersionWarning
 
 from vllm_simulator.simulation.types import SchedulerConfig
 from vllm_simulator.spec.accelerator import AcceleratorInfo
-from vllm_simulator.time_predictor.base import InferTimePredictor, ScheduleBatch
+from vllm_simulator.time_predictor.base import (
+    InferTimePredictor,
+    ScheduleBatch,
+    ScheduleRequest,
+)
 from vllm_simulator.utils import get_logger
 
 if typing.TYPE_CHECKING:
@@ -48,6 +54,81 @@ class MLTimePredictor(InferTimePredictor):
         "is_decode",
         "is_prefill",
     ]
+
+    @staticmethod
+    def build_model_from_schedule_batch(
+        jsonl_paths: str | list[str],
+        output_path: str | None = None,
+    ) -> dict:
+        """Train forward-latency models from collector schedule_batch exports.
+
+        Pure decode (all extend lengths equal 1) and prefill/mixed steps are
+        fitted separately. If either phase is absent, reuse the other model.
+        Labels are RPC-1 iter_latency in seconds; sample_tokens is not fitted.
+
+        Args:
+            jsonl_paths: One JSONL path or several; .gz is auto-detected.
+            output_path: Optional joblib output; use as database_path.
+
+        Returns:
+            A bundle with prefill/decode models and the shared feature schema.
+
+        Raises:
+            ValueError: No scheduled steps or invalid lengths/latencies.
+        """
+        import numpy as np
+        from sklearn.ensemble import HistGradientBoostingRegressor
+
+        if isinstance(jsonl_paths, str):
+            jsonl_paths = [jsonl_paths]
+        features, latencies = [], []
+        for path in jsonl_paths:
+            opener = gzip.open if path.endswith(".gz") else open
+            with opener(path, "rt") as source:
+                for line in source:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    requests = row.get("requests") or []
+                    if not requests:
+                        continue
+                    if any(
+                        not isinstance(value, int) or value < minimum
+                        for req in requests
+                        for value, minimum in ((req[1], 1), (req[2], 0))
+                    ):
+                        raise ValueError(f"Invalid scheduled lengths in {path}")
+                    batch = ScheduleBatch(
+                        [
+                            ScheduleRequest(extend_length=req[1], past_kv_length=req[2])
+                            for req in requests
+                        ]
+                    )
+                    latency = float(row["iter_latency"])
+                    if not math.isfinite(latency) or latency < 0:
+                        raise ValueError(f"Invalid iter_latency in {path}: {latency}")
+                    features.append(MLTimePredictor._extract_features(batch))
+                    latencies.append(latency)
+        if not features:
+            raise ValueError("Cannot train an ML model without scheduled steps")
+        X, y = np.asarray(features), np.asarray(latencies)
+        is_decode = X[:, -2] == 1
+        models = {}
+        for name, mask in (("prefill", ~is_decode), ("decode", is_decode)):
+            if mask.any():
+                models[name] = HistGradientBoostingRegressor(random_state=0).fit(
+                    X[mask], y[mask]
+                )
+                logger.info("Trained %s model on %d steps", name, int(mask.sum()))
+        for name in ("prefill", "decode"):
+            if name not in models:
+                logger.warning("No %s steps; reusing the other phase's model", name)
+                models[name] = next(iter(models.values()))
+        bundle = {**models, "features": list(MLTimePredictor.FEATURE_NAMES)}
+        if output_path:
+            joblib.dump(bundle, output_path)
+            logger.info("ML model written to %s", output_path)
+        return bundle
 
     def __init__(
         self,

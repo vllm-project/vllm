@@ -94,7 +94,7 @@ vllm_simulator uses **dynamic interception** to hijack the execution flow of vLL
 
 - **Platform / Worker**: stub CUDA operations and KV-cache allocation so the engine runs on CPU while preserving GPU deployment semantics. The model runner is replaced by a stand-in for Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1` is forced; the V1 runner is not modelled).
 - **EngineCore** (`vllm.v1.engine.core.EngineCore`): holds requests in a future queue and dispatches them by `simulation.created_time`; records per-request queueing and prefix-cache hit stats.
-- **Executor** (`UniProcExecutor.execute_model`): accounts the predicted GPU span of each step (AIConfigurator prediction + sampler/logprobs compensation) and advances the simulation clock.
+- **Executor** (`UniProcExecutor.execute_model`): accounts the predicted GPU span of each step (AISimulate prediction + sampler/logprobs compensation) and advances the simulation clock.
 - **Per-request stats**: each finished request's stats are returned in its output's `kv_transfer_params["simulation"]` (`RequestOutput` for in-process runners, non-streaming OpenAI responses). Once every received request has finished, the engine resets the virtual clock; no explicit round marker is needed. Per-step iteration stats and optional CPU overhead are logged at DEBUG level without retaining an iteration history.
 
 Key environment variables:
@@ -133,12 +133,12 @@ The config file is a JSON file with three main sections:
   - `accelerator`: GPU model (e.g., `"h100_sxm"`, `"b300_sxm"`) and `hbm_capacity_gb`
 
 - **`predictor`**: Time prediction module
-  - `name`: predictor type (`"aiconfigurator"`, `"ml"`, `"replay"` or `"linear"`)
+  - `name`: predictor type (`"aisimulate"`, `"ml"`, `"replay"` or `"linear"`)
   - See the **TimePredictor** section below for details
 
 - **`scheduler`**: Parallelism and backend metadata
   > ⚠️ **Note**: Multi-GPU parallelism (TP/EP) should not be configured at the framework level during server launch. Instead, specify `tp_size` and `ep_size` here; the predictor will simulate parallel execution overhead accordingly.
-  - `backend_name` / `backend_version`: the simulated inference engine and version, used to locate the matching AIConfigurator performance database (e.g., `"vllm"` / `"0.19.0"`).
+  - `backend_name` / `backend_version`: the simulated inference engine and version, used to locate the matching AISimulate performance database (e.g., `"vllm"` / `"0.24.0"`).
 
 **Example Config**:
 ```json
@@ -150,7 +150,7 @@ The config file is a JSON file with three main sections:
         }
     },
     "predictor": {
-        "name": "aiconfigurator",
+        "name": "aisimulate",
         "database_mode": "SOL"
     },
     "scheduler": {
@@ -165,19 +165,20 @@ The config file is a JSON file with three main sections:
 
 ---
 ## TimePredictor
-### AIConfigurator
-- Project: <https://github.com/ai-dynamo/aiconfigurator>
+### AISimulate
+- Project: <https://github.com/ai-dynamo/aisimulate> (successor of AIConfigurator)
+- Install: `pip install aisimulate`. The PyPI package is a stub that fetches the wheel from `https://pypi.nvidia.com`. Uninstall `aiconfigurator` / `aiconfigurator-core` first.
 - Parameters:
   - `database_path`: (optional) path to custom operator profiling data
-  - `database_mode`: (optional) performance database mode, e.g. `"SOL"` (speed-of-light) or `"SILICON"` (measured data); defaults to `"SILICON"`
-  - `platform.accelerator.name`: device/system name; it should be one of those defined internally in AIConfigurator
+  - `database_mode`: (optional) performance database mode, `"SILICON"` (measured data), `"HYBRID"`, `"EMPIRICAL"` or `"SOL"` (speed-of-light); defaults to `"SILICON"`
+  - `platform.accelerator.name`: device/system name; it should be one of those defined internally in AISimulate
   - `prefill_scale_factor` / `decode_scale_factor`: optional calibration factors to adjust predicted latency
 
 **Example**:
 ```json
 {
-  "name": "aiconfigurator",
-  "database_path": "path/to/aiconfigurator/data",
+  "name": "aisimulate",
+  "database_path": "path/to/aisimulate/data",
   "database_mode": "SOL",
   "prefill_scale_factor": 1.02040816,
   "decode_scale_factor": 1.01010101

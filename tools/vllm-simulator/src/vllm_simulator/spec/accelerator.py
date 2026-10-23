@@ -12,7 +12,7 @@ logger = get_logger()
 
 @dataclass
 class AcceleratorInfo:
-    # Must match an AIConfigurator system name.
+    # Must match an AISimulate system name.
     name: str
     hbm_capacity_gb: Optional[float] = None
     device_alias: list = field(default_factory=list)

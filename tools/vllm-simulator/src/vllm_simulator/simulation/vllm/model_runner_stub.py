@@ -124,9 +124,9 @@ class _NullCudaStream:
 @functools.cache
 def _simulated_device_capability():
     """Capability of the simulated accelerator, read from its
-    AIConfigurator system spec; A100 when the system is unknown."""
+    AISimulate system spec; A100 when the system is unknown."""
     import yaml
-    from aiconfigurator.sdk.perf_database import get_systems_paths
+    from aisimulate_core.sdk.perf_database import get_systems_paths
 
     from vllm.platforms.interface import DeviceCapability
 

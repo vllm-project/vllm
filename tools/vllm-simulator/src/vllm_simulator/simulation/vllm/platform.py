@@ -120,6 +120,13 @@ class C_VLLMPlatformHook(BaseHook):
                 return min(valid, key=lambda c: c.priority).backend.get_path()
 
             @classmethod
+            def import_kernels(cls) -> None:
+                # The base Platform imports vllm._C, which CUDA wheels do not
+                # ship; compile passes need the CUDA op registrations.
+                from vllm.platforms.cuda import CudaPlatformBase
+                CudaPlatformBase.import_kernels()
+
+            @classmethod
             def verify_quantization(cls, quant: str) -> None:
                 pass
 

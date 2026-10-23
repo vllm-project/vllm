@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 os.environ["VLLM_SIMULATOR_CONFIG_PATH"] = (
     os.path.dirname(__file__) + "/assets/config_vllm.json"
 )
+os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "NON_BLOCKING"
 
 from vllm_simulator.simulation.benchmark import (  # noqa: E402
     BenchmarkConfig,

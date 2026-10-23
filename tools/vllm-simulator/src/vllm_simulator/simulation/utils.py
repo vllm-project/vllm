@@ -5,7 +5,7 @@ from typing import Union
 import numpy as np
 from vllm_simulator.simulation.types import RequestStats, SchedulerConfig
 from vllm_simulator.spec.accelerator import AcceleratorInfo
-from vllm_simulator.time_predictor.aiconfigurator import get_perf_model
+from vllm_simulator.time_predictor.aisimulate import get_perf_model
 
 if typing.TYPE_CHECKING:
     from vllm.config import ModelConfig

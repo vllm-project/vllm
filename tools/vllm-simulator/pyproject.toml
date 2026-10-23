@@ -10,7 +10,7 @@ urls = { Homepage = "https://github.com/vllm-project/vllm" }
 dependencies = [
     "numpy",
     "scikit-learn",
-    "aiconfigurator"
+    "aisimulate"
 ]
 
 [tool.setuptools.dynamic]

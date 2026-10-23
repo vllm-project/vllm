@@ -28,7 +28,6 @@ import requests
 os.environ["VLLM_SIMULATOR_CONFIG_PATH"] = (
     os.path.dirname(__file__) + "/assets/config_vllm.json"
 )
-os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "BLOCKING"
 
 MODEL_PATH = "Qwen/Qwen3-8B"
 SERVER_PORT = 18100
@@ -123,7 +122,11 @@ class VLLMServingRunner:
 
 def test_vllm_serving_blocking():
     """Test vLLM server with BLOCKING mode simulation."""
-    runner = VLLMServingRunner(model=MODEL_PATH)
+    # Scoped to the server process: a module-level os.environ write would
+    # leak into in-process engines of other test modules in the same session.
+    runner = VLLMServingRunner(
+        model=MODEL_PATH, env_overrides={"VLLM_SIMULATOR_OUTPUT_MODE": "BLOCKING"}
+    )
 
     try:
         # Send a few requests sequentially
@@ -141,7 +144,7 @@ def test_vllm_serving_blocking():
             text = result["choices"][0]["text"]
             assert len(text) > 0, f"Request {i}: empty text output"
             # In BLOCKING mode, each request should take some time due to time.sleep
-            # With AIConfigurator predictor, each token takes real inference time
+            # With AISimulate predictor, each token takes real inference time
             print(
                 f"  Request {i}: output_tokens={result['usage']['completion_tokens']}, "
                 f"elapsed={elapsed:.3f}s"

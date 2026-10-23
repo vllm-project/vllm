@@ -2,15 +2,14 @@ import typing
 from typing import Optional
 
 import numpy as np
-from aiconfigurator.sdk import models
-from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.common import (
+from aisimulate_core.sdk import models
+from aisimulate_core.sdk.backends.factory import get_backend
+from aisimulate_core.sdk.common import (
     DatabaseMode,
     KVCacheQuantMode,
 )
-from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
-from aiconfigurator.sdk.inference_session import InferenceSession
-from aiconfigurator.sdk.perf_database import (
+from aisimulate_core.sdk.config import ModelConfig, RuntimeConfig
+from aisimulate_core.sdk.perf_database import (
     get_database,
     get_systems_paths,
     resolve_query_version,
@@ -37,7 +36,7 @@ def get_perf_model(
     model: "vllm.config.ModelConfig",
     workload_distribution: str = "balanced",
 ) -> models.BaseModel:
-    # Quant modes left as None are inferred by AIConfigurator from the
+    # Quant modes left as None are inferred by AISimulate from the
     # checkpoint's quantization_config. Only a runtime --kv-cache-dtype is
     # invisible to the checkpoint, so it is forwarded explicitly.
     model_config = ModelConfig(
@@ -61,7 +60,7 @@ def get_perf_model(
     )
 
 
-class AIConfiguratorTimePredictor(InferTimePredictor):
+class AISimulateTimePredictor(InferTimePredictor):
     def __init__(
         self,
         model: "vllm.config.ModelConfig",
@@ -95,6 +94,8 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
                 hw.name, config.backend_name, config.backend_version, systems_paths
             ),
             systems_paths=systems_paths,
+            # The mode decides whether sibling-version rows are inherited.
+            database_mode=database_mode.name,
         )
 
         if database is None:
@@ -102,11 +103,9 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
 
         database.set_default_database_mode(database_mode)
 
-        self._session = InferenceSession(
-            model=get_perf_model(config, model, workload_distribution),
-            backend=get_backend(self.config.backend_name),
-            database=database,
-        )
+        self._model = get_perf_model(config, model, workload_distribution)
+        self._backend = get_backend(self.config.backend_name)
+        self._database = database
 
     def _resolve_database_version(
         self,
@@ -115,8 +114,9 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
         version: Optional[str],
         systems_paths: list[str],
     ) -> str:
-        # AIC only serves versions within its queryable slots (current/previous/next);
-        # fall back to the 'current' slot when the requested version is unlisted.
+        # AISimulate only serves versions within its queryable slots
+        # (current/previous/next); fall back to the 'current' slot when the
+        # requested version is unlisted.
         if not version:
             return "current"
         try:
@@ -128,7 +128,7 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
                 system, backend, "current", systems_paths=systems_paths
             )
             logger.warning(
-                "AIConfigurator has no queryable %s/%s on %s, falling back to "
+                "AISimulate has no queryable %s/%s on %s, falling back to "
                 "'current' slot %s. Set AIC_ALLOW_UNLISTED_VERSIONS=1 to force "
                 "the raw version.",
                 backend,
@@ -139,12 +139,13 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
             return resolved
 
     def _get_database_mode(self, mode: str) -> DatabaseMode:
+        # SOL_FULL is a per-query diagnostic in AISimulate and cannot be a
+        # database's default mode.
         return {
             "SILICON": DatabaseMode.SILICON,
             "HYBRID": DatabaseMode.HYBRID,
             "EMPIRICAL": DatabaseMode.EMPIRICAL,
             "SOL": DatabaseMode.SOL,
-            "SOL_FULL": DatabaseMode.SOL_FULL,
         }.get(mode.upper(), DatabaseMode.SILICON)
 
     def ctx_attn_flops_ratio_with_avg(self, reqs: list[ScheduleRequest]) -> float:
@@ -164,60 +165,54 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
 
         return actual_flops / avg_flops
 
+    def _run_static(self, runtime_config: RuntimeConfig, mode: str) -> dict:
+        if self.enable_oom_check:
+            summary = self._backend.run_static(
+                self._model, self._database, runtime_config, mode
+            )
+            if mode == "static_gen":
+                return summary.get_generation_latency_dict()
+            return summary.get_context_latency_dict()
+        # faster path: skip building the InferenceSummary
+        results = self._backend._run_static_breakdown(
+            self._model,
+            self._database,
+            runtime_config,
+            mode=mode,
+            include_energy=False,
+        )
+        return results[2] if mode == "static_gen" else results[0]
+
     def predict_infer_latency_dict(self, batch: ScheduleBatch) -> dict:
         # Returns latency details for debugging operators.
+        if batch.is_empty():
+            return {}
         if batch.is_decode():
             # Decode: output sequence length (osl) = 2, input sequence length (isl) = mean(past_kv_length)
             isl = int(np.mean([req.past_kv_length for req in batch.reqs]))
             runtime_config = RuntimeConfig(batch_size=batch.batch_size, isl=isl, osl=2)
-            if self.enable_oom_check:
-                summary = self._session.run_static(runtime_config, mode="static_gen")
-                latency_dict = summary.get_generation_latency_dict()
-            else:
-                # faster path
-                results = self._session._backend._run_static_breakdown(
-                    self._session._model,
-                    self._session._database,
-                    runtime_config,
-                    mode="static_gen",
-                )
-                latency_dict = results[2]
-        else:
-            # Prefill: output sequence length (osl) = 1, input sequence length (isl) = mean(past_kv + input), prefix = mean(past_kv)
-            mean_past = np.mean([req.past_kv_length for req in batch.reqs])
-            mean_input = np.mean([req.extend_length for req in batch.reqs])
-            isl = int(mean_past + mean_input)
-            prefix = int(mean_past)
+            return self._run_static(runtime_config, "static_gen")
 
-            seq_imbalance_correction_scale = self.ctx_attn_flops_ratio_with_avg(
-                batch.reqs
-            )
-            extra_kwargs = (
-                {"seq_imbalance_correction_scale": seq_imbalance_correction_scale}
-                if seq_imbalance_correction_scale >= 0.4
-                else {}
-            )
-            runtime_config = RuntimeConfig(
-                batch_size=batch.batch_size,
-                isl=isl,
-                prefix=prefix,
-                osl=1,
-                **extra_kwargs,
-            )
+        # Prefill: output sequence length (osl) = 1, input sequence length (isl) = mean(past_kv + input), prefix = mean(past_kv)
+        mean_past = np.mean([req.past_kv_length for req in batch.reqs])
+        mean_input = np.mean([req.extend_length for req in batch.reqs])
+        isl = int(mean_past + mean_input)
+        prefix = int(mean_past)
 
-            if self.enable_oom_check:
-                summary = self._session.run_static(runtime_config, mode="static_ctx")
-                latency_dict = summary.get_context_latency_dict()
-            else:
-                # faster path
-                results = self._session._backend._run_static_breakdown(
-                    self._session._model,
-                    self._session._database,
-                    runtime_config,
-                    mode="static_ctx",
-                )
-                latency_dict = results[0]
-        return latency_dict
+        seq_imbalance_correction_scale = self.ctx_attn_flops_ratio_with_avg(batch.reqs)
+        extra_kwargs = (
+            {"seq_imbalance_correction_scale": seq_imbalance_correction_scale}
+            if seq_imbalance_correction_scale >= 0.4
+            else {}
+        )
+        runtime_config = RuntimeConfig(
+            batch_size=batch.batch_size,
+            isl=isl,
+            prefix=prefix,
+            osl=1,
+            **extra_kwargs,
+        )
+        return self._run_static(runtime_config, "static_ctx")
 
     def predict_infer_time(self, batch: ScheduleBatch) -> float:
         latency_dict = self.predict_infer_latency_dict(batch)

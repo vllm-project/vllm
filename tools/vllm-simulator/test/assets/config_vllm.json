@@ -6,7 +6,7 @@
         }
     },
     "predictor": {
-        "name": "aiconfigurator",
+        "name": "aisimulate",
         "database_mode": "SOL"
     },
     "scheduler": {
