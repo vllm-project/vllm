@@ -155,6 +155,9 @@ class _ArgsRewriter:
 
     def rewrite(self) -> str:
         text = self._text
+        if not self._props and "NaN" not in text and "Infinity" not in text:
+            # Without a property schema only non-finite literals are rewritten.
+            return text
         i = self._skip_ws(0)
         if i >= len(text) or text[i] != "{":
             return text
