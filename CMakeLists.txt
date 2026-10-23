@@ -424,7 +424,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/gptq/q_gemm.cu"
     "csrc/pos_encoding_kernels.cu"
-    "csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cu"
+    # Fused MUSE-Spark qknorm/rope/kv-insert is instantiated one unit per
+    # head_dim: with the whole op in one unit it is one of the longest compiles
+    # of a 9-arch build. _api keeps the public entry point and forwards on
+    # head_dim.
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_api.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.cu"
     "csrc/fused_qknorm_rope_kernel.cu"
     "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
     "csrc/layernorm_kernels.cu"
