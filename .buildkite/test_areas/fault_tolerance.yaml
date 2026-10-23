@@ -20,6 +20,7 @@ steps:
   - vllm/v1/worker/
   - tests/v1/fault_tolerance/
   - tests/v1/distributed/test_external_lb_dp.py
+  - requirements/kv_connectors.txt
   commands:
   # Base image has no nixl; install it or has_nixl_ep() skips the tests.
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh

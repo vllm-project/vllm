@@ -223,6 +223,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
     - tests/v1/kv_connector/nixl_push_integration/
+    - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
@@ -237,6 +238,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/v1/core/sched/
     - tests/v1/kv_connector/nixl_integration/
+    - requirements/kv_connectors.txt
   env:
     PREFILL_GPU_ID: "0"
     DECODE_GPU_ID: "1"
@@ -271,6 +273,7 @@ steps:
     - vllm/v1/core/sched/
     - vllm/v1/core/kv_cache_coordinator.py
     - tests/v1/kv_connector/nixl_integration/
+    - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
@@ -304,6 +307,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - tests/v1/kv_connector/nixl_integration/
+    - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
@@ -337,6 +341,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
+    - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
@@ -369,6 +374,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - tests/v1/kv_connector/nixl_integration/
+    - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
