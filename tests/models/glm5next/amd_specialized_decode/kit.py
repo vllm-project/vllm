@@ -141,9 +141,12 @@ def patch_layers(
         return FakeKernel(idx, width, words)
 
     monkeypatch.setattr(decode, "model_refusals", lambda b: list(model_reasons))
-    monkeypatch.setattr(
-        layers, "pack", lambda model, ctx: log.append(("pack",)) or "packed"
-    )
+
+    def pack(model, ctx):
+        log.append(("pack",))
+        return "packed"
+
+    monkeypatch.setattr(layers, "pack", pack)
     monkeypatch.setattr(layers, "bind", bind)
     monkeypatch.setattr(layers, "build", build)
     monkeypatch.setattr(layers, "eligible", lambda ctx, step: eligible_reason)

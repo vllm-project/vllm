@@ -13,13 +13,12 @@ import pytest
 import ray
 import torch
 
-from vllm.platforms import current_platform
-
-from ....utils import (
+from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
 )
+from vllm.platforms import current_platform
 
 REPLAYS = 300
 ROWS = (2, 4, 8, 16)

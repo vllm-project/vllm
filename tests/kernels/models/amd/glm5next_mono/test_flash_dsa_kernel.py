@@ -576,7 +576,7 @@ def test_dsa_layer_matches_vllm_ops(
     monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, kv_fp8: bool
 ):
     """``kv_fp8``: an e4m3 MLA cache, as ``--kv-cache-dtype fp8_e4m3`` gives."""
-    from ....utils import multi_process_parallel
+    from tests.utils import multi_process_parallel
 
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")

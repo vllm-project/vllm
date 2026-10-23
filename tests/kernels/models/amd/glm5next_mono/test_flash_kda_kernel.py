@@ -181,7 +181,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
     lay, kda = _Layer(rank, tp, device), _Kda(rank, tp, device)
     if not dim_first:
         kda.conv0 = kda.conv0.transpose(1, 2).contiguous()
-    nin = FlashShard(tp).kda_in_rows
+    n_in = FlashShard(tp).kda_in_rows
     group = get_tp_group().cpu_group
     for S in ROWS:
         rt = FlashFfnRuntime(
@@ -224,7 +224,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         assert _rel(a_in, a_ref) < 1e-2, f"S={S}: attention input {_rel(a_in, a_ref)}"
 
         # merged projection and the f_b / g_b gates on the kernel's own inputs
-        proj = _box(rt, "proj", S * nin).view(S, nin)
+        proj = _box(rt, "proj", S * n_in).view(S, n_in)
         want = (a_in.float() @ kda.w_in.float().T).bfloat16().float()
         assert _rel(proj, want) < 1e-2, f"S={S}: projection {_rel(proj, want)}"
         gates = _box(rt, "gates", S * 2 * kda.P).view(S, 2 * kda.P)
@@ -307,7 +307,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
 def test_kda_layer_matches_vllm_ops(
     monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool
 ):
-    from ....utils import multi_process_parallel
+    from tests.utils import multi_process_parallel
 
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")

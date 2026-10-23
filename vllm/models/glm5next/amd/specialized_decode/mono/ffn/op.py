@@ -174,7 +174,7 @@ class FlashFfnRuntime:
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
         )
-        dev = torch.device("cuda", torch.cuda.current_device())
+        dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
         self.scratch = torch.zeros(self.sc["_bytes"], dtype=torch.uint8, device=dev)
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)

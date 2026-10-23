@@ -201,7 +201,7 @@ def test_moved_caches_are_rebound_and_rechecked(monkeypatch):
 def test_caches_index_into_tuples_and_skip_other_layers(monkeypatch):
     from vllm.models.glm5next.amd.specialized_decode.runtime import layers
 
-    log = []
+    log: list = []
     kit.patch_layers(monkeypatch, log)
     when = lambda layer: layer.idx != 2  # noqa: E731
     monkeypatch.setattr(layers, "CACHES", {"rec": ("pair[1]", (torch.float32,), when)})

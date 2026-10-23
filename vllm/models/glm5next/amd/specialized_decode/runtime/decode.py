@@ -108,7 +108,7 @@ class SpecializedDecode:
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
             cpu_group=get_tp_group().cpu_group,
-            device=torch.device("cuda", torch.cuda.current_device())
+            device=torch.device("cuda", torch.accelerator.current_device_index())
             if torch.cuda.is_available()
             else torch.device("cpu"),
         )

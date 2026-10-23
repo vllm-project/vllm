@@ -68,7 +68,7 @@ def _export(pointer: int) -> tuple[bytes, int]:
     )
     handle = _IpcHandle()
     _check(_lib().hipIpcGetMemHandle(ctypes.byref(handle), base), "hipIpcGetMemHandle")
-    return bytes(handle.reserved), pointer - int(base.value)
+    return bytes(handle.reserved), pointer - (base.value or 0)
 
 
 def _open(handle: bytes) -> int:
@@ -79,7 +79,7 @@ def _open(handle: bytes) -> int:
         _lib().hipIpcOpenMemHandle(ctypes.byref(mapped), h, _LAZY_ENABLE_PEER_ACCESS),
         "hipIpcOpenMemHandle",
     )
-    return int(mapped.value)
+    return mapped.value or 0
 
 
 class PeerBuffers:
@@ -91,7 +91,7 @@ class PeerBuffers:
         import torch.distributed as dist
 
         self.rank, self.npes, self.group = rank, npes, group
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device("cuda", torch.accelerator.current_device_index())
         self.storage = torch.zeros(nbytes, dtype=torch.uint8, device=device)
         local = self.storage.data_ptr()
         self._remote: list[int] = []
@@ -101,9 +101,9 @@ class PeerBuffers:
             mine: tuple | str
             try:
                 mine = _export(local)
-            except RuntimeError as error:
-                mine = str(error)
-            exported = [None] * npes
+            except RuntimeError as err:
+                mine = str(err)
+            exported: list = [None] * npes
             dist.all_gather_object(exported, mine, group=group)
             failed = [
                 f"rank {r}: {e}" for r, e in enumerate(exported) if isinstance(e, str)
@@ -124,7 +124,7 @@ class PeerBuffers:
                     break
                 self._remote.append(base)
                 pointers.append(base + offset)
-            status = [None] * npes
+            status: list = [None] * npes
             dist.all_gather_object(status, error, group=group)
             failed = [f"rank {r}: {e}" for r, e in enumerate(status) if e]
             if failed:
@@ -139,7 +139,7 @@ class PeerBuffers:
         self._remote.clear()
 
     def close(self) -> None:
-        torch.cuda.synchronize(self.storage.device)
+        torch.accelerator.synchronize(self.storage.device)
         if self.npes > 1:
             import torch.distributed as dist
 
