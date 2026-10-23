@@ -14,8 +14,8 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
-- name: label-recipes
-  description: Automatically apply recipes label
+- name: label-recipe
+  description: Automatically apply recipe label
   conditions:
     - label != stale
     - -closed
@@ -23,7 +23,7 @@ pull_request_rules:
   actions:
     label:
       add:
-        - recipes
+        - recipe
     comment:
       message: "Recipe preview (rebuilt within ~15 minutes of each push): https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
 
