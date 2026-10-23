@@ -122,10 +122,11 @@ def test_replayssm_skipped_step_matches_no_skip(vllm_runner, monkeypatch, model_
         ) as llm:
             # 23 outputs: past the first flush, with 7 tokens still in the ring.
             ref = llm.llm.generate(PROMPTS, params(None))
-            out = llm.llm.generate(PROMPTS, params(23))
+            # Only the first request is held back; the other keeps running.
+            out = llm.llm.generate(PROMPTS, [params(23), params(None)])
     envs.disable_envs_cache()
 
-    assert len(skipped_step_scheduler.skipped) == len(PROMPTS)
+    assert len(skipped_step_scheduler.skipped) == 1
     for r, o in zip(ref, out):
         assert list(o.outputs[0].token_ids) == list(r.outputs[0].token_ids)
 

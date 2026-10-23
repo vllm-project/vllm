@@ -1493,7 +1493,7 @@ class GPUModelRunner(
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
-            if request.num_accepted_tokens != 1:
+            if self.use_async_scheduling and request.num_accepted_tokens != 1:
                 self._num_accepted_on_readd[request.req_id] = (
                     request.num_accepted_tokens
                 )
