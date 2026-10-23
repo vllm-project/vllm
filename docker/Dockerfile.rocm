@@ -387,7 +387,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 FROM base AS build_nixl
 ARG NIXL_BRANCH="1683cf3b7f3d11674c03c5e861cea22339876c96"
 ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
-ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
+ARG UCX_BRANCH="2ff0b47ce7626584cb9b56c647d08f712c6c3edf"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ENV UCX_HOME=/usr/local/ucx
 ENV NIXL_HOME=/usr/local/nixl
@@ -842,8 +842,8 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # Use legacy IPC mode for HSA to avoid GPU memory pinning issues with UCX rocm_ipc.
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
-ENV UCX_RMA_PPLN_ENABLE=y
 ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
+ENV UCX_ROCM_IPC_SIGPOOL_MAX_ELEMS=inf
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
@@ -978,8 +978,8 @@ COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 # Use legacy IPC mode for HSA to avoid GPU memory pinning issues with UCX rocm_ipc
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
-ENV UCX_RMA_PPLN_ENABLE=y
 ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
+ENV UCX_ROCM_IPC_SIGPOOL_MAX_ELEMS=inf
 
 ENV TOKENIZERS_PARALLELISM=false
 
