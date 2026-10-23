@@ -79,7 +79,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python3 --version && python3 -m pip --version
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11==3.0.4 Cython
+    pip install -U packaging 'cmake<4' ninja wheel==0.48.0 'setuptools<80' pybind11==3.0.4 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install ROCm SDK via TheRock

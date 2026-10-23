@@ -239,7 +239,7 @@ ARG NIC_BACKEND=all
 # (libionic1=54.0-187-1), required for MoRI-EP/NIXL on Pollara/AINIC.
 ARG AINIC_VERSION=1.117.5-a-77
 ARG UBUNTU_CODENAME=jammy
-RUN /bin/bash -lc 'set -euo pipefail; \
+RUN --mount=type=cache,target=/root/.cache/pip /bin/bash -lc 'set -euo pipefail; \
  \
  install_ainic() { \
    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg apt-transport-https; \
