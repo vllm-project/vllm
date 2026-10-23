@@ -44,10 +44,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
-    get_request_block_hasher,
-    init_none_hash,
-)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -82,11 +79,6 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
-
-
-def _enable_lookahead_block_hashes(scheduler: Scheduler) -> None:
-    scheduler.num_hash_lookahead_tokens = 1
-    scheduler.kv_cache_manager.block_pool.num_hash_lookahead_tokens = 1
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -388,7 +380,6 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
         block_size=block_size,
         max_num_batched_tokens=16,
     )
-    _enable_lookahead_block_hashes(scheduler)
 
     def make_request(request_id: str, prompt_token_ids: list[int]) -> Request:
         return Request(
@@ -422,50 +413,110 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
     assert num_cached_tokens([0, 1, 2, 3, 6, 7]) == block_size
 
 
-def test_finished_request_publishes_block_ending_at_last_sampled_token():
-    """The last sampled token is never computed, but it is the lookahead token
-    of the block ending right before it, whose draft KV the finishing step
-    wrote. That block must be published before the request is freed."""
-    block_size = 2
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("lookahead", [0, 1])
+@pytest.mark.parametrize("ending", ["prefill", "accepted", "stop", "rejected"])
+def test_finished_spec_request_caches_completed_blocks(
+    async_scheduling, lookahead, ending
+):
+    """Final output can make a computed block's hash available before freeing it."""
+    block_size = 4
     init_none_hash(sha256)
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         block_size=block_size,
-        max_num_batched_tokens=16,
+        num_speculative_tokens=2,
+        speculative_method="ngram_gpu",
+        async_scheduling=async_scheduling,
     )
-    _enable_lookahead_block_hashes(scheduler)
+    hasher = get_request_block_hasher(block_size, sha256, lookahead)
+    prompt = list(range(4 if ending == "prefill" else 2))
     request = Request(
-        request_id="request",
-        prompt_token_ids=[0, 1, 2],
-        sampling_params=SamplingParams(max_tokens=2, ignore_eos=True),
+        request_id="producer",
+        prompt_token_ids=prompt,
+        sampling_params=SamplingParams(
+            max_tokens={"prefill": 1, "rejected": 2}.get(ending, 4),
+            ignore_eos=True,
+            stop_token_ids=[4] if ending == "stop" else None,
+        ),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, 1),
+        block_hasher=hasher,
     )
-    scheduler.add_request(request)
 
-    for token_id in (3, 4):
-        scheduler_output = scheduler.schedule()
+    def finish_step(output, tokens):
         scheduler.update_from_output(
-            scheduler_output,
+            output,
             ModelRunnerOutput(
                 req_ids=[request.request_id],
                 req_id_to_index={request.request_id: 0},
-                sampled_token_ids=[[token_id]],
+                sampled_token_ids=[tokens],
             ),
         )
-    assert request.is_finished()
-    # Tokens 0-3 were computed; token 4 is the lookahead of block [2, 4).
-    assert request.num_computed_tokens == 4
 
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if ending == "prefill":
+        finish_step(output, [4])
+    else:
+        finish_step(output, [2])
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(req_ids=[request.request_id], draft_token_ids=[[3, 4]])
+        )
+        output = scheduler.schedule()
+        finish_step(output, [8] if ending == "rejected" else [3, 4, 5])
+
+    assert request.is_finished()
+    assert request.num_output_placeholders == 0
     probe = Request(
         request_id="probe",
-        prompt_token_ids=[0, 1, 2, 3, 4, 5],
+        prompt_token_ids=list(request.all_token_ids) + [99] * block_size,
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, 1),
+        block_hasher=hasher,
     )
-    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
-    assert num_tokens == 4
+    expected = 0 if ending == "rejected" else block_size
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == expected
+
+
+@pytest.mark.parametrize("num_spec_tokens", [None, 2])
+def test_async_output_does_not_cache_inflight_tokens(num_spec_tokens):
+    """A returned token ID does not prove that its next-step KV is ready."""
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=1,
+        async_scheduling=True,
+        num_speculative_tokens=num_spec_tokens,
+        speculative_method="ngram_gpu" if num_spec_tokens else None,
+    )
+    hasher = get_request_block_hasher(1, sha256)
+    request = Request(
+        request_id="producer",
+        prompt_token_ids=[0, 1],
+        sampling_params=SamplingParams(max_tokens=16, ignore_eos=True),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] > 0
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[2]],
+        ),
+    )
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=[0, 1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 2
 
 
 def test_schedule_multimodal_requests():
@@ -4759,7 +4810,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
-    scheduler.num_hash_lookahead_tokens = 0
+    scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

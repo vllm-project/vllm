@@ -92,12 +92,8 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
-    """Tokens after each block that its hash also depends on, one entry per
-    block in block_hashes; None for the legacy hashes.
-
-    Set with EAGLE-family lookahead block hashes. These tokens are not cached in
-    the block, and extra_keys also covers them, so blocks with the same tokens
-    at the same position can have different hashes.
+    """Tokens beyond each block used in its hash, one list per block_hashes entry.
+    None when lookahead hashing is disabled.
     """
     lookahead_token_ids: list[list[int]] | None = None
 

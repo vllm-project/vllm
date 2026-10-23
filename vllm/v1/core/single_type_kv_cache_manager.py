@@ -499,12 +499,8 @@ class SingleTypeKVCacheManager(ABC):
         if not self.kv_cache_spec.prefix_cacheable:
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        resolved_block_hashes = resolve_block_hashes(
-            request.block_hashes,
-            self.block_pool.hash_block_size,
-            self.block_size,
-        )
-        num_full_blocks = min(num_tokens // self.block_size, len(resolved_block_hashes))
+        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
+        num_full_blocks = min(num_tokens, num_hashed_tokens) // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -879,7 +875,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             if self.use_eagle
             else request.num_prompt_tokens - 1
         )
-        boundary_tokens = token_limit // hash_block_size * hash_block_size
+        boundary_tokens = (
+            min(token_limit // hash_block_size, len(request.block_hashes))
+            * hash_block_size
+        )
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -1763,6 +1762,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens,
                 self.cache_hit_alignment_tokens,
                 self.drop_eagle_checkpoint_block,
+                num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
             )
             if not self._needs_internal_checkpoint(
                 request_id,
@@ -2048,6 +2048,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     request.num_prompt_tokens,
                     self.cache_hit_alignment_tokens,
                     self.drop_eagle_checkpoint_block,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
                 )
             )
             is_retained_checkpoint = False
@@ -2087,6 +2088,7 @@ class MambaManager(SingleTypeKVCacheManager):
             request.num_prompt_tokens,
             hash_block_size,
             self.drop_eagle_checkpoint_block,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
         # The junction is the other position a sibling resumes at: where one was
         # observed to stop, and where the scheduler already ends a chunk. Bounded

@@ -26,6 +26,7 @@ def compute_mamba_prefill_checkpoints(
     checkpoint_alignment: int | None,
     drop_eagle_block: bool,
     cache_hit_alignment_tokens: int,
+    num_hash_lookahead_tokens: int = 0,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -44,7 +45,10 @@ def compute_mamba_prefill_checkpoints(
     for seq_len, query_len in zip(seq_lens, query_lens):
         query_start = seq_len - query_len
         position = get_mamba_prefill_checkpoint_position(
-            seq_len, cache_hit_alignment_tokens, drop_eagle_block=drop_eagle_block
+            seq_len,
+            cache_hit_alignment_tokens,
+            drop_eagle_block=drop_eagle_block,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,
@@ -100,8 +104,6 @@ class MambaPrefillCheckpointBuilder:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
         speculative_config = vllm_config.speculative_config
-        # Lookahead hashes prove the boundary token's draft KV, so the
-        # checkpoint needs no Eagle back-off.
         self.drop_eagle_block = (
             speculative_config is not None
             and speculative_config.use_eagle_block_drop()
@@ -136,6 +138,7 @@ class MambaPrefillCheckpointBuilder:
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
             drop_eagle_block=self.drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
+            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
         )
         if not any(checkpoint_offsets):
             return None

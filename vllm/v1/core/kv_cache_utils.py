@@ -1010,7 +1010,6 @@ def get_request_block_hasher(
                     curr_mm_idx,
                 )
                 if num_hash_lookahead_tokens == 1:
-                    # Same tuple as the slice below, built faster.
                     extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
                 else:
                     extra_keys = (
@@ -1044,11 +1043,9 @@ def generate_lookahead_block_hash_extra_keys(
     hash_end_token_idx: int,
     start_mm_idx: int,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    """`generate_block_hash_extra_keys` over the block and its lookahead tokens
-    up to ``hash_end_token_idx``.
+    """Generate extra keys for the block and its lookahead tokens.
 
-    The returned MM index steps back to the first MM input the next block,
-    which starts at ``end_token_idx``, still overlaps.
+    Rewind the MM index to retain inputs overlapping the next block.
     """
     extra_keys, mm_idx = generate_block_hash_extra_keys(
         request, start_token_idx, hash_end_token_idx, start_mm_idx

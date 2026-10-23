@@ -191,12 +191,6 @@ vllm serve <target-model> \
   are populated by vLLM and are not intended to be set by users.
 - `use_heterogeneous_vocab` currently supports greedy draft sampling only. Probabilistic acceptance (temperature > 0 draft sampling) is not yet supported and will be added in a future release.
 
-## Prefix caching
-
-EAGLE, EAGLE3 and MTP drafters write the draft KV at a block's last position from the token after the block (the next `num_speculative_tokens` tokens for MTP checkpoints with several MTP layers). With prefix caching enabled, vLLM adds those tokens to each block hash by default, so a hit covers the full block-aligned prefix, as without speculative decoding. Set `"disable_lookahead_block_hashes": true` to use the legacy hashes instead, which drop the last matched block on every hit. Lookahead hashes are not used when a KV connector is configured.
-
-KV cache events carry those tokens in [BlockStored][vllm.distributed.kv_events.BlockStored]`.lookahead_token_ids`. A block hash depends on `token_ids`, `extra_keys` and `lookahead_token_ids`, so blocks with the same tokens at the same position can carry different hashes.
-
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

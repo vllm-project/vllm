@@ -189,6 +189,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=use_eagle,
+        num_hash_lookahead_tokens=0,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
