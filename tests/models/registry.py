@@ -1107,6 +1107,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "Custom processor code is not compatible with Transformers v5."
         },
     ),
+    "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-OCR-1.0",
+        min_transformers_version="5.19.0",
+        is_available_online=False,
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
