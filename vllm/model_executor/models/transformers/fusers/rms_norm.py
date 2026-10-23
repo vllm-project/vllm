@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
+from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -32,34 +33,56 @@ from vllm.model_executor.models.transformers.layers import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+logger = init_logger(__name__)
+
+
+def _operand(node: fx.Node, index: int, name: str) -> object | None:
+    """Operand `index` of `node`, whether it was passed positionally or as `name`."""
+    if len(node.args) > index:
+        return node.args[index]
+    return node.kwargs.get(name)
+
 
 def _is_squared(node: object, x: fx.Node) -> bool:
     """`x**2`, `x.square()` or `x * x`, through any dtype casts."""
     node = peel(node)
     if is_op(node, "pow"):
-        base, exp = node.args
-        return peel(base) is x and exp == 2
+        return (
+            peel(_operand(node, 0, "input")) is x and _operand(node, 1, "exponent") == 2
+        )
     if is_op(node, "square"):
-        return peel(node.args[0]) is x
+        return peel(_operand(node, 0, "input")) is x
     if is_op(node, "mul"):
-        a, b = node.args
-        return peel(a) is x and peel(b) is x
+        return (
+            peel(_operand(node, 0, "input")) is x
+            and peel(_operand(node, 1, "other")) is x
+        )
+    return False
+
+
+def _is_inverse_sqrt(node: object) -> bool:
+    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it."""
+    if is_op(node, "rsqrt"):
+        return True
+    if is_op(node, "pow"):
+        return _operand(node, 1, "exponent") == -0.5
     return False
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
-    """eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
-    add = peel(rsqrt.args[0])
+    """`eps` from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
+    add = peel(_operand(rsqrt, 0, "input"))
     if not is_op(add, "add"):
         return None
-    consts = [a for a in add.args if isinstance(a, (int, float))]
-    nodes = [a for a in add.args if isinstance(a, fx.Node)]
+    operands = [_operand(add, 0, "input"), _operand(add, 1, "other")]
+    consts = [a for a in operands if isinstance(a, (int, float))]
+    nodes = [a for a in operands if isinstance(a, fx.Node)]
     if len(consts) != 1 or len(nodes) != 1:
         return None
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
-    if not _is_squared(mean.args[0], x):
+    if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
 
@@ -69,7 +92,10 @@ def _is_one_plus(node: object) -> bool:
     node = peel(node)
     if not is_op(node, "add"):
         return False
-    return any(isinstance(a, (int, float)) and a == 1 for a in node.args)
+    return any(
+        isinstance(a, (int, float)) and a == 1
+        for a in (_operand(node, 0, "input"), _operand(node, 1, "other"))
+    )
 
 
 def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
@@ -122,6 +148,10 @@ class RMSNormFuser(BaseFuser):
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
     source_cls: str
     """Class name of the norm this was matched from (for logging)."""
+    eps_attr: str | None = None
+    """Attribute holding `eps`, read per instance in `fuse`."""
+    eps: float | None = None
+    """`eps` itself, when it is not held in an attribute (see `_eps_source`)."""
 
     def info(self, name: str) -> str:
         norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
@@ -137,22 +167,30 @@ class RMSNormFuser(BaseFuser):
             return None
         # Handle native torch `rms_norm` op.
         rms_norm = find_node(graph, lambda n: is_op(n, "rms_norm"))
-        if rms_norm is not None and rms_norm.args and peel(rms_norm.args[0]) is x:
+        if rms_norm is not None and peel(_operand(rms_norm, 0, "input")) is x:
             if _has_trailing_compute(graph, rms_norm):
                 return None
-            return cls(zero_centered=False, source_cls=type(module).__name__)
+            eps_attr, eps = cls._eps_source(graph, module)
+            return cls(
+                zero_centered=False,
+                source_cls=type(module).__name__,
+                eps_attr=eps_attr,
+                eps=eps,
+            )
         # Handle explicit `x * rsqrt(mean(x**2, -1) + eps)` pattern.
         # The rsqrt over the mean-square variance is the spine of the norm.
         rsqrt = None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and _variance_eps(node, x) is not None:
+            if _is_inverse_sqrt(node) and _variance_eps(node, x) is not None:
                 rsqrt = node
                 break
         if rsqrt is None:
             return None
         # The `x * rsqrt(...)` normalize multiply.
         normalize = find_node(
-            graph, lambda n: is_op(n, "mul") and rsqrt in map(peel, n.args)
+            graph,
+            lambda n: is_op(n, "mul")
+            and rsqrt in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other"))),
         )
         if normalize is None:
             return None
@@ -161,7 +199,11 @@ class RMSNormFuser(BaseFuser):
         for node in graph.nodes:
             if not is_op(node, "mul") or node is normalize:
                 continue
-            operands = [peel(a) for a in node.args if isinstance(a, fx.Node)]
+            operands = [
+                peel(a)
+                for a in (_operand(node, 0, "input"), _operand(node, 1, "other"))
+                if isinstance(a, fx.Node)
+            ]
             if len(operands) == 2 and normalize in operands:
                 weight = next(o for o in operands if o is not normalize)
                 tail, zero_centered = node, _is_one_plus(weight)
@@ -169,7 +211,51 @@ class RMSNormFuser(BaseFuser):
         # The norm must be the last compute in forward, or it is not a pure norm.
         if _has_trailing_compute(graph, tail):
             return None
-        return cls(zero_centered=zero_centered, source_cls=type(module).__name__)
+        eps_attr, eps = cls._eps_source(graph, module)
+        return cls(
+            zero_centered=zero_centered,
+            source_cls=type(module).__name__,
+            eps_attr=eps_attr,
+            eps=eps,
+        )
+
+    @classmethod
+    def _eps_source(
+        cls, graph: fx.Graph, module: nn.Module
+    ) -> tuple[str | None, float | None]:
+        """Where `fuse` should read `eps` from, resolved once per class."""
+        eps = cls._eps_from_graph(graph)
+        if eps is None:
+            return None, None
+        # Whatever supplied the constant must still equal it.
+        candidates = {
+            name: value
+            for name, value in vars(module).items()
+            if isinstance(value, float) and value == eps
+        }
+        # Use unique markers and retrace to verify exactly which attribute is eps.
+        markers = {float(-index - 1): name for index, name in enumerate(candidates)}
+        marked = None
+        if markers:
+            try:
+                for marker, name in markers.items():
+                    setattr(module, name, marker)
+                if (remarked := trace(module)) is not None:
+                    marked = cls._eps_from_graph(remarked)
+            finally:
+                for name, value in candidates.items():
+                    setattr(module, name, value)
+        if marked is not None and (name := markers.get(marked)) is not None:
+            return name, None
+        logger.debug_once(
+            "%s does not hold its eps (%s) in an attribute. Every instance in this "
+            "model will use the value traced from this instance. If this is not "
+            "desired, consider storing and reading eps using attribute of %s.",
+            type(module).__name__,
+            eps,
+            type(module).__name__,
+        )
+        return None, eps
 
     @staticmethod
     def _eps_from_graph(graph: fx.Graph) -> float | None:
@@ -177,12 +263,12 @@ class RMSNormFuser(BaseFuser):
         if (x := find_node(graph, lambda n: n.op == "placeholder")) is None:
             return None
         fused = find_node(graph, lambda n: is_op(n, "rms_norm"))
-        if fused is not None and fused.args and peel(fused.args[0]) is x:
+        if fused is not None and peel(_operand(fused, 0, "input")) is x:
             args, kwargs = fused.args, fused.kwargs
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
-            return eps if isinstance(eps, (int, float)) else None
+            return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+            if _is_inverse_sqrt(node) and (eps := _variance_eps(node, x)) is not None:
                 return eps
         return None
 
@@ -194,19 +280,18 @@ class RMSNormFuser(BaseFuser):
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
         weight = getattr(module, "weight", None)
-        has_weight = weight is not None
-        hidden_size = weight.size(0) if has_weight else 0
-        graph = trace(module)
-        eps = self._eps_from_graph(graph) if graph is not None else None
-        if eps is None:
-            # If eps not in graph, match torch behaviour.
-            dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
+        hidden_size = weight.size(0) if weight is not None else 0
+        eps = getattr(module, self.eps_attr, None) if self.eps_attr else self.eps
+        if not isinstance(eps, (int, float)):
+            # If eps was not detected, match torch behaviour.
+            config_dtype = vllm_config.model_config.dtype
+            dtype = weight.dtype if weight is not None else config_dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
             return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
         return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,
-            has_weight=has_weight,
-            dtype=weight.dtype if has_weight else None,
+            has_weight=weight is not None,
+            dtype=weight.dtype if weight is not None else None,
         )

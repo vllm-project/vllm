@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -21,6 +23,8 @@ _QWEN_MODEL_TYPES = frozenset(
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        "qwen4_exp",
+        "qwen4_exp_text",
     }
 )
 
@@ -37,10 +41,14 @@ class _QwenGDNWarmupConfig:
     conv_kernel_size: int
     conv_state: torch.Tensor
     conv_dtype: torch.dtype
+    norm_weight_dtype: torch.dtype
+    norm_before_gate: bool
+    norm_activation: str
     a_log: torch.Tensor
     dt_bias: torch.Tensor
     state_stride_token: int
     state_dtype: torch.dtype
+    fused_spec_decode: bool = False
 
     @property
     def conv_dim(self) -> int:
@@ -62,6 +70,7 @@ def _is_qwen_gdn_layer(module: object) -> bool:
             "conv_kernel_size",
             "tp_size",
             "kv_cache",
+            "norm",
             "A_log",
             "dt_bias",
         )
@@ -112,6 +121,7 @@ def _qwen_gdn_warmup_config(
         tp_size = int(layer.tp_size)
         h = int(layer.num_k_heads) // tp_size
         hv = int(layer.num_v_heads) // tp_size
+        norm = layer.norm
 
         return _QwenGDNWarmupConfig(
             h=h,
@@ -121,10 +131,16 @@ def _qwen_gdn_warmup_config(
             conv_kernel_size=int(layer.conv_kernel_size),
             conv_state=conv_state,
             conv_dtype=conv_state.dtype,
+            norm_weight_dtype=norm.weight.dtype,
+            norm_before_gate=bool(norm.norm_before_gate),
+            norm_activation=str(norm.activation),
             a_log=layer.A_log,
             dt_bias=layer.dt_bias,
             state_stride_token=int(ssm_state.stride(0)),
             state_dtype=ssm_state.dtype,
+            fused_spec_decode=bool(
+                getattr(layer, "enable_fused_gdn_spec_decode", False)
+            ),
         )
 
     if found_layer:
@@ -132,6 +148,29 @@ def _qwen_gdn_warmup_config(
     else:
         logger.info("Skipping Qwen GDN Triton warmup: no Qwen GDN layer found.")
     return None
+
+
+def _warm_gated_rms_norm_kernel(
+    device: torch.device,
+    config: _QwenGDNWarmupConfig,
+    max_num_tokens: int,
+    x_dtype: torch.dtype,
+) -> None:
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        warmup_layer_norm_fwd,
+    )
+
+    warmup_layer_norm_fwd(
+        max_num_tokens=max_num_tokens,
+        rows_per_token=config.hv,
+        group_size=config.v,
+        x_dtype=x_dtype,
+        weight_dtype=config.norm_weight_dtype,
+        device=device,
+        norm_before_gate=config.norm_before_gate,
+        is_rms_norm=True,
+        activation=config.norm_activation,
+    )
 
 
 def _warm_causal_conv1d_fwd_kernel(
@@ -241,6 +280,75 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
     )
 
 
+def _warm_fused_gdn_decode_post_conv_mtp_kernel(
+    device: torch.device,
+    config: _QwenGDNWarmupConfig,
+    x_dtype: torch.dtype,
+    num_spec_tokens: int,
+    max_num_reqs: int,
+) -> None:
+    """Compile the ROCm Triton MTP decode kernels for every V tile size the
+    request count can select, with the layer's packed QKVZ/BA layouts so the
+    stride specializations match serving."""
+    from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (  # noqa: E501
+        fused_gdn_decode_post_conv_mtp_triton,
+    )
+    from vllm.utils.platform_utils import num_compute_units
+
+    num_cus = num_compute_units(device.index)
+    # Smallest request counts that select BV = 32, 64 and V (see the wrapper).
+    request_counts = sorted({1, -(-num_cus // config.hv), 4 * num_cus // config.hv + 1})
+    tokens_per_req = num_spec_tokens + 1
+    norm_weight = torch.ones(config.v, dtype=config.norm_weight_dtype, device=device)
+    state = torch.zeros(
+        2 * config.state_stride_token, dtype=config.state_dtype, device=device
+    ).as_strided(
+        (2, config.hv, config.v, config.k),
+        (config.state_stride_token, config.v * config.k, config.k, 1),
+    )
+    for num_reqs in request_counts:
+        if num_reqs > max_num_reqs:
+            continue
+        num_tokens = num_reqs * tokens_per_req
+        mixed_qkvz = torch.zeros(
+            (num_tokens, config.conv_dim + config.hv * config.v),
+            dtype=x_dtype,
+            device=device,
+        )
+        mixed_qkv, output_gate = mixed_qkvz.split(
+            [config.conv_dim, config.hv * config.v], dim=-1
+        )
+        ba = torch.zeros((num_tokens, 2 * config.hv), dtype=x_dtype, device=device)
+        b, a = ba.chunk(2, dim=-1)
+        fused_gdn_decode_post_conv_mtp_triton(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=config.a_log,
+            dt_bias=config.dt_bias,
+            state_indices=torch.zeros(
+                (num_reqs, tokens_per_req), dtype=torch.int32, device=device
+            ),
+            cu_seqlens=torch.arange(
+                0,
+                num_tokens + 1,
+                tokens_per_req,
+                dtype=torch.int32,
+                device=device,
+            ),
+            num_accepted_tokens=torch.ones(num_reqs, dtype=torch.int32, device=device),
+            state=state,
+            output_gate=output_gate.reshape(num_tokens, config.hv, config.v),
+            norm_weight=norm_weight,
+            out=torch.empty(
+                (num_tokens, config.hv, config.v), dtype=x_dtype, device=device
+            ),
+            scale=config.k**-0.5,
+            norm_eps=1e-6,
+            output_gate_activation=config.norm_activation,
+        )
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.accelerator.synchronize(device)
@@ -249,33 +357,43 @@ def _synchronize_device(device: torch.device) -> None:
 @torch.inference_mode()
 def qwen_triton_warmup(
     runner: "GPUModelRunner",
-    model_config: object,
+    model_config: "ModelConfig",
 ) -> None:
-    """Warm Qwen Triton kernels reported by the JIT monitor."""
-    if runner.is_pooling_model:
-        return
-
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    model_type = None
-    for config in (hf_text_config, hf_config):
-        model_type = getattr(config, "model_type", None)
-        if model_type is not None:
-            model_type = str(model_type)
-            break
+    """Warm Qwen GDN Triton kernels reported by the JIT monitor."""
+    model_type = getattr(model_config.hf_text_config, "model_type", "") or getattr(
+        model_config.hf_config, "model_type", ""
+    )
     if model_type not in _QWEN_MODEL_TYPES:
         return
 
-    device = getattr(runner, "device", torch.device("cuda"))
-    logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
+    device = runner.device
+    logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
 
-    compilation_config = getattr(runner, "compilation_config", None)
-    static_forward_context = getattr(compilation_config, "static_forward_context", None)
-    gdn_config = _qwen_gdn_warmup_config(static_forward_context)
+    gdn_config = _qwen_gdn_warmup_config(
+        runner.compilation_config.static_forward_context
+    )
     if gdn_config is None:
         return
 
+    max_num_tokens = max(1, int(runner.max_num_tokens))
+    _warm_gated_rms_norm_kernel(device, gdn_config, max_num_tokens, model_config.dtype)
     _warm_causal_conv1d_fwd_kernel(device, gdn_config)
     _warm_fused_post_conv_kernel(device, gdn_config)
-    _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, gdn_config)
+    # Pooling only runs full prefills; the decode update kernel is unused.
+    if not runner.is_pooling_model:
+        _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, gdn_config)
+    # ROCm runs the Triton port of the fused MTP decode kernel.
+    spec_config = runner.speculative_config
+    if (
+        current_platform.is_rocm()
+        and gdn_config.fused_spec_decode
+        and spec_config is not None
+    ):
+        _warm_fused_gdn_decode_post_conv_mtp_kernel(
+            device,
+            gdn_config,
+            model_config.dtype,
+            spec_config.num_speculative_tokens,
+            runner.max_num_reqs,
+        )
     _synchronize_device(device)

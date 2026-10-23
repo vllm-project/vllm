@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark the efficiency of prefix caching.
+"""Benchmark the efficiency of prefix caching.
 
 This script allows you to benchmark the performance of
 a model with and without prefix caching using either fixed prompts
