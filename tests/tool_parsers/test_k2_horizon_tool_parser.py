@@ -175,7 +175,10 @@ def test_request_level_format_overrides(tokenizer, tool_format, call, expected):
 @pytest.mark.parametrize("streaming", [False, True])
 def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming):
     request = _request(tool_format).model_copy(deep=True)
-    request.tools[0].function.parameters["properties"]["limit"] = {"type": "number"}
+    assert request.tools is not None
+    parameters = request.tools[0].function.parameters
+    assert parameters is not None
+    parameters["properties"]["limit"] = {"type": "number"}
     parser = K2HorizonToolParser(tokenizer, request.tools)
     value = 2**63 - 1
     output = _group(
