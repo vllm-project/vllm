@@ -201,6 +201,29 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         # build(); the valid/padding partition is a per-forward constant, so
         # every layer overwrites the same valid tiles before its own top-k.
         self.unified_scores_buffer: torch.Tensor | None = None
+        self.prefill_scores_buffer: torch.Tensor | None = None
+        self.prefill_candidates_buffer: torch.Tensor | None = None
+        if self.prefill_local_score:
+            heads = self.num_index_heads * self.index_k_tp
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            score_elements = (
+                PREFILL_FMHA_SCRATCH_BYTES // 5
+                if self.index_k_tp == 2
+                else PREFILL_SCORE_BYTES // 4
+            )
+            self.prefill_scores_buffer = torch.empty(
+                min(max_tokens * heads * MAX_K_TILES, score_elements),
+                dtype=torch.float32,
+                device=device,
+            )
+            # Each active arm is a contiguous prefix, independent of the
+            # previous step's token count; NCCL never exchanges capacity padding.
+            self.prefill_candidates_buffer = torch.empty(
+                2,
+                heads * max_tokens * (2 * TOPK + 1),
+                dtype=torch.int32,
+                device=device,
+            )
         if not self.prefill_local_score:
             self.unified_scores_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -386,21 +409,18 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                             )
                         )
                     start += query_len
-                local_scores = torch.empty(
-                    min(chunk_size, int(side_qo.max())),
-                    heads,
-                    score_cols,
-                    dtype=torch.float32,
-                    device=seq_lens.device,
+                assert self.prefill_scores_buffer is not None
+                assert self.prefill_candidates_buffer is not None
+                score_rows = min(chunk_size, int(side_qo.max()))
+                score_elements = score_rows * heads * score_cols
+                assert score_elements <= self.prefill_scores_buffer.numel()
+                local_scores = self.prefill_scores_buffer[:score_elements].view(
+                    score_rows, heads, score_cols
                 )
-                candidate_buffers = torch.empty(
-                    2,
-                    heads,
-                    num_prefill_tokens,
-                    2 * TOPK + 1,
-                    dtype=torch.int32,
-                    device=seq_lens.device,
-                )
+                candidate_elements = heads * num_prefill_tokens * (2 * TOPK + 1)
+                candidate_buffers = self.prefill_candidates_buffer[
+                    :, :candidate_elements
+                ].view(2, heads, num_prefill_tokens, 2 * TOPK + 1)
             prefill = MiniMaxM3IndexerMSAPrefillMetadata(
                 plan=plan,
                 cu_seqlens_q=(query_start_loc[lo : hi + 1] - query_start_loc[lo]).to(
