@@ -158,6 +158,7 @@ class StaticSinkAttention(Attention, CustomOp):
     def update_sink_kv(self, sink_key, sink_value) -> None:
         self.sink_key = sink_key
         self.sink_value = sink_value
+        self.sink_populated = False
 
     def forward_native(
         self,

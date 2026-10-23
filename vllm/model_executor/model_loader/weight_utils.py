@@ -1526,6 +1526,37 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+def stash_weight_part(
+    module: torch.nn.Module,
+    key: str,
+    part: str,
+    tensor: torch.Tensor,
+    parts: tuple[str, ...] = ("weight", "scale"),
+) -> dict[str, torch.Tensor] | None:
+    """Park one part of a multi-tensor weight on `module`; return all once complete."""
+    pending = module.__dict__.setdefault("_pending_weight_parts", {})
+    entry = pending.setdefault(key, {})
+    entry[part] = tensor
+    if all(p in entry for p in parts):
+        return pending.pop(key)
+    # Weight-transfer buckets reuse their buffers between calls.
+    entry[part] = tensor.clone()
+    return None
+
+
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Once per full load or reload: reject unpaired parts, run the model hook."""
+    incomplete = [
+        f"{key} (has {sorted(entry)})"
+        for module in model.modules()
+        for key, entry in module.__dict__.pop("_pending_weight_parts", {}).items()
+    ]
+    if incomplete:
+        raise ValueError(f"Incomplete multi-tensor weights: {incomplete}")
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:

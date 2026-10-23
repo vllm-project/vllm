@@ -54,6 +54,7 @@ from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_moe_expert_param_name,
+    stash_weight_part,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -1041,26 +1042,20 @@ class Llama4ForConditionalGeneration(
     def _consolidate_qkv_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        qkv_idx_mappings = {
-            ".self_attn.q_proj": 0,
-            ".self_attn.k_proj": 1,
-            ".self_attn.v_proj": 2,
-        }
-        qkv_weights = {}
         for name, loaded_weight in weights:
-            for weight_name, idx in qkv_idx_mappings.items():
+            for part in ("q", "k", "v"):
+                weight_name = f".self_attn.{part}_proj"
                 if weight_name not in name:
                     continue
                 new_name = name.replace(weight_name, ".self_attn.qkv_proj")
-                if new_name not in qkv_weights:
-                    qkv_weights[new_name] = [None] * 3
-                qkv_weights[new_name][idx] = loaded_weight
+                parts = stash_weight_part(
+                    self, new_name, part, loaded_weight, ("q", "k", "v")
+                )
+                if parts is not None:
+                    yield new_name, torch.cat([parts[p] for p in "qkv"], dim=0)
                 break
             else:
                 yield name, loaded_weight
-        for key, weight in qkv_weights.items():
-            qkv_weight = torch.cat(weight, dim=0)
-            yield key, qkv_weight
 
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM

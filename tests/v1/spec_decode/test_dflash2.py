@@ -8,6 +8,7 @@ import torch
 
 from vllm.model_executor.models.qwen3_dflash import (
     _add_global_draft_layer_exclusions,
+    _rebuild_in_place,
 )
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
@@ -778,3 +779,28 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+def test_rebuild_in_place_keeps_captured_tensors():
+    module = torch.nn.Linear(4, 2)
+
+    def build():
+        module._fused = torch.cat([module.weight.data, module.weight.data])
+        module._resized = module.weight.data[: module.out_features].clone()
+        module._splits = (module.weight.data[:, :2].contiguous(), module.bias.data * 2)
+
+    build()
+    fused, resized, splits = module._fused, module._resized, module._splits
+    with torch.no_grad():
+        module.weight.add_(1.0)
+    module.out_features = 1
+    _rebuild_in_place(module, build)
+
+    # Same shape: refreshed in the tensor a CUDA graph may have captured.
+    assert module._fused is fused
+    torch.testing.assert_close(fused, torch.cat([module.weight, module.weight]))
+    assert module._splits is splits
+    torch.testing.assert_close(splits[1], module.bias * 2)
+    # Changed shape: replaced.
+    assert module._resized is not resized
+    assert module._resized.shape == (1, 4)
