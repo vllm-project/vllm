@@ -57,14 +57,15 @@ class SpeculatorConfig:
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
-    requires_equal_draft_vocab_size: ClassVar[bool] = False
+    # The draft model has its own vocabulary, which must match the target's
+    # unless use_heterogeneous_vocab.
+    draft_has_own_vocab: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     supports_parallel_drafting: ClassVar[bool] = False
     supports_draft_lm_head_quantization: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
-    supports_heterogeneous_vocab: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 

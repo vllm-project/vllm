@@ -1642,7 +1642,7 @@ class SpeculativeConfig:
 
     def _verify_heterogeneous_vocab_args(self) -> None:
         # V1 model runner only (V2 falls back to V1 for this).
-        if not self.speculator_config.supports_heterogeneous_vocab:
+        if not self.speculator_config.draft_has_own_vocab:
             raise ValueError(
                 "use_heterogeneous_vocab only works with method='draft_model'"
             )
@@ -1663,7 +1663,7 @@ class SpeculativeConfig:
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.speculator_config.requires_equal_draft_vocab_size
+            self.speculator_config.draft_has_own_vocab
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):

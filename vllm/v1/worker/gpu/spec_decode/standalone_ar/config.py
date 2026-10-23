@@ -17,11 +17,9 @@ class DraftModelSpeculatorConfig(CheckpointSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
     )
-    requires_equal_draft_vocab_size = True
+    draft_has_own_vocab = True
     # Rejects recognized drafters (e.g. MTP heads).
     validates_checkpoint = True
-    # V1 model runner only.
-    supports_heterogeneous_vocab = True
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:
