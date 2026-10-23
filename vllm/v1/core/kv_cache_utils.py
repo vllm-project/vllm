@@ -950,23 +950,6 @@ def resolve_cache_hit_alignment_tokens(
     return scheduler_block_size
 
 
-def get_num_hash_lookahead_tokens(vllm_config: VllmConfig) -> int:
-    """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
-    speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is None
-        or not speculative_config.use_eagle_block_drop()
-        or speculative_config.disable_lookahead_block_hashes
-        or not vllm_config.cache_config.enable_prefix_caching
-    ):
-        return 0
-    # KV connectors, including HiSparse's, keep the legacy hashes.
-    if vllm_config.kv_transfer_config is not None:
-        return 0
-    # The drafter's KV at a block's last position reads this far ahead.
-    return vllm_config.num_prefill_lookahead_tokens
-
-
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],

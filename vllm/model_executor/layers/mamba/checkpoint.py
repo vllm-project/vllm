@@ -11,7 +11,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import get_num_hash_lookahead_tokens
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -106,7 +105,7 @@ class MambaPrefillCheckpointBuilder:
         self.drop_eagle_block = (
             speculative_config is not None
             and speculative_config.use_eagle_block_drop()
-            and not get_num_hash_lookahead_tokens(vllm_config)
+            and not vllm_config.num_hash_lookahead_tokens
         )
 
     def build(

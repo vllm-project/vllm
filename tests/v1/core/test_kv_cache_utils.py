@@ -49,7 +49,6 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
     get_max_concurrency_for_kv_cache_config,
-    get_num_hash_lookahead_tokens,
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
@@ -1161,7 +1160,7 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
         ),
     )
 
-    assert get_num_hash_lookahead_tokens(vllm_config) == expected
+    assert VllmConfig.num_hash_lookahead_tokens.fget(vllm_config) == expected
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

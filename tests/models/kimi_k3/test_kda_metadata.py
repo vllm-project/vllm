@@ -13,9 +13,8 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.mamba import checkpoint as mamba_checkpoint
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -387,9 +386,9 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
 ) -> None:
     """Lookahead hashes need no back-off from the replay boundary."""
     monkeypatch.setattr(
-        mamba_checkpoint,
-        "get_num_hash_lookahead_tokens",
-        lambda *_: num_hash_lookahead_tokens,
+        VllmConfig,
+        "num_hash_lookahead_tokens",
+        property(lambda _: num_hash_lookahead_tokens),
     )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
