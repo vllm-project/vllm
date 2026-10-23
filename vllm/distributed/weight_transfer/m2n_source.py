@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Trainer-side weight sources for the NCCL M2N backend.
 
-m2n plans a transfer from both sides' layouts, so the trainer has to say how it
+M2N plans a transfer from both sides' layouts, so the trainer has to say how it
 holds each parameter — which the base `WeightSource` / `ParamMeta` pair does not
-express. This module supplies the m2n flavor of both, and the DTensor-backed
-implementation that covers the common trainer. Each parameter owns its source
-mesh and placements because dense and expert weights can use different
-factorizations over the same trainer ranks.
+express. Each parameter owns its source mesh and placements because dense and
+expert weights can use different factorizations over the same source-group
+ranks. A source topology separately routes each parameter to its owning rank
+group, including pipeline-parallel producers.
 """
 
 from collections.abc import Callable, Iterator, Sequence
@@ -23,11 +23,13 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NLayout,
     M2NMesh,
     M2NParamMeta,
+    M2NSourceTopology,
     Placements,
 )
 
 __all__ = [
     "M2NWeightSource",
+    "M2NSourceTopology",
     "M2NManifestEntry",
     "ManifestM2NWeightSource",
     "DTensorModuleSource",
@@ -58,6 +60,36 @@ class M2NWeightSource(WeightSource):
         allocation lifetime, dtype, and shape correctness.
         """
         raise NotImplementedError
+
+    def source_topology(self) -> M2NSourceTopology | None:
+        """Return explicit source groups, or ``None`` for the legacy single group.
+
+        Group ranks use global trainer-rank ids in source-mesh coordinate order.
+        The trainer engine converts ``None`` into one group containing every
+        trainer rank and assigning every parameter to it. Pipeline-parallel or
+        otherwise partitioned producers override this together with
+        :meth:`iter_group`; vLLM never infers trainer ownership from parameter
+        names or inference topology.
+        """
+        return None
+
+    def iter_group(self, group_index: int) -> Iterator[tuple[str, Any]]:
+        """Iterate one source group in its global manifest subsequence order.
+
+        Legacy sources expose one group and keep their existing ``__iter__``
+        implementation. Explicit multi-group sources must override this method
+        so ranks materialize only parameters belonging to the requested group.
+        """
+        if (
+            not isinstance(group_index, int)
+            or isinstance(group_index, bool)
+            or group_index != 0
+        ):
+            raise ValueError(
+                "legacy M2N source only supports source group 0; explicit "
+                "multi-group sources must override iter_group()"
+            )
+        return iter(self)
 
 
 @dataclass(frozen=True)
@@ -99,7 +131,14 @@ class M2NManifestEntry:
 
 
 class ManifestM2NWeightSource(M2NWeightSource):
-    """An ordered M2N source backed by lazy, rank-local manifest entries."""
+    """An ordered M2N source backed by lazy, rank-local manifest entries.
+
+    The provider callable is invoked on every iteration, so it can return a
+    current parameter view or perform rank-local conversion and LoRA merging.
+    Callable identities and tensors remain local and never enter the wire plan.
+    Callbacks run synchronously and must honor `M2NWeightSource.__iter__`'s
+    current-stream readiness contract.
+    """
 
     def __init__(self, entries: Sequence[M2NManifestEntry]) -> None:
         self._entries = tuple(entries)
@@ -131,8 +170,13 @@ def _placement_code(placement: Any) -> int:
 def mesh_from_tensor(tensor: torch.Tensor, num_trainer_ranks: int) -> M2NMesh:
     """The mesh a parameter lives on, as an `M2NMesh`.
 
-    Tensors without DeviceMesh metadata are treated as replicated. Implicitly
-    sharded tensors require a custom source with an explicit layout.
+    This adapter treats tensors without DeviceMesh metadata as replicated.
+    Implicitly sharded tensors, such as Megatron parameters, require a custom
+    `M2NWeightSource` with an explicit source layout.
+
+    Megatron integrations must use `ManifestM2NWeightSource` or another custom
+    `M2NWeightSource` that explicitly supplies TP/EP layouts. Megatron parameters
+    must not be passed to `DTensorModuleSource`.
     """
     device_mesh = getattr(tensor, "device_mesh", None)
     if device_mesh is None:
