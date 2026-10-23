@@ -42,6 +42,7 @@ from .utils import (
     expand_strided_descs,
     make_kv_cache_config,
     make_nixl_scheduler,
+    maybe_update_block_size,
 )
 
 
@@ -1033,7 +1034,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         kv_connector="NixlConnector",
         kv_role="kv_consumer",
     )
-    block_size = 16
+    block_size = maybe_update_block_size(16)
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
