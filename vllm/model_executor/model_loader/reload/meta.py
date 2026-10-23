@@ -49,13 +49,16 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     """Materialize a meta tensor into an actual tensor on the current device.
     Should be called within the torch device context for the given rank.
+
+    Zero-filled: regions no checkpoint tensor covers (e.g. alignment padding
+    rows a module zeroed at init) must not come back as stale memory on reload.
     """
     tensor = torch.empty_strided(
         size=tuple(meta_tensor.size()),
         stride=tuple(meta_tensor.stride()),
         dtype=meta_tensor.dtype,
         requires_grad=False,
-    )
+    ).zero_()
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor

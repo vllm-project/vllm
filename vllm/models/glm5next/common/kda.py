@@ -38,7 +38,10 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    set_cached_tensor,
+    sharded_weight_loader,
+)
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
@@ -294,8 +297,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
+        # Merged q|k|v conv weight, rebuilt after every (re)load by the model's
+        # process_weights_after_loading (refresh_post_load_cache). See _forward.
         self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
@@ -381,6 +384,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
+
+    def refresh_post_load_cache(self) -> None:
+        """(Re)build the merged conv weight from the loaded q/k/v conv weights,
+        in place once it exists (captured CUDA graphs hold its address)."""
+
+        def _w(m):
+            return m.weight.view(m.weight.size(0), m.weight.size(2))
+
+        merged = torch.cat(
+            [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)], dim=0
+        ).contiguous()
+        set_cached_tensor(self, "_merged_conv_weight", merged)
 
     def _flashkda_prefill(
         self,
@@ -556,14 +571,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # built once and cached (params are fixed after load). conv_state is
         # already stored as the merged q|k|v state, so it is used directly.
         if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
+            self.refresh_post_load_cache()
         conv_weights = self._merged_conv_weight
         conv_bias = self.q_conv1d.bias
 

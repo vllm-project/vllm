@@ -32,7 +32,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import make_attention_sink
+from vllm.model_executor.model_loader.weight_utils import (
+    make_attention_sink,
+    set_cached_tensor,
+)
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
@@ -102,6 +105,13 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
+def _reads_raw_weights(projs: list[nn.Module]) -> bool:
+    """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
+    return not current_platform.is_cpu() and all(
+        isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
     )
 
 
@@ -527,29 +537,24 @@ class DFlashQwen3Model(nn.Module):
         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
         self._context_q_sizes = [a.q_size for a in layers_attn]
 
-        if all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in self._context_qkv_projs
-        ):
+        # Quantized linear weights may use packed storage that cannot be
+        # consumed by F.linear; then each projection runs through its quant
+        # method and the fused buffers stay None.
+        kv_weight = kv_bias = None
+        if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            kv_weight = torch.cat(kv_weights, dim=0)
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-            else:
-                self._fused_kv_bias = None
-        else:
-            # Quantized linear weights may use packed storage that cannot be
-            # consumed by F.linear. Run each projection through its quant method.
-            self._fused_kv_weight = None
-            self._fused_kv_bias = None
+                kv_bias = torch.cat(kv_biases, dim=0)
+        set_cached_tensor(self, "_fused_kv_weight", kv_weight)
+        set_cached_tensor(self, "_fused_kv_bias", kv_bias)
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
+        set_cached_tensor(self, "_k_norm_weights", k_norm.contiguous())
 
     def _build_fused_kv_buffers(self) -> None:
         """Build fused weight buffers for precompute_and_store_context_kv.
@@ -905,6 +910,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

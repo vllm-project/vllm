@@ -1556,6 +1556,13 @@ class KimiLinearForCausalLM(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
+    def process_weights_after_loading(self) -> None:
+        """Model-level post-load hook (after a full load or reload). The specialized
+        decode is built after the first load and keeps copies derived from the
+        weights; refresh them after a reload."""
+        if self.specialized_decode is not None:
+            self.specialized_decode.refresh_weights()
+
 
 def get_spec_layer_idx_from_weight_name(
     config: KimiLinearConfig, weight_name: str
@@ -2005,3 +2012,6 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()

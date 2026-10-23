@@ -1526,6 +1526,65 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+@torch.no_grad()
+def set_cached_tensor(owner: object, name: str, new: torch.Tensor | None) -> None:
+    """Set ``owner.<name>`` to a tensor derived from loaded weights. Post-load
+    hooks rerun on every weight reload while CUDA graphs keep the address
+    captured at startup, so refill the existing tensor in place when it matches
+    ``new`` in shape, dtype and device."""
+    cached = getattr(owner, name, None)
+    if (
+        isinstance(cached, torch.Tensor)
+        and new is not None
+        and (cached.shape, cached.dtype, cached.device)
+        == (new.shape, new.dtype, new.device)
+    ):
+        cached.copy_(new)
+    else:
+        setattr(owner, name, new)
+
+
+def stash_weight_part(
+    module: torch.nn.Module,
+    key: str,
+    part: str,
+    tensor: torch.Tensor,
+    parts: tuple[str, ...] = ("weight", "scale"),
+) -> dict[str, torch.Tensor] | None:
+    """Buffer one part of a multi-tensor checkpoint weight on ``module``, so the
+    parts may arrive in different ``load_weights`` calls. Returns all parts once
+    complete; ``finalize_model_weights`` raises on parts left unpaired."""
+    pending = module.__dict__.setdefault("_pending_weight_parts", {})
+    entry = pending.setdefault(key, {})
+    entry[part] = tensor
+    if all(p in entry for p in parts):
+        return pending.pop(key)
+    # Weight-transfer buckets reuse their buffers between calls.
+    entry[part] = tensor.clone()
+    return None
+
+
+def discard_weight_parts(model: torch.nn.Module) -> None:
+    """Drop parts parked by an update that never finished, so they cannot pair
+    with the next update's parts. Called when a reload starts."""
+    for module in model.modules():
+        module.__dict__.pop("_pending_weight_parts", None)
+
+
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Run once after a full load or reload: reject multi-tensor weights whose
+    parts never all arrived, then run the model-level post-load hook."""
+    incomplete = [
+        f"{key} (has {sorted(entry)})"
+        for module in model.modules()
+        for key, entry in module.__dict__.pop("_pending_weight_parts", {}).items()
+    ]
+    if incomplete:
+        raise ValueError(f"Incomplete multi-tensor weights: {incomplete}")
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:
