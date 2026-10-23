@@ -5,13 +5,15 @@
 Three bf16 planes sum exactly to the fp32 weight; split-K sums in fixed order.
 """
 
+import functools
+
 import torch
 
 from vllm.triton_utils import tl, triton
 
-# (max tokens, BLOCK_M, BLOCK_N, BLOCK_K, splits, num_warps), tuned on MI350X
-# for the Muse router shape (N=256, K=8192).
-_CONFIGS = (
+# (max tokens, BLOCK_M, BLOCK_N, BLOCK_K, splits, num_warps) for the Muse router
+# shape (N=256, K=8192), tuned on MI350X (CDNA4, gfx950).
+_CONFIGS_CDNA4 = (
     (16, 16, 32, 128, 32, 2),
     (64, 64, 32, 128, 32, 2),
     (128, 64, 32, 128, 16, 2),
@@ -20,10 +22,27 @@ _CONFIGS = (
     (4096, 128, 128, 64, 8, 8),
     (None, 128, 128, 64, 4, 8),
 )
+# Tuned on MI300X (CDNA3, gfx942). Its 64 KiB of LDS rejects some of the CDNA4 tiles.
+_CONFIGS_CDNA3 = (
+    (16, 32, 32, 64, 32, 4),
+    (128, 64, 64, 128, 32, 4),
+    (256, 64, 64, 128, 16, 4),
+    (512, 64, 64, 128, 8, 4),
+    (1024, 128, 128, 64, 16, 8),
+    (2048, 128, 128, 64, 8, 8),
+    (None, 128, 128, 64, 4, 8),
+)
+
+
+@functools.cache
+def _device_configs() -> tuple[tuple, ...]:
+    from vllm.platforms.rocm import get_cdna_version
+
+    return _CONFIGS_CDNA3 if get_cdna_version() == 3 else _CONFIGS_CDNA4
 
 
 def _config(num_tokens: int) -> tuple[int, int, int, int, int]:
-    for max_tokens, *cfg in _CONFIGS:
+    for max_tokens, *cfg in _device_configs():
         if max_tokens is None or num_tokens <= max_tokens:
             return tuple(cfg)  # type: ignore[return-value]
     raise AssertionError("unreachable")
@@ -32,7 +51,8 @@ def _config(num_tokens: int) -> tuple[int, int, int, int, int]:
 def supports_router_bf16x3(num_experts: int, hidden_size: int) -> bool:
     return all(
         num_experts % bn == 0 and hidden_size % (splits * bk) == 0
-        for _, _, bn, bk, splits, _ in _CONFIGS
+        for configs in (_CONFIGS_CDNA4, _CONFIGS_CDNA3)
+        for _, _, bn, bk, splits, _ in configs
     )
 
 
