@@ -10,7 +10,6 @@ lease-free (``batch_probe_key``) and leases only the keys the hit will load.
 
 import time
 from collections.abc import Callable, Sequence
-from importlib import metadata
 from typing import Any, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -30,13 +29,10 @@ logger = init_logger(__name__)
 # Lease rounds before giving up on a hit whose keys keep being evicted between
 # probe and lease. Only a hit whose lease found every key is returned.
 _LEASE_ROUNDS = 2
-# Key probed at startup to check that the master serves batch_probe_key.
-_SENTINEL_KEY = "vllm-selective-lease-probe"
-_MOONCAKE_DISTRIBUTIONS = (
-    "mooncake-transfer-engine",
-    "mooncake-transfer-engine-cuda13",
-    "mooncake-transfer-engine-non-cuda",
-)
+
+
+class _LeaseFailedError(Exception):
+    """The lease RPC raised or returned per-key error results."""
 
 
 class _RecordOperation(Protocol):
@@ -50,15 +46,6 @@ class _RecordOperation(Protocol):
         status: str = "ok",
         num_failed_keys: int = 0,
     ) -> None: ...
-
-
-def _installed_mooncake() -> str:
-    for dist in _MOONCAKE_DISTRIBUTIONS:
-        try:
-            return f"{dist} {metadata.version(dist)}"
-        except metadata.PackageNotFoundError:
-            continue
-    return "unknown version"
 
 
 class SelectiveLookupLease:
@@ -87,23 +74,11 @@ class SelectiveLookupLease:
 
     @staticmethod
     def _check_supported(store: Any) -> None:
-        """Raise unless the client and the master both serve lease-free probes.
-
-        A master without the probe RPC answers each key with an error code
-        instead of raising, which would turn every lookup into a silent miss.
-        """
         if not callable(getattr(store, "batch_probe_key", None)):
             raise RuntimeError(
-                "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE needs Mooncake 0.3.14 or "
-                f"newer with batch_probe_key; installed: {_installed_mooncake()}"
-            )
-        res = store.batch_probe_key([_SENTINEL_KEY])
-        if len(res) != 1 or res[0] < 0:
-            raise RuntimeError(
-                "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE: the Mooncake master "
-                f"rejected batch_probe_key (result {list(res)}); the master and "
-                "every client must run the same Mooncake version "
-                f"(installed client: {_installed_mooncake()})"
+                "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE requires "
+                "MooncakeDistributedStore.batch_probe_key, which the installed "
+                "Mooncake version does not provide."
             )
 
     def probe(self, keys: list[str]) -> list[int]:
@@ -130,15 +105,16 @@ class SelectiveLookupLease:
                 if hit.hit_length <= 0:
                     return hit
                 evicted = self._lease(block_hashes, hit)
-                if evicted is None:
-                    break
                 if not evicted:
                     return hit
                 exists_set = exists_set - evicted
                 hit = longest_hit(exists_set)
+        except _LeaseFailedError as e:
+            logger.error("Failed to lease a Mooncake lookup hit: %s", e)
         except Exception:
             # The lookup server has no handler of its own; report a miss.
             logger.exception("Failed to lease a Mooncake lookup hit")
+        # The lease failed, or keys kept being evicted until rounds ran out.
         return MooncakeLookupResult(0)
 
     def loaded_keys(
@@ -181,11 +157,12 @@ class SelectiveLookupLease:
         self,
         block_hashes: Sequence[BlockHash],
         hit: MooncakeLookupResult,
-    ) -> set[tuple[int, bytes]] | None:
+    ) -> set[tuple[int, bytes]]:
         """Lease the keys a load of ``hit`` reads.
 
-        Returns the ``(group, hash)`` pairs no longer in the store, or None
-        when the lease RPC fails, including per-key error results.
+        Returns the ``(group, hash)`` pairs no longer in the store. Raises
+        ``_LeaseFailedError`` when the lease RPC fails, including per-key error
+        results.
         """
         keys, key_meta = self.loaded_keys(block_hashes, hit)
         if not keys:
@@ -194,18 +171,14 @@ class SelectiveLookupLease:
         try:
             res = self.store.batch_is_exist(keys)
         except Exception as e:
-            logger.error("Remote connection failed leasing a lookup hit: %s", e)
-            res = [-1] * len(keys)
+            self._record_lease_error(start, len(keys), len(keys))
+            raise _LeaseFailedError(f"lease RPC raised: {e}") from e
         num_errors = sum(1 for r in res if r < 0)
         if num_errors:
-            self.record_operation(
-                "lookup_lease",
-                time.perf_counter() - start,
-                len(keys),
-                status="error",
-                num_failed_keys=num_errors,
+            self._record_lease_error(start, len(keys), num_errors)
+            raise _LeaseFailedError(
+                f"lease RPC returned errors for {num_errors} of {len(keys)} keys"
             )
-            return None
         evicted = [meta for meta, r in zip(key_meta, res, strict=True) if r != 1]
         self.record_operation(
             "lookup_lease",
@@ -215,3 +188,12 @@ class SelectiveLookupLease:
             num_failed_keys=len(evicted),
         )
         return set(evicted)
+
+    def _record_lease_error(self, start: float, num_keys: int, num_failed: int) -> None:
+        self.record_operation(
+            "lookup_lease",
+            time.perf_counter() - start,
+            num_keys,
+            status="error",
+            num_failed_keys=num_failed,
+        )

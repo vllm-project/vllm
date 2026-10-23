@@ -945,17 +945,14 @@ class _LeaseTrackingStore(_DictStore):
     probe and lease would.
     """
 
-    def __init__(self, probe_result=None):
+    def __init__(self):
         super().__init__()
-        self.probe_result = probe_result
         self.probed: list[str] = []
         self.lease_calls: list[list[str]] = []
         self.evictions: list[set[str]] = []
 
     def batch_probe_key(self, keys):
         self.probed.extend(keys)
-        if self.probe_result is not None:
-            return [self.probe_result] * len(keys)
         return [1 if k in self._data else 0 for k in keys]
 
     def batch_is_exist(self, keys):
@@ -1212,11 +1209,3 @@ def test_selective_lease_requires_probe_support(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
     with pytest.raises(RuntimeError, match="batch_probe_key"):
         _full_plus_mamba_worker(_DictStore())
-
-
-def test_selective_lease_requires_master_probe_support(monkeypatch):
-    """A master that rejects the probe RPC answers with per-key errors; the
-    startup check turns that into an error instead of silent lookup misses."""
-    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
-    with pytest.raises(RuntimeError, match="master"):
-        _full_plus_mamba_worker(_LeaseTrackingStore(probe_result=-900))
