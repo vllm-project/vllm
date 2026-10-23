@@ -538,7 +538,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
 
-        if expert_tokens_meta is not None:
+        # The field is checked as well as the container. On the cudagraph path
+        # (do_cpu_sync=False) ExpertTokensMetadata is present while
+        # expert_num_tokens inside it is None, and .sum() then raises
+        # "'NoneType' object has no attribute 'sum'" before the server answers
+        # a single request. Seen with the DeepEPv2 all2all backend on gfx950:
+        # the eager arm of the same run was green and only cudagraph died.
+        if (
+            expert_tokens_meta is not None
+            and expert_tokens_meta.expert_num_tokens is not None
+        ):
             # AITER dereferences num_local_tokens[0] as the number of
             # hidden_states rows this rank holds, while ExpertTokensMetadata
             # carries one count per local expert. Forwarding the vector makes
