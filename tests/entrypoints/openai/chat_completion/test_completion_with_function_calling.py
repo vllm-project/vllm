@@ -8,6 +8,7 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 
 # downloading lora to test lora requests
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
@@ -127,7 +128,7 @@ messages = [
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -136,7 +137,7 @@ def server():
         "--structured-outputs-config.backend",
         "xgrammar",
         "--tool-call-parser",
-        "hermes",
+        getattr(request, "param", "hermes"),
         "--reasoning-parser",
         "qwen3",
         "--gpu-memory-utilization",
@@ -152,6 +153,37 @@ def server():
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server", ["qwen3_coder"], indirect=True)
+async def test_non_streaming_preserves_text_after_tool_call(client: openai.AsyncOpenAI):
+    text = (
+        "<tool_call><function=get_current_weather>"
+        "<parameter=country>Austria</parameter>"
+        "<parameter=unit>celsius</parameter>"
+        "</function></tool_call>I will check the weather."
+    )
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Check the weather in Austria."}],
+        tools=tools[:1],
+        tool_choice="auto",
+        temperature=0,
+        max_completion_tokens=128,
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "structured_outputs": {"regex": re.escape(text)},
+        },
+    )
+
+    choice = completion.choices[0]
+    assert choice.message.content == "I will check the weather."
+    assert choice.finish_reason == "tool_calls"
+    assert len(choice.message.tool_calls) == 1
+    tool_call = choice.message.tool_calls[0].function
+    assert tool_call.name == "get_current_weather"
+    assert json.loads(tool_call.arguments) == {"country": "Austria", "unit": "celsius"}
 
 
 @pytest.mark.asyncio
