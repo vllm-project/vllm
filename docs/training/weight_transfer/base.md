@@ -26,11 +26,11 @@ anything else (a pipeline stage, a rank's experts, a Megatron export) you
 typically write your own. Engines receive HF-format names, so any gathering,
 re-fusing or renaming happens in the source.
 
-A source implements `metadata()` and one or both iteration modes:
+A source implements `metadata` and one or both iteration modes:
 
 | Method | Yields |
 | ------ | ------ |
-| `metadata()` | a `ParamMeta` for every parameter of the whole model, identical on every rank; transfers nothing |
+| `metadata` | a `functools.cached_property`: a `ParamMeta` for every parameter of the whole model, identical on every rank; transfers nothing |
 | `iter_full()` | `(name, full tensor)` for each name this rank owns |
 | `iter_local()` | `(name, this rank's piece)` for each name this rank owns |
 
@@ -57,7 +57,7 @@ class ParamMeta:
   does. A source without `iter_local()` leaves them unset.
 
 Because metadata is the same on every rank, every engine plans from it without
-exchanging anything. `owned_names(metas, rank)` gives the names a rank iterates.
+exchanging anything. `source.owned_names(rank)` gives the names a rank iterates.
 For example, under pipeline parallelism 2 x tensor parallelism 2 (stage 0 is
 ranks 0–1, stage 1 is ranks 2–3):
 
@@ -70,13 +70,13 @@ ranks 0–1, stage 1 is ranks 2–3):
 
 #### Iteration
 
-Both modes yield exactly `owned_names(metadata(), rank)`, in metadata order,
+Both modes yield exactly `owned_names(rank)`, in metadata order,
 with the declared dtypes and shapes. Either may run collectives among a
 parameter's owners (an FSDP all-gather per tensor or per layer), as long as
 every owner iterates in that order. Each call starts a fresh pass.
 
 Keep names that share a layer index (`model.layers.3.*`) contiguous in
-`metadata()`: sharded RDT transfers [a layer at a time](sharded_rdt.md).
+`metadata`: sharded RDT transfers [a layer at a time](sharded_rdt.md).
 
 #### ModuleSource
 
@@ -99,6 +99,8 @@ A source that knows its layout declares it. Here each pipeline stage sends its
 own layers:
 
 ```python
+from functools import cached_property
+
 from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.base import materialize_full_tensor
 
@@ -110,17 +112,19 @@ class PipelineStageSource(WeightSource):
 
     def __init__(self, module, layout, stage_ranks):
         self._module = module
-        self._meta = [
-            ParamMeta(name, dtype, shape, owners=stage_ranks[stage])
-            for name, dtype, shape, stage in layout
-        ]
+        self._layout = layout
+        self._stage_ranks = stage_ranks
 
+    @cached_property
     def metadata(self):
-        return self._meta
+        return [
+            ParamMeta(name, dtype, shape, owners=self._stage_ranks[stage])
+            for name, dtype, shape, stage in self._layout
+        ]
 
     def iter_full(self):
         params = dict(self._module.named_parameters())
-        for meta in self._meta:
+        for meta in self.metadata:
             if meta.name in params:
                 yield meta.name, materialize_full_tensor(params[meta.name])
 ```
@@ -325,9 +329,9 @@ class MyTrainerWeightTransferEngine(TrainerWeightTransferEngine[MyTrainerInitInf
 
     def send_weights(self) -> None:
         assert self.source is not None
-        meta = self.source.metadata()      # every rank: may be a collective
+        meta = self.source.metadata
         if not self.is_sender:
-            for _ in self.source:          # stay in the trainer-side collective
+            for _ in self.source.iter_full():  # join the source's collectives
                 pass
             return
 
@@ -339,7 +343,7 @@ class MyTrainerWeightTransferEngine(TrainerWeightTransferEngine[MyTrainerInitInf
                 "shapes": [list(m.shape) for m in meta],
             }
         )
-        for name, tensor in self.source:
+        for name, tensor in self.source.iter_full():
             ...                            # transmit
         self.client.finish_weight_update()
 ```

@@ -345,7 +345,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
         # Metadata is declared without gathering. For Megatron it is itself a
         # collective, so every rank runs it; only the sender ships it.
-        meta = source.metadata()
+        meta = source.metadata
         # Identical on every rank, so every rank raises alike.
         for m in meta:
             if m.owners is not None and m.owners[0] != 0:
@@ -436,7 +436,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         told to expect.
 
         The worker sizes its receive buffers — and in packed mode cuts its chunk
-        boundaries — from the update info, which is built from `metadata()`. If
+        boundaries — from the update info, which is built from `metadata`. If
         iteration disagrees with it, the two sides split the stream differently
         and the transfer hangs in NCCL or loads garbage. Checking here costs one
         comparison per parameter and turns that into an error naming the first
@@ -447,7 +447,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         for name, tensor in source.iter_full():
             if sent >= len(meta):
                 raise ValueError(
-                    f"WeightSource yielded more parameters than metadata() "
+                    f"WeightSource yielded more parameters than metadata "
                     f"declared ({len(meta)}); first extra is {name!r}."
                 )
             expected = meta[sent]
@@ -457,7 +457,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 or tuple(tensor.shape) != expected.shape
             ):
                 raise ValueError(
-                    "WeightSource metadata() disagrees with iteration at index "
+                    "WeightSource metadata disagrees with iteration at index "
                     f"{sent}: declared {expected.name!r} "
                     f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
                     f"{tensor.dtype} {tuple(tensor.shape)}. Both channels must "
@@ -467,7 +467,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             yield name, tensor
         if sent != len(meta):
             raise ValueError(
-                f"WeightSource yielded {sent} parameters but metadata() "
+                f"WeightSource yielded {sent} parameters but metadata "
                 f"declared {len(meta)}; the worker is waiting for the rest."
             )
 

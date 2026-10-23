@@ -9,7 +9,7 @@ M2N runtime and multiple GPUs, so it is exercised separately.
 
 import logging
 from contextlib import contextmanager
-from functools import wraps
+from functools import cached_property, wraps
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -170,6 +170,7 @@ class _StaticSource(WeightSource):
         self._metadata = metadata
         self._values = values
 
+    @cached_property
     def metadata(self):
         return list(self._metadata)
 
@@ -1161,6 +1162,7 @@ def _m2n_trainer_send(
             """Declares each layout on the base `ParamMeta`; both shards come
             from `iter_local`."""
 
+            @cached_property
             def metadata(self):
                 return [
                     ParamMeta(

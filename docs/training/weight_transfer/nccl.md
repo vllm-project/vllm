@@ -109,11 +109,11 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 ### Metadata and `iter_full()` must agree
 
 Dense NCCL builds the per-round update info from
-[`metadata()`](base.md#weightsource) and ships it ahead of the bytes; the worker
+[`metadata`](base.md#weightsource) and ships it ahead of the bytes; the worker
 sizes its receive buffers from that info, and in packed mode cuts its chunk
 boundaries from it. The bytes themselves come from the source's `iter_full()`.
 
-If `iter_full()` disagrees with what `metadata()` declared — a reordered, omitted, or
+If `iter_full()` disagrees with what `metadata` declared — a reordered, omitted, or
 re-dtyped parameter — the two sides split the same byte stream differently. The
 transfer then either hangs in NCCL waiting for a length that never arrives, or
 loads garbage into the model.
@@ -159,7 +159,7 @@ Rules to remember:
   after a re-init must send the full list again.
 
 `NCCLTrainerWeightTransferEngine.send_weights` follows these rules for you: it
-compares `metadata()` with what the last successful round sent, and sends empty
+compares `metadata` with what the last successful round sent, and sends empty
 lists when they are equal. You only need to think about them if you build
 `update_info` yourself, for example over HTTP without vLLM.
 

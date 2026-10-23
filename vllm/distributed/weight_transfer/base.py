@@ -4,8 +4,9 @@
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -51,7 +52,7 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
 
     This defines what a *group index* means for backends that transfer a layer
     at a time: index *g* names the same group on every trainer rank and every
-    consumer, because it is derived from `metadata()` order, which every rank
+    consumer, because it is derived from `metadata` order, which every rank
     shares.
 
     Keying on the index rather than a literal prefix needs no per-architecture
@@ -211,15 +212,10 @@ class ParamMeta:
         object.__setattr__(self, "placements", placements)
 
 
-def owned_names(metas: Sequence[ParamMeta], rank: int) -> list[str]:
-    """The names `rank` owns, in metadata order: exactly what it iterates."""
-    return [m.name for m in metas if m.owners is None or rank in m.owners]
-
-
 class WeightSource(ABC):
     """The trainer's weights, as metadata plus one or two iteration modes.
 
-    * `metadata()` declares every parameter of the whole model, on every rank:
+    * `metadata` declares every parameter of the whole model, on every rank:
       name, wire dtype, full shape, and which ranks own it in what layout (see
       `ParamMeta`). It transfers nothing.
     * `iter_full()` yields each owned parameter as a full tensor.
@@ -230,22 +226,36 @@ class WeightSource(ABC):
     to the other. Each engine consumes the mode it needs: broadcast, IPC and
     RDT consume `iter_full`, NCCL M2N consumes `iter_local`.
 
-    Both modes yield `(name, tensor)` pairs: exactly `owned_names(metadata(),
-    rank)`, in metadata order. Either may run collectives among a parameter's
+    Both modes yield `(name, tensor)` pairs: exactly `owned_names(rank)`, in
+    metadata order. Either may run collectives among a parameter's
     owners (an FSDP all-gather, one per layer if it likes); every owner
     iterates in metadata order, so the collectives line up. Work is enqueued
     on the caller's current stream. Each call starts a fresh pass.
     """
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        metadata = cls.__dict__.get("metadata")
+        if metadata is not None and not isinstance(metadata, cached_property):
+            raise TypeError(
+                f"{cls.__name__}.metadata must be a functools.cached_property: "
+                "engines read it repeatedly and it must not change."
+            )
+
+    @property
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
-        """Declare every parameter, without transferring anything.
+        """Every parameter, declared without transferring anything.
 
-        Must be identical on every trainer rank, including ownership: engines
-        plan from it without exchanging it. May be expensive on first call for
-        producers that must materialize to learn shapes, in which case cache.
+        Implement it as a `functools.cached_property`. Must be identical on
+        every trainer rank, including ownership: engines plan from it without
+        exchanging it.
         """
         raise NotImplementedError
+
+    def owned_names(self, rank: int) -> list[str]:
+        """The names `rank` owns, in metadata order: exactly what it iterates."""
+        return [m.name for m in self.metadata if m.owners is None or rank in m.owners]
 
     def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield the full tensor of each name this rank owns."""
@@ -295,8 +305,8 @@ class ModuleSource(WeightSource):
     placements. `iter_full` gathers each DTensor with `full_tensor()` (a
     collective among its owners); `iter_local` yields `to_local()`. A DTensor
     whose placements are not plain `Shard` / `Replicate` is declared replicated,
-    and `iter_local` gathers it. `metadata()` reads global shapes and never
-    gathers.
+    and `iter_local` gathers it. `metadata` reads global shapes, never
+    gathers, and is cached on first read, so shard the module first.
 
     The mesh ranks are taken as trainer ranks, so the default process group's
     ranks must be the `TrainerInitInfo.rank`s.
@@ -305,6 +315,7 @@ class ModuleSource(WeightSource):
     def __init__(self, module: torch.nn.Module) -> None:
         self._module = module
 
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
         metas = []
         for name, p in self._module.named_parameters():

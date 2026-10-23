@@ -20,7 +20,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
-    owned_names,
 )
 
 if TYPE_CHECKING:
@@ -299,8 +298,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             )
         # Each rank exports its own copies for its colocated worker, merged by
         # position, so every rank must hold every parameter.
-        meta = source.metadata()
-        if len(owned_names(meta, init_info.rank)) != len(meta):
+        if len(source.owned_names(init_info.rank)) != len(source.metadata):
             raise ValueError(
                 f"rank {init_info.rank} does not own every parameter, but IPC "
                 "needs every trainer rank to own every parameter."

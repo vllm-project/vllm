@@ -13,6 +13,7 @@ import runpy
 import threading
 import time
 from contextlib import nullcontext
+from functools import cached_property
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -42,7 +43,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
-    owned_names,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -1371,7 +1371,7 @@ class TestModuleSource:
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
-        meta = source.metadata()
+        meta = source.metadata
         assert [m.name for m in meta] == ["w", "b"]
         assert [m.shape for m in meta] == [(2, 3), (3,)]
         assert all(m.dtype == torch.float32 for m in meta)
@@ -1390,12 +1390,12 @@ class TestModuleSource:
         assert [n for n, _ in source.iter_full()] == ["w"]
 
     def test_metadata_agrees_with_both_modes(self):
-        """Engines declare the round from `metadata()` and send what a mode
+        """Engines declare the round from `metadata` and send what a mode
         yields, so both modes must match it."""
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
-        declared = [(m.name, m.dtype, m.shape) for m in source.metadata()]
+        declared = [(m.name, m.dtype, m.shape) for m in source.metadata]
         for pairs in (source.iter_full(), source.iter_local()):
             assert [(n, t.dtype, tuple(t.shape)) for n, t in pairs] == declared
 
@@ -1442,7 +1442,7 @@ class TestModuleSourceDTensor:
         source = ModuleSource(
             self._dtensor_module({"w": [TS(0), TS(1)], "r": [TR(), TR()]})
         )
-        w, r = source.metadata()
+        w, r = source.metadata
         assert w.owners == (0, 1, 2, 3)
         assert w.mesh_shape == (2, 2)
         assert w.placements == (Shard(0), Shard(1))
@@ -1464,7 +1464,7 @@ class TestModuleSourceDTensor:
         from torch.distributed.tensor import Partial
 
         source = ModuleSource(self._dtensor_module({"p": [Partial(), Partial()]}))
-        (meta,) = source.metadata()
+        (meta,) = source.metadata
         assert meta.owners == (0, 1, 2, 3)
         assert meta.placements is None
 
@@ -1509,8 +1509,23 @@ class TestParamMetaOwnership:
             ParamMeta("layers.1.w", torch.float32, (4,), owners=(2, 3)),
             ParamMeta("norm", torch.float32, (4,)),
         ]
-        assert owned_names(metas, 0) == ["embed", "layers.0.w", "norm"]
-        assert owned_names(metas, 3) == ["layers.1.w", "norm"]
+
+        class _Declared(WeightSource):
+            @cached_property
+            def metadata(self):
+                return metas
+
+        assert _Declared().owned_names(0) == ["embed", "layers.0.w", "norm"]
+        assert _Declared().owned_names(3) == ["layers.1.w", "norm"]
+
+    @pytest.mark.parametrize("wrap", [lambda f: f, property])
+    def test_metadata_must_be_a_cached_property(self, wrap):
+        """A plain method would hand engines a bound method, and a plain
+        property would rebuild on every read, so both fail at definition."""
+        with pytest.raises(TypeError, match="cached_property"):
+
+            class _Uncached(WeightSource):
+                metadata = wrap(lambda self: [])
 
 
 class TestDeferredProcessingContract:
@@ -1880,6 +1895,7 @@ class _ScriptedSource(WeightSource):
         self._meta = meta
         self._pairs = pairs
 
+    @cached_property
     def metadata(self):
         return list(self._meta)
 
@@ -1909,7 +1925,7 @@ def test_nccl_trainer_init_requires_source():
 
 
 def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
-    """The worker sizes its buffers (and cuts packed chunks) from metadata(), so
+    """The worker sizes its buffers (and cuts packed chunks) from metadata, so
     iteration disagreeing with it must raise rather than corrupt the stream."""
     meta = [
         ParamMeta("w", torch.float32, (4,)),
@@ -2020,6 +2036,7 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
             super().update_weights(update_info)
 
     class _FailingSource(WeightSource):
+        @cached_property
         def metadata(self):
             return [ParamMeta("w", torch.float32, (4,))]
 

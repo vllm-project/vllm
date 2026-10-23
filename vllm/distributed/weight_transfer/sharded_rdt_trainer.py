@@ -42,7 +42,6 @@ from vllm.distributed.weight_transfer.base import (
     VLLMWeightSyncClient,
     WeightSource,
     layerwise_groups,
-    owned_names,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
@@ -998,7 +997,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 "weight sync (allocate gather buffers in classic segments)."
             )
 
-        engine._meta = list(source.metadata())
+        engine._meta = list(source.metadata)
         names = [m.name for m in engine._meta]
         engine._groups = layerwise_groups(names)
         flat = [n for g in engine._groups for n in g]
@@ -1085,7 +1084,8 @@ class ShardedRDTTrainerWeightTransferEngine(
                 class_of_owners[owners] = ci
                 owner_sets.append(list(owners))
             name_owner_class.append(ci)
-        owned = set(owned_names(self._meta, rank))
+        assert self.source is not None
+        owned = set(self.source.owned_names(rank))
         self._owner_sets = owner_sets
         self._name_owner_class = name_owner_class
         self._owned_idx = [
@@ -1121,7 +1121,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         mismatched = [r for r, g in enumerate(gathered) if g is None or g[1] != digest]
         if mismatched:
             raise ValueError(
-                f"WeightSource.metadata() disagrees across trainer ranks (rank "
+                f"WeightSource.metadata disagrees across trainer ranks (rank "
                 f"{rank} digest {digest}, differing ranks {mismatched[:4]}). "
                 "Every rank must describe the WHOLE model, with the same owners."
             )

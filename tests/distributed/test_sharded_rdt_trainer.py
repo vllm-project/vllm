@@ -14,6 +14,7 @@ test_sharded_rdt_producer.py.
 
 import itertools
 from dataclasses import asdict
+from functools import cached_property
 
 import pytest
 import torch
@@ -38,6 +39,7 @@ class _ListSource(WeightSource):
     def __init__(self, pairs):
         self._pairs = list(pairs)
 
+    @cached_property
     def metadata(self):
         return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
@@ -130,7 +132,7 @@ def _rdt_engine_with_fake_server(
     engine = ShardedRDTTrainerWeightTransferEngine(
         client=client, source=source, is_sender=is_sender, init_info=init_info
     )
-    engine._meta = list(source.metadata())
+    engine._meta = list(source.metadata)
     names = [m.name for m in engine._meta]
     engine._groups = layerwise_groups(names)
     engine._server = server
@@ -303,6 +305,7 @@ class _DeclaredSource(_ListSource):
         self._owners = owners
         self._rank = rank
 
+    @cached_property
     def metadata(self):
         return [
             ParamMeta(n, t.dtype, tuple(t.shape), owners=self._owners.get(n))

@@ -402,7 +402,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     ) -> None:
         """Build and validate this rank's immutable source plan."""
         self._metas = [
-            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata()
+            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata
         ]
         names: set[str] = set()
         for meta in self._metas:
@@ -532,7 +532,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         for name, shard in self.source.iter_local():
             if sent >= len(self._metas):
                 raise RuntimeError(
-                    "weight source yielded more parameters than metadata() "
+                    "weight source yielded more parameters than metadata "
                     f"declared (first extra parameter: '{name}')"
                 )
             meta = self._metas[sent]
@@ -573,7 +573,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if sent != len(self._metas):
             missing = self._metas[sent].name
             raise RuntimeError(
-                f"weight source yielded {sent} parameters, but metadata() "
+                f"weight source yielded {sent} parameters, but metadata "
                 f"declared {len(self._metas)} (first missing: '{missing}')"
             )
 

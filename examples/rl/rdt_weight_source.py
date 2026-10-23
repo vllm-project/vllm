@@ -10,6 +10,8 @@ inside it so the example stays about the sync itself, alongside
 ``rdt_vllm_serve.py``.
 """
 
+from functools import cached_property
+
 import regex as re
 import torch
 
@@ -65,6 +67,7 @@ class CheckpointNameSource(WeightSource):
             for proj in ("gate", "up")
         ]
 
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
         return [
             ParamMeta(entry_name, param.dtype, shape)

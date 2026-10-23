@@ -26,6 +26,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from functools import cached_property
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -359,6 +360,7 @@ class _CountingSource(WeightSource):
     def __init__(self, groups):
         self._groups = groups
 
+    @cached_property
     def metadata(self):
         return [
             ParamMeta(n, torch.float32, (16,)) for names in self._groups for n in names
@@ -398,7 +400,7 @@ def _loop_engine(server, n_groups, *, lookahead):
     e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
-    e._meta = e.source.metadata()
+    e._meta = e.source.metadata
     e._groups = [list(g) for g in groups]
     e._owned_idx = list(range(n_groups))
     e._owned_names = {m.name for m in e._meta}
