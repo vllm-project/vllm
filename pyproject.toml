@@ -230,9 +230,10 @@ inverse_std_variences = "inverse_std_variences"
 TPE = "TPE"
 
 [tool.typos.default.extend-words]
-# Muse Spark K3 monokernel: shuffled-weight / scale tags
+# Muse Spark monokernel: shuffled-weight / scale tags, o_proj flag region
 shs = "shs"
 shw = "shw"
+opf = "opf"
 certifi = "certifi"
 MoNE = "MoNE"
 mone = "mone"

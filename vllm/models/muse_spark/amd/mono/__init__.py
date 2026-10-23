@@ -3,7 +3,8 @@
 """FlyDSL decode monokernel for MuseSpark1x on MI355X (``--monokernel``)."""
 
 import importlib
-from types import ModuleType
+import os
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -18,8 +19,10 @@ from .decoder import (
     LAST_LAYER,
     NUM_CUS,
     MonoDims,
+    MonoKernels,
     MuseSparkMono,
     _routed_experts,
+    built_buckets,
     config_refusals,
     deployment_refusals,
     layer_refusals,
@@ -28,11 +31,27 @@ from .decoder import (
 logger = init_logger(__name__)
 
 
-def _load_k3() -> tuple[ModuleType | None, str | None]:
+def _ensure_writable_flydsl_cache() -> None:
+    """AITER points FlyDSL at its bundled, read-only cache; new kernels need a
+    writable one."""
+    cur = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR")
+    if cur and os.access(cur, os.W_OK):
+        return
+    path = Path.home() / ".flydsl" / "cache"
+    path.mkdir(parents=True, exist_ok=True)
+    os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(path)
+
+
+def _load_kernels() -> tuple[MonoKernels | None, str | None]:
+    _ensure_writable_flydsl_cache()
     try:
-        return importlib.import_module(f"{__name__}.kernels.k3"), None
+        modules = {
+            name: importlib.import_module(f"{__name__}.kernels.{name}")
+            for name in ("k3", "k5", "k5m")
+        }
     except ImportError as e:
-        return None, f"FlyDSL K3 kernels unavailable ({e})"
+        return None, f"needs FlyDSL and AITER's FlyDSL helpers ({e})"
+    return MonoKernels(**modules), None
 
 
 def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
@@ -50,7 +69,8 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     if cus != NUM_CUS:
         reasons.append(f"{cus} CUs (kernel: {NUM_CUS})")
     model = lm.model
-    reasons += config_refusals(model.config)
+    text_config = lm.vllm_config.model_config.hf_text_config
+    reasons += config_refusals(text_config)
     if reasons:
         return reasons
     experts = _routed_experts(model.layers[FIRST_LAYER])
@@ -60,7 +80,7 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     reasons += deployment_refusals(lm.vllm_config, tp_rank, tp_size, moe_parallel)
     if reasons:
         return reasons
-    return layer_refusals(model, MonoDims.from_config(model.config, tp_size))
+    return layer_refusals(model, MonoDims.from_config(text_config, tp_size))
 
 
 def maybe_attach_mono(lm: nn.Module) -> None:
@@ -77,10 +97,11 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         return
     group = get_tp_group()
     rank, world_size = group.rank_in_group, group.world_size
+    text_config = lm.vllm_config.model_config.hf_text_config
     reasons = static_refusals(lm, rank, world_size)
-    k3 = None
+    kernels = None
     if not reasons:
-        k3, missing = _load_k3()
+        kernels, missing = _load_kernels()
         if missing is not None:
             reasons.append(missing)
     verdict = torch.tensor([0 if reasons else 1], dtype=torch.int32)
@@ -90,20 +111,25 @@ def maybe_attach_mono(lm: nn.Module) -> None:
             "--monokernel: Muse Spark cannot run the monokernel: "
             + ("; ".join(reasons) or "a peer rank refused the deployment")
         )
-    assert k3 is not None
+    assert kernels is not None
+    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs)
     model.mono = MuseSparkMono(
         model,
-        k3,
+        kernels,
         rank=rank,
         group=group.cpu_group,
         device=torch.device("cuda", torch.accelerator.current_device_index()),
-        dims=MonoDims.from_config(model.config, world_size),
+        dims=MonoDims.from_config(text_config, world_size),
+        buckets=buckets,
     )
     logger.info(
-        "Muse Spark monokernel attached: layers %d-%d of one-request verify "
-        "steps run as FlyDSL K3 launches (MoE activations in bf16)",
+        "Muse Spark monokernel attached: layers %d-%d of verify steps with "
+        "up to %d rows run as FlyDSL launches (builds S=%s; MoE activations "
+        "in bf16)",
         FIRST_LAYER,
         LAST_LAYER,
+        buckets[-1],
+        ",".join(map(str, buckets)),
     )
 
 

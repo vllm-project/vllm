@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x decode monokernel: layers 1-60 of a verify step as K3 launches.
+"""MuseSpark1x decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
 
-Per eligible step (one request x 8 verify tokens, TP8 with expert parallelism):
+Per eligible step (1-16 requests x 8 verify tokens, TP8 with expert
+parallelism; see README.md):
 
 - layer 0: stock.
 - layer 1: stock attention input and attention front (QKV, QK-norm, RoPE, KV
   insert), then vLLM's attention op.
-- layers 1-60: K3_i takes layer i's attention output, runs o-norm/gate,
-  o_proj, the attention boundary, the MoE half with its EP all-reduce and the
-  FFN boundary, then layer i+1's QKV+O-gate GEMV, QK-norm, RoPE and KV insert.
-  vLLM's attention op on K3_i's q is layer i+1's attention.
-- layer 61: vLLM's attention op on K3_60's q, then the stock tail.
+- layers 1-60: from layer i's attention output to layer i+1's q, o-gate and
+  KV insert: o-norm/gate, o_proj, the attention boundary, the MoE with its EP
+  all-reduce, the FFN boundary, layer i+1's QKV+O-gate GEMV, QK-norm and RoPE.
+  8 / 16 rows: one K3 launch; 24-128 rows: HA, HM (the experts) and HB.
+  vLLM's attention op on that q is layer i+1's attention.
+- layer 61: vLLM's attention op, then the stock tail.
 
 Every rank must take the same path (the kernel waits on its peers), so the
 decision uses only rank-invariant data: the static deployment checked at
 attach, the batch shape and the attention metadata counts.
 """
 
+import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
 from types import ModuleType
@@ -44,7 +47,8 @@ logger = init_logger(__name__)
 FIRST_LAYER = 1
 LAST_LAYER = 60
 ROWS_PER_REQUEST = 8
-K3_ROWS = (8,)
+K3_ROWS = (8, 16)
+K5_ROWS = (32, 64, 96, 128)
 WORLD_SIZE = 8
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
@@ -125,9 +129,18 @@ class MonoDims:
         }
 
 
+def bucket_of(rows: int) -> int | None:
+    """The kernel build that serves ``rows`` (padded up); None = stock."""
+    if rows <= 0 or rows % ROWS_PER_REQUEST:
+        return None
+    if rows in K3_ROWS:
+        return rows
+    return next((s for s in K5_ROWS if rows <= s), None)
+
+
 @dataclass
-class K3LayerWeights:
-    """Views of vLLM's parameters (and small norm copies) for K3_i."""
+class LayerWeights:
+    """Views of vLLM's parameters (and small norm copies) for layer i's launches."""
 
     w_o: torch.Tensor
     alpha_a: torch.Tensor
@@ -150,42 +163,29 @@ class K3LayerWeights:
     w_qkvg: torch.Tensor
     next_rope: bool
 
-    def pointers(self) -> tuple[int, ...]:
-        """K3's weight arguments, in launch order."""
-        return tuple(
-            t.data_ptr()
-            for t in (
-                self.w_o,
-                self.alpha_a,
-                self.beta_a,
-                self.w_pffn,
-                self.w_r,
-                self.bias,
-                self.w_pre,
-                self.w_pren,
-                self.w13,
-                self.w13s,
-                self.w2,
-                self.w2s,
-                self.w_post,
-                self.w_pp,
-                self.w_pff,
-                self.alpha,
-                self.beta,
-                self.w_in,
-                self.w_qkvg,
-            )
+    def _ptrs(self, *names: str) -> tuple[int, ...]:
+        return tuple(getattr(self, n).data_ptr() for n in names)
+
+    def ha_pointers(self) -> tuple[int, ...]:
+        """Attention boundary, router and pre-expert projection (HA, K3)."""
+        return self._ptrs(
+            "w_o", "alpha_a", "beta_a", "w_pffn", "w_r", "bias", "w_pre", "w_pren"
         )
 
+    def hm_pointers(self) -> tuple[int, ...]:
+        """The local experts (HM, K3)."""
+        return self._ptrs("w13", "w13s", "w2", "w2s", "w_post")
+
+    def hb_pointers(self) -> tuple[int, ...]:
+        """Post-expert projection, FFN boundary and the next QKV (HB, K3)."""
+        return self._ptrs("w_pp", "w_pff", "alpha", "beta", "w_in", "w_qkvg")
+
+    def k3_pointers(self) -> tuple[int, ...]:
+        return self.ha_pointers() + self.hm_pointers() + self.hb_pointers()
+
     def expert_replica_pointers(self) -> tuple[int, ...]:
-        """K3's EPLB replica arguments; without replicas, the own experts."""
-        return (
-            self.w13.data_ptr(),
-            self.w13s.data_ptr(),
-            self.w2.data_ptr(),
-            self.w2s.data_ptr(),
-            self.w13.data_ptr(),
-        )
+        """The EPLB replica arguments; without replicas, the own experts."""
+        return self._ptrs("w13", "w13s", "w2", "w2s", "w13")
 
 
 def effective_norm_weight(norm: nn.Module) -> torch.Tensor:
@@ -207,14 +207,14 @@ def _rows(t: torch.Tensor, rank: int, n: int) -> torch.Tensor:
 
 def collect_layer_weights(
     layers: Sequence[nn.Module], i: int, rank: int, dims: MonoDims
-) -> K3LayerWeights:
-    """K3_i's arguments from decoder layers ``i`` and ``i + 1``; no weight copy."""
+) -> LayerWeights:
+    """Layer i's kernel weights from decoder layers ``i`` and ``i + 1``; no copy."""
     layer, nxt = layers[i], layers[i + 1]
     moe = layer.feed_forward
     experts = _routed_experts(layer)
     assert experts is not None
     w = dims.world_size
-    return K3LayerWeights(
+    return LayerWeights(
         w_o=layer.self_attn.o_proj.weight.detach(),
         alpha_a=layer.add_attn.alpha,
         beta_a=layer.add_attn.beta,
@@ -277,6 +277,11 @@ def deployment_refusals(
         reasons.append(
             f"EP rank {moe_parallel.ep_rank}/{moe_parallel.ep_size} "
             f"!= TP rank {tp_rank}/{tp_size}"
+        )
+    spec = vllm_config.speculative_config
+    if spec is None or spec.num_speculative_tokens != ROWS_PER_REQUEST - 1:
+        reasons.append(
+            f"needs speculative decoding with {ROWS_PER_REQUEST - 1} draft tokens"
         )
     if vllm_config.lora_config is not None:
         reasons.append("LoRA on")
@@ -408,9 +413,15 @@ def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
     return None
 
 
-def batch_refusal(num_tokens: int, forward_context: Any) -> str | None:
-    """Why this step runs stock, from rank-invariant data only; None = mono."""
-    if num_tokens not in K3_ROWS:
+def batch_refusal(
+    num_tokens: int, forward_context: Any, layer_names: Sequence[str]
+) -> str | None:
+    """Why this step runs stock, from rank-invariant data only; None = mono.
+
+    Reads the attention metadata of the kernels' layers (``layer_names``) only:
+    the dict also holds the draft model's layers.
+    """
+    if bucket_of(num_tokens) is None:
         return f"rows:{num_tokens}"
     mode = forward_context.cudagraph_runtime_mode
     if mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
@@ -419,7 +430,10 @@ def batch_refusal(num_tokens: int, forward_context: Any) -> str | None:
     if not isinstance(metadata, dict) or not metadata:
         return "attn-metadata"
     seen: set[int] = set()
-    for md in metadata.values():
+    for name in layer_names:
+        md = metadata.get(name)
+        if md is None:
+            return "attn-metadata"
         if id(md) in seen:
             continue
         seen.add(id(md))
@@ -437,38 +451,90 @@ def batch_refusal(num_tokens: int, forward_context: Any) -> str | None:
     return None
 
 
-class _K3Buffers:
-    """Launchers and persistent buffers of one row count."""
+@dataclass(frozen=True)
+class MonoKernels:
+    """The FlyDSL kernel modules (``kernels.k3``, ``kernels.k5``, ``kernels.k5m``)."""
+
+    k3: ModuleType
+    k5: ModuleType
+    k5m: ModuleType
+
+
+@dataclass(frozen=True)
+class _LayerArgs:
+    ha: tuple[int, ...]
+    hm: tuple[int, ...]
+    hb: tuple[int, ...]
+    replicas: tuple[int, ...]
+    next_rope: bool
+
+
+class _Bucket:
+    """Launchers and persistent buffers of one kernel build (row count)."""
+
+    def __init__(
+        self,
+        kernel: ModuleType,
+        rows: int,
+        peer_bytes: int,
+        dims: MonoDims,
+        device: torch.device,
+        group: Any,
+    ) -> None:
+        self.rows = rows
+        self.dims = dims
+        self.blocks = kernel.BLOCKS
+        self.peers = PeerBuffer(peer_bytes + 256, group)
+        self.epoch = torch.zeros(4, dtype=torch.int32, device=device)
+        self.health = torch.zeros(kernel.HEALTH_WORDS, dtype=torch.int32, device=device)
+        self.timeline = torch.zeros(
+            kernel.BLOCKS * kernel.TL_POINTS, dtype=torch.int64, device=device
+        )
+        self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
+
+    def _common(self) -> tuple[int, ...]:
+        return (
+            self.epoch.data_ptr(),
+            self.health.data_ptr(),
+            self.timeline.data_ptr(),
+            *self.peers.pointers,
+        )
+
+    def run(
+        self,
+        mono: "MuseSparkMono",
+        layers: Sequence[nn.Module],
+        positions: torch.Tensor,
+        o: torch.Tensor,
+        g: torch.Tensor,
+        stream: torch.Tensor,
+        aux_layers: Sequence[int],
+        aux_hidden_states: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Layers FIRST_LAYER..LAST_LAYER; returns layer 61's (stream, q, g)."""
+        raise NotImplementedError
+
+
+class _K3Bucket(_Bucket):
+    """8 / 16 rows: one K3 launch a layer."""
 
     def __init__(
         self,
         k3: ModuleType,
         rows: int,
         dims: MonoDims,
-        rank: int,
         device: torch.device,
         group: Any,
     ) -> None:
-        self.k3 = k3
-        self.rows = rows
+        w = dims.world_size
+        super().__init__(k3, rows, k3.peer_layout(rows, w)[1], dims, device, group)
         self.launchers = {
-            next_rope: k3.build(
-                k3.build_vllm(S=rows, W=dims.world_size, next_rope=next_rope)
-            )
+            next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
             for next_rope in (True, False)
         }
-        _, scratch_bytes = k3.scratch_layout(rows, dims.world_size)
-        _, peer_bytes = k3.peer_layout(rows, dims.world_size)
         self.scratch = torch.zeros(
-            scratch_bytes // 4 + 64, dtype=torch.int32, device=device
+            k3.scratch_layout(rows, w)[1] // 4 + 64, dtype=torch.int32, device=device
         )
-        self.peers = PeerBuffer(peer_bytes + 256, group)
-        self.epoch = torch.zeros(4, dtype=torch.int32, device=device)
-        self.health = torch.zeros(k3.HEALTH_WORDS, dtype=torch.int32, device=device)
-        self.timeline = torch.zeros(
-            k3.BLOCKS * k3.TL_POINTS, dtype=torch.int64, device=device
-        )
-        self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
         bf16 = torch.bfloat16
         self.outs = [
             {
@@ -482,38 +548,223 @@ class _K3Buffers:
             }
             for _ in range(2)
         ]
-        self.rank = rank
-        self.dims = dims
+
+    def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
+        q = o
+        for i in range(FIRST_LAYER, LAST_LAYER + 1):
+            if i > FIRST_LAYER:
+                o = layers[i].self_attn.core(q, None, None)
+            kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
+            a = mono.layer_args[i]
+            out = self.outs[i % 2]
+            self.launchers[a.next_rope](
+                o.data_ptr(),
+                g.data_ptr(),
+                stream.data_ptr(),
+                *a.ha,
+                *a.hm,
+                *a.hb,
+                out["stream"].data_ptr(),
+                out["xn"].data_ptr(),
+                out["part"].data_ptr(),
+                out["q"].data_ptr(),
+                out["g"].data_ptr(),
+                kv_cache.data_ptr(),
+                # The kernel takes the block stride (elements) in the V slot.
+                kv_cache.stride(0),
+                slots.data_ptr(),
+                cos_sin.data_ptr(),
+                positions.data_ptr(),
+                self.scratch.data_ptr(),
+                *self._common(),
+                i,
+                mono.rank,
+                g.stride(0),
+                *a.replicas,
+                stream=torch.cuda.current_stream(),
+            )
+            stream, q, g = out["stream"], out["q"], out["g"]
+            if i + 1 in aux_layers:
+                aux_hidden_states.append(stream.clone())
+        return stream, q, g
+
+
+class _K5Bucket(_Bucket):
+    """24-128 rows: HA (attention boundary, router, pre-expert projection),
+    HM (the local experts) and HB (FFN boundary, next QKV) a layer; between
+    the launches the residual stream lives token-sharded unless the build
+    replicates it (``key.bnd``)."""
+
+    def __init__(
+        self,
+        k5: ModuleType,
+        k5m: ModuleType,
+        rows: int,
+        dims: MonoDims,
+        device: torch.device,
+        group: Any,
+    ) -> None:
+        w = dims.world_size
+        key = k5.build_vllm(S=rows, W=w, next_rope=True)
+        super().__init__(
+            k5, rows, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group
+        )
+        self.bnd = key.bnd
+        self.launch_a, launch_b = k5.build(key)
+        self.launch_b = {
+            True: launch_b,
+            False: k5.build(dataclasses.replace(key, next_rope=False))[1],
+        }
+        self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
+        i32, f32, bf16 = torch.int32, torch.float32, torch.bfloat16
+        self.scratch = torch.zeros(
+            k5.scratch_layout(rows, w, key.bnd)[1] // 4 + 64, dtype=i32, device=device
+        )
+        self.scratch_m = torch.zeros(
+            k5m.scratch_layout(rows)[1] // 4 + 64, dtype=i32, device=device
+        )
+        self.timeline_m = torch.zeros(k5.BLOCKS * 8, dtype=torch.int64, device=device)
+        topk = int(KERNEL_CONFIG["num_experts_per_tok"])
+        self.h = torch.zeros(rows, dims.pooled_size, dtype=bf16, device=device)
+        self.ids = torch.zeros(rows, topk, dtype=i32, device=device)
+        self.scores = torch.zeros(rows, topk, dtype=f32, device=device)
+        self.part = torch.zeros(rows, dims.pooled_size, dtype=bf16, device=device)
+        sharded_rows = rows // w if key.bnd < 2 else rows
+        self.ts = [
+            torch.zeros(sharded_rows, dims.hidden_size, dtype=f32, device=device)
+            for _ in range(2)
+        ]
+        self.sfull = torch.zeros(rows, dims.hidden_size, dtype=f32, device=device)
+        self.q = [
+            torch.zeros(rows, dims.q_rows, dtype=bf16, device=device) for _ in range(2)
+        ]
+        self.g = [
+            torch.zeros(rows, dims.q_rows, dtype=bf16, device=device) for _ in range(2)
+        ]
+
+    def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
+        nrows = stream.shape[0]
+        hidden = self.dims.hidden_size
+        cur = torch.cuda.current_stream()
+        s_in, s_full = stream, 1
+        q = o
+        for i in range(FIRST_LAYER, LAST_LAYER + 1):
+            if i > FIRST_LAYER:
+                o = layers[i].self_attn.core(q, None, None)
+            kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
+            a = mono.layer_args[i]
+            self.launch_a(
+                o.data_ptr(),
+                g.data_ptr(),
+                s_in.data_ptr(),
+                *a.ha,
+                self.h.data_ptr(),
+                self.ids.data_ptr(),
+                self.scores.data_ptr(),
+                self.scratch.data_ptr(),
+                *self._common(),
+                i,
+                mono.rank,
+                g.stride(0),
+                s_full,
+                nrows,
+                stream=cur,
+            )
+            self.launch_m(
+                self.h.data_ptr(),
+                self.ids.data_ptr(),
+                self.scores.data_ptr(),
+                *a.hm,
+                self.part.data_ptr(),
+                self.scratch_m.data_ptr(),
+                self.epoch.data_ptr(),
+                self.health.data_ptr(),
+                self.timeline_m.data_ptr(),
+                *self.peers.pointers,
+                i,
+                mono.rank,
+                nrows,
+                *a.replicas,
+                stream=cur,
+            )
+            gather = int(i == LAST_LAYER or i + 1 in aux_layers or self.bnd == 1)
+            ts, q_out, g_out = self.ts[i % 2], self.q[i % 2], self.g[i % 2]
+            self.launch_b[a.next_rope](
+                self.part.data_ptr(),
+                *a.hb,
+                ts.data_ptr(),
+                self.sfull.data_ptr(),
+                q_out.data_ptr(),
+                g_out.data_ptr(),
+                kv_cache.data_ptr(),
+                kv_cache.stride(0),
+                slots.data_ptr(),
+                cos_sin.data_ptr(),
+                positions.data_ptr(),
+                self.scratch.data_ptr(),
+                *self._common(),
+                i,
+                mono.rank,
+                hidden,
+                0,
+                gather,
+                nrows,
+                stream=cur,
+            )
+            if self.bnd == 1:
+                s_in, s_full = self.sfull, 1
+            else:
+                s_in, s_full = ts, int(self.bnd >= 2)
+            q, g = q_out[:nrows], g_out[:nrows]
+            if i + 1 in aux_layers:
+                aux_hidden_states.append(self.sfull[:nrows].clone())
+        return self.sfull[:nrows], q, g
+
+
+def built_buckets(max_num_seqs: int) -> list[int]:
+    """The builds a server with ``max_num_seqs`` requests can use."""
+    max_rows = min(max_num_seqs, K5_ROWS[-1] // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
+    return sorted(
+        {
+            b
+            for rows in range(ROWS_PER_REQUEST, max_rows + 1, ROWS_PER_REQUEST)
+            if (b := bucket_of(rows)) is not None
+        }
+    )
 
 
 class MuseSparkMono:
-    """Runs decoder layers 1-60 of eligible verify steps through K3."""
+    """Runs decoder layers 1-60 of eligible verify steps through the kernels."""
 
     def __init__(
         self,
         model: nn.Module,
-        k3: ModuleType,
+        kernels: MonoKernels,
         rank: int,
         group: Any,
         device: torch.device,
         dims: MonoDims,
+        buckets: Sequence[int],
     ) -> None:
         self.rank = rank
         self.dims = dims
         self.device = device
-        self.k3 = k3
-        self.weights: dict[int, K3LayerWeights] = {}
         self.refresh_weights(model)
-        self.buffers = {
-            rows: _K3Buffers(k3, rows, dims, rank, device, group) for rows in K3_ROWS
+        self.buckets: dict[int, _Bucket] = {
+            b: (
+                _K3Bucket(kernels.k3, b, dims, device, group)
+                if b in K3_ROWS
+                else _K5Bucket(kernels.k5, kernels.k5m, b, dims, device, group)
+            )
+            for b in buckets
         }
-        self._validated: set[tuple[int, int]] = set()
+        self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
         self._engaged: set[int] = set()
         self._steps = 0
         self._health_host = {
-            rows: torch.zeros_like(b.health, device="cpu").pin_memory()
-            for rows, b in self.buffers.items()
+            b: torch.zeros_like(buf.health, device="cpu").pin_memory()
+            for b, buf in self.buckets.items()
         }
         self._health_event: torch.cuda.Event | None = None
 
@@ -523,10 +774,31 @@ class MuseSparkMono:
             i: collect_layer_weights(model.layers, i, self.rank, self.dims)
             for i in range(FIRST_LAYER, LAST_LAYER + 1)
         }
-        self._pointers = {
-            i: (w.pointers(), w.expert_replica_pointers())
+        self.layer_args = {
+            i: _LayerArgs(
+                ha=w.ha_pointers(),
+                hm=w.hm_pointers(),
+                hb=w.hb_pointers(),
+                replicas=w.expert_replica_pointers(),
+                next_rope=w.next_rope,
+            )
             for i, w in self.weights.items()
         }
+
+    def _layer_names(self, model: nn.Module) -> list[str]:
+        return [
+            model.layers[i].self_attn.attn.layer_name
+            for i in range(FIRST_LAYER, LAST_LAYER + 2)
+        ]
+
+    def next_kv(
+        self, layer: nn.Module, no_rope: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The KV cache, slots and RoPE table the kernels write ``layer``'s KV with."""
+        kv_cache, slots = self._kv_of(layer)
+        assert slots is not None
+        rope = layer.self_attn.rotary_emb
+        return kv_cache, slots, rope.cos_sin_cache if rope is not None else no_rope
 
     def _kv_of(self, layer: nn.Module) -> tuple[torch.Tensor, torch.Tensor | None]:
         _, _, kv_cache, slot_mapping = get_attention_context(
@@ -539,10 +811,13 @@ class MuseSparkMono:
     ) -> str | None:
         if not isinstance(x, torch.Tensor):
             return "input"
-        reason = batch_refusal(x.shape[0], get_forward_context())
+        rows = x.shape[0]
+        reason = batch_refusal(rows, get_forward_context(), self._layer_names(model))
         if reason is not None:
             return reason
-        if positions.dtype != torch.int64 or positions.shape != (x.shape[0],):
+        if bucket_of(rows) not in self.buckets:
+            return f"rows:{rows}"
+        if positions.dtype != torch.int64 or positions.shape != (rows,):
             return "positions"
         for i in range(FIRST_LAYER + 1, LAST_LAYER + 2):
             kv_cache, slots = self._kv_of(model.layers[i])
@@ -552,7 +827,7 @@ class MuseSparkMono:
             if (
                 slots is None
                 or slots.dtype != torch.int64
-                or slots.shape[0] < x.shape[0]
+                or slots.shape[0] < rows
                 or slots.stride(-1) != 1
             ):
                 return "slot-mapping"
@@ -575,9 +850,11 @@ class MuseSparkMono:
         rows = x.shape[0]
         if rows not in self._engaged:
             self._engaged.add(rows)
+            bucket = bucket_of(rows)
             logger.info(
-                "Muse Spark monokernel engaged for %d rows (layers %d-%d)%s",
+                "Muse Spark monokernel engaged for %d rows (%s, layers %d-%d)%s",
                 rows,
+                f"K3 S={bucket}" if bucket in K3_ROWS else f"HA+HM+HB S={bucket}",
                 FIRST_LAYER,
                 LAST_LAYER,
                 " in CUDA graph capture"
@@ -587,16 +864,12 @@ class MuseSparkMono:
         return self._forward(model, positions, x, aux_hidden_states)
 
     def _validate(
-        self,
-        key: tuple[int, int],
-        attn_o: torch.Tensor,
-        attn_g: torch.Tensor,
-        stream: torch.Tensor,
+        self, attn_o: torch.Tensor, attn_g: torch.Tensor, stream: torch.Tensor
     ) -> None:
-        """Check K3's activation arguments at the first launches of a row count."""
-        if key in self._validated:
+        """Check the stock layer-1 tensors the kernels read, once a row count."""
+        rows = stream.shape[0]
+        if rows in self._validated:
             return
-        rows = key[0]
         bf16, d = torch.bfloat16, self.dims
         checks = (
             ("attn_o", attn_o, bf16, (rows, d.q_rows)),
@@ -617,50 +890,7 @@ class MuseSparkMono:
                 f"Muse Spark monokernel: o-gate is {attn_g.dtype} "
                 f"{tuple(attn_g.shape)} {attn_g.stride()}"
             )
-        self._validated.add(key)
-
-    def _launch(
-        self,
-        buf: _K3Buffers,
-        i: int,
-        attn_o: torch.Tensor,
-        attn_g: torch.Tensor,
-        stream: torch.Tensor,
-        out: dict[str, torch.Tensor],
-        kv_cache: torch.Tensor,
-        slots: torch.Tensor,
-        cos_sin: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        weights, replicas = self._pointers[i]
-        launch = buf.launchers[self.weights[i].next_rope]
-        launch(
-            attn_o.data_ptr(),
-            attn_g.data_ptr(),
-            stream.data_ptr(),
-            *weights,
-            out["stream"].data_ptr(),
-            out["xn"].data_ptr(),
-            out["part"].data_ptr(),
-            out["q"].data_ptr(),
-            out["g"].data_ptr(),
-            kv_cache.data_ptr(),
-            # The kernel takes the block stride (elements) in the V slot.
-            kv_cache.stride(0),
-            slots.data_ptr(),
-            cos_sin.data_ptr(),
-            positions.data_ptr(),
-            buf.scratch.data_ptr(),
-            buf.epoch.data_ptr(),
-            buf.health.data_ptr(),
-            buf.timeline.data_ptr(),
-            *buf.peers.pointers,
-            i,
-            self.rank,
-            attn_g.stride(0),
-            *replicas,
-            stream=torch.cuda.current_stream(),
-        )
+        self._validated.add(rows)
 
     def _forward(
         self,
@@ -671,9 +901,10 @@ class MuseSparkMono:
     ) -> Any:
         layers = model.layers
         aux_layers = model.aux_hidden_state_layers
-        rows = x.shape[0]
-        buf = self.buffers[rows]
-        buf.epoch.add_(1)
+        rows = bucket_of(x.shape[0])
+        assert rows is not None
+        bucket = self.buckets[rows]
+        bucket.epoch.add_(1)
 
         y = layers[0](positions, x)
         if 1 in aux_layers:
@@ -683,31 +914,10 @@ class MuseSparkMono:
         q, k, v, g = first.self_attn.front(positions, attn_input)
         o = first.self_attn.core(q, k, v)
         assert g is not None
-        for i in range(FIRST_LAYER, LAST_LAYER + 1):
-            if i > FIRST_LAYER:
-                o = layers[i].self_attn.core(q, None, None)
-            if i <= FIRST_LAYER + 1:
-                self._validate((rows, i), o, g, stream)
-            nxt = layers[i + 1]
-            kv_cache, slots = self._kv_of(nxt)
-            assert slots is not None
-            rope = nxt.self_attn.rotary_emb
-            out = buf.outs[i % 2]
-            self._launch(
-                buf,
-                i,
-                o,
-                g,
-                stream,
-                out,
-                kv_cache,
-                slots,
-                rope.cos_sin_cache if rope is not None else buf.no_rope,
-                positions,
-            )
-            stream, q, g = out["stream"], out["q"], out["g"]
-            if i + 1 in aux_layers:
-                aux_hidden_states.append(stream.clone())
+        self._validate(o, g, stream)
+        stream, q, g = bucket.run(
+            self, layers, positions, o, g, stream, aux_layers, aux_hidden_states
+        )
 
         last = layers[LAST_LAYER + 1]
         o = last.self_attn.core(q, None, None)
@@ -717,7 +927,7 @@ class MuseSparkMono:
         return y
 
     def poll_health(self) -> None:
-        """Raise if a K3 launch timed out waiting for a peer rank.
+        """Raise if a launch timed out waiting for a peer rank.
 
         Reads the health words with an asynchronous copy every
         HEALTH_POLL_INTERVAL calls and checks the previous copy, so the step
@@ -728,20 +938,20 @@ class MuseSparkMono:
         self._steps += 1
         if self._health_event is not None and self._health_event.query():
             self._health_event = None
-            for rows, host in self._health_host.items():
+            for b, host in self._health_host.items():
                 if int(host[0]) != 0:
-                    records = host[8:].view(self.k3.BLOCKS, 8)
+                    records = host[8:].view(self.buckets[b].blocks, 8)
                     stuck = records[records[:, 0] != 0][:8].tolist()
                     raise RuntimeError(
-                        f"Muse Spark monokernel: rank {self.rank}, {rows} rows: "
-                        f"K3 timed out waiting for a peer rank {stuck}"
+                        f"Muse Spark monokernel: rank {self.rank}, S={b}: a launch "
+                        f"timed out waiting for a peer rank {stuck}"
                     )
         if self._health_event is None and self._steps % HEALTH_POLL_INTERVAL == 0:
-            for rows, buf in self.buffers.items():
-                self._health_host[rows].copy_(buf.health, non_blocking=True)
+            for b, buf in self.buckets.items():
+                self._health_host[b].copy_(buf.health, non_blocking=True)
             self._health_event = torch.cuda.Event()
             self._health_event.record()
 
     def close(self) -> None:
-        for buf in self.buffers.values():
+        for buf in self.buckets.values():
             buf.peers.close()
