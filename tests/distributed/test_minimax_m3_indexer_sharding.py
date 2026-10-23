@@ -81,7 +81,6 @@ def _check_initialization_fallback(config, device, rank):
             assert msa.get_comm() is None
             assert not msa._COMM_FAILED
 
-    original_empty = symm_mem.empty
     for failure in (
         "topology",
         "recv_allocation",
@@ -91,13 +90,10 @@ def _check_initialization_fallback(config, device, rank):
             m.setattr(msa, "_COMM_FAILED", False)
             injected = False
 
-            def fail_allocation(*args, failure=failure, **kwargs):
+            def fail_allocation(*args, **kwargs):
                 nonlocal injected
-                shape = args[0]
-                if failure == "recv_allocation" and len(shape) == 5:
-                    injected = True
-                    raise RuntimeError("injected indexer allocation failure")
-                return original_empty(*args, **kwargs)
+                injected = True
+                raise RuntimeError("injected indexer allocation failure")
 
             def fail_topology(_):
                 nonlocal injected
