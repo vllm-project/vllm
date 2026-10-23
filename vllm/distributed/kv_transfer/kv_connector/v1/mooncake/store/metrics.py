@@ -3,9 +3,9 @@
 """Per-operation telemetry for MooncakeStoreConnector.
 
 Records one row per Mooncake RPC (``save_exists``, ``save_put``, ``load_get``,
-``lookup_exists``) with duration, key/byte counts, status, and failed-key
-count. Exposed to the logger via ``KVConnectorLogging`` and to Prometheus
-via ``MooncakeStorePromMetrics``.
+``lookup_exists``, ``lookup_lease``) with duration, key/byte counts, status,
+and failed-key count. Exposed to the logger via ``KVConnectorLogging`` and to
+Prometheus via ``MooncakeStorePromMetrics``.
 """
 
 from dataclasses import dataclass

@@ -8,6 +8,7 @@ import threading
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
@@ -22,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
@@ -932,3 +934,289 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
 
     assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     assert not any("@group:1" in key for key in store._data)
+
+
+class _LeaseTrackingStore(_DictStore):
+    """Dict store that tells lease-free probes from leasing existence checks.
+
+    ``batch_probe_key`` grants no lease; ``batch_is_exist`` leases every key it
+    finds. Each leasing call is recorded separately, and ``evictions`` holds
+    keys to drop just before each successive leasing call, as evictions between
+    probe and lease would.
+    """
+
+    def __init__(self, probe_result=None):
+        super().__init__()
+        self.probe_result = probe_result
+        self.probed: list[str] = []
+        self.lease_calls: list[list[str]] = []
+        self.evictions: list[set[str]] = []
+
+    def batch_probe_key(self, keys):
+        self.probed.extend(keys)
+        if self.probe_result is not None:
+            return [self.probe_result] * len(keys)
+        return [1 if k in self._data else 0 for k in keys]
+
+    def batch_is_exist(self, keys):
+        if self.evictions:
+            for key in self.evictions.pop(0):
+                self._data.pop(key, None)
+        self.lease_calls.append(list(keys))
+        return super().batch_is_exist(keys)
+
+
+def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
+    """Full-attention + align-mode Mamba worker on ``store``."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    cfg = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=8 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=8 * mamba.page_size_bytes,
+                layers=["L1"],
+                layer_stride=8 * mamba.page_size_bytes,
+                block_stride=mamba.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], mamba),
+        ],
+        # The hit alignment the engine core resolves for 4-token hash units.
+        **({"cache_hit_alignment_tokens": 4} if partial_hash_hits else {}),
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    if partial_hash_hits:
+        # Hash unit 4 < Mamba block 16 enables partial hash hits.
+        vllm_config.cache_config.prefix_match_unit = 4
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    for g_idx, db in enumerate(worker.token_dbs):
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+    return worker
+
+
+def _store_keys(worker, g_idx, block_hash):
+    return [
+        PoolKey.build_key_string(prefix, block_hash.hex())
+        for prefix in worker._lookup_key_prefixes[g_idx]
+    ]
+
+
+def _store_full_history(worker, store):
+    """Store every block and every block-boundary Mamba state of a 64-token
+    prefix, as earlier turns of a conversation would."""
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    for g_idx in range(2):
+        for h in hs:
+            for key in _store_keys(worker, g_idx, h):
+                store._data[key] = b"x"
+    return hs
+
+
+def test_lookup_leases_every_probed_key_by_default():
+    """Without the flag, the lookup leases every candidate it finds, including
+    the Mamba states at earlier block boundaries."""
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
+
+    assert not store.probed
+    assert set(_store_keys(worker, 1, hs[0])) <= set(store.lease_calls[0])
+
+
+def test_selective_lease_leases_only_loaded_keys(monkeypatch):
+    """The lookup probes the whole prefix lease-free and leases only what the
+    hit loads: every full-attention block and the Mamba state at the tail."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
+
+    full_keys = [k for h in hs for k in _store_keys(worker, 0, h)]
+    mamba_keys = [k for h in hs for k in _store_keys(worker, 1, h)]
+    assert set(full_keys + mamba_keys) <= set(store.probed)
+    assert len(store.lease_calls) == 1
+    assert sorted(store.lease_calls[0]) == sorted(
+        full_keys + _store_keys(worker, 1, hs[-1])
+    )
+    stats = worker.get_kv_connector_stats().reduce()
+    assert stats["lookup_lease_count"] == 1
+    assert stats["lookup_lease_error_count"] == 0
+
+
+def test_selective_lease_leases_shorter_hit_after_eviction(monkeypatch):
+    """A tail state evicted between probe and lease shortens the hit, and the
+    shorter hit is leased in a second call."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+    store.evictions = [set(_store_keys(worker, 1, hs[3]))]
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 48
+
+    assert len(store.lease_calls) == 2
+    assert sorted(store.lease_calls[1]) == sorted(
+        [k for h in hs[:3] for k in _store_keys(worker, 0, h)]
+        + _store_keys(worker, 1, hs[2])
+    )
+
+
+def test_selective_lease_returns_no_hit_while_evictions_continue(monkeypatch):
+    """When every lease round finds an eviction, the lookup reports no hit
+    rather than a hit whose tail was never leased."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+    store.evictions = [
+        set(_store_keys(worker, 1, hs[3])),
+        set(_store_keys(worker, 1, hs[2])),
+    ]
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
+
+
+def test_selective_lease_treats_error_results_as_failed_lease(monkeypatch):
+    """Per-key error codes from the lease RPC report no hit and an error,
+    instead of shortening the hit as evictions would."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+    store.batch_is_exist = lambda keys: [-900] * len(keys)
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
+    assert worker.get_kv_connector_stats().reduce()["lookup_lease_error_count"] == 1
+
+
+def test_selective_lease_reports_no_hit_when_lease_raises(monkeypatch):
+    """A lease RPC that raises reports no hit, as a failed lookup does."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+
+    def _fail(_keys):
+        raise RuntimeError("master unreachable")
+
+    store.batch_is_exist = _fail
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
+
+
+def test_selective_lease_covers_every_key_the_load_reads(monkeypatch):
+    """Every key the receive thread reads for the hit was leased by the
+    lookup, so the two key walks cannot drift apart."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store)
+    hs = _store_full_history(worker, store)
+    hit = worker.lookup(num_tokens=65, block_hashes=hs)
+
+    read_keys: list[str] = []
+
+    class _CapturingStore:
+        def batch_get_into_multi_buffers(self, keys, addrs, sizes):
+            read_keys.extend(keys)
+            return [0] * len(keys)
+
+    recv = KVCacheStoreRecvingThread(
+        store=_CapturingStore(),
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        tp_rank=0,
+        ready_event=threading.Event(),
+        coord=worker.coord,
+    )
+    recv.request_queue.put(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=hit.hit_length,
+            block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+            block_hashes=hs,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=hit.hit_length,
+                can_load=True,
+                token_len=hit.hit_length,
+                tail_key_boundaries=hit.tail_key_boundaries,
+            ),
+        )
+    )
+    recv._handle_request(recv.request_queue.get())
+
+    assert read_keys
+    assert set(read_keys) <= set(store.lease_calls[0])
+
+
+def test_selective_lease_with_partial_hash_hits(monkeypatch):
+    """With sub-block hash units, the lease keys the partial tail chunk by its
+    stored boundary, exactly as it was saved."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    store = _LeaseTrackingStore()
+    worker = _full_plus_mamba_worker(store, partial_hash_hits=True)
+    assert worker.coord.enable_partial_hash_hits
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+    # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=12,
+        completed_token_len=12,
+        boundary_puts=[(1, 7, 8)],
+    )
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    store.lease_calls.clear()
+
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
+    assert sorted(store.lease_calls[0]) == sorted(store._data)
+
+
+def test_selective_lease_requires_probe_support(monkeypatch):
+    """Enabling the flag on a Mooncake without ``batch_probe_key`` fails at
+    startup instead of silently leasing every key."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    with pytest.raises(RuntimeError, match="batch_probe_key"):
+        _full_plus_mamba_worker(_DictStore())
+
+
+def test_selective_lease_requires_master_probe_support(monkeypatch):
+    """A master that rejects the probe RPC answers with per-key errors; the
+    startup check turns that into an error instead of silent lookup misses."""
+    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
+    with pytest.raises(RuntimeError, match="master"):
+        _full_plus_mamba_worker(_LeaseTrackingStore(probe_result=-900))
