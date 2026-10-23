@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU checks of Dory math and loading, with a reference attention backend."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +29,7 @@ class ReferenceAttention(nn.Module):
         super().__init__()
         self.num_heads, self.num_kv_heads = num_heads, num_kv_heads
         self.head_size, self.scale = head_size, scale
-        self.prefix = kwargs["prefix"]
+        self.prefix = self.layer_name = kwargs["prefix"]
         self.window = kwargs["per_layer_sliding_window"]
         self.keys = self.values = None
 
@@ -66,7 +67,14 @@ def model_factory(monkeypatch):
         compilation_config=CompilationConfig(mode=0, custom_ops=["none"]),
     )
 
-    def build(*, hf_overrides=None, quant_config=None, **overrides):
+    def build(
+        *,
+        hf_overrides=None,
+        quant_config=None,
+        num_draft_loops=0,
+        num_shared_loops=0,
+        **overrides,
+    ):
         kwargs = dict(
             vocab_size=32,
             hidden_size=16,
@@ -101,6 +109,15 @@ def model_factory(monkeypatch):
             hf_config=cfg, head_dtype=None, dtype=torch.float32
         )
         vc.quant_config = quant_config
+        vc.speculative_config = (
+            SimpleNamespace(
+                method="looped_self_draft",
+                num_draft_loops=num_draft_loops,
+                num_shared_loops=num_shared_loops,
+            )
+            if num_draft_loops
+            else None
+        )
         with set_current_vllm_config(vc):
             model = dory.DoryForCausalLM(vllm_config=vc)
 
@@ -372,3 +389,137 @@ def test_quantized_loader_rejects_oversized_shards(quantized_model, suffix):
         quantized_model.load_weights(
             [(f"backbone.layers.0.mixer.q_proj.{suffix}", oversized)]
         )
+
+
+@pytest.mark.parametrize(
+    "num_draft_loops,num_shared_loops", [(1, 1), (1, 0), (2, 2), (2, 0), (2, 1)]
+)
+@torch.inference_mode()
+def test_self_speculation_reuses_prefix_and_preserves_kv_after_rejection(
+    model_factory, num_draft_loops, num_shared_loops
+):
+    """Reuse must match recomputation across full, partial and zero acceptance."""
+    torch.manual_seed(42)
+    kwargs = dict(num_draft_loops=num_draft_loops, num_shared_loops=num_shared_loops)
+    model = model_factory(**kwargs)
+    reference = model_factory(**kwargs)
+    target_reference = model_factory()
+    draft_reference = model_factory(n_recurrent_loops=num_draft_loops)
+    for param in model.parameters():
+        param.normal_(std=0.02)
+    reference.load_state_dict(model.state_dict())
+    target_reference.load_state_dict(model.state_dict())
+    draft_reference.load_state_dict(model.state_dict())
+    from vllm.model_executor.models.interfaces import SupportsLoopedSelfDraft
+
+    assert isinstance(model, SupportsLoopedSelfDraft)
+    draft = model.get_looped_self_draft_model()
+    assert list(draft.parameters()) == []
+    assert draft.target is model
+    caches = [m for m in model.modules() if isinstance(m, ReferenceAttention)]
+    assert len({extract_layer_index(m.prefix) for m in caches}) == len(caches)
+    output_cache = model.backbone.layers[6].mixer
+    assert output_cache.attn[1] is not output_cache.attn[0]
+    shared = model.backbone.num_shared_loops
+    num_loops = model.config.n_recurrent_loops
+    draft_names = set(model.get_draft_attn_layer_names())
+    assert model.backbone.layers[0].mixer.attn[0].layer_name in draft_names
+    private_target_caches = []
+    for layer in model.backbone.layers[2:6]:
+        if not layer.is_attention:
+            continue
+        assert len(layer.mixer.attn) == num_loops + num_draft_loops - shared
+        for i, attn in enumerate(layer.mixer.attn):
+            assert (attn.layer_name in draft_names) == (i < shared or i >= num_loops)
+        private_target_caches.extend(layer.mixer.attn[shared:num_loops])
+
+    # CPU analogue of the activation buffer; GPU row mapping is tested separately.
+    class ActivationCache:
+        num_speculative_tokens = 3
+        verify = False
+
+        def __init__(self):
+            self.inputs, self.states = [], []
+            self.start_pos = 0
+
+        def record(self, input_hidden_states, hidden_states):
+            self.inputs.append(input_hidden_states.clone())
+            self.states.append(hidden_states.clone())
+
+        def merge(self, tail_input, tail_state):
+            return torch.cat([*self.inputs, tail_input]), torch.cat(
+                [*self.states, tail_state]
+            )
+
+        @contextmanager
+        def prefix_context(self):
+            # Emulate compact slot mappings for the missing final prefix row.
+            for cache in caches:
+                cache.start_pos = self.start_pos + self.num_speculative_tokens
+            yield
+            for cache in caches:
+                cache.start_pos = self.start_pos
+
+    cache = ActivationCache()
+    model.draft_activation_cache = cache
+    tokens = torch.arange(4)
+    actual = model(tokens, tokens)
+    torch.testing.assert_close(actual, reference(tokens, tokens))
+    torch.testing.assert_close(actual, target_reference(tokens, tokens))
+    draft_reference(tokens, tokens)
+    start = 4
+    for accepted in [3, 0, 2, 1, 3]:
+        cache.verify = False
+        cache.inputs.clear()
+        cache.states.clear()
+        tokens = torch.randint(0, 32, (4,))
+        positions = torch.arange(start, start + 4)
+        target_keys = [attn.keys.clone() for attn in private_target_caches]
+        for step in range(3):
+            for target in (model, reference):
+                for attn in target.modules():
+                    if isinstance(attn, ReferenceAttention):
+                        attn.start_pos = start + step
+                actual_draft = target.backbone.draft_forward(
+                    tokens[step : step + 1], positions[step : step + 1]
+                )
+            expected_draft = draft_reference(
+                tokens[step : step + 1], positions[step : step + 1]
+            )
+            torch.testing.assert_close(
+                actual_draft, expected_draft, atol=2e-6, rtol=2e-5
+            )
+        for attn, keys in zip(private_target_caches, target_keys):
+            torch.testing.assert_close(attn.keys, keys, atol=0, rtol=0)
+        cache.start_pos = start
+        cache.verify = True
+        actual = model(tokens, positions)
+        expected = reference(tokens, positions)
+        torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(
+            actual, target_reference(tokens, positions), atol=2e-6, rtol=2e-5
+        )
+        draft_reference(tokens, positions)
+        reference_caches = [
+            m for m in reference.modules() if isinstance(m, ReferenceAttention)
+        ]
+        for actual_cache, expected_cache in zip(caches, reference_caches):
+            torch.testing.assert_close(
+                actual_cache.keys, expected_cache.keys, atol=2e-6, rtol=2e-5
+            )
+            torch.testing.assert_close(
+                actual_cache.values, expected_cache.values, atol=2e-6, rtol=2e-5
+            )
+        start += accepted + 1
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"num_draft_loops": 3}, "below n_recurrent_loops"),
+        ({"num_draft_loops": 1, "recurrent_kv_cache_mode": "last_loop"}, "per_loop"),
+    ],
+)
+def test_self_draft_rejects_incompatible_model_layout(model_factory, kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        model_factory(**kwargs)

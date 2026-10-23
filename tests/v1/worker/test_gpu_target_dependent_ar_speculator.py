@@ -40,6 +40,16 @@ class _TestSpeculator(TargetDependentARSpeculator):
         return self.test_draft_model
 
 
+def test_looped_self_draft_rejects_unsupported_model():
+    from vllm.v1.worker.gpu.spec_decode.looped_self_draft.speculator import (
+        LoopedSelfDraftSpeculator,
+    )
+
+    speculator = object.__new__(LoopedSelfDraftSpeculator)
+    with pytest.raises(ValueError, match="SupportsLoopedSelfDraft"):
+        speculator.load_draft_model(torch.nn.Identity(), set())
+
+
 class _DraftModel(torch.nn.Module):
     def __init__(self, output: torch.Tensor | tuple[torch.Tensor, torch.Tensor]):
         super().__init__()
@@ -158,7 +168,10 @@ def _make_speculator(
 
 
 @pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
-def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected):
+@pytest.mark.parametrize("requires_hidden_states", [True, False])
+def test_speculator_uses_draft_model_hidden_size(
+    monkeypatch, hc_mult, expected, requires_hidden_states
+):
     # Qwen4Exp targets expose multi-stream HC residuals to the drafter.
     monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: True)
     hf_config = SimpleNamespace()
@@ -195,9 +208,16 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         ),
     )
 
+    monkeypatch.setattr(
+        _TestSpeculator, "requires_hidden_states", requires_hidden_states
+    )
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 
     assert speculator.hidden_size == expected
+    assert speculator.hidden_states.shape == (
+        8,
+        expected if requires_hidden_states else 0,
+    )
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
@@ -666,3 +686,63 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator._configure_decode_metadata_update()
 
     assert speculator.supports_decode_metadata_update is expected
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("start_step", [0, 1])
+@pytest.mark.parametrize("requires_hidden_states", [True, False])
+def test_fused_drafts_replay_with_optional_hidden_feedback(
+    start_step, requires_hidden_states
+):
+    """Fused graphs preserve tokens when hidden-state feedback is disabled."""
+    from vllm.v1.worker.gpu.input_batch import InputBuffers
+
+    speculator = object.__new__(_TestSpeculator)
+    speculator.requires_hidden_states = requires_hidden_states
+    speculator.input_buffers = InputBuffers(2, 2, torch.device("cuda"))
+    speculator.idx_mapping = torch.arange(2, device="cuda")
+    speculator.current_draft_step = torch.zeros((), device="cuda", dtype=torch.int64)
+    speculator.sample_src_positions = torch.zeros(2, device="cuda", dtype=torch.int64)
+    speculator.hidden_states = torch.zeros(
+        2, 4 if requires_hidden_states else 0, device="cuda"
+    )
+    speculator.draft_tokens = torch.full((2, 3), -1, device="cuda", dtype=torch.int64)
+    speculator.temperature = speculator.seeds = torch.ones(2, device="cuda")
+    speculator.draft_logits = speculator.acceptance_estimator = None
+    speculator.use_local_argmax_reduction = False
+    speculator.max_model_len = 32
+    speculator.model = SimpleNamespace(compute_logits=lambda x: x)
+    speculator._prepare_eplb_forward = lambda _: None
+
+    def run_model(*args):
+        tokens = (speculator.input_buffers.input_ids.long() + 1) % 4
+        logits = torch.nn.functional.one_hot(tokens, num_classes=4).float()
+        return logits, logits
+
+    speculator._run_model = run_model
+
+    def generate():
+        speculator._generate_fused_drafts(
+            2, 2, None, None, None, CUDAGraphMode.FULL, 3, start_step=start_step
+        )
+
+    generate()  # Warm up the input-update kernel before capturing it.
+    graph = torch.cuda.CUDAGraph()
+    torch.accelerator.synchronize()
+    with torch.cuda.graph(graph):
+        generate()
+    speculator.input_buffers.input_ids.copy_(torch.tensor([1, 2], device="cuda"))
+    speculator.input_buffers.positions.fill_(7)
+    speculator.input_buffers.seq_lens.fill_(8)
+    speculator.sample_src_positions.fill_(7)
+    speculator.draft_tokens.fill_(-1)
+    graph.replay()
+    expected = torch.full_like(speculator.draft_tokens, -1)
+    expected[:, start_step:] = (
+        torch.tensor([1, 2], device="cuda")[:, None]
+        + torch.arange(1, 4 - start_step, device="cuda")
+    ) % 4
+    torch.testing.assert_close(speculator.draft_tokens, expected)
+    assert speculator.input_buffers.positions.tolist() == [9 - start_step] * 2
+    assert speculator.input_buffers.seq_lens.tolist() == [10 - start_step] * 2
+    assert speculator.sample_src_positions.tolist() == [9 - start_step] * 2

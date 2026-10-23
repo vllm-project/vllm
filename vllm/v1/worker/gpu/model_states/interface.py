@@ -14,7 +14,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -163,6 +163,12 @@ class ModelState(ABC):
         are gathered). Used by mamba "align" prefix caching to pre-copy state
         across block boundaries. No-op by default."""
         return None
+
+    def prepare_execution(
+        self, scheduler_output: SchedulerOutput, dummy_run: bool = False
+    ) -> bool:
+        """Prepare batch-dependent model state before dispatch; return force-eager."""
+        return False
 
     def postprocess_state(
         self,

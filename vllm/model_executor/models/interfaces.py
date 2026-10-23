@@ -70,6 +70,9 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.looped_self_draft.activation_cache import (
+        LoopedSelfDraftActivationCache,
+    )
 
 logger = init_logger(__name__)
 
@@ -1482,6 +1485,22 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SupportsLoopedSelfDraft(Protocol):
+    """Looped models that draft using their own weights and prefix KV caches.
+
+    The model validates its draft depth and cache layout. Its parameter-free
+    draft wrapper implements the usual forward/compute_logits contract. The
+    model records and consumes the optional activation cache at its loop boundary.
+    """
+
+    draft_activation_cache: "LoopedSelfDraftActivationCache | None"
+
+    def get_looped_self_draft_model(self) -> nn.Module: ...
+
+    def get_draft_attn_layer_names(self) -> list[str]: ...
 
 
 @runtime_checkable

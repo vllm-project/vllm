@@ -4229,3 +4229,79 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+@pytest.fixture
+def looped_self_draft_target_config(tmp_path):
+    from transformers import LlamaConfig
+
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    return ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+
+
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"model": "another-checkpoint"}, "shares the target checkpoint"),
+        ({"parallel_drafting": True}, "fixed-length autoregressive"),
+        ({"kv_cache_dtype": "fp8"}, "shares the target KV cache dtype"),
+        ({"num_shared_loops": -1}, "greater than or equal to 0"),
+        ({"num_shared_loops": 2}, "must not exceed num_draft_loops"),
+    ],
+)
+def test_looped_self_draft_config_rejects_incompatible_drafts(
+    looped_self_draft_target_config, overrides, match
+):
+    with pytest.raises(ValueError, match=match):
+        SpeculativeConfig(
+            method="looped_self_draft",
+            num_speculative_tokens=4,
+            target_model_config=looped_self_draft_target_config,
+            target_parallel_config=ParallelConfig(),
+            **overrides,
+        )
+
+
+@pytest.mark.parametrize(
+    "num_draft_loops,num_shared_loops,expected_shared",
+    [(1, None, 1), (2, None, 2), (2, 0, 0), (2, 1, 1), (2, 2, 2)],
+)
+def test_looped_self_draft_config_shares_target_and_hashes_reuse(
+    looped_self_draft_target_config,
+    num_draft_loops,
+    num_shared_loops,
+    expected_shared,
+):
+    config = SpeculativeConfig(
+        method="looped_self_draft",
+        num_speculative_tokens=4,
+        target_model_config=looped_self_draft_target_config,
+        target_parallel_config=ParallelConfig(),
+        num_draft_loops=num_draft_loops,
+        num_shared_loops=num_shared_loops,
+    )
+    assert config.num_shared_loops == expected_shared
+    assert config.draft_model_config is looped_self_draft_target_config
+    assert config.max_num_new_slots_for_drafting == 0
+    graph_hash = config.compute_hash()
+    config.reuse_draft_activations = False
+    assert config.compute_hash() != graph_hash
+    config.reuse_draft_activations = True
+    config.num_shared_loops = (expected_shared + 1) % (num_draft_loops + 1)
+    assert config.compute_hash() != graph_hash
+
+
+def test_looped_self_draft_reserves_kv_and_prefill_lookahead():
+    # The drafter feeds the bonus token even when the target is mid-prefill.
+    config = object.__new__(VllmConfig)
+    config.speculative_config = SimpleNamespace(
+        method="looped_self_draft",
+        num_speculative_tokens=4,
+        use_dflash=lambda: False,
+        use_dspark=lambda: False,
+        use_eagle=lambda: False,
+        use_multi_module_mtp=lambda: False,
+        uses_draft_model=lambda: False,
+    )
+    assert config.num_lookahead_tokens == 4
+    assert config.num_prefill_lookahead_tokens == 1

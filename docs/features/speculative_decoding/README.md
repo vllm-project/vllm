@@ -12,6 +12,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
+- [Looped Self-Drafting](looped_self_draft.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)

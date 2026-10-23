@@ -633,7 +633,11 @@ class VllmConfig:
             # Fill-in drafting uses a bonus query plus one query per draft token.
             # DSpark's anchor-sampling layout does not need the extra slot.
             return self.num_speculative_tokens + 1
-        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
+        if (
+            speculative_config.use_eagle()
+            or speculative_config.uses_draft_model()
+            or speculative_config.method == "looped_self_draft"
+        ):
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query), so it needs exactly
@@ -654,14 +658,17 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_eagle():
+        if speculative_config is None or not (
+            speculative_config.use_eagle()
+            or speculative_config.method == "looped_self_draft"
+        ):
             return 0
         if speculative_config.use_multi_module_mtp():
             # Each MTP module reads one token further ahead than the one before
             # it, so the chain needs num_speculative_tokens of runway at a
             # chunked-prefill boundary.
             return self.num_speculative_tokens
-        # Eagle-family drafters read only the immediate next token.
+        # Other autoregressive drafters read only the immediate next token.
         return 1
 
     @property
@@ -1608,13 +1615,15 @@ class VllmConfig:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
-                    and self.speculative_config.method != "draft_model"
+                    and self.speculative_config.method
+                    not in ("draft_model", "looped_self_draft")
                     and self.speculative_config.method != "dspark"
                     and self.speculative_config.method != "dflash"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
+                        "with EAGLE/MTP/Draft Model/Looped Self-Draft/"
+                        "NGram GPU/DSpark/DFlash "
                         "kind of speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -1642,7 +1651,8 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
-                and self.speculative_config.method != "draft_model"
+                and self.speculative_config.method
+                not in ("draft_model", "looped_self_draft")
                 and self.speculative_config.method != "dspark"
                 and self.speculative_config.method != "dflash"
             ):
@@ -3044,6 +3054,8 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
+            if self.speculative_config.method == "looped_self_draft":
+                unsupported.append("looped_self_draft speculative decoding")
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:

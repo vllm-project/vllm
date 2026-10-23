@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,11 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.looped_self_draft.activation_cache import (
+        LoopedSelfDraftActivationCache,
+    )
 
 EPS = 1e-6
 
@@ -228,14 +234,35 @@ class DoryDecoderLayer(nn.Module):
         return slerp_alpha(residual, out, self.mlp_alpha, self._alpha_scale)
 
 
-@support_torch_compile
+@support_torch_compile(
+    enable_if=lambda vllm_config: (
+        vllm_config.speculative_config is None
+        or vllm_config.speculative_config.method != "looped_self_draft"
+    )
+)
 class DoryBackbone(nn.Module):
-    def __init__(self, config, cache_config, quant_config, prefix):
+    def __init__(
+        self,
+        config,
+        cache_config,
+        quant_config,
+        prefix,
+        num_draft_loops=0,
+        num_shared_loops=0,
+    ):
         super().__init__()
         self.config = config
         self.num_loops = config.n_recurrent_loops
+        self.num_draft_loops = num_draft_loops
+        self.num_shared_loops = num_shared_loops
+        self.draft_activation_cache: LoopedSelfDraftActivationCache | None = None
+        self.draft_fill_end = max(
+            (i + 1 for i, kind in enumerate(config.layer_types) if kind != "mlp"),
+            default=0,
+        )
         n_in = config.n_input_layers
         n_rec = config.n_recurrent_layers
+        self.out_start = n_in + n_rec
         self.embeddings = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
             [
@@ -245,11 +272,57 @@ class DoryBackbone(nn.Module):
                     cache_config,
                     quant_config,
                     f"{prefix}.layers.{i}",
-                    num_loops=self.num_loops if n_in <= i < n_in + n_rec else 1,
+                    num_loops=(
+                        self.num_loops + num_draft_loops - self.num_shared_loops
+                        if n_in <= i < self.out_start
+                        else 2
+                        if num_draft_loops and i >= self.out_start
+                        else 1
+                    ),
                 )
                 for i in range(config.num_hidden_layers)
             ]
         )
+
+    def _loops(
+        self, positions, hidden_states, input_hidden_states, start, end, kv_offset=0
+    ):
+        for loop_idx in range(start, end):
+            hidden_states = justnorm(hidden_states + input_hidden_states)
+            for layer in self.layers[self.config.n_input_layers : self.out_start]:
+                hidden_states = layer(
+                    positions, hidden_states, loop_idx=loop_idx + kv_offset
+                )
+            hidden_states = justnorm(hidden_states)
+        return hidden_states
+
+    def _shared_prefix(self, input_ids, positions, inputs_embeds=None):
+        hidden_states = (
+            inputs_embeds if inputs_embeds is not None else self.embeddings(input_ids)
+        )
+        for layer in self.layers[: self.config.n_input_layers]:
+            hidden_states = layer(positions, hidden_states)
+        return hidden_states, self._loops(
+            positions, hidden_states, hidden_states, 0, self.num_shared_loops
+        )
+
+    def _draft_suffix(
+        self, positions, hidden_states, input_hidden_states, output_end=None
+    ):
+        hidden_states = self._loops(
+            positions,
+            hidden_states,
+            input_hidden_states,
+            self.num_shared_loops,
+            self.num_draft_loops,
+            kv_offset=self.num_loops - self.num_shared_loops,
+        )
+        return self._output_block(positions, hidden_states, loop_idx=1, end=output_end)
+
+    def _output_block(self, positions, hidden_states, loop_idx=0, end=None):
+        for layer in self.layers[self.out_start : end]:
+            hidden_states = layer(positions, hidden_states, loop_idx=loop_idx)
+        return hidden_states
 
     def forward(
         self,
@@ -257,26 +330,53 @@ class DoryBackbone(nn.Module):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = inputs_embeds if inputs_embeds is not None else self.embeddings(input_ids)
-        c = self.config
-        n_in, n_rec = c.n_input_layers, c.n_recurrent_layers
+        cache = self.draft_activation_cache
+        if cache is not None and cache.verify:
+            assert input_ids is not None
+            width = cache.num_speculative_tokens + 1
+            tail_positions = positions[width - 1 :: width].contiguous()
+            tail_ids = input_ids[width - 1 :: width].contiguous()
+            with cache.prefix_context():
+                input_hidden_states, hidden_states = self._shared_prefix(
+                    tail_ids, tail_positions
+                )
+                # Earlier rows already filled the private draft KV while proposing.
+                self._draft_suffix(
+                    tail_positions,
+                    hidden_states,
+                    input_hidden_states,
+                    output_end=self.draft_fill_end,
+                )
+            input_hidden_states, hidden_states = cache.merge(
+                input_hidden_states, hidden_states
+            )
+        else:
+            input_hidden_states, hidden_states = self._shared_prefix(
+                input_ids, positions, inputs_embeds
+            )
+            if self.num_draft_loops:
+                self._draft_suffix(
+                    positions,
+                    hidden_states,
+                    input_hidden_states,
+                    output_end=self.draft_fill_end,
+                )
+        hidden_states = self._loops(
+            positions,
+            hidden_states,
+            input_hidden_states,
+            self.num_shared_loops,
+            self.num_loops,
+        )
+        return self._output_block(positions, hidden_states)
 
-        for layer in self.layers[:n_in]:
-            h = layer(positions, h)
-        input_h = h
-
-        state = input_h
-        for i in range(self.num_loops):
-            combined = justnorm(state + input_h)
-            h = combined
-            for layer in self.layers[n_in : n_in + n_rec]:
-                h = layer(positions, h, loop_idx=i)
-            state = justnorm(h)
-
-        h = state
-        for layer in self.layers[n_in + n_rec :]:
-            h = layer(positions, h)
-        return h
+    def draft_forward(self, input_ids, positions, inputs_embeds=None):
+        input_hidden_states, hidden_states = self._shared_prefix(
+            input_ids, positions, inputs_embeds
+        )
+        if self.draft_activation_cache is not None:
+            self.draft_activation_cache.record(input_hidden_states, hidden_states)
+        return self._draft_suffix(positions, hidden_states, input_hidden_states)
 
 
 class DoryForCausalLM(nn.Module):
@@ -293,11 +393,31 @@ class DoryForCausalLM(nn.Module):
         config.validate()
         if get_tensor_model_parallel_world_size() != 1:
             raise ValueError("Dory currently supports tensor_parallel_size=1 only")
+        speculative_config = vllm_config.speculative_config
+        num_draft_loops = 0
+        num_shared_loops = 0
+        if (
+            speculative_config is not None
+            and speculative_config.method == "looped_self_draft"
+        ):
+            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+                raise ValueError(
+                    "Dory self-speculation requires prefill_context_parallel_size=1"
+                )
+            num_draft_loops = speculative_config.num_draft_loops
+            assert speculative_config.num_shared_loops is not None
+            num_shared_loops = speculative_config.num_shared_loops
+            if num_draft_loops >= config.n_recurrent_loops:
+                raise ValueError("num_draft_loops must be below n_recurrent_loops")
+            if config.recurrent_kv_cache_mode != "per_loop":
+                raise ValueError("Dory self-speculation requires per_loop KV caches")
         self.backbone = DoryBackbone(
             config,
             vllm_config.cache_config,
             vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "backbone"),
+            num_draft_loops=num_draft_loops,
+            num_shared_loops=num_shared_loops,
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -307,6 +427,33 @@ class DoryForCausalLM(nn.Module):
         )
         self.lm_head.logit_scale = nn.Parameter(torch.empty(config.vocab_size))
         self.logits_processor = LogitsProcessor(config.vocab_size)
+
+    def get_looped_self_draft_model(self) -> nn.Module:
+        return DoryDraftModel(self)
+
+    def get_draft_attn_layer_names(self) -> list[str]:
+        backbone = self.backbone
+        names: list[str] = []
+        for i, layer in enumerate(backbone.layers):
+            if layer.is_attention:
+                attn = layer.mixer.attn
+                if i >= backbone.out_start:
+                    attn = attn[1:]
+                elif i >= self.config.n_input_layers:
+                    attn = [
+                        *attn[: backbone.num_shared_loops],
+                        *attn[backbone.num_loops :],
+                    ]
+                names.extend(a.layer_name for a in attn)
+        return names
+
+    @property
+    def draft_activation_cache(self) -> "LoopedSelfDraftActivationCache | None":
+        return self.backbone.draft_activation_cache
+
+    @draft_activation_cache.setter
+    def draft_activation_cache(self, cache: "LoopedSelfDraftActivationCache | None"):
+        self.backbone.draft_activation_cache = cache
 
     def embed_input_ids(self, input_ids):
         return self.backbone.embeddings(input_ids)
@@ -329,6 +476,8 @@ class DoryForCausalLM(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if self.backbone.draft_activation_cache is not None:
+            self.backbone.draft_activation_cache.invalidate()
         stacked = [
             # (target, artifact shard name, shard id)
             ("qkv_proj", "q_proj", "q"),
@@ -389,3 +538,29 @@ class DoryForCausalLM(nn.Module):
                 f"Dory weight {name}: expected shape {expected}, "
                 f"got {tuple(weight.shape)}"
             )
+
+
+class DoryDraftModel(nn.Module):
+    """Self-speculation drafter: the target's weights at `num_draft_loops` loops.
+
+    The input block and first `num_shared_loops` loops share the target's KV.
+    Remaining draft loops and the output block use private draft caches, also
+    filled during target prefill. The target is held by reference, so no parameters
+    repeat.
+    """
+
+    def __init__(self, target):
+        super().__init__()
+        self._target = (target,)
+
+    @property
+    def target(self):
+        return self._target[0]
+
+    def forward(self, input_ids, positions, hidden_states=None, inputs_embeds=None):
+        return self.target.backbone.draft_forward(
+            input_ids, positions, inputs_embeds=inputs_embeds
+        )
+
+    def compute_logits(self, hidden_states):
+        return self.target.compute_logits(hidden_states)

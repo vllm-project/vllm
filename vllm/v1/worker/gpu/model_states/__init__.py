@@ -32,6 +32,16 @@ def resolve_model_state_cls(
     if hasattr(model, "get_model_state_cls"):
         return model.get_model_state_cls()
 
+    if (
+        vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.method == "looped_self_draft"
+    ):
+        from vllm.v1.worker.gpu.model_states.looped_self_draft import (
+            LoopedSelfDraftModelState,
+        )
+
+        return LoopedSelfDraftModelState
+
     # Cross-attention encoder-decoder models (Whisper, CohereASR, NemotronParse, ...)
     if any(isinstance(m, CrossAttention) for m in model.modules()):
         from vllm.v1.worker.gpu.model_states.encoder_decoder import (

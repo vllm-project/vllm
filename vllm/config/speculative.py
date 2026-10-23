@@ -73,6 +73,7 @@ EagleModelTypes = Literal[
 SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
+    "looped_self_draft",
     "suffix",
     "custom_class",
     EagleModelTypes,
@@ -601,6 +602,15 @@ class SpeculativeConfig:
             )
         return SpeculativeConfig._acceptance_length_to_rates(length, n)
 
+    num_draft_loops: int = Field(default=1, ge=1)
+    """Recurrent depth of the looped self-speculation drafter."""
+    num_shared_loops: int | None = Field(default=None, ge=0)
+    """Early loops whose KV and activations the drafter shares with the target.
+    Defaults to num_draft_loops. Zero shares only the input block. Must not
+    exceed num_draft_loops; used by looped_self_draft."""
+    reuse_draft_activations: bool = True
+    """Reuse draft activations in eligible uniform verification batches."""
+
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
@@ -634,6 +644,15 @@ class SpeculativeConfig:
             "dspark",
         )
         factors.append(uses_aux_hidden_states)
+        if self.method == "looped_self_draft":
+            factors.extend(
+                (
+                    self.num_draft_loops,
+                    self.num_shared_loops,
+                    self.reuse_draft_activations,
+                    self.num_speculative_tokens,
+                )
+            )
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
 
@@ -1165,6 +1184,12 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
+            elif self.method == "looped_self_draft":
+                if self.target_model_config is None:
+                    raise ValueError(
+                        "target_model_config must be present for looped_self_draft"
+                    )
+                self.model = self.target_model_config.model
             elif self.method == "dspark":
                 # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
@@ -1270,6 +1295,32 @@ class SpeculativeConfig:
             )
             self.update_arch_()
             self.draft_parallel_config = self.target_parallel_config
+
+        elif self.method == "looped_self_draft":
+            target = self.target_model_config
+            if self.num_shared_loops is None:
+                self.num_shared_loops = self.num_draft_loops
+            if self.num_shared_loops > self.num_draft_loops:
+                raise ValueError("num_shared_loops must not exceed num_draft_loops")
+            if target is None:
+                raise ValueError("looped_self_draft requires a target model")
+            if self.model != target.model:
+                raise ValueError("Looped self-drafting shares the target checkpoint")
+            if (
+                self.parallel_drafting
+                or self.enable_adaptive_verification
+                or self.num_speculative_tokens_per_batch_size is not None
+            ):
+                raise ValueError(
+                    "Looped self-drafting requires fixed-length autoregressive drafting"
+                )
+            if self.kv_cache_dtype is not None:
+                raise ValueError(
+                    "Looped self-drafting shares the target KV cache dtype"
+                )
+            self.draft_model_config = target
+            self.draft_parallel_config = self.target_parallel_config
+            self.prompt_lookup_max = self.prompt_lookup_min = 0
 
         else:
             self.prompt_lookup_max = 0

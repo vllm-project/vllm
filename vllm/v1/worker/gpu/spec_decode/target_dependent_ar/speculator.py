@@ -30,11 +30,17 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
     hidden states (and, for Gemma4, its KV cache) at each draft step.
     """
 
+    # KV-dependent drafters can opt out of hidden-state feedback between steps.
+    requires_hidden_states: bool = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            self.max_num_tokens,
+            self.hidden_size if self.requires_hidden_states else 0,
+            dtype=self.dtype,
+            device=device,
         )
         self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
         self.last_token_indices = torch.zeros(
@@ -486,6 +492,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_speculative_steps: int,
+        start_step: int = 1,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -493,10 +500,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         attn_metadata = None
         slot_mappings_by_layer = None
-        for step in range(1, num_speculative_steps):
+        for step in range(start_step, num_speculative_steps):
             # Rebuild every step when positions advance, or just once
             # on the first step when positions are constant (Gemma4 MTP).
-            if not skip_attn and (self.advance_draft_positions or step == 1):
+            if not skip_attn and (self.advance_draft_positions or step == start_step):
                 slot_mappings = self.block_tables.compute_slot_mappings(
                     idx_mapping,
                     query_start_loc,
@@ -538,6 +545,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_speculative_steps: int,
+        start_step: int = 1,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -581,6 +589,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             batch_desc.cg_mode,
             num_speculative_steps,
+            start_step=start_step,
         )
 
     def _generate_fused_drafts(
@@ -592,14 +601,15 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode,
         num_speculative_steps: int,
+        start_step: int = 1,
     ) -> None:
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
-        for step in range(1, num_speculative_steps):
+        for step in range(start_step, num_speculative_steps):
             if attn_metadata is not None and (
-                self.advance_draft_positions or step == 1
+                self.advance_draft_positions or step == start_step
             ):
                 self.block_tables.compute_slot_mappings(
                     idx_mapping,
@@ -659,7 +669,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         update_draft_inputs(
             draft_tokens,
             self.current_draft_step,
-            hidden_states,
+            hidden_states if self.requires_hidden_states else hidden_states[:, :0],
             self.draft_tokens,
             self.hidden_states,
             self.input_buffers,
