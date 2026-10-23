@@ -777,13 +777,13 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
 
 # --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
 #
-# Only matters when aiter's internal `output_aux` flag is set, which aiter
-# sets only for the MXFP4 DeepSeek-V4.1 (DSV4) a4w4 path, opted into via
-# VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (FusedMoEConfig.__post_init__;
-# rocm_aiter_fused_experts()'s use_mxfp4_w4a4_dsv4 branch) -- why #58393
-# deferred this. Despite the "a4w4" name, DSV4 is reached through vLLM's
-# W4A16 modular-kernel quant pair: activations aren't pre-quantized here,
-# AITER quantizes them to 4-bit internally, hence the "a4w4"/"W4A4" name.
+# Only matters when aiter's internal `output_aux` flag is set. aiter sets it
+# unconditionally for the MXFP4 DSV4 a4w4 kernel family, and conditionally
+# for a few other MXFP4 model configs it ships -- DSV4 is just the only one
+# wired to a vLLM flag today (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1,
+# FusedMoEConfig.__post_init__), which is why #58393 deferred this. Despite
+# the "a4w4" name, DSV4 runs through vLLM's W4A16 quant pair: activations
+# aren't pre-quantized here, AITER quantizes them to 4-bit internally.
 #
 # Shape (E=384, K=5120, N=640, topk=6, M=16) is DeepSeek-V4.1-tuned
 # (dsv41_fp4_tuned_fmoe.csv) and selects block_m=16 -- the only block_m
@@ -871,8 +871,8 @@ def _aiter_mxfp4_sort_backend_worker(
 @pytest.mark.parametrize("backend", MXFP4_SORT_BACKEND_ENV_CASES)
 def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
     """3b follow-up to test_aiter_moe_sorting_backend_dispatch_env_matrix: covers
-    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393 since it only fires
-    on the MXFP4 DSV4 path."""
+    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393 since DSV4 is the
+    only aiter output_aux path vLLM currently drives."""
     if not _aiter_sort_backend_hooks_available():
         pytest.skip(
             "Installed aiter build predates the sort-backend hooks "
