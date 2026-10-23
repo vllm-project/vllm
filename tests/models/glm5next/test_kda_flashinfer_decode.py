@@ -121,13 +121,23 @@ def _make_inputs(num_heads: int, num_tokens: int, seed: int = 1) -> dict:
 
 
 def _non_spec_metadata(
-    query_lens: list[int], num_decodes: int, slots: list[int], has_state: list[bool]
+    query_lens: list[int],
+    num_decodes: int,
+    slots: list[int],
+    has_state: list[bool],
+    block_table_width: int = 1,
 ) -> GDNAttentionMetadata:
     """Non-spec metadata as the builder makes it: decodes first, then the
-    prefill tail rebased for the peeled path."""
+    prefill tail rebased for the peeled path. The slot indices are column 0
+    of a [N, block_table_width] block table (1 + num_spec columns with
+    speculative decoding, so a strided view)."""
     qsl_cpu = torch.tensor([0, *torch.tensor(query_lens).cumsum(0).tolist()]).int()
     qsl = qsl_cpu.cuda()
-    indices = torch.tensor(slots, dtype=torch.int32, device="cuda")
+    block_table = torch.zeros(
+        len(slots), block_table_width, dtype=torch.int32, device="cuda"
+    )
+    block_table[:, 0] = torch.tensor(slots, dtype=torch.int32)
+    indices = block_table[:, 0]
     has_initial_state = torch.tensor(has_state, device="cuda")
     num_decode_tokens = num_decodes
     num_prefills = len(query_lens) - num_decodes

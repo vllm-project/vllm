@@ -49,8 +49,10 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
     flashinfer_packed_fused_kda_decode,
+    flashinfer_recurrent_kda,
     has_flashinfer_fused_kda_decode,
     has_flashinfer_packed_fused_kda_decode,
+    has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -145,14 +147,31 @@ def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
 
 
 def _resolve_kda_prefill_backend(
-    backend: str, head_dim: int, dtype: torch.dtype, lower_bound: float | None
+    backend: str,
+    head_dim: int,
+    dtype: torch.dtype,
+    lower_bound: float | None,
+    state_dtype: torch.dtype = torch.float32,
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
-    SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
+    SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate), FlashInfer's
+    CuTe DSL kernel (opt-in; updates the state pool in place) or the Triton
     ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
-    if backend not in ("auto", "triton", "flashkda"):
+    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda /
+    flashinfer)."""
+    if backend not in ("auto", "triton", "flashkda", "flashinfer"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if backend == "flashinfer":
+        if not _is_flashinfer_kda_prefill_supported(
+            head_dim, dtype, state_dtype, lower_bound
+        ):
+            raise RuntimeError(
+                "FlashInfer KDA prefill requires CUDA SM100/SM103/SM107, "
+                "bfloat16 activations, a float32 or bfloat16 recurrent state, "
+                "head_dim=128 and a bounded KDA gate."
+            )
+        logger.info_once("Using FlashInfer KDA prefill.")
+        return "flashinfer"
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
@@ -168,6 +187,68 @@ def _resolve_kda_prefill_backend(
             "and a bounded KDA gate."
         )
     return "flashkda" if supported and backend != "triton" else "triton"
+
+
+def _is_flashinfer_kda_prefill_supported(
+    head_dim: int,
+    dtype: torch.dtype,
+    state_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> bool:
+    """Whether FlashInfer's CuTe DSL chunked KDA prefill runs this layer."""
+    if not current_platform.is_cuda() or not has_flashinfer_recurrent_kda():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    return (
+        (capability.major, capability.minor) in ((10, 0), (10, 3), (10, 7))
+        and head_dim == 128
+        and dtype == torch.bfloat16
+        and state_dtype in (torch.float32, torch.bfloat16)
+        and lower_bound is not None
+        and lower_bound < 0
+    )
+
+
+def _flashinfer_kda_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    lower_bound: float,
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """FlashInfer's CuTe DSL chunked KDA prefill (raw gate and beta logits),
+    reading and writing the recurrent states in place at ``state_indices``
+    (made contiguous: with speculative decoding they are column 0 of the
+    [N, 1 + num_spec] block table, which FlashInfer rejects)."""
+    flashinfer_recurrent_kda(
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        g=g.contiguous(),
+        beta=beta.contiguous(),
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=q.shape[-1] ** -0.5,
+        initial_state=state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices.contiguous(),
+        output=out,
+        beta_is_logit=True,
+        backend="cute-dsl",
+    )
 
 
 def _is_flashinfer_kda_decode_supported(
@@ -435,6 +516,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         additional_config = vllm_config.additional_config
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -442,12 +524,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
+            recurrent_state_dtype,
         )
 
         # With speculative decoding every decode row is a draft-verify row of
         # 1 + num_spec tokens (kda_spec_decode_backend); otherwise rows have
         # one token (kda_decode_backend).
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         decode_backend_key = (
             "kda_spec_decode_backend" if self.num_spec > 0 else "kda_decode_backend"
         )
@@ -669,6 +751,66 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 num_accepted_tokens=num_accepted_tokens,
                 **kwargs,
             )
+
+    def _flashinfer_prefill(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        out: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """FlashInfer's chunked prefill (raw gate and beta logits), in place on
+        the state pool at ``state_indices``: no gather / scatter. Writes
+        ``out`` (a new buffer when ``None``) and returns it."""
+        # FlashInfer has no has-initial-state flag: zero the slots of fresh
+        # sequences first (the others zero the unused null slot).
+        state.index_fill_(
+            0, torch.where(has_initial_state, NULL_BLOCK_ID, state_indices).long(), 0
+        )
+        if out is None:
+            out = torch.empty_like(q)
+        if q.size(1) > 1:
+            assert self.kda_lower_bound is not None
+            _flashinfer_kda_prefill(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=self.A_log.view(-1),
+                dt_bias=self.dt_bias,
+                lower_bound=self.kda_lower_bound,
+                state=state,
+                state_indices=state_indices,
+                cu_seqlens=cu_seqlens,
+                out=out,
+            )
+        else:
+            # FlashInfer's prefill needs two tokens; one is a decode step.
+            fused_recurrent_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                ssm_state_indices=state_indices,
+                out=out,
+                sigmoid_beta=True,
+                a_log=self.A_log,
+                g_bias=self.dt_bias,
+                compute_gate=True,
+                lower_bound=self.kda_lower_bound,
+            )
+        return out
 
     @eager_break_during_capture
     def _forward(
@@ -967,9 +1109,25 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 v_ns = v_ns[num_fused_decodes:]
                 g1_ns = g1_ns[:, num_fused_decodes:]
                 beta_ns = beta_ns[:, num_fused_decodes:]
-            initial_state = gather_initial_states(
-                recurrent_state, prefill_state_indices, prefill_has_initial_state
-            )
+            if self.kda_prefill_backend == "flashinfer":
+                core_attn_out_non_spec = ns_out = self._flashinfer_prefill(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    g=g1_ns,
+                    beta=beta_ns,
+                    state=recurrent_state,
+                    state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
+                    cu_seqlens=prefill_query_start_loc,
+                    out=None
+                    if use_spec
+                    else core_attn_out[:, num_fused_decodes:num_actual_tokens],
+                )
+            else:
+                initial_state = gather_initial_states(
+                    recurrent_state, prefill_state_indices, prefill_has_initial_state
+                )
             if self.kda_prefill_backend == "flashkda":
                 # Non-spec step: write straight into the layer output buffer
                 # (dense token order, no merge copy). Step with spec-decode
@@ -993,7 +1151,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     conv_state=conv_state,
                     recurrent_state=recurrent_state,
                 )
-            else:
+            elif self.kda_prefill_backend == "triton":
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -1014,12 +1172,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
                 )
-            # Init cache
-            scatter_states(
-                recurrent_state,
-                last_recurrent_state,
-                prefill_state_indices,
-            )
+            if self.kda_prefill_backend != "flashinfer":
+                # Init cache
+                scatter_states(
+                    recurrent_state,
+                    last_recurrent_state,
+                    prefill_state_indices,
+                )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None

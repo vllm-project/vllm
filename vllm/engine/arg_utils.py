@@ -1957,7 +1957,8 @@ class EngineArgs:
             choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
             help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
-            "'fused' is ROCm-only; 'auto' picks a supported backend.",
+            "'fused' is ROCm-only; 'flashinfer' (FlashInfer's CuTe DSL kernel) "
+            "is opt-in; 'auto' picks a supported backend.",
         )
         parser.add_argument(
             "--kda-decode-backend",
