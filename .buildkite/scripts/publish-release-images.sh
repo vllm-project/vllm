@@ -69,19 +69,19 @@ if target_enabled cuda-13-0; then
     "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-zstd"
 fi
 
-# ---- Ubuntu 24.04 (CUDA 13.0) ----
+# ---- Ubuntu 24.04 compatibility aliases of the default CUDA images ----
 
 if target_enabled cuda-13-0-ubuntu-24-04; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64"
 
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" vllm/vllm-openai:latest-x86_64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
   docker push vllm/vllm-openai:latest-x86_64-ubuntu2404
   docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
 
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" vllm/vllm-openai:latest-aarch64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
   docker push vllm/vllm-openai:latest-aarch64-ubuntu2404
   docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
 
