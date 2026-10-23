@@ -1113,6 +1113,8 @@ def _m2n_trainer_send(
     """Send either the basic or mixed-layout manifest through the real engine."""
     device = _assigned_device()
 
+    from functools import cached_property
+
     from vllm.distributed.weight_transfer import WeightTransferTrainerFactory
     from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
