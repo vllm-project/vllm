@@ -2530,15 +2530,16 @@ def _assert_sharded_topk(actual, scores, num_valid, init_blocks, local_blocks):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA candidate exchange")
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 1), (1, 1)])
 @pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("prefill", [False, True])
 def test_sharded_candidate_merge_deduplicates_and_forces(
-    init_blocks, local_blocks, world
+    init_blocks, local_blocks, world, prefill
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_merge_candidates,
     )
 
-    valid = [48, 48, 48, 3, 0, 1]
+    valid = [48, 48, 48, 3, 0, 1, 15, 16, 17]
     scores = torch.full((world, len(valid), 48), -1000.0)
     blocks = torch.arange(48)
     for rank in range(world):
@@ -2573,9 +2574,15 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     order = torch.randperm(16, generator=torch.Generator().manual_seed(17))
     recv[1, ..., :16] = recv[1, ..., :16].index_select(-1, order)
     recv[1, ..., 16:32] = recv[1, ..., 16:32].index_select(-1, order)
+    if prefill:
+        # NCCL completion orders the payload; ready words are not a handshake.
+        recv[..., 32] = -7
     recv = recv.cuda()
     before = recv.clone()
-    actual = torch.full((len(valid), 1, 16), -9, dtype=torch.int32, device="cuda")
+    output_storage = torch.full(
+        (len(valid) + 2, 1, 16), -9, dtype=torch.int32, device="cuda"
+    )
+    actual = output_storage[1:-1]
     errors = torch.zeros(1, dtype=torch.int32, device="cuda")
     counts = torch.tensor(valid, dtype=torch.int32, device="cuda")
     minimax_m3_index_merge_candidates(
@@ -2586,6 +2593,7 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
         spin_limit=1 << 20,
+        prefill=prefill,
     )
     _assert_sharded_topk(
         actual, scores.max(dim=0).values.unsqueeze(1), counts, init_blocks, local_blocks
@@ -2593,8 +2601,77 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     tie_ids = list(range(1 - init_blocks, 16 - init_blocks)) + [47]
     assert actual[2, 0].tolist() == tie_ids
     assert errors.item() == 0
-    assert torch.count_nonzero(recv[..., 32]).item() == 0
-    torch.testing.assert_close(recv[..., :32], before[..., :32], rtol=0, atol=0)
+    assert torch.all(output_storage[[0, -1]] == -9).item()
+    if prefill:
+        torch.testing.assert_close(recv, before, rtol=0, atol=0)
+    else:
+        assert torch.count_nonzero(recv[..., 32]).item() == 0
+        torch.testing.assert_close(recv[..., :32], before[..., :32], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Native prefill TopK requires SM100 family.",
+)
+@pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
+def test_prefill_topk_emits_original_score_bits(init_blocks, local_blocks):
+    from vllm.third_party.fmha_sm100.api import sparse_topk_select_prefill
+
+    valid = torch.tensor(
+        [0, 1, 15, 16, 17, 33, 48, 3, 16], device="cuda", dtype=torch.int32
+    )
+    tokens, heads, blocks = valid.numel(), 4, 48
+    block_ids = torch.arange(blocks, device="cuda")
+    head_ids = torch.arange(heads, device="cuda")
+    scores = (
+        ((block_ids[None, None, :] * 7 + head_ids[None, :, None] * 13) % 53)
+        .expand(tokens, -1, -1)
+        .float()
+        .contiguous()
+    )
+    scores[5:7] = 0.0
+    scores[5:7, :, :24] = -0.0
+    storage = torch.full(
+        (heads, 2 * tokens + 3, 33), -777, device="cuda", dtype=torch.int32
+    )
+    carrier = storage[:, 1 : 2 * tokens + 1 : 2]
+    written = torch.zeros(storage.shape[1], device="cuda", dtype=torch.bool)
+    written[1 : 2 * tokens + 1 : 2] = True
+
+    def launch():
+        sparse_topk_select_prefill(
+            scores,
+            valid,
+            carrier,
+            force_begin_blocks=init_blocks,
+            force_end_blocks=local_blocks,
+        )
+
+    launch()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        launch()
+    for step in range(2):
+        valid.copy_(valid.roll(1))
+        scores.copy_(scores.roll(1, 0))
+        for row, count in enumerate(valid.tolist()):
+            # Forced candidates retain their original low scores in the payload.
+            scores[row, :, : min(init_blocks, count)] = -2000 - step
+            scores[row, :, max(0, count - local_blocks) : count] = -3000 - step
+            scores[row, :, count:] = float("nan")
+        graph.replay()
+        ids = carrier[..., 16:32].transpose(0, 1)
+        _assert_sharded_topk(ids, scores, valid, init_blocks, local_blocks)
+        expected = scores.gather(-1, ids.clamp_min(0).long())
+        expected.masked_fill_(ids < 0, -float("inf"))
+        torch.testing.assert_close(
+            carrier[..., :16].transpose(0, 1),
+            expected.view(torch.int32),
+            rtol=0,
+            atol=0,
+        )
+        assert torch.all(carrier[..., 32] == 1).item()
+        assert torch.all(storage[:, ~written] == -777).item()
 
 
 # Sparse attention kernels.
