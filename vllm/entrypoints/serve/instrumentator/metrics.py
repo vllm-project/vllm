@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import prometheus_client
 import regex as re
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
@@ -49,18 +48,10 @@ def _patch_instrumentator_route_walk() -> None:
 _patch_instrumentator_route_walk()
 
 
-class PrometheusResponse(Response):
-    media_type = prometheus_client.CONTENT_TYPE_LATEST
-
-
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
     registry = get_prometheus_registry()
 
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
         excluded_handlers=[
             "/metrics",
@@ -71,7 +62,7 @@ def attach_router(app: FastAPI):
             "/server_info",
         ],
         registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+    ).add().instrument(app)
 
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
