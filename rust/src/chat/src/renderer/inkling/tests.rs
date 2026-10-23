@@ -62,8 +62,6 @@ impl Tokenizer for FixtureTokenizer {
             CONTENT_XML => Some(200024),
             "<|audio_end|>" => Some(200043),
             "<|content_invoke_tool_json|>" => Some(200049),
-            super::IMAGE_SOFT_PLACEHOLDER => Some(200054),
-            super::AUDIO_SOFT_PLACEHOLDER => Some(200053),
             _ => None,
         }
     }
@@ -83,8 +81,6 @@ impl Tokenizer for FixtureTokenizer {
             200024 => CONTENT_XML,
             200043 => "<|audio_end|>",
             200049 => "<|content_invoke_tool_json|>",
-            200054 => super::IMAGE_SOFT_PLACEHOLDER,
-            200053 => super::AUDIO_SOFT_PLACEHOLDER,
             _ => return None,
         };
         Some(token.to_string())
@@ -158,7 +154,7 @@ fn flush_text_bytes(out: &mut String, text_bytes: &mut Vec<u8>) {
     text_bytes.clear();
 }
 
-fn symbolic_tokens() -> [(&'static str, u32); 15] {
+fn symbolic_tokens() -> [(&'static str, u32); 13] {
     [
         (MESSAGE_USER, 200000),
         (MESSAGE_MODEL, 200001),
@@ -173,8 +169,6 @@ fn symbolic_tokens() -> [(&'static str, u32); 15] {
         (CONTENT_XML, 200024),
         (AUDIO_END, 200043),
         (CONTENT_INVOKE_TOOL_JSON, 200049),
-        (super::IMAGE_SOFT_PLACEHOLDER, 200054),
-        (super::AUDIO_SOFT_PLACEHOLDER, 200053),
     ]
 }
 

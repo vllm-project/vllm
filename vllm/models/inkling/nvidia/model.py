@@ -591,14 +591,8 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
         # embed_input_ids handles actual placement.
         pixel_values = kwargs.get("pixel_values")
         num_patches = kwargs.get("num_patches")
-        if num_patches is None:
-            # The Rust frontend ships the shared per-item-count key instead;
-            # mm kwargs arrive grouped per modality, so it is unambiguous.
-            num_patches = kwargs.get("tokens_per_item")
         input_audio_features = kwargs.get("input_audio_features")
         num_audio_tokens = kwargs.get("num_audio_tokens")
-        if num_audio_tokens is None:
-            num_audio_tokens = kwargs.get("tokens_per_item")
 
         embeddings: tuple[torch.Tensor, ...] = ()
         if pixel_values is not None and self.visual is not None:
