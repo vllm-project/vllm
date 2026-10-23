@@ -834,13 +834,23 @@ OUTPUT_HEADS = [
     ("llama", "LlamaForCausalLM", {}, "lm_head", 1.0, None, False),
     ("gemma2", "Gemma2ForCausalLM", {}, "lm_head", 1.0, 30.0, False),
     ("cohere", "CohereForCausalLM", {}, "lm_head", 0.0625, None, False),
-    # Divides the logits by `logits_scaling`, which no other config spells that way
+    # Divides the logits by `logits_scaling`
     (
         "granite",
         "GraniteForCausalLM",
         {"logits_scaling": 4.0},
         "lm_head",
         0.25,
+        None,
+        False,
+    ),
+    # Multiplies the logits by `logits_scaling`, so config names cannot be trusted
+    (
+        "hyperclovax",
+        "HyperCLOVAXForCausalLM",
+        {"logits_scaling": 0.125},
+        "lm_head",
+        0.125,
         None,
         False,
     ),
