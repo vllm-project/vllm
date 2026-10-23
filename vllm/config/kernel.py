@@ -470,7 +470,15 @@ class KernelConfig:
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
-        return get_compile_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
+
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            factors["rocm_aiter_w4a16"] = rocm_aiter_ops.linear_w4a16_compile_factor()
+        return factors
 
     @field_validator(
         "enable_flashinfer_autotune",
