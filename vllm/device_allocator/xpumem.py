@@ -166,24 +166,41 @@ class XpuMemAllocator:
         logger.debug("Freed %s bytes for %s at %s", data.handle[1], data.tag, ptr)
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        keep_tags: tuple[str, ...] | str | None = None,
+    ) -> None:
         if offload_tags is None:
             offload_tags = (XpuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
+        if keep_tags is None:
+            keep_tags = ()
+        elif isinstance(keep_tags, str):
+            keep_tags = (keep_tags,)
 
         assert isinstance(offload_tags, tuple)
+        assert isinstance(keep_tags, tuple)
+        if overlap := set(offload_tags) & set(keep_tags):
+            raise ValueError(
+                f"Tags {sorted(overlap)} cannot be both offloaded and kept."
+            )
 
         total_bytes = 0
         backup_bytes = 0
+        kept_bytes = 0
         has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
                 requests_offload = data.tag in offload_tags
                 was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if data.tag in keep_tags or requests_offload != was_offloaded:
                     has_policy_conflict = True
+                continue
+            if data.tag in keep_tags:
+                kept_bytes += data.handle[1]
                 continue
             size_in_bytes = data.handle[1]
             total_bytes += size_in_bytes
@@ -221,6 +238,12 @@ class XpuMemAllocator:
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
         )
+        if kept_bytes:
+            logger.info(
+                "XpuMemAllocator: sleep kept %.2f GiB mapped for tags %s.",
+                kept_bytes / 1024**3,
+                keep_tags,
+            )
 
         if has_policy_conflict:
             logger.warning(
