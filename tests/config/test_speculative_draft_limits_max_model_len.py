@@ -3,9 +3,10 @@
 """Tests that the V2 model runner limits max_model_len to the draft's (#57941).
 
 The V2 speculators draft at every length the target accepts, so a draft model
-whose max_model_len is smaller than the target's (and can't be raised to match)
-must lower the target's max_model_len. The V1 model runner instead skips
-speculation for longer batches, so it keeps the target's max_model_len.
+whose max_model_len is smaller than the target's (and whose rotary cache can't
+be raised to match) must lower the target's max_model_len. The V1 model runner
+instead skips speculation for longer batches, so it keeps the target's
+max_model_len.
 """
 
 import pytest
@@ -43,10 +44,18 @@ def test_draft_model_limits_max_model_len(
 
 
 @pytest.mark.cpu_test
-def test_eagle_draft_keeps_target_max_model_len(monkeypatch: pytest.MonkeyPatch):
-    """EAGLE drafts have their max_position_embeddings raised to the target's
-    max_model_len, so they don't limit it."""
+@pytest.mark.parametrize("resizable", [True, False])
+def test_eagle_draft_limits_max_model_len_unless_resized(
+    resizable: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """An EAGLE draft's max_position_embeddings is raised to the target's
+    max_model_len when its RoPE type allows it; otherwise the draft limits
+    max_model_len."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    if not resizable:
+        monkeypatch.setattr(
+            "vllm.config.speculative._CACHE_ONLY_ROPE_TYPES", frozenset()
+        )
     model_config = ModelConfig(LLAMA3_TARGET, max_model_len=8192)
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
@@ -59,4 +68,6 @@ def test_eagle_draft_keeps_target_max_model_len(monkeypatch: pytest.MonkeyPatch)
         model_config=model_config, speculative_config=speculative_config
     )
     assert vllm_config.use_v2_model_runner
-    assert vllm_config.model_config.max_model_len == 8192
+    draft_hf_config = speculative_config.draft_model_config.hf_config
+    assert draft_hf_config.max_position_embeddings == (8192 if resizable else 2048)
+    assert vllm_config.model_config.max_model_len == (8192 if resizable else 2048)
