@@ -42,9 +42,9 @@ class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
         return self.num_speculative_tokens + 1
 
     @property
-    def draft_query_len(self) -> int:
-        return self.num_lookahead_tokens
-
-    @property
     def max_num_new_slots_for_drafting(self) -> int:
         return 0
+
+    def max_num_draft_seqs(self, max_num_batched_tokens: int) -> int:
+        # The draft pass has num_lookahead_tokens queries for every request.
+        return max_num_batched_tokens // self.num_lookahead_tokens

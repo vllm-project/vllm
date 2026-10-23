@@ -2351,20 +2351,21 @@ class VllmConfig:
                     f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
             spec = self.speculative_config
-            draft_query_len = spec.speculator_config.draft_query_len
-            if draft_query_len is not None:
+            max_draft_seqs = spec.speculator_config.max_num_draft_seqs(
+                max_num_batched_tokens
+            )
+            if max_draft_seqs is not None:
                 max_num_active_seqs = (
                     self.scheduler_config.max_num_active_seqs
                     or self.scheduler_config.max_num_seqs
                 )
-                max_draft_seqs = max_num_batched_tokens // draft_query_len
                 if max_draft_seqs < max_num_active_seqs:
                     logger.warning_once(
-                        "The %s draft pass needs %d query tokens per request within "
+                        "The %s draft pass fits at most %d requests within "
                         "max_num_batched_tokens=%d. Overriding max_num_active_seqs "
                         "from %d to %d.",
                         spec.method,
-                        draft_query_len,
+                        max_draft_seqs,
                         max_num_batched_tokens,
                         max_num_active_seqs,
                         max_draft_seqs,
