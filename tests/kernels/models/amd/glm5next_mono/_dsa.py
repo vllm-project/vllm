@@ -10,17 +10,14 @@ its tail fit, the sparse attention and W_UV, then the FFN seam on the TP sum of 
 o_proj partials and the MoE. Rows mix short (every token), long (scored), pool
 completing and padding rows."""
 
-import pytest
 import torch
 
-from .test_flash_ffn_kernel import (
+from ._ffn import (
     REPLAYS,
     _Layer,
     _moe_reference,
-    _on_cdna4,
     _rel,
     _vllm_seam,
-    _worker,
 )
 
 ROWS = (2, 4, 8)
@@ -558,27 +555,3 @@ FORMATS = {
     "bf16": (False, False, False),
     "mixed": (False, True, True),
 }
-
-
-@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize(
-    "tp, fmt, kv_fp8",
-    [
-        (2, "mixed", False),
-        (4, "fp8", False),
-        (4, "bf16", False),
-        (8, "mixed", False),
-        (4, "mixed", True),
-        (8, "mixed", True),
-    ],
-)
-def test_dsa_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, kv_fp8: bool
-):
-    """``kv_fp8``: an e4m3 MLA cache, as ``--kv-cache-dtype fp8_e4m3`` gives."""
-    from tests.utils import multi_process_parallel
-
-    if torch.accelerator.device_count() < tp:
-        pytest.skip(f"needs {tp} GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, FORMATS[fmt], kv_fp8))

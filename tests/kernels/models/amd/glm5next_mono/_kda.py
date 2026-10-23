@@ -7,17 +7,14 @@ stage: the attention-side mHC, the merged projection, the short conv, the gated
 delta rule (and both state updates), the gated RMSNorm, then the FFN seam on the
 TP sum of the o_proj partials and the MoE."""
 
-import pytest
 import torch
 
-from .test_flash_ffn_kernel import (
+from ._ffn import (
     REPLAYS,
     _Layer,
     _moe_reference,
-    _on_cdna4,
     _rel,
     _vllm_seam,
-    _worker,
 )
 
 ROWS = (2, 4, 8)
@@ -298,18 +295,3 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         assert not rt.words.any()
         dist.barrier(group)
         rt.close()
-
-
-@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize(
-    "tp, dim_first", [(2, False), (4, False), (4, True), (8, False)]
-)
-def test_kda_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool
-):
-    from tests.utils import multi_process_parallel
-
-    if torch.accelerator.device_count() < tp:
-        pytest.skip(f"needs {tp} GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, dim_first))

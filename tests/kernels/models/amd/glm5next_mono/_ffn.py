@@ -9,14 +9,12 @@ quantized as the kernel declares (MXFP8)."""
 
 import os
 
-import pytest
 import ray
 import torch
 
 from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
-    multi_process_parallel,
 )
 from vllm.platforms import current_platform
 
@@ -371,22 +369,3 @@ def _worker(check, *args):
             check(rank, tp_size, device, *args)
 
     return run
-
-
-@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize("tp, separate", [(2, True), (4, False), (4, True), (8, False)])
-def test_ffn_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, separate: bool
-):
-    if torch.accelerator.device_count() < tp:
-        pytest.skip(f"needs {tp} GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, separate))
-
-
-@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-def test_stalled_rank_reports_expiry(monkeypatch: pytest.MonkeyPatch):
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("needs 4 GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, 4, 1, _worker(_check_fault))

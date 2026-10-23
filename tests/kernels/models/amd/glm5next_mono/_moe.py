@@ -15,17 +15,15 @@ route alike."""
 
 from types import SimpleNamespace
 
-import pytest
 import ray
 import torch
 
 from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
-    multi_process_parallel,
 )
 
-from .test_flash_ffn_kernel import _dequant, _on_cdna4, _rel, _vllm_seam
+from ._ffn import _dequant, _rel, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 PREFIX = "language_model.model.layers.7.mlp"
@@ -260,12 +258,3 @@ def _check(rank: int, tp: int, device) -> None:
         assert torch.equal(routed, order.int().sort(-1).values), f"S={S}: routing"
         dist.barrier(group)
         rt.close()
-
-
-@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize("tp", [2, 4, 8])
-def test_ffn_matches_glm5next_moe(monkeypatch: pytest.MonkeyPatch, tp: int):
-    if torch.accelerator.device_count() < tp:
-        pytest.skip(f"needs {tp} GPUs")
-    pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker)
