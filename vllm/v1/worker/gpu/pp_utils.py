@@ -142,9 +142,7 @@ class PPHandler:
             }
         )
 
-    def get_prev_sampled_outputs(
-        self, draft_tokens_to_update: torch.Tensor | None = None
-    ) -> dict[str, torch.Tensor] | None:
+    def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
@@ -174,18 +172,6 @@ class PPHandler:
             )
 
         self.main_stream.wait_event(slot.event)
-        if slot.draft_tokens is not None and draft_tokens_to_update is not None:
-            draft_tokens = slot.draft_tokens
-            draft_idx_mapping = slot.idx_mapping
-            if exclude_mask.any():
-                keep = ~exclude_mask
-                keep_t = torch.as_tensor(keep, device=self.device)
-                draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_tensor_h2d(
-                    slot.idx_mapping_np[keep], device=self.device
-                )
-            draft_tokens_to_update[draft_idx_mapping] = draft_tokens
-
         return dict(
             sampled_tokens=slot.sampled_tokens,
             num_sampled=slot.num_sampled,

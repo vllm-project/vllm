@@ -12,9 +12,52 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, post_update
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA Triton.")
+@pytest.mark.parametrize("with_drafts", [False, True])
+def test_post_update_preserves_freed_slots_and_maps_pp_drafts(with_drafts: bool):
+    """Deferred PP updates must write live request slots, never freed rows."""
+    device = torch.device(DEVICE)
+    indices = torch.tensor([-1, 3, 1], dtype=torch.int32, device=device)
+    computed = torch.full((4,), 10, dtype=torch.int32, device=device)
+    last = torch.full((4,), -1, dtype=torch.int64, device=device)
+    total_len = torch.full((4,), 4, dtype=torch.int32, device=device)
+    tokens = torch.full((4, 16), -1, dtype=torch.int32, device=device)
+    sampled = torch.tensor([[11, 12, 13], [21, 22, 23], [31, 32, 33]], device=device)
+    drafts = torch.tensor([[101, 102], [201, 202], [301, 302]], device=device)
+    draft_table = torch.full((4, 2), -1, dtype=torch.int64, device=device)
+
+    post_update(
+        indices,
+        computed,
+        last,
+        None,
+        sampled,
+        torch.tensor([1, 2, 1], dtype=torch.int32, device=device),
+        torch.tensor([0, 2, 1], dtype=torch.int32, device=device),
+        None,
+        tokens,
+        total_len,
+        drafts if with_drafts else None,
+        draft_table if with_drafts else None,
+    )
+
+    assert computed.tolist() == [10, 9, 10, 8]
+    assert last.tolist() == [-1, 31, -1, 22]
+    assert total_len.tolist() == [4, 5, 4, 6]
+    expected_tokens = torch.full_like(tokens, -1)
+    expected_tokens[1, 4] = 31
+    expected_tokens[3, 4:6] = sampled[1, :2]
+    torch.testing.assert_close(tokens, expected_tokens, rtol=0, atol=0)
+    expected_drafts = torch.full_like(draft_table, -1)
+    if with_drafts:
+        expected_drafts[1] = drafts[2]
+        expected_drafts[3] = drafts[1]
+    torch.testing.assert_close(draft_table, expected_drafts, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
