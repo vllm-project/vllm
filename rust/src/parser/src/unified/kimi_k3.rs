@@ -183,8 +183,13 @@ enum KimiK3Mode {
     /// falls through as visible text so marker-free output still streams.
     #[default]
     Idle,
-    /// Inside the `think` channel.
+    /// Inside the `think` channel the model opened.
     Reasoning,
+    /// Inside the `think` channel the prompt opened, before the model emitted
+    /// any channel marker. The model may skip thinking and open `response`
+    /// directly, which also ends this channel; a generated `think` open moves
+    /// to [`KimiK3Mode::Reasoning`].
+    PrefilledReasoning,
     /// Inside the `response` channel.
     Response,
     /// After the `response` (or `tools`) channel closed: only a `tools`
@@ -256,7 +261,7 @@ impl KimiK3UnifiedParser {
             return;
         };
         self.mode = match tag.trim() {
-            "think" => KimiK3Mode::Reasoning,
+            "think" => KimiK3Mode::PrefilledReasoning,
             "response" => KimiK3Mode::Response,
             _ => KimiK3Mode::Idle,
         };
@@ -367,7 +372,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
             KimiK3Mode::Idle | KimiK3Mode::Response => {
                 output.push_text(self.buffer.take().text);
             }
-            KimiK3Mode::Reasoning => {
+            KimiK3Mode::Reasoning | KimiK3Mode::PrefilledReasoning => {
                 output.push_reasoning(self.buffer.take());
             }
             KimiK3Mode::Epilogue | KimiK3Mode::Done => self.buffer.clear(),
@@ -396,6 +401,7 @@ fn parse_next_kimi_k3_event(
     match mode {
         KimiK3Mode::Idle => parse_idle_event(input),
         KimiK3Mode::Reasoning => parse_reasoning_event(input),
+        KimiK3Mode::PrefilledReasoning => parse_prefilled_reasoning_event(input),
         KimiK3Mode::Response => parse_response_event(input),
         KimiK3Mode::Epilogue => parse_epilogue_event(input),
         KimiK3Mode::Tools => parse_tools_event(input),
@@ -426,6 +432,22 @@ fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event
         // `include_stop_str_in_output`; never leak it into reasoning.
         markers.end_of_msg.value(KimiK3Event::MessageEnd),
         safe_reasoning_event,
+    ))
+    .parse_next(input)
+}
+
+/// Parse an event inside the `think` channel the prompt opened.
+///
+/// Like Python, a `response` open ends reasoning only while the model has not
+/// emitted its own `think` open.
+fn parse_prefilled_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    alt((
+        markers.think_close.value(KimiK3Event::ThinkClose),
+        markers.think_open.value(KimiK3Event::ThinkOpen),
+        markers.response_open.value(KimiK3Event::ResponseOpen),
+        markers.end_of_msg.value(KimiK3Event::MessageEnd),
+        safe_prefilled_reasoning_event,
     ))
     .parse_next(input)
 }
@@ -501,6 +523,22 @@ fn safe_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event>
     let markers = input.markers();
     safe_text_len_mul(input, &[&markers.think_close, &markers.end_of_msg])
         .map(|_| KimiK3Event::Reasoning)
+}
+
+/// Parse safe reasoning before the next marker of a prefilled `think`
+/// channel.
+fn safe_prefilled_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.think_close,
+            &markers.think_open,
+            &markers.response_open,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Reasoning)
 }
 
 /// Parse safe response text before the next channel marker.
@@ -973,6 +1011,41 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.reasoning_text(), "reasoning");
+        assert_eq!(output.normal_text(), "answer");
+    }
+
+    #[test]
+    fn kimi_k3_response_open_ends_prefilled_reasoning() {
+        let prompt = structural("<|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>");
+        let text = format!(
+            "{RESPONSE_OPEN}answer{RESPONSE_CLOSE}{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
+            call("tool=\"calc\" index=\"1\"", &arg("x", "number", "42")),
+        );
+
+        for size in [1, 3, 7, text.len()] {
+            let chunks = char_chunks(&text, size);
+            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let mut parser = test_parser();
+            parser.initialize(&prompt).unwrap();
+            let output = collect_stream(&mut parser, &chunk_refs);
+
+            assert_eq!(output.reasoning_text(), "", "chunk size {size}");
+            assert_eq!(output.normal_text(), "answer", "chunk size {size}");
+            assert_eq!(first_call(&output).arguments, r#"{"x":42}"#);
+        }
+    }
+
+    #[test]
+    fn kimi_k3_response_open_stays_in_explicitly_opened_reasoning() {
+        let mut parser = test_parser();
+        start_in_reasoning(&mut parser);
+        let output = parser
+            .parse_complete(&format!(
+                "{THINK_OPEN}draft {RESPONSE_OPEN}x{THINK_CLOSE}{RESPONSE_OPEN}answer{RESPONSE_CLOSE}"
+            ))
+            .unwrap();
+
+        assert_eq!(output.reasoning_text(), format!("draft {RESPONSE_OPEN}x"));
         assert_eq!(output.normal_text(), "answer");
     }
 
