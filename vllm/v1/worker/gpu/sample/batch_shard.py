@@ -346,22 +346,196 @@ def all_to_all_logits(
     logits_shard: torch.Tensor,
     metadata: BatchShardMetadata,
 ) -> torch.Tensor:
-    recv = logits_shard.new_empty(
-        metadata.tp_size * metadata.num_local_logits, logits_shard.shape[-1]
+    return all_to_all_rows(
+        logits_shard, metadata.num_logits_per_rank, metadata.num_local_logits
     )
+
+
+def all_to_all_rows(
+    rows_shard: torch.Tensor,
+    num_rows_per_rank: list[int],
+    num_local_rows: int,
+) -> torch.Tensor:
+    """Send owner-sorted vocab-shard rows to their owners; return this rank's
+    rows with the full vocab, shards in rank order (the all-gather layout)."""
+    tp_size = len(num_rows_per_rank)
+    recv = rows_shard.new_empty(tp_size * num_local_rows, rows_shard.shape[-1])
     torch.distributed.all_to_all_single(
         recv,
-        logits_shard.contiguous(),
-        output_split_sizes=[metadata.num_local_logits] * metadata.tp_size,
-        input_split_sizes=metadata.num_logits_per_rank,
+        rows_shard.contiguous(),
+        output_split_sizes=[num_local_rows] * tp_size,
+        input_split_sizes=num_rows_per_rank,
         group=get_tp_group().device_group,
     )
     shard_width = recv.shape[-1]
     return (
-        recv.view(metadata.tp_size, metadata.num_local_logits, shard_width)
+        recv.view(tp_size, num_local_rows, shard_width)
         .permute(1, 0, 2)
-        .reshape(metadata.num_local_logits, metadata.tp_size * shard_width)
+        .reshape(num_local_rows, tp_size * shard_width)
     )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def _build_draft_shard_plan_kernel(
+    sample_idx_mapping_ptr,
+    sample_pos_ptr,
+    send_rows_ptr,
+    gathered_src_ptr,
+    local_rows_ptr,
+    # [NUM_STEPS, local_stride]: step-major, so each step's slice is contiguous
+    local_idx_mapping_ptr,
+    local_sample_pos_ptr,
+    local_stride,
+    num_reqs,
+    NUM_STEPS: tl.constexpr,
+    PADDED_NUM_STEPS: tl.constexpr,
+    TP_SIZE: tl.constexpr,
+    TP_RANK: tl.constexpr,
+    PADDED_NUM_REQS: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(sample_idx_mapping_ptr + req_idx * NUM_STEPS)
+    is_valid = req_state_idx >= 0
+    owner = req_state_idx % TP_SIZE
+
+    req_block = tl.arange(0, PADDED_NUM_REQS)
+    req_mask = req_block < num_reqs
+    slots = tl.load(
+        sample_idx_mapping_ptr + req_block * NUM_STEPS, mask=req_mask, other=-1
+    )
+    valid = slots >= 0
+    owners = slots % TP_SIZE
+    before = req_block < req_idx
+    local_idx = tl.sum((valid & (owners == owner) & before).to(tl.int32))
+    owner_start = tl.sum((valid & (owners < owner)).to(tl.int32))
+    # Padding rows (slot -1) go after every owner's rows, so the whole send
+    # permutation is rewritten each step.
+    pad_start = tl.sum(valid.to(tl.int32)) + tl.sum(
+        (req_mask & (slots < 0) & before).to(tl.int32)
+    )
+    send_idx = tl.where(is_valid, owner_start + local_idx, pad_start)
+
+    steps = tl.arange(0, PADDED_NUM_STEPS)
+    step_mask = steps < NUM_STEPS
+    rows = req_idx * NUM_STEPS + steps
+    tl.store(
+        send_rows_ptr + send_idx * NUM_STEPS + steps, rows.to(tl.int64), mask=step_mask
+    )
+    if is_valid:
+        tl.store(
+            gathered_src_ptr + req_idx, (owner * num_reqs + local_idx).to(tl.int64)
+        )
+        if owner == TP_RANK:
+            tl.store(local_rows_ptr + local_idx, req_idx.to(tl.int64))
+            local = steps * local_stride + local_idx
+            tl.store(
+                local_idx_mapping_ptr + local,
+                tl.load(sample_idx_mapping_ptr + rows, mask=step_mask),
+                mask=step_mask,
+            )
+            tl.store(
+                local_sample_pos_ptr + local,
+                tl.load(sample_pos_ptr + rows, mask=step_mask),
+                mask=step_mask,
+            )
+
+
+class DraftBatchSharder:
+    """Routes a drafter's per-position logits rows to their owner ranks.
+
+    Ownership is BatchSharder's (request slot % TP size), so a request's draft
+    logits land on the rank that verifies it in the next step. `stage` runs
+    inside the drafter's CUDA graph; `all_to_all` and `gather_draft_ids` run
+    after it, since their split sizes change every step.
+    """
+
+    def __init__(
+        self,
+        max_num_reqs: int,
+        num_steps: int,
+        shard_width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        tp_group = get_tp_group()
+        self.tp_rank = tp_group.rank_in_group
+        self.tp_size = tp_group.world_size
+        self.num_steps = num_steps
+        max_rows = max_num_reqs * num_steps
+        # Owner-sorted vocab-shard rows, read by the all-to-all after the graph.
+        self.send = torch.empty(max_rows, shard_width, dtype=dtype, device=device)
+        self.send_rows = torch.zeros(max_rows, dtype=torch.int64, device=device)
+        self.gathered_src = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
+        self.local_rows = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
+        # [num_steps, max_num_reqs]: the owned requests' slots and positions.
+        self.local_idx_mapping = torch.full(
+            (num_steps, max_num_reqs), -1, dtype=torch.int32, device=device
+        )
+        self.local_sample_pos = torch.zeros(
+            num_steps, max_num_reqs, dtype=torch.int64, device=device
+        )
+        self.local_draft_ids = torch.zeros(
+            max_num_reqs, num_steps, dtype=torch.int64, device=device
+        )
+        self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
+        self._padded_num_steps = triton.next_power_of_2(num_steps)
+
+    def stage(
+        self,
+        local_logits: torch.Tensor,
+        sample_idx_mapping: torch.Tensor,
+        sample_pos: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        """Owner-sort this rank's vocab shard of the (req, step) rows.
+
+        `sample_idx_mapping` holds -1 for padded requests; everything is
+        derived on device, so a captured graph replays any batch.
+        """
+        num_rows = num_reqs * self.num_steps
+        _build_draft_shard_plan_kernel[(num_reqs,)](
+            sample_idx_mapping,
+            sample_pos,
+            self.send_rows,
+            self.gathered_src,
+            self.local_rows,
+            self.local_idx_mapping,
+            self.local_sample_pos,
+            self.local_idx_mapping.stride(0),
+            num_reqs,
+            NUM_STEPS=self.num_steps,
+            PADDED_NUM_STEPS=self._padded_num_steps,
+            TP_SIZE=self.tp_size,
+            TP_RANK=self.tp_rank,
+            PADDED_NUM_REQS=self._padded_num_reqs,
+        )
+        torch.index_select(
+            local_logits, 0, self.send_rows[:num_rows], out=self.send[:num_rows]
+        )
+
+    def all_to_all(self, idx_mapping_np: np.ndarray) -> tuple[torch.Tensor, int]:
+        """This rank's (req, step) rows with the full vocab, and its number of
+        requests. `idx_mapping_np` is the unpadded batch staged last."""
+        num_reqs_per_rank = np.bincount(
+            idx_mapping_np % self.tp_size, minlength=self.tp_size
+        )
+        num_local_reqs = int(num_reqs_per_rank[self.tp_rank])
+        num_rows = idx_mapping_np.shape[0] * self.num_steps
+        logits = all_to_all_rows(
+            self.send[:num_rows],
+            (num_reqs_per_rank * self.num_steps).tolist(),
+            num_local_reqs * self.num_steps,
+        )
+        return logits, num_local_reqs
+
+    def gather_draft_ids(self, num_reqs_padded: int, out: torch.Tensor) -> torch.Tensor:
+        """All-gather the owners' `local_draft_ids` into `out` in batch order."""
+        gathered = tensor_model_parallel_all_gather(
+            self.local_draft_ids[:num_reqs_padded], dim=0
+        )
+        return torch.index_select(
+            gathered, 0, self.gathered_src[: out.shape[0]], out=out
+        )
 
 
 def _shard_grammar_output(

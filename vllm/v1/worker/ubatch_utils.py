@@ -320,6 +320,14 @@ def _make_metadata_with_slice(
 
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
+    causal = attn_metadata.causal
+    if isinstance(causal, torch.Tensor):
+        causal = causal[request_slice]
+    is_prefilling = (
+        attn_metadata.is_prefilling[request_slice]
+        if attn_metadata.is_prefilling is not None
+        else None
+    )
 
     positions = attn_metadata.positions
     if positions is not None:
@@ -335,7 +343,9 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        causal=causal,
         positions=positions,
+        is_prefilling=is_prefilling,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
     )
 

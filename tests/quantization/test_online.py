@@ -881,7 +881,7 @@ def test_weight_loading_requantization_moe(
     for name, expected in tensors.items():
         # Public loading must preserve all packed weights and scale conventions.
         torch.testing.assert_close(getattr(layer, name).cpu(), expected, rtol=0, atol=0)
-    actual_w13, actual_w2 = source.dequantize_weight(layer)
+    ((_, actual_w13, actual_w2),) = source.dequantize_weight(layer)
 
     # Gate/up ordering and distinct global scales must survive source loading.
     torch.testing.assert_close(actual_w13.cpu(), expected_w13, rtol=0, atol=0)
@@ -921,9 +921,12 @@ def test_online_requantized_moe_padding(
         w13_num_shards=num_shards, is_act_and_mul=is_act_and_mul, has_bias=has_bias
     )
     method.requantization_source = Mock()
-    method.requantization_source.dequantize_weight.return_value = (w13, w2)
+    method.requantization_source.dequantize_weight.return_value = iter(
+        [(slice(0, 2), w13, w2)]
+    )
     layer = SimpleNamespace(
         local_num_experts=2,
+        expert_map_manager=SimpleNamespace(num_fused_shared_experts=0),
         moe_config=SimpleNamespace(
             hidden_dim_unpadded=16,
             intermediate_size_per_partition_unpadded=32,
@@ -1075,6 +1078,7 @@ def test_online_requantized_moe_reload(
         layer = torch.nn.Module()
         layer.local_num_experts = 2
         layer.num_experts = 2
+        layer.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
         layer._expert_routing_tables = lambda: None
         layer.moe_config = SimpleNamespace(
             hidden_dim_unpadded=size,
@@ -2477,7 +2481,7 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
         **checkpoint_tensors,
         params_dtype=torch.bfloat16,
     )
-    w13_dequantized, w2_dequantized = source.dequantize_weight(source_layer)
+    ((_, w13_dequantized, w2_dequantized),) = source.dequantize_weight(source_layer)
 
     w13 = torch.cat((w1, w3), dim=1)
     torch.testing.assert_close(w13_dequantized, w13_reference, rtol=0, atol=0)

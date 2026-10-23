@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -132,18 +133,30 @@ def _make_packed_mla_view_worker(
     pp_size=1,
     backend_names=("FLASHMLA",),
     worker_cls=NixlPushConnectorWorker,
+    gqa_layers=(),
 ):
-    """Register real strided views; only NIXL and distributed runtime are fake."""
+    """Register real strided views; only NIXL and distributed runtime are fake.
+
+    Layers named in `gqa_layers` get a K/V spec and make the model non-MLA.
+    """
     block_size = 16
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
     for name, (offset, page_size) in layouts.items():
-        spec = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=page_size // block_size,
-            dtype=torch.uint8,
-        )
+        if name in gqa_layers:
+            spec = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=page_size // block_size // 2,
+                dtype=torch.uint8,
+            )
+        else:
+            spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=page_size // block_size,
+                dtype=torch.uint8,
+            )
         tensor = KVCacheTensor(
             size=raw.nbytes,
             layers=[name],
@@ -180,7 +193,7 @@ def _make_packed_mla_view_worker(
             "producer" if pp_size > 1 else "consumer",
             KVCacheConfig(num_blocks, tensors, groups),
         )
-        worker.use_mla = True
+        worker.use_mla = not gqa_layers
         worker.register_kv_caches(caches)
     return worker, raw
 
@@ -206,6 +219,46 @@ def test_packed_mla_pp1_transfers_whole_rows(num_layers, worker_cls):
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     assert metadata.packed_member_layouts == layouts
+
+
+# MiniMax-M3-like row: each layer's K/V page (head-sharded) and indexer page.
+_GQA_ROW = {
+    "L0.kv": (0, 128),
+    "L0.ix": (128, 64),
+    "L1.kv": (192, 128),
+    "L1.ix": (320, 64),
+}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
+)
+def test_packed_gqa_pp1_transfers_whole_rows(worker_cls):
+    # Head-sharded pages still travel as whole rows when P and D shard alike.
+    worker, raw = _make_packed_mla_view_worker(
+        _GQA_ROW, 384, worker_cls=worker_cls, gqa_layers=("L0.kv", "L1.kv")
+    )
+    assert not worker.use_mla
+    assert worker.num_regions == 1
+    assert worker.src_blocks_data.tolist() == [[raw.data_ptr(), 384, 0, 384, 4]]
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    assert metadata.packed_member_layouts == _GQA_ROW
+
+
+@pytest.mark.cpu_test
+def test_packed_gqa_rows_reject_heterogeneous_tp():
+    gqa = ("L0.kv", "L1.kv")
+    producer, _ = _make_packed_mla_view_worker(_GQA_ROW, 384, gqa_layers=gqa)
+    consumer, _ = _make_packed_mla_view_worker(_GQA_ROW, 384, gqa_layers=gqa)
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    metadata.engine_id = "remote"
+    with pytest.raises(RuntimeError, match="need the same TP"):
+        consumer.add_remote_agent(metadata, remote_tp_size=2)
 
 
 @pytest.mark.cpu_test

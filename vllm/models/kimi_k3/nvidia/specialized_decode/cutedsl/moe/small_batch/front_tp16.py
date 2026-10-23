@@ -12,7 +12,7 @@ import torch
 from cutlass import BFloat16, Float32, Int32, Uint8, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream, make_fake_tensor
 
-from .....ops.cute_dsl.latent_moe_tail.primitives import to_cute
+from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
 from ...common.primitives import (
     alloc,
     asm,

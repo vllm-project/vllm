@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample import batch_shard
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
+    DraftBatchSharder,
     _shard_grammar_output,
 )
 
@@ -653,6 +654,76 @@ def test_gather_sampler_output_logprobs_and_nans():
             assert lp.cu_num_generated_tokens == cu.tolist()
         else:
             assert lp.cu_num_generated_tokens is None
+
+
+@requires_gpu
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    "num_reqs,num_reqs_padded", [(1, 1), (3, 4), (5, 8), (23, 24), (40, 40)]
+)
+def test_draft_shard_plan(tp_size: int, num_reqs: int, num_reqs_padded: int):
+    """A drafter's staged (req, step) rows are owner-sorted like the target's
+    logits (batch order within an owner, padded requests last), and the local
+    views and gather sources address exactly each rank's requests."""
+    rng = np.random.default_rng(num_reqs * 10 + tp_size)
+    max_num_reqs, num_steps, width = 64, 3, 8
+    slots = rng.choice(max_num_reqs, size=num_reqs, replace=False).astype(np.int32)
+    sample_idx_mapping = np.full(max_num_reqs * num_steps, -1, dtype=np.int32)
+    sample_idx_mapping[: num_reqs * num_steps] = np.repeat(slots, num_steps)
+    sample_pos = rng.integers(0, 10_000, size=max_num_reqs * num_steps)
+    num_rows = num_reqs_padded * num_steps
+    # Row r of the vocab shard holds the value r in every column.
+    local_logits = (
+        torch.arange(num_rows, dtype=torch.float32, device=DEVICE)
+        .unsqueeze(1)
+        .repeat(1, width)
+    )
+    sample_idx_mapping_gpu = torch.from_numpy(sample_idx_mapping).to(DEVICE)
+    sample_pos_gpu = torch.from_numpy(sample_pos).to(DEVICE)
+
+    owners = slots % tp_size
+    order = np.argsort(owners, kind="stable")
+    send_reqs = np.concatenate([order, np.arange(num_reqs, num_reqs_padded)])
+    expected_rows = (send_reqs[:, None] * num_steps + np.arange(num_steps)).ravel()
+
+    local_ids = []
+    gathered_src = None
+    for rank in range(tp_size):
+        fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
+        with mock.patch.object(batch_shard, "get_tp_group", return_value=fake_group):
+            sharder = DraftBatchSharder(
+                max_num_reqs, num_steps, width, torch.float32, torch.device(DEVICE)
+            )
+        # Stale entries must never survive into a smaller batch.
+        sharder.send_rows.fill_(10**9)
+        sharder.stage(
+            local_logits, sample_idx_mapping_gpu, sample_pos_gpu, num_reqs_padded
+        )
+        assert _np(sharder.send_rows[:num_rows]).tolist() == expected_rows.tolist()
+        assert (_np(sharder.send[:num_rows])[:, 0] == expected_rows).all()
+
+        owned = np.flatnonzero(owners == rank)
+        num_owned = len(owned)
+        assert _np(sharder.local_rows[:num_owned]).tolist() == owned.tolist()
+        # Step-major: [step, owned request].
+        owned_rows = owned[None, :] * num_steps + np.arange(num_steps)[:, None]
+        assert (
+            _np(sharder.local_idx_mapping[:, :num_owned])
+            == sample_idx_mapping[owned_rows]
+        ).all()
+        assert (
+            _np(sharder.local_sample_pos[:, :num_owned]) == sample_pos[owned_rows]
+        ).all()
+        src = _np(sharder.gathered_src[:num_reqs])
+        if gathered_src is None:
+            gathered_src = src
+        assert (src == gathered_src).all()
+        # This rank's gather block: its owned slots, then padding.
+        block = np.full(num_reqs_padded, -1, dtype=np.int64)
+        block[:num_owned] = slots[owned]
+        local_ids.append(block)
+    # Indexing the rank-major gather with gathered_src restores batch order.
+    assert (np.concatenate(local_ids)[gathered_src] == slots).all()
 
 
 def test_finish_requests_frees_slots_in_sorted_order():

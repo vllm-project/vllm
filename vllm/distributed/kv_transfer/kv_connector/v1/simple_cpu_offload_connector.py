@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.host_buffer import parse_hugepage_size
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
@@ -144,6 +145,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
+        # "1GB"/"2MB": back the CPU buffer with explicit HugeTLB pages. The
+        # key matches OffloadingConnector's hugetlbfs option.
+        cpu_hugepage_size = parse_hugepage_size(
+            extra_config.get("cpu_hugepage_block_size")
+        )
 
         if disk_mode:
             if disk_path is None:
@@ -163,6 +169,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                     ", ".join(ignored),
                 )
             disk_path = None
+        if disk_mode and cpu_hugepage_size is not None:
+            raise ValueError(
+                'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
+            )
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -224,6 +234,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                cpu_hugepage_size=cpu_hugepage_size,
             )
 
     # --- Worker-side methods ---

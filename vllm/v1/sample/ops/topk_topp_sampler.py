@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from subprocess import CalledProcessError
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -26,14 +27,14 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-def register_top_k_top_p_warmups() -> None:
+def register_top_k_top_p_warmups(**warmup_kwargs: Any) -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON and not current_platform.is_cpu():
-        _topk_topp.register_warmup()
+        _topk_topp.register_warmup(**warmup_kwargs)
         if current_platform.is_cuda_alike():
-            _topp_split_stats.register_warmup()
-            _topp_split_step.register_warmup()
-            _topp_split_mask.register_warmup()
+            _topp_split_stats.register_warmup(**warmup_kwargs)
+            _topp_split_step.register_warmup(**warmup_kwargs)
+            _topp_split_mask.register_warmup(**warmup_kwargs)
 
 
 def _aiter_temp_gumbel_sample(

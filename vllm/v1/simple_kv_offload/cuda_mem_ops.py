@@ -62,6 +62,13 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
 # Resolved lazily on first use: (entry point, numAttrs to pass).
 _batch_memcpy: tuple[Any, int] | None = None
 
+# hipMemcpyAttributes.flags for the batch copies, resolved with _batch_memcpy.
+_batch_copy_flags = 0
+
+# hipMemcpyFlagExtPreferCE: run host <-> device batches on the SDMA engines
+# rather than as a blit kernel on the CUs (HIP 7.16+).
+_HIP_MEMCPY_FLAG_EXT_PREFER_CE = 0x100
+
 # Max copy descriptors per batch call, resolved lazily on first use.
 _max_batch_descriptors: int | None = None
 
@@ -118,7 +125,10 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
             ctypes.c_void_p,  # failIdx
             ctypes.c_void_p,  # stream
         ]
-        return fn, _rocm_num_attrs(lib)
+        global _batch_copy_flags
+        version = _hip_runtime_version(lib)
+        _batch_copy_flags = _copy_flags_for_hip_version(version)
+        return fn, _num_attrs_for_hip_version(version)
 
     from cuda.bindings import driver as drv
 
@@ -146,15 +156,26 @@ def _load_hip_runtime() -> ctypes.CDLL:
     raise OSError("could not load the HIP runtime: " + "; ".join(errors))
 
 
-def _rocm_num_attrs(lib: ctypes.CDLL) -> int:
-    """``numAttrs`` for ``hipMemcpyBatchAsync`` on the running HIP runtime."""
+def _hip_runtime_version(lib: ctypes.CDLL) -> int:
+    """``hipRuntimeGetVersion`` of the running HIP runtime, 0 if unknown."""
     ver = ctypes.c_int(0)
     try:
         if lib.hipRuntimeGetVersion(ctypes.byref(ver)) != 0:
             ver.value = 0
     except (OSError, AttributeError):
         ver.value = 0
-    return _num_attrs_for_hip_version(ver.value)
+    return ver.value
+
+
+def _copy_flags_for_hip_version(version: int) -> int:
+    """``hipMemcpyAttributes.flags`` for the batch copies on HIP ``version``.
+
+    Without ``hipMemcpyFlagExtPreferCE``, HIP 7.16 runs the batch as a blit
+    kernel (``__amd_rocclr_copyBufferBatch``) that slows concurrent decode like
+    the Triton copier; with it the copies stay on SDMA at the same bandwidth.
+    """
+    major, minor = version // 10_000_000, (version // 100_000) % 100
+    return _HIP_MEMCPY_FLAG_EXT_PREFER_CE if (major, minor) >= (7, 16) else 0
 
 
 def _num_attrs_for_hip_version(version: int) -> int:
@@ -209,7 +230,9 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
+    attrs = _CUmemcpyAttributes(
+        srcAccessOrder=src_access_order, flags=_batch_copy_flags
+    )
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),

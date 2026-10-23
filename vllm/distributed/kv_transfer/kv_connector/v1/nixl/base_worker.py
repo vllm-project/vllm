@@ -1546,12 +1546,12 @@ class NixlBaseConnectorWorker:
         self._ple_block_len = None
         self._ple_region_index = None
 
-        # A shared packed row may transfer whole only if every page in it is
-        # replicated across TP ranks: MLA without SSM state. Head-sharded
-        # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
+        # A shared packed row may transfer whole if every page in it is
+        # replicated across TP ranks (MLA), or if P and D shard heads alike
+        # (non-MLA, equal TP checked at handshake). SSM state (e.g.
+        # Qwen3.8-Flash-Next) must stay split.
         packed_storage = (
             _share_storage_and_block_stride(list(xfer_buffers.values()))
-            and self.use_mla
             and not self._has_mamba
         )
         if route_packed_layers and any(
@@ -1677,13 +1677,14 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                # Block-outermost MLA: one block row holds every layer's page.
+                # Block-outermost: one block row holds every layer's page (in an
+                # MLA model, only its MLA layers' pages travel as rows).
                 packed_mla = (
                     self._has_packed_cache
                     and not self._has_mamba
                     and packed_storage
                     and storage_is_block_major
-                    and is_mla_region
+                    and (is_mla_region or not self.use_mla)
                 )
                 if packed_mla and use_layer_name_routing:
                     # PP>1 prefill stage: register only this layer's page of each row.
@@ -2860,13 +2861,16 @@ class NixlBaseConnectorWorker:
             )
 
         # NVFP4 pages store all heads' data before all heads' scales, so a
-        # head's bytes are not a contiguous slice of the page.
+        # head's bytes are not a contiguous slice of the page, unless the
+        # backend lays out the page by KV head.
         if (
             not self.use_mla
             and self.transfer_topo.local_physical_heads
             != max(1, self.transfer_topo.total_num_kv_heads // remote_tp_size)
             and any(
-                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
+                isinstance(spec, AttentionSpec)
+                and spec.kv_quant_mode.is_nvfp4
+                and not spec.kv_head_major_slots
                 for spec in self._layer_specs.values()
             )
         ):
@@ -2874,6 +2878,13 @@ class NixlBaseConnectorWorker:
                 "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
                 f"(local TP {self.transfer_topo.tp_size}, remote TP "
                 f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
+            )
+        # A whole row holds this rank's heads of every layer: no re-sharding.
+        if self._packed_member_layouts and not self.use_mla and tp_ratio != 1:
+            raise RuntimeError(
+                "Packed KV rows of a non-MLA model need the same TP on prefill "
+                f"and decode (local TP {self.transfer_topo.tp_size}, remote TP "
+                f"{remote_tp_size}). Use LBHNC for heterogeneous TP."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.
