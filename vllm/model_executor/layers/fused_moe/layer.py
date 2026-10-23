@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -114,6 +115,7 @@ def FusedMoEFactory(
     swiglu_beta: float | None = None,
     activation_situ_beta: float | None = None,
     activation_situ_linear_beta: float | None = None,
+    qat_activation_key: QuantKey | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -185,6 +187,8 @@ def FusedMoEFactory(
         swiglu_limit: SwiGLU activation limit
         activation_situ_beta: SituGLU activation beta
         activation_situ_linear_beta: SituGLU linear beta
+        qat_activation_key: Activation quantization scheme the experts were
+            trained against, for checkpoints that do not record it
         e_score_correction_bias: Expert score correction bias tensor
         apply_router_weight_on_input: Whether to apply router weights on input
         activation: Activation function name ("silu", "gelu", etc.)
@@ -383,6 +387,7 @@ def FusedMoEFactory(
         swiglu_beta=swiglu_beta,
         activation_situ_beta=activation_situ_beta,
         activation_situ_linear_beta=activation_situ_linear_beta,
+        qat_activation_key=qat_activation_key,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
     )

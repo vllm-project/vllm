@@ -85,6 +85,30 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        if not get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+            return
+        # The NVFP4 KV attention kernels (MSA's CUTLASS Q8KV4 prefill) need 16
+        # query heads per KV head on each rank; fail before the workers start.
+        text_config = vllm_config.model_config.hf_text_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        num_heads = text_config.num_attention_heads // tp_size
+        num_kv_heads = max(1, text_config.num_key_value_heads // tp_size)
+        if num_heads != 16 * num_kv_heads:
+            raise ValueError(
+                "MiniMax-M3 does not support an NVFP4 KV cache with "
+                f"tensor_parallel_size={tp_size} yet: each rank holds {num_heads} "
+                f"query heads over {num_kv_heads} KV head(s), and the NVFP4 "
+                "attention kernels need 16 per KV head. Use a smaller "
+                "tensor_parallel_size (with data/expert parallelism) or another "
+                "kv_cache_dtype."
+            )
+
+
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1214,6 +1238,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
+    "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
+    "MiniMaxM3SparseForConditionalGeneration": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,

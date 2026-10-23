@@ -9,6 +9,10 @@ from typing import Any
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -23,7 +27,12 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.ubatch_utils import create_sm_control_context
-from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
+from vllm.v1.worker.ubatching import (
+    UBatchContext,
+    dbo_comm_stream_priority,
+    init_dbo_tp_comms,
+    make_ubatch_contexts,
+)
 
 logger = init_logger(__name__)
 
@@ -41,7 +50,9 @@ def _cat_ubatch_outputs(
     produced for a single ubatch (#40769).
     """
     if sorted_results and isinstance(sorted_results[0], tuple):
-        return tuple(torch.cat(parts, dim=0) for parts in zip(*sorted_results))
+        return tuple(_cat_ubatch_outputs(list(parts)) for parts in zip(*sorted_results))
+    if sorted_results and isinstance(sorted_results[0], list):
+        return [torch.cat(parts, dim=0) for parts in zip(*sorted_results)]
     return torch.cat(sorted_results, dim=0)
 
 
@@ -73,7 +84,9 @@ class UBatchWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.comm_stream = torch.cuda.Stream(device=device)
+        self.comm_stream = torch.cuda.Stream(
+            device=device, priority=dbo_comm_stream_priority()
+        )
         # Ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(
             self.vllm_config.parallel_config.num_ubatches + 1
@@ -86,6 +99,14 @@ class UBatchWrapper:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
+        # Unsplit steps keep their breakable piecewise graphs.
+        self.piecewise_wrapper = None
+        if (
+            is_breakable_cudagraph_enabled()
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            self.piecewise_wrapper = BreakableCUDAGraphWrapper(runnable, vllm_config)
+        init_dbo_tp_comms(self.vllm_config.parallel_config)
 
         self.sm_control = create_sm_control_context(vllm_config.parallel_config)
         self.device = device
@@ -373,6 +394,11 @@ class UBatchWrapper:
                 if batch_descriptor.num_tokens in self.cudagraphs:
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
+            if (
+                cudagraph_runtime_mode is CUDAGraphMode.PIECEWISE
+                and self.piecewise_wrapper is not None
+            ):
+                return self.piecewise_wrapper(*args, **kwargs)
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
@@ -391,10 +417,11 @@ class UBatchWrapper:
 
         dp_metadata = forward_context.dp_metadata
 
-        # We shouldn't be here unless we are running with multiple DP ranks
-        assert dp_metadata is not None
-        ubatch_dp_metadata = []
+        ubatch_dp_metadata: list = []
         for ubatch_slice in ubatch_slices:
+            if dp_metadata is None:
+                ubatch_dp_metadata.append(None)
+                continue
             dp_size = self.vllm_config.parallel_config.data_parallel_size
             ubatch_num_tokens_across_dp = torch.tensor(
                 [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32

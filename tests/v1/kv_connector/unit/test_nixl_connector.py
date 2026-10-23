@@ -1553,14 +1553,24 @@ class TestNixlHandshake:
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
     @pytest.mark.parametrize(
-        ("kv_quant_mode", "local_tp", "remote_tp", "num_kv_heads", "rejected"),
+        (
+            "kv_quant_mode",
+            "local_tp",
+            "remote_tp",
+            "num_kv_heads",
+            "kv_head_major_slots",
+            "rejected",
+        ),
         [
-            (KVQuantMode.NVFP4, 2, 1, 8, True),
-            (KVQuantMode.NVFP4, 1, 2, 8, True),
-            (KVQuantMode.NVFP4, 2, 2, 8, False),
+            (KVQuantMode.NVFP4, 2, 1, 8, False, True),
+            (KVQuantMode.NVFP4, 1, 2, 8, False, True),
+            (KVQuantMode.NVFP4, 2, 2, 8, False, False),
             # Both sides hold one replicated head per rank: no head split.
-            (KVQuantMode.NVFP4, 16, 8, 8, False),
-            (KVQuantMode.NONE, 2, 1, 8, False),
+            (KVQuantMode.NVFP4, 16, 8, 8, False, False),
+            (KVQuantMode.NONE, 2, 1, 8, False, False),
+            # H2ND pages: each head's K and V slots are one contiguous run.
+            (KVQuantMode.NVFP4, 4, 1, 4, True, False),
+            (KVQuantMode.NVFP4, 1, 4, 4, True, False),
         ],
     )
     @patch(
@@ -1575,10 +1585,12 @@ class TestNixlHandshake:
         local_tp,
         remote_tp,
         num_kv_heads,
+        kv_head_major_slots,
         rejected,
     ):
         """NVFP4 pages keep all heads' data before all heads' scales, so
-        heterogeneous-TP head splitting would silently corrupt the KV.
+        heterogeneous-TP head splitting would silently corrupt the KV unless the
+        spec lays out the page by KV head.
         """
         block_size = maybe_update_block_size(16)
         vllm_config = create_vllm_config(block_size=block_size)
@@ -1594,6 +1606,7 @@ class TestNixlHandshake:
                         head_size=16,
                         dtype=torch.uint8,
                         kv_quant_mode=kv_quant_mode,
+                        kv_head_major_slots=kv_head_major_slots,
                     ),
                 )
             ],
@@ -1620,6 +1633,11 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [local_len]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        worker.src_blocks_data = np.array(
+            [(0, local_len, worker.tp_rank, local_len, worker.num_blocks)],
+            dtype=np.uint64,
+        )
+        worker.num_descs = worker.num_blocks
         meta = NixlAgentMetadata(
             engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             agent_metadata=FakeNixlWrapper.AGENT_METADATA,

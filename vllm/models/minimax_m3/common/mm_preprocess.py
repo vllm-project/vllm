@@ -40,24 +40,28 @@ from vllm.multimodal.video import (
 )
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 from vllm.transformers_utils.processors.minimax_m3 import (
-    MIN_SHORT_SIDE_PIXEL,
     MiniMaxM3VLImageProcessor,
     MiniMaxM3VLVideoProcessor,
     MiniMaxVLProcessor,
-    smart_resize,
+    compute_aligned_size,
+    resolve_max_long_side_pixel,
 )
+
+# Worst-case long-side caps in pixels, matching the processor's detail=high
+# tiers. Profiling budgets are sized against these; request-level
+# ``detail``/``max_long_side_pixel`` kwargs cannot exceed them.
+_IMAGE_MAX_LONG_SIDE_PIXEL = 3584
+_VIDEO_MAX_LONG_SIDE_PIXEL = 2188
 
 # Upper bound on the number of frames used to build the dummy video during
 # memory profiling. Sized to the worst-case video the processor accepts:
-# ``max_total_pixels // max_pixels_per_frame`` = 301,056,000 // 602,112 = 500
-# frames, each at the video processor's per-frame ``max_pixels`` (768 * 28 * 28
-# = 602,112). This reaches the true worst-case ~192,000 vision tokens, but only
-# because the dummy video is sized via ``get_video_size_with_most_features()``
-# (the video ``max_pixels`` bound), not the smaller image bound. Without a cap,
+# ``max_total_pixels // max_pixels_per_frame`` = 301,056,000 // (2184 * 2184)
+# = 63 frames, each a square at the video long-side cap (2188 px floored to
+# the patch*merge factor, 28). Without a cap,
 # ``_get_max_video_frames(seq_len)`` with M3's large ``max_model_len`` yields
 # ~1400 frames, producing a multi-GB dummy tensor that overflows the
 # multimodal encoder cache.
-_MAX_FRAMES_PER_VIDEO = 500
+_MAX_FRAMES_PER_VIDEO = 63
 
 
 class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
@@ -101,34 +105,46 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int,
         image_processor,
+        mm_kwargs: Mapping[str, object],
+        modality: str,
     ) -> tuple[ImageSize, int]:
         """Compute resized image size and number of vision tokens.
 
-        Mirrors the processor's Qwen-style ``smart_resize`` (area bound by
-        ``max_pixels``) so token counts match the actual processor output.
+        Mirrors the processor's ``compute_aligned_size`` so token counts
+        match the actual processor output.
         """
         patch_size: int = image_processor.patch_size
         merge_size: int = image_processor.merge_size
         temporal_patch_size: int = image_processor.temporal_patch_size
         factor = patch_size * merge_size
-        max_pixels: int = image_processor.max_pixels
-        # Long-side resize spec (opt-in). ``image_processor`` is the *video*
-        # processor when counting video tokens, so read the bounds off it.
-        max_long_side_pixel = getattr(image_processor, "max_long_side_pixel", None)
-        min_short_side_pixel = getattr(
-            image_processor, "min_short_side_pixel", MIN_SHORT_SIDE_PIXEL
+
+        # ``image_processor`` is the *video* processor when counting video
+        # tokens, so modality-scoped request kwargs (flat keys overlaid with
+        # ``images_kwargs``/``videos_kwargs`` via ``modality=``) and processor
+        # defaults are read per modality. Per-key fallback mirrors the
+        # processor, whose own defaults feed ``resolve_max_long_side_pixel``
+        # the same way.
+        merged = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        # nho2's get_merged_mm_kwargs has no ``modality=``: overlay the scoped
+        # dict here, as prod's overlay_modality_mm_kwargs does.
+        scoped = merged.get("images_kwargs" if modality == "image" else "videos_kwargs")
+        if isinstance(scoped, Mapping):
+            merged = {**merged, **scoped}
+        detail = merged.get("detail", getattr(image_processor, "detail", None))
+        max_long_side_pixel = merged.get(
+            "max_long_side_pixel", getattr(image_processor, "max_long_side_pixel", None)
+        )
+        resolved_long_side = resolve_max_long_side_pixel(
+            detail, max_long_side_pixel, modality=modality
         )
 
-        new_h, new_w = smart_resize(
+        # No volumetric cap here: token counting must not raise; the video
+        # processor enforces its volume cap on the real inputs.
+        new_h, new_w = compute_aligned_size(
             image_height,
             image_width,
-            factor=factor,
-            max_pixels=max_pixels,
-            max_long_side_pixel=max_long_side_pixel,
-            min_short_side_pixel=min_short_side_pixel,
-            # Token counting must not raise; the volumetric/area cap is enforced
-            # in the processor's _preprocess on the real inputs.
-            max_total_pixels=None,
+            factor,
+            max_long_side_pixel=resolved_long_side,
         )
         grid_h = new_h // patch_size
         grid_w = new_w // patch_size
@@ -153,6 +169,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
             num_frames=1,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return n
 
@@ -170,48 +188,27 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
             num_frames=num_frames,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
+            modality="video",
         )
         return n
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        # Largest square (a multiple of patch_size*merge_size) whose area is
-        # within the image processor's bound — this yields the most vision
-        # tokens for one image. With the long-side spec the square side is
-        # capped by ``max_long_side_pixel`` (and the fixed ``max_total_pixels``);
-        # otherwise it is bound by the ``max_pixels`` area.
+        # Worst case is a detail=high image: a square whose side is the max
+        # long side (3584 px, a multiple of patch_size*merge_size).
         image_processor = self.get_image_processor()
         factor = image_processor.patch_size * image_processor.merge_size
-        max_long_side_pixel = getattr(image_processor, "max_long_side_pixel", None)
-        if max_long_side_pixel is not None:
-            side_px = min(
-                max_long_side_pixel,
-                math.isqrt(image_processor.max_total_pixels),
-            )
-        else:
-            side_px = math.isqrt(image_processor.max_pixels)
-        side = max(factor, (side_px // factor) * factor)
+        side = (_IMAGE_MAX_LONG_SIDE_PIXEL // factor) * factor
         return ImageSize(width=side, height=side)
 
     def get_video_size_with_most_features(self) -> ImageSize:
-        # Per-frame size that yields the most vision tokens, bound by the
-        # *video* processor's ``max_pixels`` (which differs from the image
-        # bound). Token count depends only on area, so maximize the area
-        # achievable with both sides a multiple of patch_size*merge_size rather
-        # than picking the largest square — a square (e.g. 756x756 for M3's
-        # 602,112 bound) leaves area on the table, undercounting frames.
+        # Worst single frame is a detail=high square capped by the video
+        # long-side max (2188 px), floored to a patch_size*merge_size
+        # multiple (2184).
         video_processor = self.get_video_processor()
         factor = video_processor.patch_size * video_processor.merge_size
-        per_frame_pixels = video_processor.max_pixels
-        max_long_side_pixel = getattr(video_processor, "max_long_side_pixel", None)
-        if max_long_side_pixel is not None:
-            # Long-side spec: a frame's worst case is a square capped by
-            # ``max_long_side_pixel`` (per-frame area, not the volumetric cap).
-            per_frame_pixels = min(per_frame_pixels, max_long_side_pixel**2)
-        units = per_frame_pixels // (factor * factor)  # h_u * w_u
-        h_u = math.isqrt(units)
-        while units % h_u:
-            h_u -= 1
-        return ImageSize(width=(units // h_u) * factor, height=h_u * factor)
+        side = (_VIDEO_MAX_LONG_SIDE_PIXEL // factor) * factor
+        return ImageSize(width=side, height=side)
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
@@ -220,7 +217,9 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
             image_width=size.width,
             image_height=size.height,
             image_processor=image_processor,
-            mm_kwargs={},
+            # Budgets must cover the worst case (detail=high); the default
+            # detail=auto cap would undercount.
+            mm_kwargs={"max_long_side_pixel": _IMAGE_MAX_LONG_SIDE_PIXEL},
         )
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
@@ -233,7 +232,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
                 image_height=size.height,
                 num_frames=num_frames + 1,
                 image_processor=video_processor,
-                mm_kwargs={},
+                # Worst case (detail=high); see get_max_image_tokens.
+                mm_kwargs={"max_long_side_pixel": _VIDEO_MAX_LONG_SIDE_PIXEL},
             )
             if next_n > max_tokens:
                 break
@@ -265,7 +265,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
             image_height=size.height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
             image_processor=video_processor,
-            mm_kwargs={},
+            # Worst case (detail=high); see get_max_image_tokens.
+            mm_kwargs={"max_long_side_pixel": _VIDEO_MAX_LONG_SIDE_PIXEL},
         )
 
 
@@ -487,6 +488,11 @@ class MiniMaxM3VideoBackend(VideoBackend):
         backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        # fps=-1 (unspecified) falls back to the default 1 fps.
+        if fps == -1:
+            fps = 1
+        if not 0.2 <= fps <= 5:
+            raise ValueError(f"video fps must be in [0.2, 5], got {fps}")
         return super().load_bytes(
             data,
             num_frames=num_frames,
@@ -526,6 +532,15 @@ class MiniMaxM3VideoBackend(VideoBackend):
                 break
             indices.append(target_frame)
             prev_kept_ts = target_frame / video_fps
+
+        # Always keep the last frame when it is far enough (>= 1/fps, up to
+        # eps) from the previously kept frame, matching the SFT frame
+        # sampler's constant-mode behavior.
+        last_frame_idx = total_frames - 1
+        last_ts = last_frame_idx / video_fps
+        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
+            indices.append(last_frame_idx)
+
         if not indices:
             indices = [0]
         return indices

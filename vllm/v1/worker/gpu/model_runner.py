@@ -450,6 +450,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     device=self.device,
                 )
                 logger.info("Batch-sharded sampling enabled.")
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.speculator.enable_batch_sharded_sampling()
             else:
                 logger.warning_once(
                     "Disabling batch-sharded sampling: %s does not implement "
@@ -473,7 +475,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
                 with self.jit_warmup_registry.activate():
-                    register_top_k_top_p_warmups()
+                    if current_platform.is_cuda():
+                        # V2's native logits processors use contiguous FP32 rows.
+                        register_top_k_top_p_warmups(
+                            vllm_config=self.vllm_config,
+                            logits_strides=(self.vocab_size,),
+                        )
+                    else:
+                        register_top_k_top_p_warmups()
 
             sampler_kwargs: dict[str, Any] = {
                 "vllm_config": self.vllm_config,
@@ -1375,9 +1384,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
@@ -1477,6 +1483,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            is_padding=(is_padding if envs.VLLM_MOE_SKIP_PADDING else None),
+            num_tokens_padded=num_tokens_after_padding,
+            pad_start=num_tokens,  # Scheduler total before adaptive compaction.
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -1555,6 +1564,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
+            skip_draft_proposals=scheduler_output.skip_draft_proposals,
             fast_prefill=fast_prefill,
             max_query_len=(
                 int(num_scheduled_tokens_upper_bound.max())
@@ -2274,13 +2284,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
-            if num_spec_tokens < self.num_speculative_steps:
-                draft_tokens[:, num_spec_tokens:] = -1
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
+            if draft_tokens is not None:
+                if num_spec_tokens < self.num_speculative_steps:
+                    draft_tokens[:, num_spec_tokens:] = -1
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+                if self.adaptive_verification is not None:
+                    self.adaptive_verification.record_confidences(
+                        self.speculator.draft_token_confidence_probs, input_batch
+                    )
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

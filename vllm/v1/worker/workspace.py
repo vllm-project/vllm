@@ -127,7 +127,10 @@ class WorkspaceManager:
                 f"Workspace lane {lane} is not configured; manager has "
                 f"{self._num_lanes} lane(s)."
             )
-        return dbo_current_ubatch_id() * self._num_lanes + lane
+        # One set of workspaces shared by every microbatch (TP-only DBO) or one
+        # per microbatch.
+        ubatch = dbo_current_ubatch_id() if self._num_ubatches > 1 else 0
+        return ubatch * self._num_lanes + lane
 
     def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return the resource cached for ``key`` in the current ubatch and lane.

@@ -238,9 +238,10 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
-        if rejection_sampler is not None:
-            # Greedy batches skip logits processing, so rejection kernels
-            # also see model-dtype logits instead of FP32.
+        if model_runner.num_speculative_steps > 0:
+            # Only the last PP rank owns a rejection sampler, but every rank
+            # must participate in the extra forward passes. Greedy batches warm
+            # rejection kernels with model-dtype logits instead of FP32.
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )

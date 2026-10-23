@@ -35,7 +35,7 @@ def _mxfp8_linear_kernel(
     out_ptr,
     M,
     N,
-    K,
+    K: tl.constexpr,
     stride_xm,
     stride_xk,
     stride_xsm,
@@ -87,10 +87,20 @@ def _mxfp8_dot_scaled_linear(
     w: torch.Tensor,  # [N, K] fp8 e4m3
     w_scale: torch.Tensor,  # [N, K//32] uint8 (E8M0)
 ) -> torch.Tensor:
-    M, K = x.shape
-    N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
-    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
+    return _mxfp8_dot_scaled_gemm(x_q, x_scale, w, w_scale, x.dtype)
+
+
+def _mxfp8_dot_scaled_gemm(
+    x_q: torch.Tensor,  # [M, K] fp8 e4m3
+    x_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0)
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    M, K = x_q.shape
+    N = w.shape[0]
+    out = torch.empty((M, N), dtype=out_dtype, device=x_q.device)
     BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _select_cfg(M, N, K)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
@@ -124,10 +134,12 @@ def _mxfp8_dot_scaled_linear(
 # gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
 # room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
+_ON_GFX950 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
 
-    if on_gfx950():
+    _ON_GFX950 = on_gfx950()
+    if _ON_GFX950:
         _BK256_STAGES = 2
 
 
@@ -142,6 +154,11 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
+    if _ON_GFX950 and M <= 16:
+        if K == 6144 and N in (1536, 2560):
+            return 16, 16, 1024, 2, 3
+        if K == 768 and N == 6144:
+            return 16, 16, 256, 2, 3
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
@@ -260,6 +277,30 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    @staticmethod
+    def supports_quantized_input(layer: torch.nn.Module) -> bool:
+        """Whether ``apply_quantized`` serves ``layer`` (fp8 weights)."""
+        return layer.weight.element_size() == 1 and (
+            layer.weight_scale.shape[0] != layer.weight.shape[0]
+            or layer.weight.shape[1] % _DOT_SCALED_K_ALIGN == 0
+        )
+
+    def apply_quantized(
+        self,
+        layer: torch.nn.Module,
+        x_q: torch.Tensor,
+        x_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """``apply_weights`` on ``mxfp8_e4m3_quantize``'s fp8 + e8m0 output."""
+        if layer.weight_scale.shape[0] != layer.weight.shape[0]:
+            return rocm_mxfp8_block32_gemm(
+                x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+            )
+        return _mxfp8_dot_scaled_gemm(
+            x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+        )
 
     def apply_weights(
         self,

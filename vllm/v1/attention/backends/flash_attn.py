@@ -1174,6 +1174,25 @@ class FlashAttentionImpl(AttentionImpl):
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
 
+    def _descale(
+        self, scale: torch.Tensor, scale_float: float, shape: tuple[int, int]
+    ) -> torch.Tensor | None:
+        # FA4 reads a missing descale as 1.0, and it copies every expanded view
+        # into a contiguous tensor: three copy kernels per layer and step. The
+        # scales are fixed once weights are loaded, so a per-tensor scale of 1.0
+        # (FP8 KV cache without calibrated scales) needs none. Per-head scales
+        # keep their tensor: their float mirror holds only the maximum.
+        if (
+            self.vllm_flash_attn_version == 4
+            and scale.numel() == 1
+            and scale_float == 1.0
+        ):
+            return None
+        # A (1, 1) expanded view (one sequence, one KV head per rank) counts
+        # as contiguous, so FA4 skips its copy and its CuTe layout check then
+        # rejects the zero stride.
+        return canonicalize_singleton_dim_strides(scale.expand(shape))
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1281,14 +1300,13 @@ class FlashAttentionImpl(AttentionImpl):
         scheduler_metadata = attn_metadata.scheduler_metadata
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
-
         q_descale = (
-            layer._q_scale.expand(descale_shape)
+            self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
             if self.supports_quant_query_input
             else None
         )
-        k_descale = layer._k_scale.expand(descale_shape)
-        v_descale = layer._v_scale.expand(descale_shape)
+        k_descale = self._descale(layer._k_scale, layer._k_scale_float, descale_shape)
+        v_descale = self._descale(layer._v_scale, layer._v_scale_float, descale_shape)
 
         if self.dcp_world_size > 1:
             self._forward_with_dcp(

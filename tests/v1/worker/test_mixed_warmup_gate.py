@@ -74,6 +74,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     runner = SimpleNamespace(
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
+        num_speculative_steps=3,
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
@@ -91,3 +92,33 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+
+
+@pytest.mark.parametrize("num_spec_steps", [0, 3])
+def test_greedy_warmup_runs_the_same_passes_on_all_pp_ranks(
+    monkeypatch, num_spec_steps
+):
+    """A last-rank-only extra pass waits forever for upstream PP inputs."""
+    passes = []
+    monkeypatch.setattr(
+        warmup,
+        "_warmup_kernels",
+        lambda runner, execute, sample, greedy=False: passes.append(greedy),
+    )
+    schedules = []
+    for rank in range(4):
+        sampler = (
+            SimpleNamespace(enable_adaptive_verification=False)
+            if rank == 3 and num_spec_steps > 0
+            else None
+        )
+        runner = SimpleNamespace(
+            adaptive_verification=None,
+            rejection_sampler=sampler,
+            num_speculative_steps=num_spec_steps,
+        )
+        passes.clear()
+        warmup.warmup_kernels(runner, _fail, _fail)
+        schedules.append(list(passes))
+    expected = [False, True] if num_spec_steps else [False]
+    assert schedules == [expected] * 4

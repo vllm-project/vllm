@@ -73,16 +73,21 @@ def resolve_layer_fused_shared_expert(
     """
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
-    fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-    fse_compatible, fse_reason = (
-        is_shared_expert_quant_fse_compatible(
-            quant_config,
-            f"{prefix}.experts",
-            f"{prefix}.{shared_expert_name}",
+    aiter_enabled = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+    fse_requested = aiter_enabled or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    if not fse_requested:
+        fse_compatible, fse_reason = True, None
+    elif not aiter_enabled:
+        fse_compatible = False
+        fse_reason = (
+            "AITER fused MoE is not enabled, which requires VLLM_ROCM_USE_AITER=1 "
+            f"(currently {envs.VLLM_ROCM_USE_AITER}) and "
+            f"VLLM_ROCM_USE_AITER_MOE=1 (currently {envs.VLLM_ROCM_USE_AITER_MOE})"
         )
-        if fse_requested
-        else (True, None)
-    )
+    else:
+        fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
+            quant_config, f"{prefix}.experts", f"{prefix}.{shared_expert_name}"
+        )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
     # In online shared_expert quantization is used, register it to
@@ -119,7 +124,7 @@ def resolve_layer_fused_shared_expert(
                     target_pattern,
                 )
     if fse_requested and not is_fused_shared_expert_enabled:
-        logger.warning(
+        logger.warning_once(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
             "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
@@ -161,7 +166,14 @@ def is_model_fused_shared_expert_compatible(
             "Per-layer fused shared experts is not yet supported. Please open "
             "an issue."
         )
-    return enabled_count > 0 and disabled_count == 0
+    is_enabled = enabled_count > 0 and disabled_count == 0
+    if is_enabled:
+        logger.info_once(
+            "Fused shared experts enabled for all %d MoE layers of %s.",
+            enabled_count,
+            moe_cls.__name__,
+        )
+    return is_enabled
 
 
 @triton.jit

@@ -347,8 +347,11 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
+    - pytest -v -s models/test_qwen3_dflash_mxfp8_context_kv.py
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Draft Model Nightly"

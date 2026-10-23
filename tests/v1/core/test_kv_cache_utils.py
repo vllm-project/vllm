@@ -1320,6 +1320,21 @@ def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
 
 
 @pytest.mark.parametrize(
+    "spec",
+    [
+        new_kv_cache_spec(),
+        SinkFullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
+        ),
+    ],
+)
+def test_attention_merge_preserves_kv_head_major_slots(spec):
+    # NIXL re-shards NVFP4 pages by KV head only if the group spec keeps the flag.
+    spec = replace(spec, num_head_slots=2 * spec.num_kv_heads, kv_head_major_slots=True)
+    assert type(spec).merge([spec, spec]).kv_head_major_slots
+
+
+@pytest.mark.parametrize(
     "layer_type,dcp_size,expected_width",
     [
         ("mla", 1, 64),

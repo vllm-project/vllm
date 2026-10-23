@@ -212,6 +212,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
+    is_last_ubatch_empty,
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
@@ -3796,6 +3797,17 @@ class GPUModelRunner(
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+        elif self.parallel_config.dbo_tp_only and allow_microbatching:
+            # One DP rank: decide the split locally; only eager steps split.
+            should_ubatch = (
+                cudagraph_mode == CUDAGraphMode.NONE
+                and check_ubatch_thresholds(
+                    self.parallel_config, num_tokens, uniform_decode=uniform_decode
+                )
+                and not is_last_ubatch_empty(
+                    num_tokens, num_tokens_padded, self.parallel_config.num_ubatches
+                )
+            )
 
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
@@ -6157,6 +6169,16 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
+        if (
+            self.parallel_config.use_ubatching
+            and not self.parallel_config.enable_expert_parallel
+        ):
+            # The profile step below is split; size the workspaces for the
+            # unsplit step first.
+            unsplit_hidden, unsplit_last = self._dummy_run(
+                self.max_num_tokens, is_profile=True, allow_microbatching=False
+            )
+            del unsplit_hidden, unsplit_last
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs

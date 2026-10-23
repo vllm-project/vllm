@@ -287,6 +287,22 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        self.draft_slots = (
+            speculative_config.max_num_new_slots_for_drafting
+            if speculative_config is not None
+            else 0
+        )
+        # Model Runner V2's DFlash/DSpark query pass has its own
+        # max_num_batched_tokens-row buffers: no charge once every request's
+        # 1 + num_spec_tokens queries fit them.
+        if (
+            speculative_config is not None
+            and speculative_config.method in ("dflash", "dspark")
+            and vllm_config.use_v2_model_runner
+            and self.scheduler_config.max_num_seqs * (1 + self.num_spec_tokens)
+            <= self.scheduler_config.max_num_batched_tokens
+        ):
+            self.draft_slots = 0
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
         # for all such groups, so the rewind matches every group's allocation.
@@ -640,7 +656,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
-        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        draft_slots = self.draft_slots
         input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
@@ -1576,6 +1592,17 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        skip_draft_proposals = (
+            self.use_v2_model_runner
+            and spec is not None
+            and (spec.use_dflash() or spec.use_dspark())
+            and bool(num_scheduled_tokens)
+            and all(
+                self._drafts_unusable(self.requests[req_id], num_tokens)
+                for req_id, num_tokens in num_scheduled_tokens.items()
+            )
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1596,6 +1623,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_draft_proposals=skip_draft_proposals,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -1632,6 +1660,19 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    @staticmethod
+    def _drafts_unusable(request: Request, num_scheduled_tokens: int) -> bool:
+        if request.num_computed_tokens + num_scheduled_tokens < request.num_tokens:
+            return True
+        num_tokens = request.num_tokens
+        if request.num_output_placeholders:
+            # Minimum length after in-flight steps, even if every draft is rejected.
+            # Matches the async max_tokens scheduling check above.
+            num_tokens = (
+                request.num_computed_tokens + 2 - request.num_output_placeholders
+            )
+        return num_tokens + 1 >= request.num_prompt_tokens + request.max_tokens
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput

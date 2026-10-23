@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -12,6 +13,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -99,7 +101,7 @@ class BaseSpeculator(ABC):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         pass
 
 
@@ -278,7 +280,16 @@ class DraftModelSpeculator(BaseSpeculator):
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
         speculators whose attention mode differs from the target's."""
-        return self.vllm_config
+        # Shallow copies instead of apply_draft_overrides: its replace()
+        # rebuilds each sub-config and drops engine-resolved init=False state
+        # such as cache_config.kv_cache_layout.
+        config = copy.copy(self.vllm_config)
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self.speculative_config, src)) is not None:
+                sub_config = copy.copy(getattr(config, config_name))
+                setattr(sub_config, dst, value)
+                setattr(config, config_name, sub_config)
+        return config
 
     def set_attn(
         self,
@@ -400,6 +411,10 @@ class DraftModelSpeculator(BaseSpeculator):
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
+
+    def enable_batch_sharded_sampling(self) -> None:
+        """Called when the target samples batch-sharded: each request is
+        verified on its owner rank, which alone reads its draft logits."""
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         """Dtype and fill for the cached proposal distribution.
