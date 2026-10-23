@@ -111,6 +111,8 @@ Patterns covered:
 
 The maximum tensor size below which the fused kernel is used is hardware-dependent (64 MB for TP=2
 on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`.
+The manual DeepSeek-V3.2 RMSNorm fusion uses the same budget. Setting it to zero
+disables fusion; leaving it unset retains the hardware default.
 
 **Code locations.**
 

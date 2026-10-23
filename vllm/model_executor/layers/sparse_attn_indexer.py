@@ -29,6 +29,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.layers.dosa_ops import as_fp32_logits
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
@@ -288,42 +289,6 @@ def fused_indexer_q_rope_quant(
     return q_fp8, weights_out
 
 
-@triton.jit
-def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    end = tl.load(row_ends_ptr + row)
-    src_ptr += row.to(tl.int64) * stride
-    dst_ptr += row.to(tl.int64) * stride
-    for start in range(tl.program_id(1) * BLOCK, end, tl.num_programs(1) * BLOCK):
-        offs = start + tl.arange(0, BLOCK)
-        mask = offs < end
-        vals = tl.load(src_ptr + offs, mask=mask)
-        tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
-
-
-def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
-    """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
-
-    Only columns below ``row_ends`` (int32, one per row) are converted, the
-    span the consumers read; DeepGEMM's aligned row stride is kept.
-    """
-    if logits.dtype == torch.float32:
-        return logits
-    out = torch.empty_strided(
-        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
-    )
-    num_rows, width = logits.shape
-    if num_rows == 0 or width == 0:
-        return out
-    assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
-    block = 1024
-    splits = min(triton.cdiv(width, block), max(1, 1024 // num_rows))
-    _upcast_logits_kernel[(num_rows, splits)](
-        logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
-    )
-    return out
-
-
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -434,6 +399,89 @@ def _reserve_row_shard_exchange_transient(
     )
 
 
+def _dosa_workspace(
+    q,
+    head_dim,
+    topk_tokens,
+    max_model_len,
+    use_fp4,
+    use_pcp,
+    dcp_size,
+    candidates,
+    dosa_max_queries: int,
+):
+    if (
+        dosa_max_queries <= 0
+        or not current_platform.is_cuda()
+        or current_platform.get_cuda_runtime_major() < 13
+        or not current_platform.is_device_capability(100)
+        or head_dim != 128
+        or topk_tokens != 2048
+        or q.shape[1] not in (32, 64)
+        or use_fp4
+        or use_pcp
+        or dcp_size != 1
+        or candidates is not None
+        or max_model_len < 131072
+    ):
+        return None
+    from vllm.model_executor.layers.dosa import DoSAWorkspace
+
+    max_queries = dosa_max_queries
+    max_keys = max(196608, min(max_model_len, 1048576))
+    key = (DoSAWorkspace, q.shape[1], max_queries, max_keys)
+
+    def create():
+        workspace = DoSAWorkspace(
+            q.device, max_queries=max_queries, max_keys=max_keys, heads=q.shape[1]
+        )
+        workspace.prepare()
+        return workspace
+
+    return current_workspace_manager().get_persistent_resource(key, create)
+
+
+def _dosa_prefill(workspace, chunk, row_start, row_end, q, k, scales, weights, output):
+    if workspace is None or not chunk.request_ranges:
+        return False
+    ranges = [
+        (max(r.query_start, row_start), min(r.query_end, row_end), r)
+        for r in chunk.request_ranges
+        if max(r.query_start, row_start) < min(r.query_end, row_end)
+    ]
+    if not ranges or any(
+        end - begin < workspace.max_q
+        or r.key_end - r.key_start < 131072
+        or r.key_end - r.key_start > workspace.max_k
+        or r.common_end < 12288
+        for begin, end, r in ranges
+    ):
+        return False
+    for begin, end, r in ranges:
+        lo, hi = begin - chunk.token_start, end - chunk.token_start
+        if not workspace.run(
+            q[begin:end],
+            k[r.key_start : r.key_end],
+            scales[r.key_start : r.key_end].view(torch.int32).reshape(-1),
+            weights[begin:end].to(torch.bfloat16),
+            chunk.cu_seqlen_ks[lo:hi],
+            chunk.cu_seqlen_ke[lo:hi],
+            output[begin:end, :2048],
+            common_end=r.common_end + (begin - r.query_start if r.causal else 0),
+            causal=r.causal,
+            key_offset=r.key_start,
+        ):
+            return False
+    logger.info_once(
+        "DoSA prefill active (H=%d, Qcapacity=%d, Kcapacity=%d)",
+        workspace.heads,
+        workspace.max_queries,
+        workspace.max_k,
+        scope="process",
+    )
+    return True
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -463,6 +511,7 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    dosa_max_queries: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -480,6 +529,17 @@ def sparse_attn_indexer(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        _dosa_workspace(
+            q_quant,
+            head_dim,
+            topk_tokens,
+            max_model_len,
+            use_fp4_cache,
+            use_pcp,
+            dcp_world_size,
+            candidate_blocks,
+            dosa_max_queries,
+        )
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
@@ -532,6 +592,7 @@ def sparse_attn_indexer(
             candidate_blocks=candidate_blocks,
             candidate_block_size=candidate_block_size,
             candidate_write=candidate_write,
+            dosa_max_queries=dosa_max_queries,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -605,6 +666,17 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
+        dosa = _dosa_workspace(
+            q_quant,
+            head_dim,
+            topk_tokens,
+            max_model_len,
+            use_fp4_cache,
+            use_pcp,
+            dcp_world_size,
+            candidate_blocks,
+            dosa_max_queries,
+        )
 
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
@@ -683,106 +755,139 @@ def sparse_attn_indexer(
                     out_scales,
                 )
 
-            q_slice = q_quant[row_start:row_end]
-            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
-            topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
+            if _dosa_prefill(
+                dosa,
+                chunk,
+                row_start,
+                row_end,
+                q_quant,
+                k_quant,
+                k_scale,
+                weights,
+                topk_indices_buffer,
+            ):
+                continue
 
-            # DeepGEMM returns compressed logits: row i starts at K position
-            # cu_seqlen_ks[i]. None means every row starts at column zero.
-            row_starts: torch.Tensor | None = None
-            if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
-                logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
-                topk_indices.fill_(-1)
-            else:
-                # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
-                # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
-                if use_fp4_cache:
-                    q_slice_cast = q_slice.view(torch.int8)
-                    k_quant_cast = k_quant.view(torch.int8)
-                    k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
-                else:
-                    q_slice_cast = q_slice
-                    k_quant_cast = k_quant
-                    k_scale_cast = k_scale.view(
-                        torch.int32 if mqa_logits_use_mx_scales() else torch.float32
-                    ).squeeze(-1)
-                if current_platform.is_xpu():
-                    if q_scale_slice is not None:
-                        raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                    logits = torch.ops.vllm.xpu_fp8_mqa_logits(
-                        q_slice_cast,
-                        k_quant_cast,
-                        k_scale_cast,
-                        weights[row_start:row_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
+            # Dense fallback retains its logits bound even when DoSA admits
+            # one larger logical call with its own profile-reserved scratch.
+            dense_rows = max(
+                1,
+                envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+                * 1024
+                * 1024
+                // (4 * max(chunk.max_seqlen_k, 1)),
+            )
+            for dense_start in range(row_start, row_end, dense_rows):
+                dense_end = min(dense_start + dense_rows, row_end)
+                lo, hi = dense_start - chunk.token_start, dense_end - chunk.token_start
+                cu_seqlen_ks = chunk.cu_seqlen_ks[lo:hi]
+                cu_seqlen_ke = chunk.cu_seqlen_ke[lo:hi]
+                q_slice = q_quant[dense_start:dense_end]
+                q_scale_slice = (
+                    q_scale[dense_start:dense_end] if q_scale is not None else None
+                )
+                topk_indices = topk_indices_buffer[dense_start:dense_end, :topk_tokens]
+
+                # DeepGEMM returns compressed logits: row i starts at K position
+                # cu_seqlen_ks[i]. None means every row starts at column zero.
+                row_starts: torch.Tensor | None = None
+                if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
+                    logits = q_slice.new_empty(
+                        (q_slice.shape[0], 0), dtype=torch.float32
                     )
-                    row_starts = cu_seqlen_ks
-                    row_ends = cu_seqlen_ke
+                    topk_indices.fill_(-1)
                 else:
-                    q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                        q_slice_cast, q_scale_slice, weights[row_start:row_end]
-                    )
-                    row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
+                    # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
+                    # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
+                    if use_fp4_cache:
+                        q_slice_cast = q_slice.view(torch.int8)
+                        k_quant_cast = k_quant.view(torch.int8)
+                        k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
+                    else:
+                        q_slice_cast = q_slice
+                        k_quant_cast = k_quant
+                        k_scale_cast = k_scale.view(
+                            torch.int32 if mqa_logits_use_mx_scales() else torch.float32
+                        ).squeeze(-1)
+                    if current_platform.is_xpu():
+                        if q_scale_slice is not None:
+                            raise RuntimeError(
+                                "XPU fp8_mqa_logits does not support FP4 Q"
+                            )
+                        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                            q_slice_cast,
+                            k_quant_cast,
+                            k_scale_cast,
+                            weights[dense_start:dense_end],
                             cu_seqlen_ks,
                             cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
-                    )
-                num_rows = logits.shape[0]
-                if candidate_blocks is not None:
-                    # Two-level selection (v4.1): the candidate source
-                    # publishes its top blocks; later indexers mask their
-                    # scores to them. Both before the row top-k.
-                    chunk_candidates = candidate_blocks[
-                        chunk.token_start : chunk.token_end
-                    ]
-                    if candidate_write:
-                        _select_candidate_blocks(
-                            logits,
-                            row_starts,
-                            row_ends,
-                            chunk_candidates.shape[1],
-                            candidate_block_size,
-                            chunk_candidates,
                         )
+                        row_starts = cu_seqlen_ks
+                        row_ends = cu_seqlen_ke
                     else:
-                        _apply_candidate_mask(
-                            logits,
-                            row_starts,
-                            row_ends,
-                            chunk_candidates,
-                            candidate_block_size,
+                        q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
+                            q_slice_cast, q_scale_slice, weights[dense_start:dense_end]
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                        row_ends = cu_seqlen_ke - cu_seqlen_ks
+                        logits = as_fp32_logits(
+                            fp8_fp4_mqa_logits(
+                                (q_slice_cast, q_scale_slice),
+                                (k_quant_cast, k_scale_cast),
+                                chunk_weights,
+                                cu_seqlen_ks,
+                                cu_seqlen_ke,
+                                chunk.max_seqlen_k,
+                            ),
+                            row_ends,
+                        )
+                    num_rows = logits.shape[0]
+                    if candidate_blocks is not None:
+                        # Two-level selection (v4.1): the candidate source
+                        # publishes its top blocks; later indexers mask their
+                        # scores to them. Both before the row top-k.
+                        chunk_candidates = candidate_blocks[dense_start:dense_end]
+                        if candidate_write:
+                            _select_candidate_blocks(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates.shape[1],
+                                candidate_block_size,
+                                chunk_candidates,
+                            )
+                        else:
+                            _apply_candidate_mask(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates,
+                                candidate_block_size,
+                            )
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        torch.zeros_like(row_ends)
+                        if row_starts is None
+                        else row_starts,
+                        row_ends,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
-            if deinterleave_idx is None:
-                # Under the PCP path the top-k already ran over the whole
-                # context.
-                _merge_dcp_topk_global(
-                    logits,
-                    topk_indices,
-                    topk_tokens,
-                    dcp_rank,
-                    dcp_world_size,
-                    cp_kv_cache_interleave_size,
-                    row_starts=row_starts,
-                )
+                if deinterleave_idx is None:
+                    # Under the PCP path the top-k already ran over the whole
+                    # context.
+                    _merge_dcp_topk_global(
+                        logits,
+                        topk_indices,
+                        topk_tokens,
+                        dcp_rank,
+                        dcp_world_size,
+                        cp_kv_cache_interleave_size,
+                        row_starts=row_starts,
+                    )
 
         if row_shard is not None:
             # Rows are already fully ranked, so this is a layout gather.
@@ -985,6 +1090,7 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    dosa_max_queries: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1046,10 +1152,16 @@ class SparseAttnIndexer(CustomOp):
         self.candidate_block_size = candidate_block_size
         self.candidate_write = candidate_write
         self.dense_mha_metadata_layer_name = ""
-        # DCP scalars are constant for the run; resolve them here (config is set
+        # Dispatch scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
         vllm_config = get_current_vllm_config()
+        self.dosa_max_queries = (
+            max(4096, vllm_config.scheduler_config.max_num_batched_tokens)
+            if vllm_config.attention_config.indexer_dosa
+            and vllm_config.speculative_config is None
+            else 0
+        )
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self._parallel_config = parallel_config
@@ -1164,6 +1276,7 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
+            dosa_max_queries=self.dosa_max_queries,
         )
 
     def forward_xpu(

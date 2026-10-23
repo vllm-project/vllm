@@ -96,6 +96,13 @@ class AttentionConfig:
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
 
+    indexer_dosa: bool = False
+    """Use DoSA certified sparse scoring for long FP8 indexer prefills on
+    SM100 (CUDA 13). It consumes the same quantized operands and selects by its
+    canonical FP32 score; the default DeepGEMM path returns BF16 logits on SM100.
+    Other hardware, short requests, FP4 caches and context-parallel requests
+    retain their original indexer. Disabled by default."""
+
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over

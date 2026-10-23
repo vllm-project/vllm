@@ -9,6 +9,10 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+    DeepseekV4ScalingRotaryEmbedding,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
@@ -191,3 +195,39 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+@pytest.mark.parametrize("is_v4", [False, True])
+@torch.inference_mode()
+def test_deepseek_rope_cache_capacity(default_vllm_config, is_v4):
+    # A narrow rotary dimension keeps the 1M-row CPU regression small.
+    with torch.device("cpu"):
+        cls = (
+            DeepseekV4ScalingRotaryEmbedding
+            if is_v4
+            else DeepseekScalingRotaryEmbedding
+        )
+        original = cls(8, 8, 4096, 10000, True, 40, torch.float32)
+        native_length = original.cos_sin_cache.shape[0]
+        assert native_length == 163840
+        parameters = {
+            "rope_type": "deepseek_yarn",
+            "rope_theta": 10000,
+            "factor": 40,
+            "original_max_position_embeddings": 4096,
+            "is_deepseek_v4": is_v4,
+        }
+        for requested in (8192, native_length, 1_048_576):
+            rope = get_rope(8, requested, True, parameters, torch.float32)
+            assert rope.cos_sin_cache.shape == (max(native_length, requested), 8)
+            assert rope.max_position_embeddings == original.max_position_embeddings
+            assert rope.scaling_factor == original.scaling_factor
+            assert rope.mscale == original.mscale
+            assert torch.equal(
+                rope.cos_sin_cache[:native_length].view(torch.int32),
+                original.cos_sin_cache.view(torch.int32),
+            )
+            assert torch.equal(
+                rope._compute_inv_freq(rope.scaling_factor).view(torch.int32),
+                original._compute_inv_freq(original.scaling_factor).view(torch.int32),
+            )

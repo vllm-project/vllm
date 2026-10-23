@@ -2664,7 +2664,10 @@ class VllmConfig:
                     self.model_config.get_hidden_size()
                     * self.model_config.dtype.itemsize
                 )
-                if compile_range_end is not None and max_token_num < compile_range_end:
+                if (
+                    compile_range_end is not None
+                    and 0 < max_token_num < compile_range_end
+                ):
                     computed_compile_ranges_endpoints.append(max_token_num)
                 else:
                     logger.debug(

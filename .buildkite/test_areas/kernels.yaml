@@ -583,6 +583,28 @@ steps:
   commands:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py
 
+- label: ":nvidia: (B200) DoSA Kernels"
+  key: kernels-dosa-test-b200
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - csrc/attention/dosa/
+  - cmake/dosa.cmake
+  - vllm/model_executor/layers/dosa.py
+  - vllm/model_executor/layers/dosa_caller.py
+  - vllm/model_executor/layers/dosa_graph.py
+  - vllm/model_executor/layers/dosa_ops.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/config/attention.py
+  - tests/kernels/attention/test_dosa.py
+  - tests/conftest.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_dosa.py
+
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
   timeout_in_minutes: 30
