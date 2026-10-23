@@ -4764,6 +4764,176 @@ async fn non_stream_completions_include_logprobs() {
     );
 }
 
+/// Send one request with output logprobs to an app whose server-wide
+/// `--return-tokens-as-token-ids` is `server_flag`, and return every logprob
+/// token string it carries, sampled tokens and top candidates alike. Streaming
+/// responses are flattened across chunks.
+async fn logprob_tokens_with_server_flag(
+    server_flag: bool,
+    uri: &str,
+    body: serde_json::Value,
+) -> BTreeSet<String> {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-return-tokens-as-token-ids".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            vec![b'h' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                            None,
+                            Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
+                            None,
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                default_return_tokens_as_token_ids: server_flag,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let stream = body["stream"].as_bool().unwrap_or(false);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let payloads = if stream {
+        sse_json_payloads(std::str::from_utf8(&body).expect("utf-8 body"))
+    } else {
+        vec![serde_json::from_slice(&body).expect("decode json")]
+    };
+
+    let mut tokens = BTreeSet::new();
+    for payload in &payloads {
+        let Some(logprobs) = payload["choices"][0].get("logprobs").filter(|v| !v.is_null()) else {
+            continue;
+        };
+        match logprobs.get("content") {
+            Some(content) => {
+                for entry in content.as_array().expect("chat logprob content") {
+                    tokens.insert(entry["token"].as_str().unwrap().to_string());
+                    for top in entry["top_logprobs"].as_array().expect("chat top logprobs") {
+                        tokens.insert(top["token"].as_str().unwrap().to_string());
+                    }
+                }
+            }
+            None => {
+                for token in logprobs["tokens"].as_array().expect("completion tokens") {
+                    tokens.insert(token.as_str().unwrap().to_string());
+                }
+                for top in logprobs["top_logprobs"].as_array().expect("completion top logprobs") {
+                    tokens.extend(top.as_object().expect("top logprob map").keys().cloned());
+                }
+            }
+        }
+    }
+    tokens
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn server_return_tokens_as_token_ids_is_the_request_default() {
+    let decoded = BTreeSet::from(["h".to_string(), "H".to_string()]);
+    let placeholder = BTreeSet::from([format!("token_id:{}", b'h'), format!("token_id:{}", b'H')]);
+    let chat = |extra: serde_json::Value, stream: bool| {
+        let mut body = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream,
+            "logprobs": true,
+            "top_logprobs": 2,
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let completion = |extra: serde_json::Value, stream: bool| {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": stream,
+            "logprobs": 1,
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // (server flag, request field, expected tokens): an omitted or `null`
+    // request field takes the server flag; an explicit value overrides it.
+    let cases = [
+        (true, json!({}), &placeholder),
+        (
+            true,
+            json!({"return_tokens_as_token_ids": null}),
+            &placeholder,
+        ),
+        (true, json!({"return_tokens_as_token_ids": false}), &decoded),
+        (false, json!({}), &decoded),
+        (
+            false,
+            json!({"return_tokens_as_token_ids": true}),
+            &placeholder,
+        ),
+    ];
+    for (server_flag, extra, expected) in cases {
+        for stream in [false, true] {
+            for (uri, body) in [
+                ("/v1/chat/completions", chat(extra.clone(), stream)),
+                ("/v1/completions", completion(extra.clone(), stream)),
+            ] {
+                assert_eq!(
+                    &logprob_tokens_with_server_flag(server_flag, uri, body).await,
+                    expected,
+                    "{uri} stream={stream} server_flag={server_flag} request={extra}",
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_include_prompt_logprobs() {

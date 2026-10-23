@@ -129,6 +129,7 @@ async fn collect_chat_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -147,6 +148,8 @@ async fn collect_chat_completion(
         is_named_tool_choice,
     }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
             "failed to collect chat completion response: {}",
@@ -260,6 +263,7 @@ async fn chat_completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -278,6 +282,8 @@ async fn chat_completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
         "chat.completion.chunk",
