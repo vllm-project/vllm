@@ -56,12 +56,12 @@ layout. Tags: tag = epoch * 64 + layer + 1 (HA and HB of a layer share it, regio
 disjoint); peer regions double buffered by tag parity.
 """
 
-import math
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
@@ -118,7 +118,6 @@ TOPK = 8
 ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
 POST_EPS = 1e-8
-LOG2E = 1.0 / math.log(2.0)
 KCH = 128
 HQ, HKV, HD = 128 // W, 16 // W, 64  # q / kv heads a rank
 QROWS, KROWS = HQ * HD, HKV * HD
@@ -567,7 +566,7 @@ def build(key: Build):
                 (t * OK_K + kk) // 2,
                 cache_modifier=CM_DEV,
             )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if (tid == 0) & (bid < S * HQ * 8 // THREADS):
             mb_put(tag, scratch + fx.Int64(lay["yf"][0]), bid, fx.Int32(1))
@@ -690,7 +689,7 @@ def build(key: Build):
                     cache_modifier=CM_SYS,
                 )
         if const_expr(not BND):  # bnd: tagged pairs, no flags
-            rocdl.s_waitcnt(0)
+            rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if tid == 0:
                 for pb in pl:
@@ -815,7 +814,7 @@ def build(key: Build):
                     (par * S + t) * (HID // 2) + cq // 2,
                     cache_modifier=CM_SYS,
                 )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             for pb in pl:
@@ -1022,7 +1021,7 @@ def build(key: Build):
                         hidx,
                         cache_modifier=CM_SYS,
                     )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             for pb in pl:
@@ -1306,7 +1305,7 @@ def build(key: Build):
             (tt * HID + c) // 2,
             cache_modifier=CM_DEV,
         )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["xinbf"][0]), bid, fx.Int32(1))
@@ -1400,7 +1399,7 @@ def build(key: Build):
             (tt * HID + c) // 2,
             cache_modifier=CM_DEV,
         )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["xnbf"][0]), bid, fx.Int32(1))
@@ -1611,7 +1610,7 @@ def build(key: Build):
                     ((par * BLOCKS + bid) * S + t) * 8 + p,
                     CM_SYS,
                 )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             for pb in pl:
@@ -1809,7 +1808,7 @@ def build(key: Build):
                             idx,
                             cache_modifier=CM_SYS,
                         )
-            rocdl.s_waitcnt(0)
+            rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if (tid == 0) & (kh == 0):
                 for pb in pl:
@@ -1941,7 +1940,7 @@ def build(key: Build):
                     (par * S + t) * (HID // 2) + cq // 2,
                     cache_modifier=CM_SYS,
                 )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             for pb in pl:

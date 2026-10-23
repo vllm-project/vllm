@@ -45,11 +45,11 @@ shuffled layouts, streamed with a prefetch queue, decoded in registers
 Same tag as HA / HB of the layer (epoch * 64 + layer + 1).
 """
 
-import math
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
@@ -98,7 +98,6 @@ EL = E // W  # local experts
 TOPK = 8
 FCH = 256
 POST_EPS = 1e-8
-LOG2E = 1.0 / math.log(2.0)
 HROW = DM + 8
 AROW = INTER + 8
 SSN = 257  # ss partial slots a pick (CTAs covering one virtual expert, at most 256 / V + 1)
@@ -607,7 +606,7 @@ def build(key: BuildM):
                 (((par * W + rank) * BLOCKS + bid) * S + t) * 8 + rp,
                 CM_SYS,
             )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put_sys(
