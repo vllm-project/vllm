@@ -454,6 +454,36 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     assert get_engine_dp_placement(daemon_config(is_moe=True), dp_rank=3) == (4, 3)
 
 
+def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
+    """Per-rank state such as the torch.compile cache is keyed by
+    parallel_config.rank, so daemons left at rank 0 would share rank 0's
+    compiled artifact and run every rank's kernels on rank 0's device."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+
+    monkeypatch.setattr(
+        daemon.WeightCacheKey, "from_model_config", lambda *args, **kwargs: None
+    )
+    for global_rank in range(4):
+        vllm_config = SimpleNamespace(
+            parallel_config=_parallel(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=2,
+                enable_eplb=False,
+                enable_expert_parallel=False,
+                expert_placement_strategy="linear",
+                rank=0,
+            ),
+            model_config=SimpleNamespace(is_moe=False),
+            cache_config=None,
+        )
+        server = daemon.WeightCacheDaemon(
+            vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
+        )
+        assert server.vllm_config.parallel_config.rank == global_rank
+
+
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
@@ -654,6 +684,51 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_daemon_reports_exported_weight_bytes():
+    """The engine's budget excludes exactly the storages it maps from the
+    daemon, not daemon-only allocations or tensors it does not export."""
+    import socket
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    def query_memory(server: daemon.WeightCacheDaemon) -> int:
+        client, connection = socket.socketpair()
+        with client, connection:
+            send_msg(client, {"cmd": "get_memory"})
+            server._handle_connection(connection)
+            response = recv_msg(client)
+        assert response["status"] == "ok"
+        return response["memory_bytes"]
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(
+        torch.empty(256, 1024, device="cuda"), requires_grad=False
+    )
+    # A tied parameter and a view share the weight's storage.
+    model.lm_head = model.weight
+    model.register_buffer("weight_row", model.weight[0], persistent=False)
+    model.register_buffer("bias", torch.empty(1024, device="cuda"))
+    # Shipped by value rather than mapped.
+    model.register_buffer("cpu_table", torch.empty(1024))
+    # Kept by the daemon but not exported (e.g. warmup workspace).
+    model.scratch = torch.empty(1 << 20, device="cuda")
+    leftover = torch.empty(1 << 20, device="cuda")
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server.model = model
+    assert query_memory(server) == (256 * 1024 + 1024) * 4
+    server.model = None
+    assert query_memory(server) == 0
+    del leftover
 
 
 @pytest.mark.parametrize(

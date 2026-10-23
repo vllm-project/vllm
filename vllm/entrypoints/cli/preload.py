@@ -119,9 +119,9 @@ class PreloadSubcommand(CLISubcommand):
             type=int,
             default=None,
             help="Rendezvous port for the daemon's own TP group. Must differ "
-            "from the engine's --master-port (the daemon holds its group open "
-            "while serving) and match across nodes. Required when --nnodes > "
-            "1; defaults to a free port for single-node.",
+            "from the engine's --master-port (the daemons may still be loading "
+            "when the engine starts) and match across nodes. Required when "
+            "--nnodes > 1; defaults to a free port for single-node.",
         )
         parser.add_argument(
             "--weight-cache-draft-master-port",
