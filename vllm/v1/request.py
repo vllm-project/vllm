@@ -80,6 +80,7 @@ class Request:
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
+        beam_group_id: str | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -196,6 +197,9 @@ class Request:
         self.trace_headers = trace_headers
         self.session_id = session_id
         self.kv_hints = kv_hints
+        # Set by Scheduler.add_beam_group. Slots stay out of the normal
+        # waiting queue and are admitted with the rest of the group.
+        self.beam_group_id = beam_group_id
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False

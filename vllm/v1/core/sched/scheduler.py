@@ -39,6 +39,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.beam_group import BeamSearchGroup, equal_chunk_size
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -222,6 +223,10 @@ class Scheduler(SchedulerInterface):
             ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
+        # Beam-search slots are not in `waiting`. Groups are admitted by
+        # _admit_waiting_beam_groups, all slots or none.
+        self.beam_groups: dict[str, BeamSearchGroup] = {}
+        self.waiting_beam_group_ids: deque[str] = deque()
         # Waiting requests that hold KV blocks are always drained before
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
@@ -766,10 +771,26 @@ class Scheduler(SchedulerInterface):
         ):
             defer_prefills = True
 
+        # Beam groups decode together, ahead of the per-request running scan.
+        # That scan skips beam slots so a group is never split across the step.
+        token_budget, input_budget, group_prefill = self._schedule_running_beam_groups(
+            token_budget=token_budget,
+            input_budget=input_budget,
+            draft_slots=draft_slots,
+            scheduled_running_reqs=scheduled_running_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+            req_to_new_blocks=req_to_new_blocks,
+            scheduled_timestamp=scheduled_timestamp,
+        )
+        prefill_scheduled = prefill_scheduled or group_prefill
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if request.beam_group_id is not None:
+                req_index += 1
+                continue
             if input_budget <= draft_slots:
                 break
 
@@ -904,46 +925,40 @@ class Scheduler(SchedulerInterface):
                         break
 
                     # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                    else:
-                        preempted_req = self.running[-1]
+                    # Preempt the lowest-priority request. Beam slots stay
+                    # together, so they are not preemption victims.
+                    preempted_req = self._select_preempt_victim()
+                    if preempted_req is None:
+                        break
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
+                    victim_index = self.running.index(preempted_req)
+                    del self.running[victim_index]
+                    if victim_index < req_index:
+                        req_index -= 1
 
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
+                    if preempted_req in scheduled_running_reqs:
+                        preempted_req_id = preempted_req.request_id
+                        scheduled_running_reqs.remove(preempted_req)
+                        restored = num_scheduled_tokens.pop(preempted_req_id)
+                        token_budget += restored
+                        input_budget += restored + draft_slots
+                        req_to_new_blocks.pop(preempted_req_id)
+                        scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                        preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                            preempted_req_id, None
+                        )
+                        if preempted_encoder_inputs:
+                            # Restore encoder compute budget if the preempted
+                            # request had encoder inputs scheduled in this step.
+                            num_embeds_to_restore = sum(
+                                preempted_req.get_num_encoder_embeds(i)
+                                for i in preempted_encoder_inputs
                             )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                    else:
-                        preempted_req = self.running.pop()
+                            encoder_compute_budget += num_embeds_to_restore
 
                     self._preempt_request(
                         preempted_req,
@@ -1013,6 +1028,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        defer_waiting_for_beam_group = False
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -1025,12 +1041,33 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            (
+                token_budget,
+                input_budget,
+                beam_prefill_admitted,
+                defer_waiting_for_beam_group,
+            ) = self._admit_waiting_beam_groups(
+                token_budget=token_budget,
+                input_budget=input_budget,
+                draft_slots=draft_slots,
+                scheduled_new_reqs=scheduled_new_reqs,
+                scheduled_resumed_reqs=scheduled_resumed_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                req_to_new_blocks=req_to_new_blocks,
+                scheduled_timestamp=scheduled_timestamp,
+            )
+            prefill_admitted = prefill_admitted or beam_prefill_admitted
+
             while token_budget > 0:
                 # Requests holding KV blocks are always drained first, and are
                 # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
                 request_queue = self.kv_holding_waiting
                 if not request_queue and self._pause_state == PauseState.UNPAUSED:
                     request_queue = self.waiting
+                if request_queue is self.waiting and defer_waiting_for_beam_group:
+                    # A waiting beam group needs these free slots. Do not fill
+                    # them with a request that arrived outside the group.
+                    break
                 if not request_queue or input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -1041,6 +1078,11 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if request.beam_group_id is not None:
+                    # A beam slot is admitted only with its group.
+                    skip_request(request_queue)
+                    continue
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1759,8 +1801,11 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
-        # Put the request back to the waiting queue.
-        self.waiting.prepend_request(request)
+        # Beam slots are re-queued with their group, not as lone requests.
+        if request.beam_group_id is None:
+            self.waiting.prepend_request(request)
+        else:
+            self._note_preempted_beam_slot(request)
         self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
@@ -2767,7 +2812,15 @@ class Scheduler(SchedulerInterface):
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+        waiting_beam_slots = sum(
+            self.beam_groups[group_id].beam_width
+            for group_id in self.waiting_beam_group_ids
+            if group_id in self.beam_groups
+        )
+        return (
+            len(self.running),
+            len(self.waiting) + len(self.kv_holding_waiting) + waiting_beam_slots,
+        )
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
@@ -2776,7 +2829,314 @@ class Scheduler(SchedulerInterface):
     def has_request(self, request_id: str) -> bool:
         return request_id in self.requests
 
+    def _select_preempt_victim(self) -> Request | None:
+        """Pick a running request to preempt, leaving beam groups intact."""
+        candidates = [req for req in self.running if req.beam_group_id is None]
+        if not candidates:
+            return None
+        if self.policy == SchedulingPolicy.PRIORITY:
+            return max(candidates, key=lambda req: (req.priority, req.arrival_time))
+        return candidates[-1]
+
+    def _note_preempted_beam_slot(self, request: Request) -> None:
+        """Return a fully preempted beam group to the group admission queue."""
+        group_id = request.beam_group_id
+        group = None if group_id is None else self.beam_groups.get(group_id)
+        if group is None or group_id is None:
+            self.waiting.prepend_request(request)
+            return
+        if any(slot.status == RequestStatus.RUNNING for slot in group.requests):
+            return
+        if group_id not in self.waiting_beam_group_ids:
+            self.waiting_beam_group_ids.appendleft(group_id)
+
+    def _schedule_running_beam_groups(
+        self,
+        *,
+        token_budget: int,
+        input_budget: int,
+        draft_slots: int,
+        scheduled_running_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
+        scheduled_timestamp: float,
+    ) -> tuple[int, int, bool]:
+        prefill_scheduled = False
+        seen: set[str] = set()
+        for request in self.running:
+            group_id = request.beam_group_id
+            if group_id is None or group_id in seen:
+                continue
+            seen.add(group_id)
+            group = self.beam_groups.get(group_id)
+            if group is None:
+                continue
+            if any(slot.status != RequestStatus.RUNNING for slot in group.requests):
+                continue
+            scheduled = self._schedule_beam_group_slots(
+                group,
+                admitting=False,
+                token_budget=token_budget,
+                input_budget=input_budget,
+                draft_slots=draft_slots,
+                scheduled_new_reqs=[],
+                scheduled_resumed_reqs=[],
+                scheduled_running_reqs=scheduled_running_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                req_to_new_blocks=req_to_new_blocks,
+                scheduled_timestamp=scheduled_timestamp,
+            )
+            if scheduled is None:
+                continue
+            token_budget, input_budget, group_prefill = scheduled
+            prefill_scheduled = prefill_scheduled or group_prefill
+        return token_budget, input_budget, prefill_scheduled
+
+    def _admit_waiting_beam_groups(
+        self,
+        *,
+        token_budget: int,
+        input_budget: int,
+        draft_slots: int,
+        scheduled_new_reqs: list[Request],
+        scheduled_resumed_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
+        scheduled_timestamp: float,
+    ) -> tuple[int, int, bool, bool]:
+        """Admit waiting beam groups until the head group does not fit.
+
+        Returns token budget, input budget, whether a prefill was admitted,
+        and whether the normal waiting scan should leave free sequence slots
+        for the head group.
+        """
+        prefill_admitted = False
+        defer_waiting = False
+        if self._pause_state != PauseState.UNPAUSED:
+            return token_budget, input_budget, prefill_admitted, defer_waiting
+
+        while self.waiting_beam_group_ids and token_budget > 0:
+            group_id = self.waiting_beam_group_ids[0]
+            group = self.beam_groups.get(group_id)
+            if group is None:
+                self.waiting_beam_group_ids.popleft()
+                continue
+            num_running = len(self.running) + self.num_waiting_for_streaming_input
+            free_slots = self.max_num_active_reqs - num_running
+            if free_slots < group.beam_width:
+                # Keep a partial hole open so the group can be admitted whole.
+                defer_waiting = free_slots > 0
+                break
+            if (
+                equal_chunk_size(
+                    group.requests,
+                    token_budget=token_budget,
+                    input_budget=input_budget,
+                    draft_slots=draft_slots,
+                    max_model_len=self.max_model_len,
+                    num_sampled_tokens=self.num_sampled_tokens_per_step,
+                )
+                < 1
+            ):
+                # This step's token budget cannot move every slot. Other
+                # waiting requests may still use what remains.
+                break
+            scheduled = self._schedule_beam_group_slots(
+                group,
+                admitting=True,
+                token_budget=token_budget,
+                input_budget=input_budget,
+                draft_slots=draft_slots,
+                scheduled_new_reqs=scheduled_new_reqs,
+                scheduled_resumed_reqs=scheduled_resumed_reqs,
+                scheduled_running_reqs=[],
+                num_scheduled_tokens=num_scheduled_tokens,
+                req_to_new_blocks=req_to_new_blocks,
+                scheduled_timestamp=scheduled_timestamp,
+            )
+            if scheduled is None:
+                # Same as a head-of-line waiting request that cannot allocate:
+                # stop filling the waiting queue this step.
+                defer_waiting = True
+                break
+            token_budget, input_budget, group_prefill = scheduled
+            prefill_admitted = prefill_admitted or group_prefill
+            self.waiting_beam_group_ids.popleft()
+        return token_budget, input_budget, prefill_admitted, defer_waiting
+
+    def _schedule_beam_group_slots(
+        self,
+        group: BeamSearchGroup,
+        *,
+        admitting: bool,
+        token_budget: int,
+        input_budget: int,
+        draft_slots: int,
+        scheduled_new_reqs: list[Request],
+        scheduled_resumed_reqs: list[Request],
+        scheduled_running_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
+        scheduled_timestamp: float,
+    ) -> tuple[int, int, bool] | None:
+        """Schedule every slot of `group`, or none of them."""
+        per_slot = equal_chunk_size(
+            group.requests,
+            token_budget=token_budget,
+            input_budget=input_budget,
+            draft_slots=draft_slots,
+            max_model_len=self.max_model_len,
+            num_sampled_tokens=self.num_sampled_tokens_per_step,
+        )
+        if per_slot < 1:
+            return None
+
+        if not admitting:
+            # Over-estimate new blocks so a miss returns before any slot is
+            # allocated. Rolling back a running slot would drop its KV.
+            free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
+            if free_blocks < per_slot * group.beam_width:
+                return None
+
+        allocated: list[tuple[Request, KVCacheBlocks]] = []
+        for request in group.requests:
+            new_blocks = self.kv_cache_manager.allocate_slots(
+                request,
+                per_slot,
+                num_lookahead_tokens=self.num_lookahead_tokens,
+            )
+            if new_blocks is None:
+                for allocated_request, _ in allocated:
+                    # Admission rolls back a request that had no blocks yet.
+                    # A running group is only attempted when the chunk fits the
+                    # budget; a mid-group miss still drops just this attempt's
+                    # blocks by freeing requests that were waiting or preempted.
+                    if allocated_request.status != RequestStatus.RUNNING:
+                        self.kv_cache_manager.free(allocated_request)
+                return None
+            allocated.append((request, new_blocks))
+
+        prefill_admitted = False
+        for request, new_blocks in allocated:
+            request_id = request.request_id
+            if admitting:
+                if request.status == RequestStatus.WAITING:
+                    scheduled_new_reqs.append(request)
+                elif request.status == RequestStatus.PREEMPTED:
+                    scheduled_resumed_reqs.append(request)
+                else:
+                    raise RuntimeError(f"Invalid beam slot status: {request.status}")
+                req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
+                    request_id
+                )
+                prefill_admitted = prefill_admitted or (
+                    request.num_computed_tokens < request.num_tokens - 1
+                )
+                self.running.append(request)
+                request.status = RequestStatus.RUNNING
+                if self.log_stats:
+                    request.record_event(
+                        EngineCoreEventType.SCHEDULED, scheduled_timestamp
+                    )
+            else:
+                scheduled_running_reqs.append(request)
+                req_to_new_blocks[request_id] = new_blocks
+                prefill_admitted = prefill_admitted or request.is_prefill_chunk
+            num_scheduled_tokens[request_id] = per_slot
+            token_budget -= per_slot
+            input_budget -= per_slot + draft_slots
+        return token_budget, input_budget, prefill_admitted
+
+    def add_beam_group(self, group_id: str, requests: list[Request]) -> BeamSearchGroup:
+        """Register a beam group. Slots are not visible to the waiting scan.
+
+        The group is scheduled only when every slot fits in the active-sequence
+        limit, the token budget, and the KV pool. Unsupported configurations
+        raise here so callers can fall back to the entrypoint beam-search loop.
+        """
+        if not group_id:
+            raise ValueError("beam group id must be non-empty")
+        if group_id in self.beam_groups:
+            raise ValueError(f"beam group {group_id} is already registered")
+        if self.vllm_config.speculative_config is not None:
+            raise ValueError(
+                "Beam groups do not support speculative decoding; "
+                "use the beam search wrapper"
+            )
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "Beam groups do not support pipeline parallelism; "
+                "use the beam search wrapper"
+            )
+
+        group = BeamSearchGroup(group_id=group_id, requests=list(requests))
+        if group.beam_width > self.max_num_active_reqs:
+            raise ValueError(
+                f"Beam width {group.beam_width} exceeds max_num_seqs "
+                f"({self.max_num_active_reqs})"
+            )
+        if group.beam_width > self.max_num_scheduled_tokens:
+            raise ValueError(
+                f"Beam width {group.beam_width} exceeds the token budget "
+                f"({self.max_num_scheduled_tokens})"
+            )
+        blocks_needed = cdiv(
+            group.requests[0].num_prompt_tokens + self.num_sampled_tokens_per_step,
+            self.block_size,
+        )
+        num_gpu_blocks = self.cache_config.num_gpu_blocks
+        assert num_gpu_blocks is not None
+        if blocks_needed * group.beam_width > num_gpu_blocks:
+            raise ValueError(
+                f"Beam group {group_id} needs {blocks_needed * group.beam_width} "
+                f"KV blocks and the pool has {num_gpu_blocks}"
+            )
+
+        for request in group.requests:
+            if request.request_id in self.requests:
+                raise ValueError(f"duplicate request id {request.request_id}")
+            request.beam_group_id = group_id
+            self.requests[request.request_id] = request
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
+        self.beam_groups[group_id] = group
+        self.waiting_beam_group_ids.append(group_id)
+        return group
+
+    def _expand_beam_group_ids(self, request_ids: set[str]) -> set[str]:
+        expanded = set(request_ids)
+        for request_id in request_ids:
+            request = self.requests.get(request_id)
+            if request is None or request.beam_group_id is None:
+                continue
+            group = self.beam_groups.get(request.beam_group_id)
+            if group is None:
+                continue
+            expanded.update(slot.request_id for slot in group.requests)
+        return expanded
+
+    def _forget_finished_beam_groups(self) -> None:
+        finished_ids = [
+            group_id
+            for group_id, group in self.beam_groups.items()
+            if all(slot.is_finished() for slot in group.requests)
+        ]
+        for group_id in finished_ids:
+            del self.beam_groups[group_id]
+            try:
+                self.waiting_beam_group_ids.remove(group_id)
+            except ValueError:
+                pass
+
     def add_request(self, request: Request) -> None:
+        if (
+            request.beam_group_id is not None
+            and request.request_id not in self.requests
+        ):
+            raise ValueError(
+                f"{request.request_id} belongs to beam group "
+                f"{request.beam_group_id}; use Scheduler.add_beam_group"
+            )
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -2827,8 +3187,9 @@ class Scheduler(SchedulerInterface):
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
-        elif request_ids is not None:
-            request_ids = set(request_ids)
+        if request_ids is not None:
+            # Aborting one beam slot aborts the whole group.
+            request_ids = self._expand_beam_group_ids(set(request_ids))
         else:
             request_ids = self.requests.keys()
 
@@ -2872,6 +3233,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
+        self._forget_finished_beam_groups()
         return valid_requests
 
     def _free_request(
