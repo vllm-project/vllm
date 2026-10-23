@@ -756,7 +756,8 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 !!! note
     `Nemotron3_5TranscribeForConditionalGeneration` transcribes with speaker tags. Its chat template turns
     thinking on by default, so transcription servers should set
-    `--default-chat-template-kwargs '{"enable_thinking": false}'`. It supports MTP speculative decoding.
+    `--default-chat-template-kwargs '{"enable_thinking": false}'`. It supports MTP and DFlash2 speculative
+    decoding.
 
     Long audio: by default vLLM refuses audio longer than 600 s and transcription uploads larger than 25 MB
     (`VLLM_MAX_AUDIO_DECODE_DURATION_S`, `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`). A chat request takes one clip of
