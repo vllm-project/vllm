@@ -256,3 +256,21 @@ purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
 - Moteur `StartedAt 14:23:45Z`, health 200 en 3,8 ms au cycle. Commit 73,3 %,
   invité 91 % (91 GB libres), pruner 0 err, nbaudit ok (vague `Image/` en
   cours de livraison).
+
+## 23/10 16:41Z — 17ᵉ wedge ; disque invité 93 % : l'équilibre tier/disque devient structurel
+
+- **17ᵉ wedge 15:12:39** (restart 15:14:12), puis **87 min tenues** (1 fail 1/2
+  non escaladé) avec **hit préfixe 73,8 % sur 60,9 M tokens** — l'amortissement
+  sain revient dès que le moteur vit assez longtemps. Charge record : **824
+  req/2 h dont 348 >100 K, pic 12 longues/min**.
+- **Disque invité 93 % (72 GB libres).** Le tier a atteint **84,7 GiB** entre
+  deux purges ; cap auto-serré à **27,7 GiB**, purge 16:20 = **1 574 blocs /
+  38,5 GiB** (0 err). Écritures ~18 GiB/h : le pruner tient, mais l'équilibre
+  est fragile — le cap 48 nominal est inatteignable tant que l'invité est à
+  93 %. **Q26 (suppression des 228 Go de modèles rejetés) = le levier
+  structurel.**
+- **0 nouvel ENOENT depuis 14:20:12** malgré la grosse purge de 16:20 — la
+  course reste prouvée 8/8 mais n'a pas rejoui cette fenêtre (le working set
+  post-restart est jeune). La veille continue.
+- Purge `/dev/shm` : **27 fichiers / 34,33 GiB** d'orphelins (bornés au
+  StartedAt 15:14:12) → **8,1 G / 13 %**, health 200 en 5,8 ms. Commit 74,3 %.
