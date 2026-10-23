@@ -1,34 +1,90 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
 
+import vllm.models.minimax_m3.nvidia.model as minimax_m3
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.model_loader.utils import configure_quant_config
 from vllm.model_executor.models.interfaces import supports_lora
+from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.models.minimax_m3.nvidia.model import (
     MiniMaxM3Model,
     MiniMaxM3SparseForCausalLM,
     MiniMaxM3SparseForConditionalGeneration,
 )
 
-
-@pytest.mark.parametrize(
-    "model_cls",
-    [MiniMaxM3SparseForCausalLM, MiniMaxM3SparseForConditionalGeneration],
+QKV = ["q_proj", "k_proj", "v_proj"]
+INDEXER = ["index_q_proj", "index_k_proj"]
+MODEL_CLASSES = pytest.mark.parametrize(
+    "model_cls,layers",
+    [
+        (MiniMaxM3SparseForCausalLM, "model.layers"),
+        (MiniMaxM3SparseForConditionalGeneration, "language_model.model.layers"),
+    ],
     ids=["text", "vl"],
 )
-def test_supports_lora_with_indexer_packing(model_cls):
-    assert supports_lora(model_cls)
-    assert model_cls.packed_modules_mapping["qkv_proj"] == [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "index_q_proj",
-        "index_k_proj",
-    ]
+
+
+def _language_model(**kwargs):
+    model = nn.Module()
+    model.make_empty_intermediate_tensors = None
+    return model
+
+
+def _build(model_cls, monkeypatch, lora_config):
+    monkeypatch.setattr(minimax_m3, "MiniMaxM3Model", _language_model)
+    monkeypatch.setattr(minimax_m3, "MiniMaxVLVisionModel", _language_model)
+    monkeypatch.setattr(minimax_m3, "init_vllm_registered_model", _language_model)
+    monkeypatch.setattr(
+        minimax_m3, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False)
+    )
+    monkeypatch.setattr(
+        model_cls, "_mark_tower_model", lambda *a, **k: nullcontext(), raising=False
+    )
+    text = SimpleNamespace(vocab_size=8, hidden_size=8)
+    model_config = SimpleNamespace(
+        hf_text_config=text,
+        hf_config=SimpleNamespace(text_config=text, vision_config={}),
+        multimodal_config=SimpleNamespace(mm_encoder_tp_mode="weights"),
+    )
+    return model_cls(
+        vllm_config=SimpleNamespace(
+            model_config=model_config, quant_config=None, lora_config=lora_config
+        )
+    )
+
+
+@MODEL_CLASSES
+@pytest.mark.parametrize(
+    "lora_config",
+    [None, SimpleNamespace(fully_sharded_loras=False)],
+    ids=["lora-off", "lora-on"],
+)
+def test_lora_packs_indexer_and_quant_checks_real_projections(
+    default_vllm_config, monkeypatch, model_cls, layers, lora_config
+):
+    dense, sparse = f"{layers}.0.self_attn", f"{layers}.3.self_attn"
+    quant_config = ModelOptMxFp8Config.from_config(
+        {
+            "quant_method": "mxfp8",
+            "ignored_layers": [f"{dense}.{p}" for p in QKV]
+            + [f"{sparse}.{p}" for p in QKV + INDEXER],
+        }
+    )
+    configure_quant_config(quant_config, model_cls)
+    model = _build(model_cls, monkeypatch, lora_config)
+
+    assert supports_lora(model)
+    assert get_packed_modules_mapping(model)["qkv_proj"] == QKV + INDEXER
+    assert quant_config.is_layer_excluded(f"{dense}.qkv_proj")
+    assert quant_config.is_layer_excluded(f"{sparse}.qkv_proj")
+    assert not quant_config.is_layer_excluded(f"{layers}.1.self_attn.qkv_proj")
 
 
 class _Recorder(nn.Module):

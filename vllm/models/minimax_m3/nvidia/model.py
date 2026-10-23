@@ -97,6 +97,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
+_LORA_PACKED_MODULES_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
+
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
@@ -1054,12 +1059,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3, Supports
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.packed_modules_mapping = _LORA_PACKED_MODULES_MAPPING
         config = vllm_config.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -1137,7 +1143,7 @@ class MiniMaxM3SparseForConditionalGeneration(
     supports_encoder_tp_data = True
 
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
@@ -1165,6 +1171,7 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.packed_modules_mapping = _LORA_PACKED_MODULES_MAPPING
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config
