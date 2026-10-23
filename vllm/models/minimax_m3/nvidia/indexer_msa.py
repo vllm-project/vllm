@@ -50,6 +50,7 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_score,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -1023,8 +1024,13 @@ class IndexKShardComm:
                 dtype=torch.int32,
                 device=self.device,
             )
+            # Decode writes four pages per stage, including the final partial stage.
+            score_cols = min(
+                MAX_K_TILES,
+                cdiv(vllm_config.model_config.max_model_len, 4 * PAGE_SIZE) * 4,
+            )
             self.scores = torch.empty(
-                (self.max_decode_tokens, total_index_heads, MAX_K_TILES),
+                (self.max_decode_tokens, total_index_heads, score_cols),
                 dtype=torch.float32,
                 device=self.device,
             )
