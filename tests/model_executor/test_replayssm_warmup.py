@@ -8,16 +8,13 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
-
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda() or not has_flashinfer(),
-    reason="FlashInfer ReplaySSM warmup tests require CUDA and FlashInfer",
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, MambaSpec
+from vllm.v1.worker.utils import allocate_kv_cache
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -39,8 +36,9 @@ def _autotune_runner(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            mamba_config=SimpleNamespace(backend=backend),
+            use_flashinfer_replayssm=(
+                use_replayssm and backend == MambaBackendEnum.FLASHINFER
+            ),
             use_v2_model_runner=use_v2_model_runner,
         ),
         uniform_decode_query_len=query_len,
@@ -117,26 +115,52 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     assert result is None
 
 
-def test_replayssm_autotune_slots_restore_state_and_trackers():
-    mixer = MambaMixer2.__new__(MambaMixer2)
-    torch.nn.Module.__init__(mixer)
-    mixer.use_replayssm = True
-    mixer.replayssm_buffer_len = 16
-    mixer.kv_cache = (
-        torch.full((4, 2), 3.0),
-        torch.full((4, 2), 3.0),
-        *(torch.full((4, 2, 17), 3.0) for _ in range(3)),
+@pytest.mark.parametrize(
+    ("use_v2", "layout"),
+    [(False, KVCacheLayout.LBNHC), (True, KVCacheLayout.BLHNC)],
+    ids=["v1", "v2"],
+)
+def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
+        dtypes=(torch.float32,) * 5,
+        page_size_padded=384,
+        use_flashinfer_replayssm=True,
     )
-    mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
-    mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
-    mixer._replayssm_prev_query_len = torch.full((4,), 3, dtype=torch.int32)
-    tracked = (
-        *mixer.kv_cache,
-        mixer._replayssm_ring_start,
-        mixer._replayssm_prev_num_accepted,
-        mixer._replayssm_prev_query_len,
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-
+    config.cache_config.kv_cache_layout = layout.name
+    kv_config = get_kv_cache_config_from_groups(
+        config,
+        [KVCacheGroupSpec(["layers.0.mixer", "layers.1.mixer"], spec)],
+        5 * (2 * spec.page_size_bytes + 8),
+    )
+    pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
+    mixers = []
+    states: list[torch.Tensor] = []
+    trackers: list[torch.Tensor] = []
+    for page in pages.values():
+        page.fill_(3)
+        mixer = MambaMixer2.__new__(MambaMixer2)
+        torch.nn.Module.__init__(mixer)
+        mixer.use_replayssm = True
+        mixer.use_flashinfer_replayssm = True
+        mixer.replayssm_buffer_len = 16
+        mixer.get_state_shape = lambda: spec.shapes
+        mixer.get_state_dtype = lambda: spec.dtypes
+        mixer.bind_kv_cache(page)
+        for tensor in mixer.kv_cache:
+            tensor.fill_(3)
+        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
+        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
+        states.extend(mixer.kv_cache)
+        trackers.extend(
+            (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
+        )
+        mixers.append(mixer)
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
     original_block_ids = block_ids.copy()
     block_table = SimpleNamespace(block_table=SimpleNamespace(np=block_ids))
@@ -144,22 +168,35 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
         block_tables=[block_table], commit_block_table=Mock()
     )
     runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
+        vllm_config=SimpleNamespace(use_v2_model_runner=use_v2),
         input_batch=SimpleNamespace(block_table=multi_group_block_table),
-        get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
+        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
+        get_model=lambda: SimpleNamespace(modules=lambda: mixers),
     )
 
-    with warmup._temporary_replayssm_autotune_state(runner, 2):
-        assert block_ids[:2, 0].tolist() == [1, 2]
-        for tensor in tracked:
+    with (
+        pytest.raises(RuntimeError, match="warmup failed"),
+        warmup._temporary_replayssm_autotune_state(runner, 2),
+    ):
+        if not use_v2:
+            assert block_ids[:2, 0].tolist() == [1, 2]
+        for tensor in (*states, *trackers):
             tensor[1:3].fill_(9)
+        raise RuntimeError("warmup failed")
 
     assert np.array_equal(block_ids, original_block_ids)
-    assert multi_group_block_table.commit_block_table.call_args_list == [
-        ((2,), {}),
-        ((2,), {}),
-    ]
-    for tensor in tracked:
+    if use_v2:
+        runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
+    else:
+        assert multi_group_block_table.commit_block_table.call_args_list == [
+            ((2,), {}),
+            ((2,), {}),
+        ]
+    for tensor in states:
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
-        assert torch.all(tensor[3] == 3)
+        assert torch.all(tensor[3:] == 3)
+    for tensor in trackers:
+        assert torch.count_nonzero(tensor) == 0
+    for page in pages.values():
+        assert torch.all(page[..., spec.state_content_size_bytes :] == 3)

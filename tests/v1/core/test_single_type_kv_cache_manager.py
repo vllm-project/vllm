@@ -241,6 +241,47 @@ def test_mamba_checkpoint_admission_matches_allocation(
     assert admission_estimate == allocation_estimate == allocated
 
 
+def test_replayssm_allocation_leaves_live_migration_to_worker():
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2,), (3,), (4,), (5,), (6,)),
+        dtypes=(torch.float32,) * 5,
+        use_flashinfer_replayssm=True,
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(num_gpu_blocks=6, enable_caching=True, hash_block_size=16)
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=16,
+    )
+
+    manager.allocate_new_blocks("request", num_tokens=14, num_tokens_main_model=14)
+    assert manager.take_pending_cow_copies() == []
+    source = manager.req_to_blocks["request"][-1]
+
+    # Optimistic async scheduling allocates column 1 while the worker can still
+    # use column 0 after rejected drafts. Allocation cannot decide state movement.
+    manager.allocate_new_blocks("request", num_tokens=18, num_tokens_main_model=18)
+    destination = manager.req_to_blocks["request"][-1]
+    assert source is not destination
+    assert manager.take_pending_cow_copies() == []
+    assert source.ref_cnt == 1
+    assert destination.ref_cnt == 1
+    # The worker can move forward or backward without allocating another block.
+    for scheduled_end in (19, 15):
+        assert (
+            manager.allocate_new_blocks(
+                "request", num_tokens=scheduled_end, num_tokens_main_model=scheduled_end
+            )
+            == []
+        )
+        assert manager.take_pending_cow_copies() == []
+        assert manager.req_to_blocks["request"] == [source, destination]
+
+
 @pytest.mark.parametrize("num_speculative_blocks", [1, 2, 3])
 @pytest.mark.parametrize("first_chunk_blocks", [2, 4])
 @pytest.mark.parametrize("retention_interval", [0, None])
