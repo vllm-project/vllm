@@ -114,6 +114,10 @@ class _EngineReasonerStub(ParserEngineReasoningAdapter):
     def reasoning_end_token_ids(self):
         return self._end_token_ids
 
+    @property
+    def implicit_reasoning_end_token_ids(self):
+        return frozenset()
+
     def find_reasoning_end(self, token_ids):
         self.windows.append(list(token_ids))
         for offset, token in enumerate(token_ids):
@@ -153,7 +157,7 @@ def test_bitmask_engine_reasoner_ends_midwindow_with_padding(backend):
     )
 
     assert bitmask is not None
-    assert bitmask.shape[0] == len(drafts) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert (bitmask[0] == -1).all()
     assert (bitmask[1] == -1).all()
     assert not (bitmask[2] == -1).all()
