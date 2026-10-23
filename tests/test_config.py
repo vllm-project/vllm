@@ -4,6 +4,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -29,6 +32,7 @@ from vllm.config import (
     HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -46,7 +50,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -284,6 +288,27 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize("supported", [True, False])
+def test_lora_rejected_at_config_time_for_unsupported_model(supported):
+    """Models without SupportsLoRA must fail during config validation with a
+    clear message, not with a bare assert inside the model constructor."""
+    model_config = SimpleNamespace(
+        is_lora_supported=supported,
+        architecture="Zamba2ForCausalLM",
+        architectures=["Zamba2ForCausalLM"],
+        model="Zyphra/Zamba2-1.2B-instruct",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    if supported:
+        lora_config.verify_with_model_config(model_config)
+    else:
+        with pytest.raises(
+            ValueError, match="LoRA is not supported for Zamba2ForCausalLM"
+        ):
+            lora_config.verify_with_model_config(model_config)
+
+
 def test_mamba_cache_mode_all_is_rejected():
     """The removed 'all' mode must fail validation instead of being ignored."""
     with pytest.raises(ValidationError, match="mamba_cache_mode"):
@@ -487,6 +512,48 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize("platform_enum", list(PlatformEnum))
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_model_runner_default_preserves_backend_fallback(
+    monkeypatch, platform_enum, has_triton
+):
+    platform = Platform()
+    platform._enum = platform_enum
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
+
+    config = VllmConfig()
+    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+
+
+def test_v2_frontend_config_can_be_created_without_triton():
+    # Start fresh so config imports observe the frontend's Triton availability.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import vllm.platforms as platforms
+                from vllm.platforms.interface import UnspecifiedPlatform
+
+                platforms._current_platform = UnspecifiedPlatform()
+                platforms._current_platform.device_type = "cpu"
+                import vllm.triton_utils
+
+                os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+                vllm.triton_utils.HAS_TRITON = False
+                from vllm.config import VllmConfig
+
+                config = VllmConfig()
+                assert config.use_v2_model_runner
+            """),
+        ],
+        check=True,
+    )
 
 
 def test_hisparse_requires_v2_model_runner():
@@ -924,7 +991,10 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
+)
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
@@ -3562,8 +3632,14 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize(
+    ("method", "drops_block"),
+    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+)
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+    method: str,
+    drops_block: bool,
     disable_eagle_block_drop: bool,
 ):
     # Start from an ngram config to avoid loading model metadata: these predicates
@@ -3573,10 +3649,12 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
         num_speculative_tokens=3,
         disable_eagle_block_drop=disable_eagle_block_drop,
     )
-    speculative_config.method = "eagle3"
+    speculative_config.method = method
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
+    assert speculative_config.use_eagle_block_drop() is (
+        drops_block and not disable_eagle_block_drop
+    )
 
 
 def test_draft_sample_method_gumbel_is_rejected():

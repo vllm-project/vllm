@@ -34,7 +34,7 @@ from fastapi.responses import Response
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
@@ -119,9 +119,9 @@ class PreloadSubcommand(CLISubcommand):
             type=int,
             default=None,
             help="Rendezvous port for the daemon's own TP group. Must differ "
-            "from the engine's --master-port (the daemon holds its group open "
-            "while serving) and match across nodes. Required when --nnodes > "
-            "1; defaults to a free port for single-node.",
+            "from the engine's --master-port (the daemons may still be loading "
+            "when the engine starts) and match across nodes. Required when "
+            "--nnodes > 1; defaults to a free port for single-node.",
         )
         parser.add_argument(
             "--weight-cache-draft-master-port",
