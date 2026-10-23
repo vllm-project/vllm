@@ -68,7 +68,10 @@ def _replayssm_autotune_kwargs(
 
 @contextmanager
 def _temporary_replayssm_autotune_state(
-    runner: "GPUModelRunner", max_num_reqs: int
+    runner: "GPUModelRunner",
+    max_num_reqs: int,
+    *,
+    prepare_dummy_block_tables: bool = True,
 ) -> Iterator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
@@ -80,8 +83,7 @@ def _temporary_replayssm_autotune_state(
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
-        tensors = (*module.kv_cache, *module.replayssm_cache)
-        for tensor in tensors:
+        for tensor in module.kv_cache:
             if tensor.numel():
                 # Overlaid groups may start at the same address with different
                 # widths. Preserve each bounded view; clearing twice is harmless.
@@ -92,7 +94,7 @@ def _temporary_replayssm_autotune_state(
 
     v2_runner: Any = runner
     block_tables = saved_block_ids = None
-    if not runner.vllm_config.use_v2_model_runner:
+    if prepare_dummy_block_tables and not runner.vllm_config.use_v2_model_runner:
         block_tables = runner.input_batch.block_table.block_tables
         saved_block_ids = tuple(
             block_table.block_table.np[:max_num_reqs, 0].copy()
@@ -106,17 +108,108 @@ def _temporary_replayssm_autotune_state(
     try:
         yield
     finally:
-        if runner.vllm_config.use_v2_model_runner:
-            v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
-        else:
-            assert block_tables is not None and saved_block_ids is not None
-            for block_table, block_ids in zip(block_tables, saved_block_ids):
-                block_table.block_table.np[:max_num_reqs, 0] = block_ids
-            runner.input_batch.block_table.commit_block_table(max_num_reqs)
+        if prepare_dummy_block_tables:
+            if runner.vllm_config.use_v2_model_runner:
+                v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
+            else:
+                assert block_tables is not None and saved_block_ids is not None
+                for block_table, block_ids in zip(block_tables, saved_block_ids):
+                    block_table.block_table.np[:max_num_reqs, 0] = block_ids
+                runner.input_batch.block_table.commit_block_table(max_num_reqs)
         for tensor in reset_tensors:
             tensor[1 : max_num_reqs + 1].zero_()
         for tensor in reset_trackers.values():
             tensor.zero_()
+
+
+def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
+    """Warm request lifecycle kernels with bounded, non-padding cache slots."""
+    config = runner.vllm_config
+    if not config.use_flashinfer_replayssm:
+        return
+    num_slots = min(runner.kv_cache_config.num_blocks - 1, 2)
+    if num_slots <= 0:
+        return
+
+    from vllm.v1.kv_cache_interface import MambaSpec
+    from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
+
+    use_v2 = config.use_v2_model_runner
+    v2_runner: Any = runner
+    grouped = []
+    for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        if not isinstance(spec, MambaSpec) or not spec.use_flashinfer_replayssm:
+            continue
+        mixers = [
+            config.compilation_config.static_forward_context[name]
+            for name in group.layer_names
+        ]
+        if not mixers:
+            continue
+        table = (
+            v2_runner.block_tables.input_block_tables[group_id]
+            if use_v2
+            else runner.input_batch.block_table[group_id].get_device_tensor(1)
+        )
+        # Match the runtime stride without changing its block-table contents.
+        scratch_table = torch.empty_strided(
+            (1, 2), table.stride(), dtype=table.dtype, device=table.device
+        )
+        scratch_table[0, 0] = 1
+        scratch_table[0, 1] = num_slots
+        grouped.append((mixers, spec, scratch_table))
+    if not grouped:
+        return
+
+    with _temporary_replayssm_autotune_state(
+        runner, num_slots, prepare_dummy_block_tables=False
+    ):
+        for mixers, _, _ in grouped:
+            for mixer in mixers:
+                for state in mixer.kv_cache:
+                    state[1 : num_slots + 1].zero_()
+                mixer._replayssm_ring_start.zero_()
+                mixer._replayssm_prev_num_accepted.zero_()
+
+        context = ReplaySSMModelContext.create(grouped, runner.max_num_reqs)
+        device = grouped[0][2].device
+        align = grouped[0][1].mamba_cache_mode == "align"
+        block_size = grouped[0][1].block_size
+        query_len = (
+            v2_runner.decode_query_len if use_v2 else runner.uniform_decode_query_len
+        )
+        idx_mapping = (
+            torch.zeros(1, dtype=torch.int64, device=device) if use_v2 else None
+        )
+        live_cols = torch.ones(1, dtype=torch.int32, device=device) if align else None
+        if align:
+            context.reset_new_slots(
+                idx_mapping=idx_mapping,
+                src_cols=torch.full((1,), -1, dtype=torch.int32, device=device),
+                dst_cols=live_cols,
+                num_reqs=1,
+            )
+        context.postprocess(
+            idx_mapping=idx_mapping,
+            query_metadata=torch.tensor(
+                [0, query_len] if use_v2 else [query_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            query_metadata_is_cumulative=use_v2,
+            num_computed_tokens=torch.full(
+                (1,),
+                block_size if use_v2 else block_size - 1,
+                dtype=torch.int32,
+                device=device,
+            ),
+            num_computed_is_post_step=use_v2,
+            num_accepted_tokens=torch.ones(1, dtype=torch.int32, device=device),
+            is_prefilling=torch.zeros(1, dtype=torch.bool, device=device),
+            live_cols=live_cols,
+            num_reqs=1,
+        )
 
 
 def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:

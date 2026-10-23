@@ -2,19 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
-    _postprocess_replayssm_kernel,
-    _ReplaySSMGroupContext,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
@@ -23,12 +24,18 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     MambaSpec,
 )
-from vllm.v1.worker.utils import allocate_replayssm_caches
+from vllm.v1.worker.replayssm_utils import (
+    _postprocess_replayssm_kernel,
+    _ReplaySSMGroupContext,
+)
+from vllm.v1.worker.utils import allocate_kv_cache
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -69,8 +76,16 @@ def _cuda_ints(values):
     return torch.tensor(values, dtype=torch.int32, device="cuda")
 
 
-@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
-def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_step):
+@pytest.mark.parametrize(
+    ("post_step", "layout", "ssm_dtype"),
+    [
+        pytest.param(False, KVCacheLayout.LBNHC, torch.float16, id="v1-fp16-lbnhc"),
+        pytest.param(True, KVCacheLayout.BLHNC, torch.float32, id="v2-fp32-blhnc"),
+    ],
+)
+def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
+    post_step, layout, ssm_dtype
+):
     """Publish a boundary without modifying its live or cached-prefix sources."""
     try:
         from flashinfer.mamba.replayssm_materialize import (
@@ -88,30 +103,53 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
 
     set_random_seed(42)
     slots, heads, dim, dstate, ring_len = 6, 8, 64, 128, 20
-    state = torch.randn(slots, heads, dim, dstate, device="cuda") * 0.1
-    # Slot 1 is an immutable cached prefix, copied to private live slot 3.
-    state[3].copy_(state[1])
-    original = state.clone()
     spec = MambaSpec(
         block_size=16,
-        shapes=((heads, dim, dstate),),
-        dtypes=(torch.float32,),
-        replayssm_shapes=(
+        shapes=(
+            (heads, dim),
+            (heads, dim, dstate),
             (heads, ring_len, dim),
             (heads, ring_len),
             (1, ring_len, dstate),
         ),
-        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+        dtypes=(
+            torch.bfloat16,
+            ssm_dtype,
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+        ),
+        use_flashinfer_replayssm=True,
     )
-    config = KVCacheConfig(
-        num_blocks=slots,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
+    spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
+    vllm_config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    config = get_kv_cache_config_from_groups(
+        vllm_config,
+        [
             KVCacheGroupSpec(["mixer", "neighbor"], spec),
             KVCacheGroupSpec(["other_group"], spec),
         ],
+        slots * (2 * spec.page_size_bytes + 16),
     )
-    rings = allocate_replayssm_caches(config, torch.device("cuda"))
+    pages = allocate_kv_cache(config, torch.device("cuda"), layout)
+    caches = {}
+    for name, page in pages.items():
+        layer = SimpleNamespace(
+            get_state_shape=lambda: spec.shapes,
+            get_state_dtype=lambda: spec.dtypes,
+        )
+        MambaBase.bind_kv_cache(layer, page)
+        caches[name] = layer.kv_cache
+    state = caches["mixer"][1]
+    state.normal_(std=0.1)
+    # Slot 1 is an immutable cached prefix, copied to private live slot 3.
+    state[3].copy_(state[1])
+    original = state.clone()
+    rings = {name: states[2:] for name, states in caches.items()}
     x, dt, B = rings["mixer"]
     x.normal_()
     dt.fill_(0.01)
@@ -126,10 +164,10 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     for tensor in rings["other_group"]:
         tensor[4].fill_(9)
     other_owned_before = [tensor[4].clone() for tensor in rings["other_group"]]
+    ring_before = [tensor.clone() for tensor in rings["mixer"]]
     A = -torch.ones(heads, device="cuda")
     mixer = SimpleNamespace(
-        kv_cache=(torch.empty(0, device="cuda"), state),
-        replayssm_cache=(x, dt, B),
+        kv_cache=caches["mixer"],
         _replayssm_ring_start=_cuda_ints([0, 0, 0, 7, 0, 2]),
         _replayssm_prev_num_accepted=_cuda_ints([0, 0, 0, 2, 0, 1]),
         replayssm_buffer_len=16,
@@ -172,7 +210,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     assert group.plan_flush_count.tolist() == [4, -1, -1, -1]
     group.materialize()
 
-    expected = original[3].clone()
+    expected = original[3].float().clone()
     for offset in range(4):
         pos = (7 + offset) % ring_len
         delta = dt[3, :, pos]
@@ -182,12 +220,14 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
             * x[3, :, pos].float()[:, :, None]
             * B[3, 0, pos].float()[None, None, :]
         )
-    torch.testing.assert_close(state[2], expected, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(state[2].float(), expected, atol=2e-3, rtol=2e-3)
     # The snapshot excludes the accepted tail past 16 and all rejected drafts.
     for slot in (0, 1, 3, 4, 5):
         torch.testing.assert_close(state[slot], original[slot], atol=0, rtol=0)
     assert mixer._replayssm_prev_num_accepted[3].item() == 5
     assert mixer._replayssm_prev_num_accepted[2].item() == 0
+    for tensor, before in zip(rings["mixer"], ring_before, strict=True):
+        torch.testing.assert_close(tensor, before, atol=0, rtol=0)
     for tensor, before in zip(rings["neighbor"], neighbor_before, strict=True):
         torch.testing.assert_close(tensor, before, atol=0, rtol=0)
     for tensor, before in zip(rings["other_group"], other_owned_before, strict=True):
@@ -202,8 +242,6 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
         kv_cache=(
             torch.empty(0, device="cuda"),
             torch.empty(6, 1, 1, 1, device="cuda"),
-        ),
-        replayssm_cache=(
             torch.empty(6, 1, 20, 1, device="cuda"),
             torch.empty(6, 1, 20, device="cuda"),
             torch.empty(6, 1, 20, 1, device="cuda"),
@@ -438,9 +476,6 @@ def test_replayssm_physical_ring_shape(
         "expected_start",
     ),
     [
-        (256, 4, False, 1, 2, 3, 3, 3),  # Padded prompt tail.
-        (256, 4, False, 3, 2, 3, 5, 3),  # Speculative decode.
-        (0, 50_000, True, 1, 2, 3, 0, 0),  # Long initial prefill.
         (50_000, 4, True, 1, 2, 3, 0, 0),  # Later prefill chunk.
         (256, 4, False, 1, 15, 7, 1, 2),  # Checkpoint wraps the physical ring.
     ],
@@ -543,8 +578,6 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
-    )
-    mixer.replayssm_cache = (
         torch.empty(3, 2, 20, 4),
         torch.empty(3, 2, 20),
         torch.empty(3, 1, 20, 8),

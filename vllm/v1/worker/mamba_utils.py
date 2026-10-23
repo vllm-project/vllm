@@ -15,14 +15,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    ReplaySSMModelContext,
-    _reinterpret_u64_as_i64,
-    mamba_state_copy_boundary,
-)
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -32,6 +28,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.replayssm_utils import (
+    ReplaySSMModelContext,
+    _reinterpret_u64_as_i64,
+    mamba_state_copy_boundary,
+)
 
 logger = init_logger(__name__)
 
@@ -523,7 +524,7 @@ def preprocess_mamba_align_fused_kernel(
     num_reqs,
     BLOCK_SIZE: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
-    PRESERVE_ACCEPTED: tl.constexpr = False,
+    HAS_IDX_MAPPING: tl.constexpr = True,
 ):
     """Fused align preprocess: emit the pre-copy src column/offset AND advance
     state_idx in a single launch (V2 align).
@@ -533,15 +534,18 @@ def preprocess_mamba_align_fused_kernel(
       2. Store the pre-copy src columns for ``precopy_mamba_align_fused_kernel``:
          - src_col = state_idx (the previous running block column)
          - src_off = max(num_accepted - 1, 0) (the accepted-token bias)
-      3. Advance state_idx to the new running block. Unless PRESERVE_ACCEPTED is
-         set, reset num_accepted to 1 when the block changes: the migrated state
+      3. Advance state_idx to the new running block. Reset num_accepted to 1
+         when the block changes: the migrated convolution state
          now sits at the start of the new block and must be read with the neutral
-         accepted-token bias. ReplaySSM block copies preserve the accepted count
-         because its copied live slot retains the same ring position.
+         accepted-token bias. ReplaySSM ring cursors are migrated separately.
     """
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < num_reqs
-    req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=0)
+    if HAS_IDX_MAPPING:
+        req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=-1)
+        mask = mask & (req_indices >= 0)
+    else:
+        req_indices = offsets
 
     state_idx = tl.load(state_idx_ptr + req_indices, mask=mask, other=-1)
     num_accepted = tl.load(num_accepted_tokens_ptr + req_indices, mask=mask, other=1)
@@ -556,9 +560,8 @@ def preprocess_mamba_align_fused_kernel(
     computed_after = num_computed + query_end - query_start
     new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
     tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
-    if not PRESERVE_ACCEPTED:
-        should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
-        tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
+    should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
+    tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
@@ -584,6 +587,7 @@ def precopy_mamba_align_fused_kernel(
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
+    ZERO_TEMPORAL_TOKEN_BIAS: tl.constexpr = False,
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
@@ -623,6 +627,9 @@ def precopy_mamba_align_fused_kernel(
         return
 
     token_bias = tl.load(token_bias_ptr + req_idx)
+    if ZERO_TEMPORAL_TOKEN_BIAS:
+        conv_width = tl.load(state_conv_widths_ptr + state_idx)
+        token_bias = tl.where(conv_width > 0, token_bias, 0)
     _copy_mamba_state_block(
         state_idx,
         req_idx,
@@ -871,6 +878,20 @@ class MambaSpecDecodeGPUContext:
         copy_funcs_by_spec = {
             spec: copy_funcs[spec.mamba_type] for spec in mamba_groups
         }
+        for spec in mamba_groups:
+            if spec.use_flashinfer_replayssm:
+                if (
+                    spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+                    or len(spec.shapes) != 5
+                    or len(spec.dtypes) != 5
+                    or copy_funcs_by_spec[spec]
+                    != (get_conv_copy_spec, get_temporal_copy_spec)
+                ):
+                    raise ValueError(
+                        "FlashInfer ReplaySSM requires two canonical Mamba2 "
+                        "states and three ring states"
+                    )
+                copy_funcs_by_spec[spec] += (get_temporal_copy_spec,) * 3
 
         # Count physical state tensors across all Mamba groups. Different
         # groups may expose different state specs.
@@ -1015,9 +1036,7 @@ class MambaSpecDecodeGPUContext:
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
         replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
-        has_replayssm_layer = False
         has_baseline_layer = False
-        has_flashinfer_replayssm = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
             mixers: list[Any] = []
@@ -1030,10 +1049,14 @@ class MambaSpecDecodeGPUContext:
                 is_flashinfer_replayssm = getattr(
                     attention, "use_flashinfer_replayssm", False
                 )
-                has_replayssm_layer |= bool(is_flashinfer_replayssm)
                 has_baseline_layer |= not is_flashinfer_replayssm
                 if is_flashinfer_replayssm:
+                    if not mamba_spec.use_flashinfer_replayssm or len(kv_caches) != 5:
+                        raise ValueError(
+                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                        )
                     mixers.append(attention)
+                    state_copy_funcs += (get_temporal_copy_spec,) * 3
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
                         f"Expected at least {len(state_copy_funcs)} Mamba state "
@@ -1082,7 +1105,6 @@ class MambaSpecDecodeGPUContext:
                             self.state_conv_widths[idx] = state.size(1)
                             self.state_inner_sizes[idx] = state.stride(1)
                     else:
-                        has_flashinfer_replayssm |= bool(is_flashinfer_replayssm)
                         # Temporal state: inner_size = natural elements per
                         # block (prod of inner dims).  The kernel uses this
                         # to compute copy_size = inner_size * elem_size,
@@ -1131,7 +1153,7 @@ class MambaSpecDecodeGPUContext:
                 )
 
         assert idx == self.num_states
-        if has_replayssm_layer and has_baseline_layer:
+        if replayssm_groups and has_baseline_layer:
             raise ValueError(
                 "mixed FlashInfer ReplaySSM and baseline Mamba layers are unsupported"
             )
@@ -1154,7 +1176,7 @@ class MambaSpecDecodeGPUContext:
                 aligned_bt.data_ptr()
             )
 
-        if has_flashinfer_replayssm:
+        if replayssm_groups:
             self.replayssm = ReplaySSMModelContext.create(
                 replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
@@ -1301,6 +1323,7 @@ class MambaSpecDecodeGPUContext:
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
+            ZERO_TEMPORAL_TOKEN_BIAS=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
@@ -1514,6 +1537,9 @@ def preprocess_mamba(
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
     copy_bufs: MambaCopyBuffers,
     align_ctx: MambaSpecDecodeGPUContext | None = None,
+    num_computed_tokens_gpu: torch.Tensor | None = None,
+    query_start_loc_gpu: torch.Tensor | None = None,
+    num_accepted_tokens_gpu: torch.Tensor | None = None,
 ):
     """Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
@@ -1544,8 +1570,6 @@ def preprocess_mamba(
             )
 
         fused.src_col.np[:num_reqs] = -1
-        # ReplaySSM reset consumes only source/destination columns. token_bias
-        # belongs to the generic pre-copy kernel, which ReplaySSM does not call.
         if fused.ctx.replayssm is None:
             fused.token_bias.np[:num_reqs] = 0
 
@@ -1576,14 +1600,12 @@ def preprocess_mamba(
         if fused is not None:
             fused.state_idx.np[i] = curr_state_idx
             if fused.ctx.replayssm is not None:
-                # A negative source means that this request has no live owner.
-                # Preserve same-column sources so ordinary decode steps are
-                # not mistaken for fresh slot ownership.
-                fused.src_col.np[i] = prev_state_idx
+                # The GPU decision uses the actual computed count and the
+                # restored accepted count in current batch order.
+                fused.state_idx.np[i] = prev_state_idx
 
-        # Baseline Mamba migrates canonical state when ownership crosses a
-        # column. ReplaySSM receives that ownership move through scheduler block
-        # copies and uses src/dst only to reset genuinely fresh ring slots.
+        # Generic Mamba retains its CPU accepted-token staging. ReplaySSM
+        # computes the convolution offset from the restored GPU count below.
         if (
             prev_state_idx != -1
             and prev_state_idx != curr_state_idx
@@ -1610,8 +1632,23 @@ def preprocess_mamba(
 
     if fused is not None:
         fused.state_idx.copy_to_gpu(num_reqs)
-        fused.src_col.copy_to_gpu(num_reqs)
         if fused.ctx.replayssm is not None:
+            assert num_computed_tokens_gpu is not None
+            assert query_start_loc_gpu is not None
+            assert num_accepted_tokens_gpu is not None
+            preprocess_mamba_align_fused_kernel[(triton.cdiv(num_reqs, 256),)](
+                None,
+                fused.state_idx.gpu,
+                num_computed_tokens_gpu,
+                query_start_loc_gpu,
+                num_accepted_tokens_gpu,
+                fused.src_col.gpu,
+                fused.token_bias.gpu,
+                num_reqs,
+                BLOCK_SIZE=256,
+                MAMBA_BLOCK_SIZE=block_size,
+                HAS_IDX_MAPPING=False,
+            )
             fused.ctx.replayssm.reset_new_slots(
                 idx_mapping=None,
                 src_cols=fused.src_col.gpu,
@@ -1619,14 +1656,15 @@ def preprocess_mamba(
                 num_reqs=num_reqs,
             )
         else:
+            fused.src_col.copy_to_gpu(num_reqs)
             fused.token_bias.copy_to_gpu(num_reqs)
-            fused.ctx.run_fused_precopy(
-                num_reqs=num_reqs,
-                state_idx_gpu=fused.state_idx.gpu,
-                src_col_gpu=fused.src_col.gpu,
-                token_bias_gpu=fused.token_bias.gpu,
-                idx_mapping=None,
-            )
+        fused.ctx.run_fused_precopy(
+            num_reqs=num_reqs,
+            state_idx_gpu=fused.state_idx.gpu,
+            src_col_gpu=fused.src_col.gpu,
+            token_bias_gpu=fused.token_bias.gpu,
+            idx_mapping=None,
+        )
     else:
         do_mamba_copy_block(copy_bufs)
 
@@ -1706,7 +1744,6 @@ def postprocess_mamba_gpu(
             live_cols=live_cols,
             num_reqs=num_reqs,
         )
-        ctx.replayssm.materialize()
 
     if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:
         # CPU consumers need the normalized live counts for the next step, not
@@ -1722,12 +1759,13 @@ def stage_postprocess_inputs_to_gpu(
     req_ids: list[str],
     num_reqs: int,
     requests: dict[str, CachedRequestState],
+    *,
+    num_decodes: int | None = None,
 ) -> None:
     """Stage the per-request decisions consumed after token acceptance.
 
-    One host pass writes scheduled, computed, draft, and prefill values into
-    pinned views shared by generic Mamba postprocess and ReplaySSM tracker
-    publication, then launches non-blocking H→D copies.
+    Generic Mamba uses scheduled, computed, and draft counts. ReplaySSM also
+    uses the final Mamba attention split to reset trackers after prefill.
     """
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
@@ -1739,7 +1777,6 @@ def stage_postprocess_inputs_to_gpu(
     scheduled_np = ctx.num_scheduled_tokens_buf.np
     computed_np = ctx.num_computed_tokens_buf.np
     draft_np = ctx.num_draft_tokens_buf.np
-    prefill_np = ctx.is_prefilling_buf.np
     for i in range(num_reqs):
         req_id = req_ids[i]
         scheduled = num_scheduled[req_id]
@@ -1749,12 +1786,12 @@ def stage_postprocess_inputs_to_gpu(
         scheduled_np[i] = scheduled
         computed_np[i] = computed
         draft_np[i] = num_draft
-        # Match Mamba attention: stateful one-token prompt tails, including
-        # those padded with speculative placeholders, run the decode kernels.
-        prefill_np[i] = computed < req_state.num_prompt_tokens and not (
-            computed > 0 and (scheduled == 1 or scheduled == num_draft + 1)
-        )
     ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)
-    ctx.is_prefilling_buf.copy_to_gpu(num_reqs)
+    if num_decodes is not None:
+        # Full decode graphs can include padded rows after the real requests.
+        num_decodes = min(num_decodes, num_reqs)
+        ctx.is_prefilling_buf.np[:num_decodes] = False
+        ctx.is_prefilling_buf.np[num_decodes:num_reqs] = True
+        ctx.is_prefilling_buf.copy_to_gpu(num_reqs)

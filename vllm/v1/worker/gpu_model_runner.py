@@ -132,7 +132,10 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadata,
+    Mamba2AttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -227,7 +230,7 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
-    allocate_replayssm_caches,
+    allocate_replayssm_ring_trackers,
     bind_kv_cache,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
@@ -4191,6 +4194,9 @@ class GPUModelRunner(
                     self._get_mamba_state_copy_funcs(),
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
+                    num_computed_tokens_gpu=self.num_computed_tokens,
+                    query_start_loc_gpu=self.query_start_loc.gpu,
+                    num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 )
                 if not self._use_flashinfer_replayssm:
                     # Generic Mamba may reset offsets after shifting state.
@@ -4201,24 +4207,6 @@ class GPUModelRunner(
 
             elif self._use_flashinfer_replayssm:
                 mamba_bufs = self._get_mamba_bufs()
-
-            # Stage inputs whenever the fused state-copy or model-wide
-            # ReplaySSM tracker postprocess will run. Mode none does not run
-            # prefix preprocessing and always uses logical live column zero.
-            if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
-                mamba_ctx = mamba_bufs.postprocess_align
-                # Every forward: copy this batch's scheduler decisions into
-                # persistent GPU buffers before model execution. After sampling
-                # reveals the accepted-token counts, postprocess_mamba_gpu uses
-                # the same snapshot to migrate canonical Mamba state and/or
-                # publish ReplaySSM's model-wide ring trackers.
-                mamba_utils.stage_postprocess_inputs_to_gpu(
-                    mamba_ctx,
-                    scheduler_output,
-                    self.input_batch.req_ids,
-                    num_reqs,
-                    self.requests,
-                )
 
             use_spec_decode = self.speculative_config is not None
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -4249,6 +4237,27 @@ class GPUModelRunner(
                     slot_mappings=slot_mappings_by_group,
                 )
             )
+
+            if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
+                mamba_ctx = mamba_bufs.postprocess_align
+                num_mamba_decodes = None
+                if self._use_flashinfer_replayssm:
+                    assert isinstance(attn_metadata, dict)
+                    mamba_group = self.kv_cache_config.kv_cache_groups[
+                        mamba_ctx.mamba_group_ids[0]
+                    ]
+                    # Cache groups share the request split, but own distinct slots.
+                    mamba_metadata = attn_metadata[mamba_group.layer_names[0]]
+                    assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
+                    num_mamba_decodes = mamba_metadata.num_decodes
+                mamba_utils.stage_postprocess_inputs_to_gpu(
+                    mamba_ctx,
+                    scheduler_output,
+                    self.input_batch.req_ids,
+                    num_reqs,
+                    self.requests,
+                    num_decodes=num_mamba_decodes,
+                )
 
             (
                 input_ids,
@@ -7093,28 +7102,30 @@ class GPUModelRunner(
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
-            replayssm_caches = allocate_replayssm_caches(kv_cache_config, self.device)
 
-            # Binding also allocates group-shared ReplaySSM trackers.
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
                 kv_caches[layer_name] = kv_caches[target_layer_name]
 
-            num_attn_module = (
-                2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
-            )
-            attn_groups = [g for groups in self.attn_groups for g in groups]
-            if self.speculative_config:
-                attn_groups += getattr(self.drafter, "draft_attn_groups", [])
-            bind_kv_cache(
+            replayssm_ring_trackers = allocate_replayssm_ring_trackers(
                 kv_caches,
                 self.compilation_config.static_forward_context,
-                self.kv_caches,
-                num_attn_module,
-                kv_cache_groups=kv_cache_config.kv_cache_groups,
-                layer_kv_caches=map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
-                replayssm_caches=replayssm_caches,
+                kv_cache_config.kv_cache_groups,
             )
+        num_attn_module = (
+            2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
+        )
+        attn_groups = [g for groups in self.attn_groups for g in groups]
+        if self.speculative_config:
+            attn_groups += getattr(self.drafter, "draft_attn_groups", [])
+        bind_kv_cache(
+            kv_caches,
+            self.compilation_config.static_forward_context,
+            self.kv_caches,
+            num_attn_module,
+            replayssm_ring_trackers=replayssm_ring_trackers,
+            layer_kv_caches=map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
+        )
         # Validate and cache optional ReplaySSM-owned state once cache binding
         # has populated every layer. Block copies are a per-step hot path.
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(

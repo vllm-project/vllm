@@ -8,11 +8,16 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FLASHINFER_REPLAYSSM_STATE_ALIGNMENT,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 
 class MambaBase(AttentionLayerBase):
@@ -23,24 +28,27 @@ class MambaBase(AttentionLayerBase):
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
-    # ReplaySSM rings are auxiliary backend state, not canonical Mamba pages.
-    replayssm_cache: tuple[torch.Tensor, ...] = ()
     supports_dcp: bool = False
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.
 
         Each block's ``C`` bytes hold the layer's states (e.g. conv, ssm)
-        packed contiguously; slice them out and reinterpret per dtype/shape.
+        packed by dtype/shape. FlashInfer ReplaySSM aligns each state to 16 bytes.
         """
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
         offset = 0
+        alignment = (
+            FLASHINFER_REPLAYSSM_STATE_ALIGNMENT
+            if getattr(self, "use_flashinfer_replayssm", False)
+            else 1
+        )
         for shape, dtype in zip(self.get_state_shape(), self.get_state_dtype()):
             nbytes = prod(shape) * get_dtype_size(dtype)
             state = pages[:, offset : offset + nbytes].view(dtype)
             states.append(state.view(-1, *shape))
-            offset += nbytes
+            offset += round_up(nbytes, alignment)
         self.kv_cache = tuple(states)
 
     @abstractmethod
@@ -64,12 +72,6 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
-    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ()
-
-    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return ()
-
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
         inside a prefill, if any; in align mode, the platform makes Mamba blocks
@@ -84,8 +86,7 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
-            replayssm_shapes=self.get_replayssm_state_shape(),
-            replayssm_dtypes=self.get_replayssm_state_dtype(),
+            use_flashinfer_replayssm=getattr(self, "use_flashinfer_replayssm", False),
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

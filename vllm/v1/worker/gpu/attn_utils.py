@@ -41,7 +41,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
-    allocate_replayssm_caches,
+    allocate_replayssm_ring_trackers,
     bind_kv_cache_to_layers,
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
@@ -424,29 +424,22 @@ def init_kv_cache(
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
-        replayssm_caches = allocate_replayssm_caches(kv_cache_config, device)
         for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
             kv_caches[layer_name] = kv_caches[target]
-        # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
-        # decoder layer, so a layer name carries two integers (layer + module index).
-        num_attn_module = (
-            2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
-        )
-        bindable_caches = map_kv_caches_to_kernel_blocks(
-            {
-                name: cache
-                for name, cache in kv_caches.items()
-                if name in forward_context
-            },
-            attn_groups,
-        )
-        bind_kv_cache_to_layers(
-            bindable_caches,
+        replayssm_ring_trackers = allocate_replayssm_ring_trackers(
+            kv_caches,
             forward_context,
-            num_attn_module,
-            kv_cache_groups=kv_cache_config.kv_cache_groups,
-            replayssm_caches=replayssm_caches,
+            kv_cache_config.kv_cache_groups,
         )
+    bindable_caches = map_kv_caches_to_kernel_blocks(
+        {name: cache for name, cache in kv_caches.items() if name in forward_context},
+        attn_groups,
+    )
+    bind_kv_cache_to_layers(
+        bindable_caches,
+        forward_context,
+        replayssm_ring_trackers=replayssm_ring_trackers,
+    )
     return kv_caches
 
 

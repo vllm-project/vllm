@@ -164,7 +164,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 allocate_checkpointing_ssu_scratch,
             )
 
-            nheads = kv_cache_spec.replayssm_shapes[0][0]
+            nheads = kv_cache_spec.shapes[2][0]
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,

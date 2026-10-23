@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -9,16 +8,13 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
-
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda() or not has_flashinfer(),
-    reason="FlashInfer ReplaySSM warmup tests require CUDA and FlashInfer",
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, MambaSpec
+from vllm.v1.worker.utils import allocate_kv_cache
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -120,25 +116,47 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
 
 
 @pytest.mark.parametrize(
-    ("use_v2", "fail_warmup"),
-    [(False, False), (True, False), (False, True)],
-    ids=["v1-success", "v2-success", "v1-failure"],
+    ("use_v2", "layout"),
+    [(False, KVCacheLayout.LBNHC), (True, KVCacheLayout.BLHNC)],
+    ids=["v1", "v2"],
 )
-def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup):
-    raw = tuple(torch.full((5, 2, 17), 3.0) for _ in range(3))
+def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
+        dtypes=(torch.float32,) * 5,
+        page_size_padded=384,
+        use_flashinfer_replayssm=True,
+    )
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config.cache_config.kv_cache_layout = layout.name
+    kv_config = get_kv_cache_config_from_groups(
+        config,
+        [KVCacheGroupSpec(["layers.0.mixer", "layers.1.mixer"], spec)],
+        5 * (2 * spec.page_size_bytes + 8),
+    )
+    pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     mixers = []
     states: list[torch.Tensor] = []
     trackers: list[torch.Tensor] = []
-    for width in (3, 11):
+    for page in pages.values():
+        page.fill_(3)
         mixer = MambaMixer2.__new__(MambaMixer2)
         torch.nn.Module.__init__(mixer)
         mixer.use_replayssm = True
+        mixer.use_flashinfer_replayssm = True
         mixer.replayssm_buffer_len = 16
-        mixer.kv_cache = tuple(torch.full((5, 2), 3.0) for _ in range(2))
-        mixer.replayssm_cache = tuple(tensor[:, :, :width] for tensor in raw)
+        mixer.get_state_shape = lambda: spec.shapes
+        mixer.get_state_dtype = lambda: spec.dtypes
+        mixer.bind_kv_cache(page)
+        for tensor in mixer.kv_cache:
+            tensor.fill_(3)
         mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
         mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
-        states.extend((*mixer.kv_cache, *mixer.replayssm_cache))
+        states.extend(mixer.kv_cache)
         trackers.extend(
             (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
         )
@@ -156,18 +174,15 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup
         get_model=lambda: SimpleNamespace(modules=lambda: mixers),
     )
 
-    error = (
-        pytest.raises(RuntimeError, match="warmup failed")
-        if fail_warmup
-        else nullcontext()
-    )
-    with error, warmup._temporary_replayssm_autotune_state(runner, 2):
+    with (
+        pytest.raises(RuntimeError, match="warmup failed"),
+        warmup._temporary_replayssm_autotune_state(runner, 2),
+    ):
         if not use_v2:
             assert block_ids[:2, 0].tolist() == [1, 2]
         for tensor in (*states, *trackers):
             tensor[1:3].fill_(9)
-        if fail_warmup:
-            raise RuntimeError("warmup failed")
+        raise RuntimeError("warmup failed")
 
     assert np.array_equal(block_ids, original_block_ids)
     if use_v2:
@@ -183,5 +198,5 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup
         assert torch.all(tensor[3:] == 3)
     for tensor in trackers:
         assert torch.count_nonzero(tensor) == 0
-    for tensor in raw:
-        assert torch.all(tensor[1:3, :, 11:] == 3)
+    for page in pages.values():
+        assert torch.all(page[..., spec.state_content_size_bytes :] == 3)

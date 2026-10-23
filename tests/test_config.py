@@ -105,11 +105,16 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
-    ("mode", "input_dtype"),
-    [("align", torch.bfloat16), ("align", torch.float16), ("none", torch.float16)],
-    ids=["align-bf16", "align-fp16-rejected", "none-fp16"],
+    ("mode", "input_dtype", "use_ubatching", "error"),
+    [
+        ("align", torch.bfloat16, False, None),
+        ("align", torch.float16, False, "bfloat16 model inputs"),
+        ("none", torch.float16, False, None),
+        ("align", torch.bfloat16, True, "ReplaySSM does not support microbatching"),
+    ],
+    ids=["align-bf16", "align-fp16-rejected", "none-fp16", "microbatch-rejected"],
 )
-def test_flashinfer_replayssm_validates_input_dtype(mode, input_dtype):
+def test_flashinfer_replayssm_validates_config(mode, input_dtype, use_ubatching, error):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
@@ -124,36 +129,16 @@ def test_flashinfer_replayssm_validates_input_dtype(mode, input_dtype):
             dtype=input_dtype,
         ),
         mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, use_ubatching=use_ubatching
+        ),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
-    if mode != "none" and input_dtype != torch.bfloat16:
-        with pytest.raises(ValueError, match="bfloat16 model inputs"):
+    if error:
+        with pytest.raises(ValueError, match=error):
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-def test_flashinfer_replayssm_rejects_microbatching():
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            mamba_cache_mode="align",
-            replayssm_buffer_len=16,
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="NemotronHForCausalLM",
-            dtype=torch.bfloat16,
-        ),
-        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=True),
-        kv_transfer_config=None,
-        use_v2_model_runner=True,
-    )
-    with pytest.raises(ValueError, match="ReplaySSM does not support microbatching"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 

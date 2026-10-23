@@ -194,9 +194,8 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         """Prepare each request's Mamba slot before the forward.
 
-        ReplaySSM live state has already moved through the scheduler block-copy
-        path, so this phase only resets a fresh slot's cursors. Baseline Mamba
-        retains the fused state pre-copy. Dummy DP/profiling runs skip this.
+        Copy from the worker's previous live column to its actual new column.
+        ReplaySSM also migrates its shared trackers. Dummy runs skip this.
         """
         if not self._align_mode:
             return
@@ -224,7 +223,6 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs,
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
-            PRESERVE_ACCEPTED=replayssm is not None,
         )
 
         if replayssm is not None:
@@ -234,14 +232,13 @@ class MambaHybridModelState(DefaultModelState):
                 dst_cols=self._mamba_state_idx_gpu,
                 num_reqs=num_reqs,
             )
-        else:
-            ctx.run_fused_precopy(
-                num_reqs,
-                self._mamba_state_idx_gpu,
-                self._mamba_src_col_gpu,
-                self._mamba_src_off_gpu,
-                input_batch.idx_mapping,
-            )
+        ctx.run_fused_precopy(
+            num_reqs,
+            self._mamba_state_idx_gpu,
+            self._mamba_src_col_gpu,
+            self._mamba_src_off_gpu,
+            input_batch.idx_mapping,
+        )
 
     def prepare_attn(
         self,
@@ -479,7 +476,6 @@ class MambaHybridModelState(DefaultModelState):
             live_cols=(self._mamba_state_idx_gpu if self._align_mode else None),
             num_reqs=num_reqs,
         )
-        replayssm.materialize()
 
 
 @triton.jit

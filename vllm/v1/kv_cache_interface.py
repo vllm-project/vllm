@@ -1031,12 +1031,15 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+FLASHINFER_REPLAYSSM_STATE_ALIGNMENT = 16
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
-    replayssm_shapes: tuple[tuple[int, ...], ...] = ()
-    replayssm_dtypes: tuple[torch.dtype, ...] = ()
+    # Enables group-shared trackers and the FlashInfer replay lifecycle.
+    use_flashinfer_replayssm: bool = False
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1049,10 +1052,28 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.use_flashinfer_replayssm and self.page_size_padded is not None:
+            object.__setattr__(
+                self,
+                "page_size_padded",
+                round_up(self.page_size_padded, FLASHINFER_REPLAYSSM_STATE_ALIGNMENT),
+            )
+
+    def get_block_stride_alignment(self) -> int:
+        alignment = super().get_block_stride_alignment()
+        if self.use_flashinfer_replayssm:
+            return math.lcm(alignment, FLASHINFER_REPLAYSSM_STATE_ALIGNMENT)
+        return alignment
+
     @property
     def state_content_size_bytes(self) -> int:
+        alignment = (
+            FLASHINFER_REPLAYSSM_STATE_ALIGNMENT if self.use_flashinfer_replayssm else 1
+        )
         return sum(
-            prod(shape) * get_dtype_size(dtype)
+            round_up(prod(shape) * get_dtype_size(dtype), alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
@@ -1062,10 +1083,7 @@ class MambaSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        page_size = sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.shapes, self.dtypes)
-        )
+        page_size = self.state_content_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
@@ -1104,8 +1122,14 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
-            and spec.replayssm_shapes == self.replayssm_shapes
-            and spec.replayssm_dtypes == self.replayssm_dtypes
+            and spec.use_flashinfer_replayssm == self.use_flashinfer_replayssm
+            and (
+                not self.use_flashinfer_replayssm
+                or (
+                    spec.shapes[2:] == self.shapes[2:]
+                    and spec.dtypes[2:] == self.dtypes[2:]
+                )
+            )
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )

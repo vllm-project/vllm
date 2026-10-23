@@ -327,7 +327,6 @@ def _check_replayssm_prefix_caching(
             mamba_cache_philox_rounds=5,
         )
     outputs = []
-    block_sizes = []
     try:
         with monkeypatch.context() as patch:
             patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
@@ -341,7 +340,6 @@ def _check_replayssm_prefix_caching(
                 ) as llm:
                     config = llm.llm.llm_engine.vllm_config
                     assert config.use_v2_model_runner is use_v2
-                    block_sizes.append(config.cache_config.block_size)
                     first_pass = llm.generate_greedy_logprobs(
                         prompts, max_tokens=32, num_logprobs=5
                     )
@@ -370,12 +368,6 @@ def _check_replayssm_prefix_caching(
     finally:
         envs.disable_envs_cache()
 
-    if mamba_backend == "flashinfer":
-        # Auxiliary FlashInfer rings cannot affect the shared page.
-        assert block_sizes[1] == block_sizes[0]
-    else:
-        # Triton's packed rings may require larger attention blocks.
-        assert block_sizes[1] >= block_sizes[0]
     name = f"{mamba_backend}_align_{speculative_method or 'stp'}_v{2 if use_v2 else 1}"
     check_logprobs_close(
         outputs_0_lst=outputs[0],

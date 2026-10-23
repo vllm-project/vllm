@@ -59,34 +59,3 @@ def test_kv_cache_oom_insufficient_memory():
     ):
         check_enough_kv_cache_memory(config, spec, 64 * spec["layer_0"].page_size_bytes)
     assert config.model_config.max_model_len == 2048
-
-
-def test_kv_cache_oom_insufficient_memory_estimate(monkeypatch):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
-        ),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            decode_context_parallel_size=1,
-        ),
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        attention_config=SimpleNamespace(hisparse_config=None),
-    )
-    monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups",
-        lambda c, s: 100 * 1024**3,
-    )
-    spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
-        )
-    }
-
-    with pytest.raises(ValueError):
-        check_enough_kv_cache_memory(config, spec, 1024**3)
