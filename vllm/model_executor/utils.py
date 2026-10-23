@@ -68,6 +68,31 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def _extent(t: torch.Tensor) -> int:
+    """Number of elements spanned by ``t`` in its storage."""
+    if t.numel() == 0:
+        return 0
+    return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
+
+
+def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
+    """``new`` copied into the bytes ``old`` spans if it is smaller, so the loaded
+    storage is kept (with its ``data_ptr``); else ``new`` itself."""
+    storage = old.untyped_storage()
+    offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    if (
+        new.numel() == 0
+        or old.device != new.device
+        or new.untyped_storage().data_ptr() == storage.data_ptr()
+        or _extent(new) != new.numel()  # overlapping or with gaps
+        or offset % size
+        or new.numel() * size >= _extent(old) * old.element_size()
+    ):
+        return new
+    view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
+    return view.copy_(new)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -79,7 +104,8 @@ def replace_parameter(
     The existing parameter object is kept (and so its class and loader attributes
     for weight reloading): ``new_tensor`` is copied into it when shape, stride,
     dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
-    otherwise the parameter's ``.data`` is rebound to ``new_tensor``. A new
+    otherwise a smaller ``new_tensor`` is copied into the parameter's own storage
+    (so the loaded storage never shrinks), else ``.data`` is rebound to it. A new
     parameter is registered only if none exists under ``param_name``, or if the
     existing one is an online requantization source (released after conversion).
 
@@ -131,8 +157,10 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
+        elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
+            old_param.data = new_tensor  # online quantization frees the source
         else:
-            old_param.data = new_tensor
+            old_param.data = _in_own_storage(old_param, new_tensor)
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return

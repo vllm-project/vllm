@@ -79,9 +79,19 @@ def test_replace_parameter_preserves_custom_attribute(wrap_in_parameter: bool) -
         (torch.ones(4, 4, dtype=torch.float32, device="cpu"), True),
         (torch.ones(4, 4, dtype=torch.float32, device="cpu").t(), False),
         (torch.ones(8, 4, dtype=torch.float32, device="cpu"), False),
-        (torch.ones(4, 4, dtype=torch.bfloat16, device="cpu"), False),
+        # A smaller result goes into the loaded storage, which never shrinks.
+        (torch.ones(4, 4, dtype=torch.bfloat16, device="cpu"), True),
+        (torch.ones(4, 2, dtype=torch.float32, device="cpu"), True),
+        (torch.tensor(1.0, device="cpu"), True),
     ],
-    ids=["same-layout-copies", "new-strides", "new-shape", "new-dtype"],
+    ids=[
+        "same-layout-copies",
+        "new-strides",
+        "larger-shape",
+        "smaller-dtype-copies",
+        "smaller-shape-copies",
+        "scalar-copies",
+    ],
 )
 def test_replace_parameter_keeps_object_by_default(
     single_rank_tp: None, new_data: torch.Tensor, copies: bool
@@ -109,6 +119,17 @@ def test_replace_parameter_keeps_object_by_default(
     assert torch.equal(layer.weight.data, new_data)
     # Copying in place keeps addresses captured in CUDA graphs valid.
     assert (layer.weight.data_ptr() == old_data_ptr) == copies
+    assert layer.weight.untyped_storage().nbytes() >= 4 * 4 * 4
+
+
+def test_replace_parameter_online_quantization_frees_source() -> None:
+    layer = torch.nn.Module()
+    layer.quant_method = type("Online", (), {"uses_meta_device": True})()
+    layer.register_parameter("weight", torch.nn.Parameter(torch.zeros(4, 4)))
+
+    replace_parameter(layer, "weight", torch.ones(4, 4, dtype=torch.bfloat16))
+
+    assert layer.weight.untyped_storage().nbytes() == 4 * 4 * 2
 
 
 def test_replace_parameter_preserves_weight_loader() -> None:

@@ -50,6 +50,10 @@ def _load(layer: torch.nn.Module) -> None:
             param.data.copy_(torch.rand(param.shape) + 0.5)
 
 
+def _nbytes(param: torch.Tensor) -> int:
+    return param.numel() * param.element_size()
+
+
 def _dims(param: torch.Tensor) -> tuple:
     return tuple(
         getattr(param, k, None) for k in ("input_dim", "output_dim", "packed_dim")
@@ -183,18 +187,27 @@ def _check_keeps_param_objects(build: Callable, vllm_config) -> None:
         layer, method = build()
         _load(layer)
         before = {
-            name: (param, set(param.__dict__), _dims(param))
+            name: (param, set(param.__dict__), _dims(param), _nbytes(param))
             for name, param in layer.named_parameters(recurse=False)
         }
         method.process_weights_after_loading(layer)
 
     after = dict(layer.named_parameters(recurse=False, remove_duplicate=False))
-    for name, (param, attrs, dims) in before.items():
+    for name, (param, attrs, dims, nbytes) in before.items():
         assert after.get(name) is param, name
         assert attrs <= param.__dict__.keys(), name
         # The loader shards by these on reload, so they keep the checkpoint layout.
         assert _dims(param) == dims, name
         assert callable(getattr(param, "weight_loader", None)), name
+        # Online quantization frees the high-precision source by design.
+        if not method.uses_meta_device:
+            kept = after[name]
+            offset = kept.storage_offset() * kept.element_size()
+            assert kept.untyped_storage().nbytes() - offset >= nbytes, name
+    # Two names share storage only as one param object.
+    objs = {id(p): p for p in after.values() if p.numel()}
+    ptrs = [p.untyped_storage().data_ptr() for p in objs.values()]
+    assert len(ptrs) == len(set(ptrs))
 
 
 @pytest.mark.parametrize("build", CASES, ids=IDS)

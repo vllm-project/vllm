@@ -983,9 +983,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             del w_all, s_all
             assert out_packed is not None
             assert out_scale is not None
-            weight.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            scale.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            torch.accelerator.empty_cache()
             return out_packed, out_scale
 
         w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
