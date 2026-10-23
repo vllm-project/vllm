@@ -19,7 +19,9 @@ logger = init_logger(__name__)
 class MTPSpeculatorConfig(EagleSpeculatorConfig):
     base_method = "mtp"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
-    supported_options = frozenset({"index_share_for_mtp_iteration"})
+    supported_options = EagleSpeculatorConfig.supported_options | {
+        "index_share_for_mtp_iteration"
+    }
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "target_opt_in"
     supports_pcp = True
     validates_checkpoint = True
@@ -87,6 +89,7 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
 
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        super().apply_options(spec)
         if spec.index_share_for_mtp_iteration is None:
             return
         if spec.draft_model_config is None:

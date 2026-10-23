@@ -1353,8 +1353,9 @@ class VllmConfig:
                     "Speculative decoding with watermarking requires "
                     "rejection_sample_method='standard'."
                 )
-            if speculative_config.parallel_drafting and not (
-                speculative_config.use_dflash() or speculative_config.use_dspark()
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.base_method not in ("dflash", "dspark")
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
@@ -3046,8 +3047,9 @@ class VllmConfig:
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
             # DFlash and DSpark use parallel drafting natively in V2 via their
             # own speculators.
-            if speculative_config.parallel_drafting and not (
-                speculative_config.use_dflash() or speculative_config.use_dspark()
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.base_method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
