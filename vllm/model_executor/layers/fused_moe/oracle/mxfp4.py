@@ -442,6 +442,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     if current_platform.is_rocm():
         return [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+            Mxfp4MoeBackend.B12X_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
     if current_platform.is_xpu():
