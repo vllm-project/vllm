@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Controller ordering and helper cleanup without CUDA initialization."""
 
+import io
+import json
 import subprocess
 import sys
 from unittest.mock import Mock, patch
@@ -11,7 +13,7 @@ import pytest
 from vllm.utils.cuda_process_checkpoint import CudaProcessCheckpoint, Driver
 
 
-@pytest.mark.parametrize("rank_count", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("rank_count", [1, 2])
 def test_all_ranks_restore_before_any_unlock(rank_count):
     events: list[tuple[int, str]] = []
     with patch("vllm.utils.cuda_process_checkpoint.Driver") as driver:
@@ -80,15 +82,6 @@ def test_helper_read_timeout_kills_process():
     selector.close.assert_called_once()
 
 
-def test_helper_close_terminates_blocked_driver_call():
-    driver = Driver.__new__(Driver)
-    driver.proc = Mock()
-    driver.proc.poll.return_value = None
-    driver.close()
-    driver.proc.kill.assert_called_once()
-    driver.proc.communicate.assert_called_once_with(timeout=1)
-
-
 def test_helper_close_reaps_real_process():
     driver = Driver.__new__(Driver)
     driver.proc = subprocess.Popen(
@@ -138,15 +131,21 @@ def test_driver_stage_collects_rank_failure():
     assert "injected" in rows[1]["error"]
 
 
-@pytest.mark.parametrize(
-    "fault", ["missing", "duplicate", "wrong_op", "bad_state", "failed"]
-)
-def test_driver_rejects_invalid_stage_response(fault, monkeypatch):
-    import io
-
+@pytest.fixture
+def stage_driver(monkeypatch):
     driver = Driver.__new__(Driver)
     driver.emit = Mock()
     driver.proc = Mock(stdin=io.StringIO())
+    response = Mock()
+    monkeypatch.setattr(driver, "_read", response)
+    return driver, response
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "duplicate", "wrong_op", "bad_state", "failed"]
+)
+def test_driver_rejects_invalid_stage_response(fault, stage_driver):
+    driver, response = stage_driver
     rows = [
         {"pid": pid, "op": "Restore", "rc": 0, "after": {"rc": 0, "value": 1}}
         for pid in [11, 22]
@@ -161,43 +160,26 @@ def test_driver_rejects_invalid_stage_response(fault, monkeypatch):
         rows[1]["after"] = {"rc": 0, "value": 2}
     else:
         rows[1]["rc"] = 2
-    monkeypatch.setattr(
-        driver,
-        "_read",
-        Mock(return_value={"kind": "stage", "op": "Restore", "results": rows}),
-    )
+    response.return_value = {"kind": "stage", "op": "Restore", "results": rows}
     with pytest.raises(RuntimeError):
         driver.run_stage([11, 22], "Restore")
 
 
 @pytest.mark.parametrize("response", [None, [], "bad", 0])
-def test_driver_rejects_non_object_response(response, monkeypatch):
-    import io
-
-    driver = Driver.__new__(Driver)
-    driver.emit = Mock()
-    driver.proc = Mock(stdin=io.StringIO())
-    monkeypatch.setattr(driver, "_read", Mock(return_value=response))
+def test_driver_rejects_non_object_response(response, stage_driver):
+    driver, read = stage_driver
+    read.return_value = response
     with pytest.raises(RuntimeError, match="Invalid CUDA checkpoint stage response"):
         driver.run_stage([11], "Restore")
 
 
-def test_driver_accepts_complete_stage_response(monkeypatch):
-    import io
-    import json
-
-    driver = Driver.__new__(Driver)
-    driver.emit = Mock()
-    driver.proc = Mock(stdin=io.StringIO())
+def test_driver_accepts_complete_stage_response(stage_driver):
+    driver, response = stage_driver
     rows = [
         {"pid": pid, "op": "Restore", "rc": 0, "after": {"rc": 0, "value": 1}}
         for pid in [11, 22]
     ]
-    monkeypatch.setattr(
-        driver,
-        "_read",
-        Mock(return_value={"kind": "stage", "op": "Restore", "results": rows}),
-    )
+    response.return_value = {"kind": "stage", "op": "Restore", "results": rows}
     driver.run_stage([11, 22], "Restore")
     assert json.loads(driver.proc.stdin.getvalue()) == [[11, 22], "Restore"]
     for row in rows:

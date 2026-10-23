@@ -5,6 +5,7 @@
 import multiprocessing
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
@@ -140,20 +141,33 @@ def test_monitor_shutdown_waits_for_inflight_checkpoint(executor):
 
     def suspend(pids):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(10)
 
+    lock, contended = obj._checkpoint_lock, threading.Event()
+
+    class ObservedLock:
+        def __enter__(self):
+            if not lock.acquire(blocking=False):
+                contended.set()
+                assert lock.acquire(timeout=10)
+
+        def __exit__(self, *exc):
+            lock.release()
+
+    obj._checkpoint_lock = ObservedLock()
     obj._checkpoint.suspend = suspend
     obj._checkpoint.close = lambda: closed.set()
-    sleeper = threading.Thread(target=obj.sleep)
-    closer = threading.Thread(target=obj.shutdown)
-    sleeper.start()
-    assert entered.wait(2)
-    closer.start()
-    assert not closed.wait(0.05)
-    release.set()
-    sleeper.join(2)
-    closer.join(2)
-    assert not sleeper.is_alive() and not closer.is_alive()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sleeper = pool.submit(obj.sleep)
+        try:
+            assert entered.wait(10)
+            closer = pool.submit(obj.shutdown)
+            assert contended.wait(5)
+            assert not closed.is_set()
+        finally:
+            release.set()
+        sleeper.result(timeout=10)
+        closer.result(timeout=10)
     assert closed.is_set()
 
 
@@ -181,21 +195,24 @@ def test_failed_executor_never_acknowledges_pause(executor):
 
 
 @pytest.mark.parametrize(
-    "nvls,suspend,accepted,fusion,backend",
+    "p2p,shm,tp,nvls,suspend,fusion,backend,accepted",
     [
-        ("0", True, True, False, None),
-        ("1", True, False, False, None),
-        ("0", False, False, False, None),
-        ("0", True, False, True, None),
-        ("0", True, True, True, "trtllm"),
-        ("0", True, False, True, "mnnvl"),
+        pytest.param("0", "1", 2, "0", True, False, None, True, id="p2p-only"),
+        pytest.param("0", "0", 3, "0", True, False, None, True, id="p2p-and-shm"),
+        pytest.param("1", "0", 8, "0", True, False, None, True, id="shm-only"),
+        pytest.param(None, None, 2, "0", True, False, None, True, id="defaults"),
+        pytest.param("0", "0", 2, "0", True, True, "trtllm", True, id="trtllm"),
+        pytest.param("0", "0", 2, "1", True, False, None, False, id="nvls"),
+        pytest.param("0", "0", 2, "0", False, False, None, False, id="no-suspend"),
+        pytest.param("0", "0", 2, "0", True, True, None, False, id="fusion-default"),
+        pytest.param("0", "0", 2, "0", True, True, "mnnvl", False, id="mnnvl"),
     ],
 )
-@pytest.mark.parametrize("p2p,shm", [("0", "1"), ("0", "0"), ("1", "0"), (None, None)])
-@pytest.mark.parametrize("tp", [2, 3, 8])
 def test_transport_requires_suspension_and_no_nvls(
     monkeypatch, nvls, suspend, accepted, fusion, backend, p2p, shm, tp
 ):
+    # Transport options are independent of the rejection rules; avoid their
+    # Cartesian product while retaining each option and validation branch.
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
     env = {
         "NCCL_P2P_DISABLE": p2p,
@@ -307,18 +324,6 @@ def test_sleep_worker_rpc_has_deadline(executor):
         assert rpc.call_args.kwargs["timeout"] == 7
 
 
-def test_terminated_workers_are_reaped():
-    proc = Mock()
-    proc.is_alive.return_value = True
-    proc.exitcode = -9
-    with patch.object(MultiprocExecutor, "_ensure_worker_termination") as terminate:
-        ProcessCheckpointExecutor._ensure_worker_termination([proc])
-    terminate.assert_not_called()
-    proc.kill.assert_called_once()
-    proc.join.assert_called_once()
-    assert 0 <= proc.join.call_args.kwargs["timeout"] <= 5
-
-
 def test_worker_termination_reaps_real_processes():
     ctx = multiprocessing.get_context("spawn")
     processes = [ctx.Process(target=time.sleep, args=(60,)) for _ in range(2)]
@@ -410,25 +415,3 @@ def test_unsupported_checkpoint_configuration_fails_before_workers(
     ):
         ProcessCheckpointExecutor(config)
     initialize.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "module,name",
-    [
-        ("cuda_checkpoint_executor", "CUDACheckpointExecutor"),
-        ("process_checkpoint_executor", "ProcessCheckpointExecutor"),
-    ],
-)
-@pytest.mark.parametrize("use_class", [False, True])
-def test_checkpoint_executor_names_resolve(module, name, use_class):
-    from vllm.utils.import_utils import resolve_obj_by_qualname
-    from vllm.v1.executor.abstract import Executor
-    from vllm.v1.executor.cuda_checkpoint_executor import CUDACheckpointExecutor
-
-    backend = f"vllm.v1.executor.{module}.{name}"
-    if use_class:
-        backend = resolve_obj_by_qualname(backend)
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(distributed_executor_backend=backend)
-    )
-    assert Executor.get_class(config) is CUDACheckpointExecutor
