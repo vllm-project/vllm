@@ -69,7 +69,9 @@ The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
 For single-node MP tensor parallelism, every TP worker maps the same pinned host
-pool and uses the same block and layer offsets. MLA source KV is replicated
+pool and uses the same block and layer offsets. TP rank 0 allocates it once with
+the CUDA driver, one chunk per GPU NUMA node, and passes it to its peers as file
+descriptors, so its pages are pinned once rather than once per rank. MLA source KV is replicated
 across TP ranks, so this stores one physical copy instead of one copy per rank.
 TP rank 0 writes the shared host pool; peers wait on its IPC events before
 reading it. Other executor and parallel layouts retain private per-rank pools.
