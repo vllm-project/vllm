@@ -644,7 +644,6 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
     if block_size == 128:
         from vllm.config import VllmConfig, set_current_vllm_config
         from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
-        from vllm.models.minimax_m3.nvidia.indexer_msa import shard_slot_mapping
 
         with set_current_vllm_config(VllmConfig()):
             cache = MiniMaxM3IndexerCache(
@@ -664,8 +663,11 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
             )
             cache.bind_kv_cache(packed)
             assert cache.kv_cache.data_ptr() == packed.data_ptr()
-            index_slots = shard_slot_mapping(
-                index_slot_mapping, rank, tp_shard, torch.empty_like(index_slot_mapping)
+            page = index_slot_mapping // block_size
+            offset = index_slot_mapping % block_size
+            index_slots = page * (block_size // tp_shard) + offset // tp_shard
+            index_slots.masked_fill_(
+                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
             )
             qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
                 torch.float8_e4m3fn, cache.kv_cache, index_slots

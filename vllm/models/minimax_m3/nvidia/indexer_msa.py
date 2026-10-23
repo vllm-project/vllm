@@ -1080,21 +1080,6 @@ class IndexKShardComm:
         return 2 if ordinal == n - 1 else ordinal % 2
 
 
-def shard_slot_mapping(
-    slot_mapping: torch.Tensor, rank: int, tp: int, out: torch.Tensor
-) -> torch.Tensor:
-    """Remap block-size-128 slots to rows of the ``[num_blocks, 128 // tp, D]``
-    shard; slots of other ranks' tokens (and padding) become -1."""
-    n = slot_mapping.numel()
-    s = slot_mapping
-    off = torch.remainder(s, PAGE_SIZE)
-    own = (s >= 0) & (torch.remainder(off, tp) == rank)
-    row = torch.div(s, PAGE_SIZE, rounding_mode="floor") * (PAGE_SIZE // tp) + off // tp
-    out = out[:n]
-    out.copy_(row.masked_fill_(~own, -1))
-    return out
-
-
 def gather_prefill_pages(
     kv_shard: torch.Tensor, pages: torch.Tensor, comm: IndexKShardComm | None = None
 ) -> torch.Tensor:

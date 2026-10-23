@@ -2174,7 +2174,7 @@ def test_decode_index_score_cutedsl_correctness(
     + [(2, q, 8, 1, 8192) for q in (1, 3, 8)]
     + [(world, 4, 4, 128, cols) for world in (2, 4) for cols in (36, 40)],
 )
-@pytest.mark.parametrize("fused_publish", [False, True])
+@pytest.mark.parametrize("candidate_source", ["reference", "native_publish"])
 @pytest.mark.parametrize("pdl_mode", ["off", "wait", "prefetch"])
 def test_sharded_decode_index_score_matches_reference(
     world,
@@ -2182,7 +2182,7 @@ def test_sharded_decode_index_score_matches_reference(
     max_decode_query_len,
     split_k,
     score_columns,
-    fused_publish,
+    candidate_source,
     pdl_mode,
 ):
     pytest.importorskip("cutlass")
@@ -2191,7 +2191,6 @@ def test_sharded_decode_index_score_matches_reference(
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_decode_score_sharded_cutedsl,
         minimax_m3_index_merge_candidates,
-        minimax_m3_index_publish_candidates,
         minimax_m3_index_select_publish_candidates,
     )
 
@@ -2254,7 +2253,7 @@ def test_sharded_decode_index_score_matches_reference(
                 prefetch_history=pdl_mode == "prefetch",
             )
             torch.maximum(all_scores, scores, out=all_scores)
-            if fused_publish:
+            if candidate_source == "native_publish":
                 minimax_m3_index_select_publish_candidates(
                     scores,
                     valid,
@@ -2280,18 +2279,22 @@ def test_sharded_decode_index_score_matches_reference(
                     output=local_ids,
                     max_score_layout="THK",
                 )
-                minimax_m3_index_publish_candidates(
-                    scores,
-                    local_ids,
-                    bases,
-                    1,
-                    rank,
-                    total_q,
-                    errors,
-                    world_size=world,
-                    heads_per_rank=heads_per_rank,
-                    spin_limit=1 << 20,
+                # Tensor reference for the carrier; this does not test transport.
+                ids = local_ids.transpose(0, 1)
+                live = (ids >= 0) & (ids < score_columns)
+                values = scores.transpose(0, 1).gather(
+                    -1, ids.long().clamp(0, score_columns - 1)
                 )
+                values.masked_fill_(~live, -float("inf"))
+                ids = ids.masked_fill(~live, -1)
+                for owner, destination in enumerate(recv):
+                    head = owner * heads_per_rank
+                    row = destination[1, rank]
+                    row[..., :16].copy_(
+                        values[head : head + heads_per_rank].view(torch.int32)
+                    )
+                    row[..., 16:32].copy_(ids[head : head + heads_per_rank])
+                    row[..., 32].fill_(1)
         for owner, r in enumerate(recv):
             head = owner * heads_per_rank
             minimax_m3_index_merge_candidates(

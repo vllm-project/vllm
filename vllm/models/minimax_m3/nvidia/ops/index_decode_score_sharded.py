@@ -506,53 +506,6 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     kernel(idx_q, index_kv_shard, block_table, score_out, seq_lens, rank)
 
 
-@triton.jit(do_not_specialize=["slot", "rank"])
-def _index_k_publish_candidates_kernel(
-    scores_ptr,
-    indices_ptr,
-    recv_bases,
-    slot,
-    rank,
-    t_max,
-    err_ptr,
-    score_stride_t,
-    score_stride_h,
-    index_stride_t,
-    index_stride_h,
-    W: tl.constexpr,
-    HPR: tl.constexpr,
-    MAX_TILES: tl.constexpr,
-    SPIN: tl.constexpr,
-):
-    t = tl.program_id(0)
-    h = tl.program_id(1)
-    peer = tl.load(recv_bases + h // HPR).to(tl.pointer_type(tl.int32))
-    row = peer + (((slot * W + rank) * HPR + h % HPR) * t_max + t) * 33
-    ready = row + 32
-    seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-    spins = 0
-    while (seen != 0) & (spins < SPIN):
-        seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-        spins += 1
-    if seen != 0:
-        tl.atomic_add(err_ptr, 1)
-        tl.inline_asm_elementwise(
-            "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-        )
-    k = tl.arange(0, 16)
-    ids = tl.load(indices_ptr + t * index_stride_t + h * index_stride_h + k)
-    valid = (ids >= 0) & (ids < MAX_TILES)
-    scores = tl.load(
-        scores_ptr + t * score_stride_t + h * score_stride_h + ids,
-        mask=valid,
-        other=-float("inf"),
-    )
-    tl.store(row + k, scores.to(tl.int32, bitcast=True))
-    tl.store(row + 16 + k, tl.where(valid, ids, -1))
-    tl.debug_barrier()
-    tl.atomic_xchg(ready, 1, sem="release", scope="sys")
-
-
 @triton.jit
 def _index_k_load_tagged_word(ptr):
     return tl.inline_asm_elementwise(
@@ -723,46 +676,6 @@ def _index_k_merge_candidates_kernel(
     if launch_pdl:
         # Do not let the next layer reuse scratch before this publisher exits.
         tl.extra.cuda.gdc_wait()
-
-
-def minimax_m3_index_publish_candidates(
-    scores: torch.Tensor,
-    local_indices: torch.Tensor,
-    recv_bases: torch.Tensor,
-    slot: int,
-    rank: int,
-    t_max: int,
-    errors: torch.Tensor,
-    *,
-    world_size: int,
-    heads_per_rank: int,
-    spin_limit: int = 1 << 26,
-) -> None:
-    """Publish local Top16 into score/ID/ready rows on each head's owner."""
-    tokens, heads, topk = local_indices.shape
-    assert topk == TOPK and tokens <= t_max
-    assert heads == world_size * heads_per_rank
-    assert scores.ndim == 3 and scores.shape[:2] == (tokens, heads)
-    assert 0 < scores.shape[-1] <= MAX_K_TILES
-    assert scores.stride(-1) == local_indices.stride(-1) == 1
-    _index_k_publish_candidates_kernel[(tokens, heads)](
-        scores,
-        local_indices,
-        recv_bases,
-        slot,
-        rank,
-        t_max,
-        errors,
-        scores.stride(0),
-        scores.stride(1),
-        local_indices.stride(0),
-        local_indices.stride(1),
-        W=world_size,
-        HPR=heads_per_rank,
-        MAX_TILES=scores.shape[-1],
-        SPIN=spin_limit,
-        num_warps=4,
-    )
 
 
 def minimax_m3_index_select_publish_candidates(
