@@ -36,8 +36,8 @@ class SpeculatorConfig:
     setup and behavior it then inherits.
     """
 
-    # The built-in method, which a custom config inherits from the built-in one
-    # it subclasses. (`SpeculativeConfig.method` is a custom method's own name.)
+    # For in-tree speculators, the `SpeculativeConfig.method` that enables it.
+    # For out-of-tree custom speculators, the method of the built-in one it subclasses.
     builtin_method: ClassVar[str | None] = None
     # Fully-qualified name of the V2 `BaseSpeculator` subclass, if any.
     speculator_class: ClassVar[str | None] = None
