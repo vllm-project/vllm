@@ -458,11 +458,17 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "adaptive,num_tokens,decode_eligible",
-    [(False, 16, True), (True, 16, True), (True, 8, True), (True, 16, False)],
+    "adaptive,num_tokens,has_prefill,decode_eligible",
+    [
+        (False, 16, False, True),
+        (True, 16, False, True),
+        (True, 8, False, True),
+        (True, 16, True, False),
+        pytest.param(True, 16, True, True, id="decode-eligible-prefill-tail"),
+    ],
 )
 def test_draft_prefill_matches_shared_target_metadata_shape(
-    monkeypatch, adaptive, num_tokens, decode_eligible
+    monkeypatch, adaptive, num_tokens, has_prefill, decode_eligible
 ):
     """Draft prefill must reuse the target's padded request layout, even after AV."""
     target = _make_spec_decode_manager(
@@ -474,9 +480,9 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
     target_desc = target.dispatch(
         4,
         num_tokens,
-        4 if num_tokens == 16 else None,
+        4 if num_tokens == 16 and decode_eligible else None,
         0,
-        max_query_len=4 if decode_eligible else None,
+        max_query_len=None if has_prefill else 4,
     )
     hidden_states = torch.zeros(target_desc.num_tokens, 1)
     speculator = SimpleNamespace(
@@ -506,6 +512,7 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         num_scheduled_tokens=torch.full((4,), 4).numpy(),
         seq_lens_cpu_upper_bound=torch.full((8,), 128),
         idx_mapping=None,
+        has_prefill=has_prefill,
         decode_graph_eligible=decode_eligible,
     )
     monkeypatch.setattr(spec_module, "prepare_prefill_inputs", lambda *a: None)
