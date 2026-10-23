@@ -911,6 +911,8 @@ def get_comm(
     group = get_tp_group()
     shape = (
         total_index_heads,
+        vllm_config.model_config.max_model_len,
+        vllm_config.cache_config.block_size,
         vllm_config.scheduler_config.max_num_seqs,
         _max_decode_query_len(vllm_config),
         int(
