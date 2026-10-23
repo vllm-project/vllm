@@ -71,12 +71,7 @@ def sync_cudagraph_and_dp_padding(
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
-        timeout = (
-            parallel_config.cpu_distributed_timeout
-            if parallel_config is not None
-            else None
-        )
-        get_dp_group().cpu_all_reduce_(tensor, timeout=timeout)
+        get_dp_group().cpu_all_reduce_(tensor)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
