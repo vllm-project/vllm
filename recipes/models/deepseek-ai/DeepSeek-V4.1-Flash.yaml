@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-22
+  date_updated: 2026-10-23
   tasks:
     - text
     - multimodal
@@ -824,52 +824,33 @@ guide: |
   `--no-swa-bounded-replay`. Use a nightly from 2026-10-13 or later; earlier
   ROCm builds lack the replay window clamp and fault at the first prefix hit.
 
-  ### AgentX TP2 scheduling profiles
+  ### AgentX TP2 scheduling
 
-  [InferenceX #4409](https://github.com/SemiAnalysisAI/InferenceX/pull/4409)
-  ([audited configuration](https://github.com/SemiAnalysisAI/InferenceX/blob/9ab3d80f7698a4a46521a71b36e023419e05f30f/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi355x-fp4-mtp/agentic.yaml))
-  records these MI355X TP2 AgentX settings, measured by
-  [sweep 39844994441](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/39844994441)
-  from source `141387b7ff3f6e0d8ed211c1144a0fa5c539d8ed`.
-  They apply to `deepseek-ai/DeepSeek-V4.1-Flash`, the **FP8 (0909)** launch
-  checkpoint, rather than the default FP8 (1017) checkpoint.
+  For MI355X **TP2** with AgentX-like traffic, we recommend the scheduler settings
+  from [InferenceX #4409](https://github.com/SemiAnalysisAI/InferenceX/pull/4409), using
+  **FP8 (0909)** (`deepseek-ai/DeepSeek-V4.1-Flash`):
 
-  | Client concurrency | TP | `--max-num-batched-tokens` | `--max-num-seqs` | `--max-cudagraph-capture-size` |
-  |---:|---:|---:|---:|---:|
-  | 16 | 2 | 8192 | 4 | 1024 |
-  | 32 | 2 | 8192 | 8 | 1024 |
+  | Client concurrency | `--max-num-batched-tokens` | `--max-num-seqs` |
+  |---:|---:|---:|
+  | 16 | 8192 | 4 |
+  | 32 | 8192 | 8 |
 
-  Client concurrency counts submitted tasks; `--max-num-seqs` limits sequences
-  running at once. Excess requests queue. The smaller running-sequence cap and
-  prefill chunk reduce prefill/decode interference for these workloads; they do
-  not limit the server to four or eight clients.
-
-  To derive the serving command, select **MI355X**, **FP8 (0909)**,
-  **Tensor Parallel**, **Rust** frontend, **Speculative decoding** and
-  **Text only** above. Keep TP2, Engram CPU offload and five-token DSpark with
-  real block rejection and `enable_adaptive_verification:false`.
-  For the measured runtime, replace the Docker image with:
+  Select **MI355X**, **FP8 (0909)**, **Tensor Parallel**, **Rust**, **Speculative decoding**
+  and **Text only** above. Keep TP2, Engram CPU offload and five-token DSpark with real
+  block rejection (`enable_adaptive_verification:false`). Append the table's flags plus
+  `--max-model-len 1048576 --max-cudagraph-capture-size 1024 --disable-uvicorn-access-log`
+  to the generated serve arguments. Replace the Docker image with the following,
+  adding `-e OMP_NUM_THREADS=1 -e PYTHONUNBUFFERED=1` before it:
 
   ```text
   vllm/vllm-openai-rocm:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:520e098f54ec96837228aaddea0a833cbf6374dbdffd480c1d65f26ffab7701b
   ```
 
-  Add `-e OMP_NUM_THREADS=1 -e PYTHONUNBUFFERED=1` before the image in the Docker
-  command, and append these flags to its `vllm serve` arguments for concurrency 16:
-
-  ```text
-  --max-model-len 1048576 --max-cudagraph-capture-size 1024 \
-  --max-num-batched-tokens 8192 --max-num-seqs 4 \
-  --disable-uvicorn-access-log
-  ```
-
-  For concurrency 32, replace `--max-num-seqs 4` with `--max-num-seqs 8`.
-  These are workload-specific settings; the generic builder retains inherited
-  scheduler limits. TP2 c1/c2/c4/c8/c64 kept 16384 batched tokens without a new
-  explicit sequence cap. The qualifying sweep selected only TP4 c1/c2, so it
-  provides no TP4 c16/c32 qualification. Its synthetic acceptance length 3.51,
-  trace loader and replay controls are throughput-measurement plumbing; ordinary
-  serving uses the real block rejection emitted by the builder.
+  [Audited config](https://github.com/SemiAnalysisAI/InferenceX/blob/9ab3d80f7698a4a46521a71b36e023419e05f30f/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi355x-fp4-mtp/agentic.yaml)
+  · [Sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/39844994441).
+  The sweep used synthetic acceptance length 3.51 for throughput; production uses real
+  block rejection. Excess clients queue behind the sequence cap. These workload-specific
+  limits are not generic defaults; this sweep did not qualify TP4 c16/c32.
 
   ## MI300X Tensor Parallel
 
