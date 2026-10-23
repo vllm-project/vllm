@@ -522,7 +522,7 @@ def rocm_aiter_fused_experts(
         topk_weights,
         topk_ids,
         expert_mask=expert_mask,
-        quant_method=quant_method,
+        quant_method=quant_method.value,
         activation_method=activation_method,
         w1_scale=quant_config.w1_scale,
         w2_scale=quant_config.w2_scale,
