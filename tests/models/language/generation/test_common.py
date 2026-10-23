@@ -43,7 +43,8 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model]
+            + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
@@ -100,6 +101,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param("domyn/Domyn-Edge-Base"),  # domyn_edge
         pytest.param(
             "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
             marks=[large_gpu_mark(min_gb=32)],
