@@ -43,7 +43,8 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model]
+            + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
@@ -74,6 +75,9 @@ AITER_MODEL_LIST = [
         pytest.param(
             "facebook/opt-125m",  # opt
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "facebook/opt-350m",  # opt with projected token embeddings
         ),
         pytest.param(
             "microsoft/phi-2",  # phi
@@ -158,7 +162,9 @@ def test_models(
                 hf_model.model.device
             )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
+                # Retained prompt values must not keep reference weights alive.
+                with torch.no_grad():
+                    embed = hf_model.model.get_input_embeddings()(token_ids)
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.

@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import itertools
 import logging
+import os
 import queue
+import secrets
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
 import numpy as np
@@ -20,11 +23,12 @@ import zmq.asyncio
 from huggingface_hub.utils import httpx
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     get_current_attn_backends,
+    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -33,13 +37,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -58,17 +68,24 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
+
+_BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
+# Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
+# one only costs that peer a LAYOUT_MISS and one layout resend.
+_MAX_PEER_LAYOUTS: Final[int] = 1024
 
 try:
     from mooncake.engine import TransferEngine
@@ -88,6 +105,12 @@ if TYPE_CHECKING:
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
 
+# Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
+# KV group on a single allocation. group_index=-1 flattens every group's block
+# ids onto that region. Hybrid KV manager assigns distinct ids per group, so
+# flatten does not copy the same block twice.
+_SHARED_REGION_GROUP_ID = -1
+
 
 @dataclass(frozen=True)
 class TransferRegion:
@@ -97,6 +120,34 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+    # Groups that share this allocation. Empty unless group_index is -1.
+    shared_group_ids: tuple[int, ...] = ()
+    # Byte offset of this view from the start of its block row.
+    row_offset: int = 0
+
+
+def _block_ids_for_region(
+    block_ids_by_group: list[list[int]],
+    group_index: int,
+    shared_group_ids: tuple[int, ...] = (),
+) -> list[int]:
+    """Follow NIXL `_block_ids_by_region`.
+
+    -1 flattens only the groups that share this allocation. NIXL can flatten
+    every group because its packed flag means they all share one storage;
+    Mooncake can still have a separate Mamba group in the same request.
+    """
+    if group_index == _SHARED_REGION_GROUP_ID:
+        assert shared_group_ids, "Shared packed region is missing its group ids."
+        return list(
+            itertools.chain.from_iterable(
+                block_ids_by_group[group] for group in shared_group_ids
+            )
+        )
+    assert 0 <= group_index < len(block_ids_by_group), (
+        "Transfer region references a missing KV group."
+    )
+    return list(block_ids_by_group[group_index])
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -127,6 +178,8 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     group_indices: list[int] | None = None,
+    shared_group_ids: list[tuple[int, ...]] | None = None,
+    row_offsets: list[int] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -148,6 +201,14 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if shared_group_ids is None:
+        shared_group_ids = [() for _ in layer_names]
+    assert len(shared_group_ids) == len(layer_names)
+    # Missing offsets must not look like row starts, or every run would be
+    # promoted to the full row.
+    if row_offsets is None:
+        row_offsets = [-1] * len(layer_names)
+    assert len(row_offsets) == len(layer_names)
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -156,6 +217,8 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
+        region_groups,
+        row_offset,
     ) in zip(
         base_addrs,
         block_lens,
@@ -163,6 +226,8 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
+        shared_group_ids,
+        row_offsets,
     ):
         regions.append(
             TransferRegion(
@@ -172,6 +237,8 @@ def _expand_transfer_regions(
                 block_len=block_len,
                 kv_block_len=kv_block_len,
                 group_index=group_index,
+                shared_group_ids=region_groups,
+                row_offset=row_offset,
             )
         )
     return regions
@@ -375,10 +442,166 @@ def _align_transfer_regions(
                     f"{remote_region.group_index}."
                 ),
             )
+        if (
+            local_region.shared_group_ids
+            and remote_region.shared_group_ids
+            and local_region.shared_group_ids != remote_region.shared_group_ids
+        ):
+            return (
+                [],
+                [],
+                (
+                    "Mooncake shared-group set mismatch for "
+                    f"{local_region.layer_name}: producer="
+                    f"{local_region.shared_group_ids}, consumer="
+                    f"{remote_region.shared_group_ids}."
+                ),
+            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
     return aligned_local, aligned_remote, None
+
+
+def _coalesce_contiguous_transfer_regions(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+    *,
+    promote_full_row: bool = False,
+) -> tuple[list[TransferRegion], list[TransferRegion]]:
+    """Merge aligned packed slices that are adjacent on both sides.
+
+    Page-contiguous views stay addressable by layer name for hetero PP
+    (#56033). KV groups overlay one row and must stay separate: each group
+    owns a different block-id space. A run that starts at row offset 0 is
+    lifted to the full row so consecutive blocks can coalesce.
+    """
+    if len(local_regions) != len(remote_regions):
+        return local_regions, remote_regions
+
+    def adjacent(
+        run_start: TransferRegion, prev: TransferRegion, nxt: TransferRegion
+    ) -> bool:
+        # Page padding sits between unpadded payloads. Allow that gap, but
+        # keep the whole run inside the row that `run_start` began. Anchoring
+        # on `prev` would slide the bound forward as the run grows.
+        return (
+            prev.group_index == nxt.group_index
+            and prev.shared_group_ids == nxt.shared_group_ids
+            and prev.block_len == nxt.block_len
+            and prev.base_addr + prev.kv_block_len <= nxt.base_addr
+            and nxt.base_addr + nxt.kv_block_len
+            <= run_start.base_addr + run_start.block_len
+        )
+
+    def span(region: TransferRegion, kv_block_len: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name=region.layer_name,
+            layer_index=region.layer_index,
+            base_addr=region.base_addr,
+            block_len=region.block_len,
+            kv_block_len=kv_block_len,
+            group_index=region.group_index,
+            shared_group_ids=region.shared_group_ids,
+            row_offset=region.row_offset,
+        )
+
+    def promote(
+        merged_local: list[TransferRegion], merged_remote: list[TransferRegion]
+    ) -> tuple[list[TransferRegion], list[TransferRegion]]:
+        if not promote_full_row:
+            return merged_local, merged_remote
+        # Each KV group overlays the row from offset 0. Promoting that run to
+        # the full row copies bytes the group's block ids exclusively own.
+        # Equal block_len is the row-structure check: both peers packed the
+        # same stride, so row_offset does not need a second compare in align.
+        promoted_local: list[TransferRegion] = []
+        promoted_remote: list[TransferRegion] = []
+        for local_region, remote_region in zip(merged_local, merged_remote):
+            if (
+                local_region.row_offset == 0
+                and remote_region.row_offset == 0
+                and local_region.block_len == remote_region.block_len
+                and local_region.kv_block_len <= local_region.block_len
+                and remote_region.kv_block_len <= remote_region.block_len
+            ):
+                promoted_local.append(span(local_region, local_region.block_len))
+                promoted_remote.append(span(remote_region, remote_region.block_len))
+            else:
+                promoted_local.append(local_region)
+                promoted_remote.append(remote_region)
+        return promoted_local, promoted_remote
+
+    if len(local_regions) <= 1:
+        return promote(list(local_regions), list(remote_regions))
+
+    merged_local: list[TransferRegion] = []
+    merged_remote: list[TransferRegion] = []
+    run_local = [local_regions[0]]
+    run_remote = [remote_regions[0]]
+
+    def flush() -> None:
+        if len(run_local) == 1:
+            merged_local.append(run_local[0])
+            merged_remote.append(run_remote[0])
+            return
+        for merged, run in ((merged_local, run_local), (merged_remote, run_remote)):
+            span_len = run[-1].base_addr + run[-1].kv_block_len - run[0].base_addr
+            merged.append(span(run[0], span_len))
+
+    for local_region, remote_region in zip(local_regions[1:], remote_regions[1:]):
+        if adjacent(run_local[0], run_local[-1], local_region) and adjacent(
+            run_remote[0], run_remote[-1], remote_region
+        ):
+            run_local.append(local_region)
+            run_remote.append(remote_region)
+            continue
+        flush()
+        run_local = [local_region]
+        run_remote = [remote_region]
+    flush()
+    return promote(merged_local, merged_remote)
+
+
+def _has_opaque_packed_row(
+    row_offsets: list[int], kv_block_lens: list[int], block_lens: list[int]
+) -> bool:
+    """Branch B is one row-sized region at offset 0, so later layer names are gone.
+
+    Page-contiguous views keep kv_block_len below the stride until promotion,
+    and promotion happens after this handshake check.
+    """
+    if (
+        not row_offsets
+        or len(row_offsets) != len(kv_block_lens)
+        or len(row_offsets) != len(block_lens)
+    ):
+        return False
+    return any(
+        offset == 0 and length == stride
+        for offset, length, stride in zip(row_offsets, kv_block_lens, block_lens)
+    )
+
+
+def _pp_mismatch_hides_packed_layers(
+    local_pp_size: int,
+    remote_pp_size: int,
+    *,
+    local_has_opaque_row: bool,
+    remote_row_offsets: list[int],
+    remote_kv_block_lens: list[int],
+    remote_block_lens: list[int],
+) -> bool:
+    """A row that dropped per-layer names cannot be aligned across PP sizes.
+
+    Either side may be the one that collapsed the row. Matching PP still
+    lines up, because both stages keep the same first layer name.
+    """
+    if local_pp_size == remote_pp_size:
+        return False
+    return local_has_opaque_row or _has_opaque_packed_row(
+        remote_row_offsets, remote_kv_block_lens, remote_block_lens
+    )
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -403,7 +626,16 @@ class MooncakeXferMetadata(
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
+    # Parallel to registered regions. Each entry is the groups that share
+    # that region. Empty means the peer did not send the field.
+    registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
+    # Byte offset of each registered view from its block row. -1 means the
+    # peer did not send the field, so the run must not be promoted.
+    registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Random per register_kv_caches, so ids never repeat across restarts.
+    # 0 means the peer sends the layout on every pull.
+    layout_id: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -413,6 +645,9 @@ class MooncakeXferResponseStatus(IntEnum):
     CONTINUE = 1
     # Something wrong, see err_msg
     ERROR = 2
+    # P does not hold the layout for this layout_id; resend it.
+    # Only sent for pulls with a nonzero layout_id and no layout.
+    LAYOUT_MISS = 3
 
 
 class MooncakeXferResponse(
@@ -423,6 +658,9 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # The pull's layout_id once P holds that layout. D omits the layout only
+    # after seeing it, so a P that predates this field always gets it.
+    layout_id: int = 0
 
 
 @dataclass
@@ -436,8 +674,8 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
-    # Set once any worker reports a failure, so a success from another worker
-    # for the same request is not counted afterwards.
+    # A failure is sticky; still settle later peer results before releasing
+    # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
 
 
@@ -483,6 +721,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -531,6 +771,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -577,9 +820,33 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Sleep mode is only validated over RDMA, not NVLink or TENT.
+        if any(
+            v in os.environ
+            for v in (
+                "MC_FORCE_MNNVL",
+                "MC_INTRANODE_NVLINK",
+                "MC_USE_TENT",
+                "MC_USE_TEV1",
+            )
+        ):
+            return False
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("mooncake_protocol", "rdma") == "rdma"
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -641,6 +908,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorStats | None:
         return MooncakeKVConnectorStats(data=data or {})
 
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MooncakePromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods."""
@@ -674,6 +953,10 @@ class MooncakeConnectorScheduler:
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
+        self._bounded_replay = any(
+            g.kv_cache_spec.prefix_replay_tokens > 0
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -718,8 +1001,10 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
+        always recomputes the last token and must start from h(N-1), and for
+        DSV41 SWA bounded replay, whose window is not replayed after a P/D load
+        and must be laid out for that token."""
+        if (self._has_mamba or self._bounded_replay) and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
@@ -735,6 +1020,9 @@ class MooncakeConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
+            # A request that skips reading the prefix cache (prompt logprobs)
+            # loads nothing on the decoder, which recomputes its whole prompt.
+            and not request.get_skip_reading_prefix_cache()
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -750,7 +1038,11 @@ class MooncakeConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and (self._has_mamba or self._bounded_replay)
+        ):
             self._truncate_mamba_request_for_prefill(request)
 
     def get_num_new_matched_tokens(
@@ -997,7 +1289,28 @@ class MooncakeConnectorWorker:
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
         self.registered_group_indices: list[int] = []
+        # Parallel to registered regions. -1 flattens only these groups.
+        self.region_shared_groups: list[tuple[int, ...]] = []
+        # Parallel to registered regions. -1 is not a packed row view.
+        self.region_row_offsets: list[int] = []
+        self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
+        self._kv_data_lens: list[int] = []
+        self._kv_unregistered = False
+        # Aligned regions depend only on the peer's registered layout.
+        # The third item is an error string when alignment cannot proceed.
+        self._prepared_transfer_regions: dict[
+            tuple,
+            tuple[list[TransferRegion], list[TransferRegion], str | None],
+        ] = {}
+        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
+        # order. Filled only after a pull that actually carried the layout.
+        self._layout_by_peer: OrderedDict[
+            tuple, tuple[list[TransferRegion], list[TransferRegion]]
+        ] = OrderedDict()
+        self._kv_layout_id = 0
+        # Decode side: worker addresses that echoed the current layout_id.
+        self._acked_layout_peers: set[str] = set()
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
@@ -1051,15 +1364,9 @@ class MooncakeConnectorWorker:
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        self._is_hma_required = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.transfer_groups
-            )
-        )
-        # Block IDs are only unique within a group; with HMA the scheduler
-        # tracks a single merged group, so failures are reported per request.
+        self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
+        # Block IDs are only unique within a group, so with multiple groups
+        # load failures are reported per request instead.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
@@ -1109,7 +1416,10 @@ class MooncakeConnectorWorker:
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
         backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        backends, specs = get_current_attn_backends_and_specs(
+            self.vllm_config, self.kv_cache_config, backends
+        )
+        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"
@@ -1153,24 +1463,44 @@ class MooncakeConnectorWorker:
             pp_rank=self.pp_rank,
             addr=worker_addr,
         )
-        while True:
+        timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
+        backoff = 1.0
+        for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
-                break
-            except httpx.ConnectError:
-                # Bootstrap server not ready, wait for a while and retry.
-                await asyncio.sleep(1)
+                return
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                # Rank 0 may be busy registering a large memory segment.
+                if attempt == max_attempts:
+                    break
+                logger.warning(
+                    "Bootstrap registration attempt %d/%d for %s failed with %s: %s. "
+                    "Retrying in %.1fs.",
+                    attempt,
+                    max_attempts,
+                    payload,
+                    type(e).__name__,
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
             except Exception as e:
                 err_msg = (
                     e.response.text if isinstance(e, httpx.HTTPStatusError) else str(e)
                 )
-                logger.error(
+                logger.exception(
                     "Error registering %s with bootstrap server: %s", payload, err_msg
                 )
-                raise e
+                raise
+        raise RuntimeError(
+            f"Failed to register {payload} with the Mooncake bootstrap server at "
+            f"{url} after {max_attempts} attempts."
+        )
 
     async def _mooncake_sender_listener(self, ready_event: threading.Event):
         """Background thread that listens for Mooncake requests, dispatches them
@@ -1250,39 +1580,51 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr,
-            self.block_len_per_layer,
-            self.kv_block_len_per_layer,
-            self.registered_layer_names,
-            self.registered_layer_indices,
-            self.registered_group_indices,
-        )
-        remote_regions = self._get_transfer_regions(
-            meta.kv_caches_base_addr,
-            meta.block_lens,
-            meta.kv_block_lens,
-            meta.registered_layer_names,
-            meta.registered_layer_indices,
-            meta.registered_group_indices,
-        )
-        local_regions, remote_regions, align_err = _align_transfer_regions(
-            local_regions,
-            remote_regions,
-            allow_partial_layers=(
-                meta.remote_pp_size > 1 and meta.remote_pp_size != self.pp_size
-            ),
-        )
-        if align_err is not None:
+        if _pp_mismatch_hides_packed_layers(
+            self.pp_size,
+            meta.remote_pp_size,
+            local_has_opaque_row=bool(self.opaque_packed_storages),
+            remote_row_offsets=meta.registered_row_offsets,
+            remote_kv_block_lens=meta.kv_block_lens,
+            remote_block_lens=meta.block_lens,
+        ):
+            msg = (
+                "Mooncake non-page-contiguous packed regions keep only the "
+                "first layer name, so they cannot be aligned across PP sizes "
+                f"{self.pp_size} and {meta.remote_pp_size}."
+            )
+            logger.error(msg)
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
-                err_msg=align_err,
+                err_msg=msg,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        validation_err = self._validate_head_resharding_layout(
-            meta.remote_tp_size, local_regions
-        ) or _validate_asymmetric_region_lengths(
+        if meta.layout_id and not meta.kv_caches_base_addr:
+            stored = self._lookup_peer_layout(meta)
+            if stored is None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.LAYOUT_MISS,
+                    err_msg=(
+                        f"Mooncake KV layout {meta.layout_id:#x} from "
+                        f"{meta.remote_hostname}:{meta.remote_port} is not cached."
+                    ),
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
+            local_regions, remote_regions = stored
+        else:
+            local_regions, remote_regions, prep_err = self._prepare_transfer_regions(
+                meta
+            )
+            if prep_err is not None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=prep_err,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
+        validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
             local_tp_size=self.tp_size,
@@ -1342,6 +1684,7 @@ class MooncakeConnectorWorker:
                     status=MooncakeXferResponseStatus.FINISH,
                     err_reqs=list(pending_reqs),
                     err_msg="Timeout waiting for P side ready.",
+                    layout_id=meta.layout_id,
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 break
@@ -1432,6 +1775,7 @@ class MooncakeConnectorWorker:
                 ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
+                layout_id=meta.layout_id,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1470,11 +1814,12 @@ class MooncakeConnectorWorker:
         )
         group_specs = self.kv_cache_config.transfer_groups
         return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical_kv_block,
-                block_arange,
-            ).tolist()
+            (
+                np.array(group)[:, None] * self._physical_blocks_per_logical_kv_block
+                + block_arange
+            )
+            .reshape(-1)
+            .tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group
             for i, group in enumerate(block_ids)
@@ -1584,12 +1929,16 @@ class MooncakeConnectorWorker:
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
-                group_index = local_region.group_index
-                assert group_index < len(local_block_ids_by_group), (
-                    "Transfer region references a missing KV group."
+                local_block_ids = _block_ids_for_region(
+                    local_block_ids_by_group,
+                    local_region.group_index,
+                    local_region.shared_group_ids,
                 )
-                local_block_ids = local_block_ids_by_group[group_index]
-                remote_block_ids = remote_block_ids_by_group[group_index]
+                remote_block_ids = _block_ids_for_region(
+                    remote_block_ids_by_group,
+                    remote_region.group_index,
+                    local_region.shared_group_ids,
+                )
                 if not local_block_ids:
                     continue
 
@@ -1722,6 +2071,21 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
+        self.region_shared_groups = []
+        self.region_row_offsets = []
+        self.opaque_packed_storages = set()
+        self._prepared_transfer_regions.clear()
+        self._layout_by_peer.clear()
+        self._acked_layout_peers.clear()
+        # Odd, so never 0 (the "layout on every pull" marker).
+        self._kv_layout_id = secrets.randbits(63) | 1
+
+        packed_storage_to_region: dict[int, int] = {}
+        packed_view_to_region: dict[tuple[int, int, int], int] = {}
+        collapsed_views = 0
+        num_blocks = (
+            self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
+        )
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -1735,6 +2099,104 @@ class MooncakeConnectorWorker:
             # One raw page tensor per layer; for Mamba that page holds all the
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
+            group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            storage = cache.untyped_storage()
+            storage_addr = storage.data_ptr()
+            if storage_addr not in seen_storage_ptrs:
+                seen_storage_ptrs.add(storage_addr)
+                kv_data_ptrs.append(storage_addr)
+                kv_data_lens.append(storage.nbytes())
+
+            is_mla_region = isinstance(
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            )
+            tensor_blocks = cache.shape[0] if cache.ndim > 1 else num_blocks
+            if cache.ndim == 1:
+                # A flat buffer is block-major only when it is an integral run
+                # of this layer's pages. NIXL uses the same remainder check.
+                hnc_contiguous = False
+                page = (
+                    layer_spec.page_size_bytes
+                    if isinstance(layer_spec, AttentionSpec)
+                    else 0
+                )
+                remainder = (
+                    storage.nbytes() - tensor_blocks * page
+                    if tensor_blocks > 0 and page > 0
+                    else -1
+                )
+                if 0 <= remainder < page:
+                    block_stride = page
+                    storage_is_block_major = True
+                else:
+                    block_stride = 0
+                    storage_is_block_major = False
+            else:
+                block_stride = cache.stride(0) * cache.element_size()
+                storage_is_block_major = (
+                    tensor_blocks > 0
+                    and tensor_blocks * block_stride == storage.nbytes()
+                )
+                hnc_contiguous = (
+                    cache.ndim == 4
+                    and cache.stride(2) == cache.shape[3]
+                    and cache.stride(1) == cache.shape[2] * cache.shape[3]
+                )
+            # Follow NIXL packed pages. Page-contiguous slices stay per layer so
+            # hetero PP can align by name (#56033). A non-contiguous row cannot
+            # name a sub-span, so it is one region anchored at the allocation.
+            use_packed_row = (
+                not isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
+                and storage_is_block_major
+                and block_stride > 0
+                and (is_mla_region or not hnc_contiguous)
+            )
+            if use_packed_row:
+                page_contiguous = (
+                    cache.ndim > 1
+                    and cache[0].is_contiguous()
+                    and 0 < cache[0].nbytes <= block_stride
+                )
+                if page_contiguous:
+                    view_addr = cache.data_ptr()
+                    kv_block_len = cache[0].nbytes
+                else:
+                    # NIXL branch B: length is the row, base is the allocation.
+                    view_addr = storage_addr
+                    kv_block_len = block_stride
+                    self.opaque_packed_storages.add(storage_addr)
+                # Same PP on both sides still aligns by the first layer name.
+                # A remote PP mismatch is rejected at send time, once the
+                # peer's PP size is known.
+                dedupe_key = (view_addr, block_stride, kv_block_len)
+                region_idx = packed_view_to_region.get(dedupe_key)
+                if region_idx is not None:
+                    collapsed_views += 1
+                    # -1 means these groups share the view. Flatten only them.
+                    groups = list(self.region_shared_groups[region_idx])
+                    if group_index not in groups:
+                        groups.append(group_index)
+                        self.region_shared_groups[region_idx] = tuple(groups)
+                    if len(self.region_shared_groups[region_idx]) > 1:
+                        self.registered_group_indices[region_idx] = (
+                            _SHARED_REGION_GROUP_ID
+                        )
+                    continue
+                if not page_contiguous:
+                    self.opaque_packed_storages.add(storage_addr)
+                if storage_addr not in packed_storage_to_region:
+                    packed_storage_to_region[storage_addr] = len(region_base_addresses)
+                packed_view_to_region[dedupe_key] = len(region_base_addresses)
+                region_base_addresses.append(view_addr)
+                self.block_len_per_layer.append(block_stride)
+                self.kv_block_len_per_layer.append(kv_block_len)
+                self.registered_layer_names.append(layer_name)
+                self.registered_layer_indices.append(layer_index)
+                self.registered_group_indices.append(group_index)
+                self.region_shared_groups.append((group_index,))
+                self.region_row_offsets.append(view_addr - storage_addr)
+                continue
+
             block_is_contiguous = is_non_overlapping_and_dense(cache[0])
             if not block_is_contiguous:
                 # Non-block-compact layouts scatter a block across per-head
@@ -1751,9 +2213,7 @@ class MooncakeConnectorWorker:
                 block_len = region_cache.stride(0) * region_cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, KpoolTailSpec):
-                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block
@@ -1763,6 +2223,8 @@ class MooncakeConnectorWorker:
                         layer_spec.page_size_bytes
                         // self._physical_blocks_per_logical_kv_block
                     )
+                elif isinstance(layer_spec, MambaSpec) and block_is_contiguous:
+                    kv_block_len = layer_spec.page_size_bytes
                 else:
                     kv_block_len = block_len
                 if kv_block_len > block_len:
@@ -1775,21 +2237,29 @@ class MooncakeConnectorWorker:
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
-                self.registered_group_indices.append(
-                    self.kv_cache_config.transfer_group_index_by_layer[layer_name]
-                )
-            storage = cache.untyped_storage()
-            storage_addr = storage.data_ptr()
-            if storage_addr not in seen_storage_ptrs:
-                seen_storage_ptrs.add(storage_addr)
-                kv_data_ptrs.append(storage_addr)
-                kv_data_lens.append(storage.nbytes())
+                self.registered_group_indices.append(group_index)
+                self.region_shared_groups.append((group_index,))
+                # Not a view into a shared packed row, so do not promote it.
+                self.region_row_offsets.append(-1)
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
+        self._kv_data_lens = kv_data_lens
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
+
+        if packed_storage_to_region and (
+            collapsed_views
+            or len(packed_view_to_region) != len(packed_storage_to_region)
+        ):
+            logger.info(
+                "Mooncake packed KV xfer: %s layer regions over %s storage "
+                "regions (%s duplicate views collapsed).",
+                len(packed_view_to_region),
+                len(packed_storage_to_region),
+                collapsed_views,
+            )
 
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
@@ -1806,11 +2276,47 @@ class MooncakeConnectorWorker:
         if self.is_kv_consumer:
             return
 
+        # httpx applies the timeout to each phase (connect, read, write, pool)
+        # rather than to the whole request, so budget for all four.
+        register_timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
+        backoff_total = sum(min(2.0**i, 10.0) for i in range(max_attempts - 1))
+        ready_timeout = max_attempts * 4 * register_timeout + backoff_total + 30.0
         ready_event = threading.Event()
-        asyncio.run_coroutine_threadsafe(
+        fut = asyncio.run_coroutine_threadsafe(
             self._mooncake_sender_listener(ready_event), self.sender_loop
         )
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+        deadline = time.monotonic() + ready_timeout
+        while not ready_event.wait(timeout=1.0):
+            if fut.done():
+                fut.result()
+                raise RuntimeError(
+                    "Mooncake sender listener exited before becoming ready."
+                )
+            if time.monotonic() > deadline:
+                fut.cancel()
+                raise RuntimeError(
+                    "Mooncake sender listener did not become ready within "
+                    f"{ready_timeout:.0f}s."
+                )
+
+    def unregister_kv_caches(self) -> None:
+        if self._kv_unregistered or not self.seen_base_addresses:
+            return
+        ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
+        if ret_value != 0:
+            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        self._kv_unregistered = True
+
+    def restore_kv_caches(self) -> None:
+        if not self._kv_unregistered:
+            return
+        ret_value = self.engine.batch_register_memory(
+            self.seen_base_addresses, self._kv_data_lens
+        )
+        if ret_value != 0:
+            raise RuntimeError("Mooncake batch memory registration failed.")
+        self._kv_unregistered = False
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
@@ -1911,61 +2417,83 @@ class MooncakeConnectorWorker:
         worker_addr: str,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
+        # Each peer settles its own requests, sharing the per-request counters.
+        pull_metas = pull_metas.copy()
         req_ids = set(pull_metas)
-        metadata = MooncakeXferMetadata(
-            remote_hostname=self.hostname,
-            remote_port=self.rpc_port,
-            remote_tp_size=self.tp_size,
-            remote_tp_rank=self.tp_rank,
-            remote_pp_size=self.pp_size,
-            req_blocks={
-                req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
-                for req_id, pull_meta in pull_metas.items()
-            },
-            kv_caches_base_addr=self.kv_caches_base_addr,
-            block_lens=self.block_len_per_layer,
-            kv_block_lens=self.kv_block_len_per_layer,
-            registered_layer_names=self.registered_layer_names,
-            registered_layer_indices=self.registered_layer_indices,
-            registered_group_indices=self.registered_group_indices,
+        include_layout = (
+            not self._kv_layout_id or worker_addr not in self._acked_layout_peers
         )
-
-        encoded_data = self._encoder.encode(metadata)
-        logger.debug(
-            "Size of encoded MooncakeXferMetadata: %d bytes", len(encoded_data)
-        )
-        logger.debug(
-            "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
-        )
-
-        # Send query for the request.
-        try:
-            with make_zmq_socket(
-                self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-            ) as sock:
-                # If something goes wrong, let P wait timeout first (in asyncio.wait()).
-                sock.setsockopt(
-                    zmq.RCVTIMEO, (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000
+        # Each pass either returns or breaks out of the recv loop to resend
+        # the layout after a LAYOUT_MISS.
+        while True:
+            metadata = self._build_pull_metadata(
+                pull_metas, include_layout=include_layout
+            )
+            encoded_data = self._encoder.encode(metadata)
+            logger.debug(
+                "MooncakeXferMetadata to %s is %d bytes (%s).",
+                worker_addr,
+                len(encoded_data),
+                "layout" if include_layout else "blocks",
+            )
+            logger.debug(
+                "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
+            )
+            try:
+                with make_zmq_socket(
+                    self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
+                ) as sock:
+                    sock.setsockopt(
+                        zmq.RCVTIMEO,
+                        (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000,
+                    )
+                    await sock.send(encoded_data)
+                    while True:
+                        ret_msg = await sock.recv()
+                        response = self._xfer_resp_decoder.decode(ret_msg)
+                        status = response.status
+                        if status == MooncakeXferResponseStatus.LAYOUT_MISS:
+                            self._acked_layout_peers.discard(worker_addr)
+                            if not include_layout:
+                                logger.info(
+                                    "Mooncake prefill %s lost the KV layout; "
+                                    "resending it.",
+                                    worker_addr,
+                                )
+                                include_layout = True
+                                break
+                        if status in (
+                            MooncakeXferResponseStatus.ERROR,
+                            MooncakeXferResponseStatus.LAYOUT_MISS,
+                        ):
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                response.err_msg or "transfer error",
+                            )
+                            return
+                        if (
+                            self._kv_layout_id
+                            and response.layout_id == self._kv_layout_id
+                        ):
+                            self._acked_layout_peers.add(worker_addr)
+                        self.process_pulling_result(response, pull_metas)
+                        if status == MooncakeXferResponseStatus.FINISH:
+                            # P may omit expired requests from its final response.
+                            self._handle_failed_recv(
+                                pull_metas,
+                                list(pull_metas),
+                                "peer finished without reporting a transfer result",
+                            )
+                            return
+            except zmq.ContextTerminated:
+                logger.debug(
+                    "ZMQ context terminated, exiting Mooncake receiver thread."
                 )
-                await sock.send(encoded_data)
-                while True:
-                    ret_msg = await sock.recv()
-                    response = self._xfer_resp_decoder.decode(ret_msg)
-                    if response.status == MooncakeXferResponseStatus.ERROR:
-                        self._handle_failed_recv(
-                            pull_metas,
-                            req_ids,
-                            response.err_msg or "transfer error",
-                        )
-                        return
-                    self.process_pulling_result(response, pull_metas)
-                    if response.status == MooncakeXferResponseStatus.FINISH:
-                        break
-        except zmq.ContextTerminated:
-            logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
-        except Exception as e:
-            self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
-            return
+                return
+            except Exception as e:
+                self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
+                return
 
     def _handle_failed_recv(
         self,
@@ -1976,8 +2504,11 @@ class MooncakeConnectorWorker:
         """Report a failed remote KV load so the scheduler can fail or recompute it."""
         failed: list[ReqId] = []
         for req_id in req_ids:
-            pull_meta = pull_metas.get(req_id)
-            if pull_meta is None or pull_meta.failed:
+            pull_meta = pull_metas.pop(req_id, None)
+            if pull_meta is None:
+                continue
+            if pull_meta.failed:
+                self._complete_pull_task(pull_meta)
                 continue
             pull_meta.failed = True
             failed.append(req_id)
@@ -1991,15 +2522,23 @@ class MooncakeConnectorWorker:
                 # abort_immediately request just to run request_finished). No D
                 # request is waiting on a load, and reporting one here would trip
                 # the scheduler's `assert req_id in self.requests`.
+                self._complete_pull_task(pull_meta)
                 continue
             if self._is_hma_required:
                 self._failed_recv_reqs.put(pull_meta.d_req_id)
             else:
                 self._invalid_block_ids.put(invalid)
-            self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self._complete_pull_task(pull_meta)
 
         if failed:
             logger.error("pulling kv_caches for %s failed: %s", failed, reason)
+
+    def _complete_pull_task(self, pull_meta: PullReqMeta) -> None:
+        # Bootstrap failures have no peer tasks to settle.
+        if pull_meta.pull_tasks_count > 0:
+            pull_meta.pull_tasks_count -= 1
+        if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
+            self.finished_recving_reqs.add(pull_meta.d_req_id)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose remote KV load failed since the last call."""
@@ -2016,30 +2555,46 @@ class MooncakeConnectorWorker:
         response: MooncakeXferResponse,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        ok_reqs: list[ReqId] = response.ok_reqs or []
-
-        for req_id in ok_reqs:
-            pull_meta = pull_metas[req_id]
-            if pull_meta.failed:
-                continue
-            # No race because we are in async loop.
-            pull_meta.pull_tasks_count -= 1
-            if pull_meta.pull_tasks_count == 0:
-                self.finished_recving_reqs.add(pull_meta.d_req_id)
-
-        if ok_reqs:
-            logger.debug("pulling kv_caches for %s finished", ok_reqs)
-
         if response.err_reqs:
             self._handle_failed_recv(
                 pull_metas, response.err_reqs, response.err_msg or "unknown error"
             )
+        ok_reqs: list[ReqId] = response.ok_reqs or []
+
+        for req_id in ok_reqs:
+            pull_meta = pull_metas.pop(req_id, None)
+            if pull_meta is not None:
+                self._complete_pull_task(pull_meta)
+
+        if ok_reqs:
+            logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+            ) as client:
+                retry_delay = 0.1
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = await client.get(url)
+                        break
+                    except httpx.RequestError as e:
+                        if attempt == max_attempts:
+                            raise
+                        logger.warning(
+                            "Bootstrap query to %s failed on attempt %d/%d "
+                            "(%s: %s); retrying in %.1f seconds",
+                            remote_bootstrap_addr,
+                            attempt,
+                            max_attempts,
+                            type(e).__name__,
+                            e,
+                            retry_delay,
+                        )
+                        await asyncio.sleep(retry_delay)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
@@ -2054,8 +2609,9 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
+                "Failed to connect to bootstrap server %s (%s): %s",
                 remote_bootstrap_addr,
+                type(e).__name__,
                 e,
             )
 
@@ -2175,6 +2731,207 @@ class MooncakeConnectorWorker:
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
+    def _prepare_transfer_regions(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+        """Align and coalesce once per peer layout.
+
+        ``send_kv_to_decode`` runs on every scheduler batch. The registered
+        layout does not change until the next ``register_kv_caches``.
+        """
+        cache_key = (
+            meta.remote_hostname,
+            meta.remote_port,
+            meta.remote_tp_size,
+            meta.remote_tp_rank,
+            meta.remote_pp_size,
+            tuple(meta.kv_caches_base_addr),
+            tuple(meta.block_lens),
+            tuple(meta.kv_block_lens),
+            tuple(meta.registered_layer_names),
+            tuple(meta.registered_layer_indices),
+            tuple(meta.registered_group_indices),
+            tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
+            tuple(meta.registered_row_offsets),
+        )
+        cached = self._prepared_transfer_regions.get(cache_key)
+        if cached is not None:
+            # A new layout_id can carry a layout this cache already holds.
+            self._remember_peer_layout(meta, cached)
+            return cached
+
+        def finish(
+            local: list[TransferRegion],
+            remote: list[TransferRegion],
+            err: str | None,
+        ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+            prepared = (local, remote, err)
+            self._prepared_transfer_regions[cache_key] = prepared
+            return prepared
+
+        shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
+        if len(self.region_shared_groups) != len(self.registered_layer_names):
+            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
+                return finish(
+                    [],
+                    [],
+                    (
+                        "Mooncake shared-group metadata does not match "
+                        "registered layers, so a shared packed region cannot "
+                        "be transferred."
+                    ),
+                )
+            shared_groups = None
+        local_rows: list[int] | None = self.region_row_offsets
+        if len(self.region_row_offsets) != len(self.registered_layer_names):
+            local_rows = None
+        local_regions = self._get_transfer_regions(
+            self.kv_caches_base_addr,
+            self.block_len_per_layer,
+            self.kv_block_len_per_layer,
+            self.registered_layer_names,
+            self.registered_layer_indices,
+            self.registered_group_indices,
+            shared_groups,
+            local_rows,
+        )
+        remote_shared_groups = [
+            tuple(groups) for groups in meta.registered_shared_group_ids
+        ]
+        remote_shared: list[tuple[int, ...]] | None = remote_shared_groups
+        if len(remote_shared_groups) != len(meta.registered_layer_names):
+            remote_shared = None
+        remote_rows = meta.registered_row_offsets
+        remote_row_offsets: list[int] | None = remote_rows
+        if len(remote_rows) != len(meta.registered_layer_names):
+            remote_row_offsets = None
+        remote_regions = self._get_transfer_regions(
+            meta.kv_caches_base_addr,
+            meta.block_lens,
+            meta.kv_block_lens,
+            meta.registered_layer_names,
+            meta.registered_layer_indices,
+            meta.registered_group_indices,
+            remote_shared,
+            remote_row_offsets,
+        )
+        pre_align_local = local_regions
+        pre_align_remote = remote_regions
+        local_regions, remote_regions, align_err = _align_transfer_regions(
+            local_regions,
+            remote_regions,
+            allow_partial_layers=meta.remote_pp_size != self.pp_size,
+        )
+        if align_err is not None:
+            return finish([], [], align_err)
+        # Head checks must see every layer name. Coalesce keeps only the first.
+        head_err = self._validate_head_resharding_layout(
+            meta.remote_tp_size, local_regions
+        )
+        if head_err is not None:
+            return finish([], [], head_err)
+        # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
+        # multi-layer span would land that offset on the wrong layer.
+        # Replicated KV keeps that offset at 0. MLA is replicated in practice;
+        # gating on use_mla alone would promote and then fail the length check
+        # for a non-replicated MLA rank with tp_ratio != 1.
+        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
+        if tp_ratio == 1 or self._producer_cache_is_replicated():
+            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
+                remote_regions
+            ) == len(pre_align_remote)
+            n_aligned = len(local_regions)
+            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
+                local_regions,
+                remote_regions,
+                promote_full_row=covered_both_sides,
+            )
+            logger.info(
+                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
+                n_aligned,
+                len(local_regions),
+            )
+        prepared = (local_regions, remote_regions, None)
+        self._prepared_transfer_regions[cache_key] = prepared
+        self._remember_peer_layout(meta, prepared)
+        return prepared
+
+    def _peer_layout_key(self, meta: MooncakeXferMetadata) -> tuple:
+        return (
+            meta.remote_hostname,
+            meta.remote_port,
+            meta.remote_tp_rank,
+            meta.remote_pp_size,
+            meta.remote_tp_size,
+            meta.layout_id,
+        )
+
+    def _remember_peer_layout(
+        self,
+        meta: MooncakeXferMetadata,
+        prepared: tuple[list[TransferRegion], list[TransferRegion], str | None],
+    ) -> None:
+        local_regions, remote_regions, err = prepared
+        if err is not None or not meta.layout_id:
+            return
+        key = self._peer_layout_key(meta)
+        self._layout_by_peer[key] = (local_regions, remote_regions)
+        self._layout_by_peer.move_to_end(key)
+        while len(self._layout_by_peer) > _MAX_PEER_LAYOUTS:
+            self._layout_by_peer.popitem(last=False)
+
+    def _lookup_peer_layout(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion]] | None:
+        key = self._peer_layout_key(meta)
+        stored = self._layout_by_peer.get(key)
+        if stored is not None:
+            self._layout_by_peer.move_to_end(key)
+        return stored
+
+    def _build_pull_metadata(
+        self,
+        pull_metas: dict[ReqId, PullReqMeta],
+        *,
+        include_layout: bool,
+    ) -> MooncakeXferMetadata:
+        req_blocks = {
+            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+            for req_id, pull_meta in pull_metas.items()
+        }
+        if not include_layout:
+            return MooncakeXferMetadata(
+                remote_hostname=self.hostname,
+                remote_port=self.rpc_port,
+                remote_tp_size=self.tp_size,
+                remote_tp_rank=self.tp_rank,
+                remote_pp_size=self.pp_size,
+                layout_id=self._kv_layout_id,
+                req_blocks=req_blocks,
+                kv_caches_base_addr=[],
+                block_lens=[],
+                kv_block_lens=[],
+            )
+        return MooncakeXferMetadata(
+            remote_hostname=self.hostname,
+            remote_port=self.rpc_port,
+            remote_tp_size=self.tp_size,
+            remote_tp_rank=self.tp_rank,
+            remote_pp_size=self.pp_size,
+            layout_id=self._kv_layout_id,
+            req_blocks=req_blocks,
+            kv_caches_base_addr=self.kv_caches_base_addr,
+            block_lens=self.block_len_per_layer,
+            kv_block_lens=self.kv_block_len_per_layer,
+            registered_layer_names=self.registered_layer_names,
+            registered_layer_indices=self.registered_layer_indices,
+            registered_group_indices=self.registered_group_indices,
+            registered_shared_group_ids=[
+                list(groups) for groups in self.region_shared_groups
+            ],
+            registered_row_offsets=self.region_row_offsets,
+        )
+
     def _validate_head_resharding_layout(
         self, remote_tp_size: int, local_regions: list[TransferRegion]
     ) -> str | None:
@@ -2208,6 +2965,8 @@ class MooncakeConnectorWorker:
         layer_names: list[str],
         layer_indices: list[int],
         group_indices: list[int] | None = None,
+        shared_group_ids: list[tuple[int, ...]] | None = None,
+        row_offsets: list[int] | None = None,
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
@@ -2221,6 +2980,8 @@ class MooncakeConnectorWorker:
             layer_names=layer_names,
             layer_indices=layer_indices,
             group_indices=group_indices,
+            shared_group_ids=shared_group_ids,
+            row_offsets=row_offsets,
         )
 
     def _get_sender_transfer_plan(
@@ -2295,6 +3056,10 @@ def _async_loop(loop: asyncio.AbstractEventLoop):
 
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
+    if (kv_config := vllm_config.kv_transfer_config) is not None and (
+        kv_config.get_from_extra_config("bootstrap_server_address", None) is not None
+    ):
+        return False
     assert (parallel_config := vllm_config.parallel_config)
     # Only the TP=0, PP=0 worker of the designated engine should launch it.
     if get_tensor_model_parallel_rank() != 0:
@@ -2317,6 +3082,17 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     This is only used by prefillers to register workers.
     Decoders should get addr from kv_transfer_params.
     """
+    if (kv_config := vllm_config.kv_transfer_config) is not None:
+        address = kv_config.get_from_extra_config("bootstrap_server_address", None)
+        if address is not None:
+            from vllm.utils.network_utils import split_host_port
+
+            host, port = split_host_port(address)
+            if not host or not 1 <= port <= 65535:
+                raise ValueError(
+                    "bootstrap_server_address must specify a host and port"
+                )
+            return host, port
     assert (parallel_config := vllm_config.parallel_config)
     if parallel_config.local_engines_only:
         # In hybrid or external LB mode, connect to local server.

@@ -18,10 +18,16 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -33,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -65,6 +72,37 @@ _LN_2 = math.log(2.0)
 def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
     """Convert a base-2 log-sum-exp tensor to natural-log units."""
     return lse * _LN_2
+
+
+def compute_mm_prefix_ranges(
+    mm_features_per_req: Sequence[Sequence[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+    clamp_sliding_window: bool = False,
+    span_pad: int = 0,
+) -> dict[int, list[tuple[int, int]]]:
+    """Per-request PrefixLM bidirectional ranges for image/video tokens."""
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, mm_features in enumerate(mm_features_per_req):
+        image_doc_ranges = []
+        for mm_feature in mm_features:
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            pos_info = mm_feature.mm_position
+            if span_pad:
+                start = round_down(pos_info.offset, span_pad) + span_pad - 1
+                feature_ranges = [(start, pos_info.offset + pos_info.length - 1)]
+            else:
+                feature_ranges = pos_info.extract_embeds_range()
+            for r in feature_ranges:
+                if (
+                    not clamp_sliding_window
+                    and sliding_window is not None
+                    and (r[1] - r[0] + 1) > sliding_window
+                ):
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges
 
 
 def compute_mm_prefix_range_tensor(
@@ -286,9 +324,13 @@ def resolve_kv_cache_layout(
     # specs can re-interpret HNC with different sizes as long as the total number of
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    # Specs without per-layer views lay out their own raw backing tensor.
+    kv_cache_specs = tuple(
+        spec for spec in kv_cache_specs or () if spec.has_layer_views
+    )
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
-        for spec in kv_cache_specs or ()
+        for spec in kv_cache_specs
     }
     if len(hnc_shapes) > 1:
         candidates = [m for m in candidates if m.is_block_compact]
@@ -296,6 +338,24 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "Specs with mixed HNC shapes need a block-compact layout, but "
                 f"none is in every supported set: {supported_layouts}."
+            )
+
+    # Self-addressed per-request rings (e.g. the kpool tail) are replicated
+    # state like Mamba and don't need a separate draft group.
+    dcp_sharding = {
+        spec.dcp_sharded
+        for spec in kv_cache_specs
+        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
+    }
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+        # Sharded target and replicated draft caches need independent groups.
+        # Block-outer layouts can pack those groups without equalizing pages.
+        candidates = [layout for layout in candidates if layout.is_block_outermost]
+        if not candidates:
+            raise ValueError(
+                "DCP with a replicated draft and mixed KV page sizes requires "
+                f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -828,7 +888,7 @@ def split_decodes_and_prefills(
             (query_lens == query_lens[0]) | (query_lens == 0)
         ):
             return num_reqs, 0, num_tokens, 0  # all decodes
-        is_prefill = query_lens != query_lens[0]
+        is_prefill = (query_lens != query_lens[0]) & (query_lens != 0)
     else:
         is_prefill = query_lens > decode_threshold
 
@@ -1096,6 +1156,7 @@ def get_dcp_local_seq_lens(
     Only consider dcp now, we can extend the case of cp based on this.
     """
     seq_lens_i32 = seq_lens.to(torch.int32)
+    rank_offsets: int | torch.Tensor
     if dcp_rank is None:
         rank_offsets = torch.arange(
             dcp_size,
@@ -1113,7 +1174,8 @@ def get_dcp_local_seq_lens(
         rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     else:
-        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        # Use the Python scalar directly to avoid a synchronizing H2D copy.
+        rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled
@@ -1131,6 +1193,75 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit(
+    do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
+)
+def _mamba_align_block_table_kernel(
+    out_ptr,
+    block_table_ptr,
+    block_table_stride_0: tl.int64,
+    block_table_stride_1,
+    seq_lens_ptr,
+    seq_lens_stride,
+    block_size,
+    n_out,
+    BLOCK: tl.constexpr,
+):
+    """Gather the last ``n_out`` block-table entries of each request.
+
+    One program per request. This replaces a five-statement PyTorch expression
+    that expanded to seven kernels over a ``(num_reqs,)`` tensor -- one element
+    in a single-request decode -- so almost all of its cost was launch
+    overhead rather than work.
+
+    Both block-table strides are passed explicitly. The expression this replaces
+    was ``torch.gather(block_table, 1, ...)``, which honours any layout, and
+    this is a shared utility -- ``gdn_attn``, ``mamba_attn``, ``short_conv_attn``
+    and ``linear_attn`` all call it -- so assuming a column stride of 1 would
+    silently read the wrong slots for a caller holding a non-contiguous view.
+    ``kimi_k3/nvidia/kda_metadata.py`` passes both strides for the same reason.
+
+    Two annotations above are load-bearing and easy to drop by accident:
+
+    ``block_table_stride_0: tl.int64``
+        Without it ``req_idx * block_table_stride_0`` is computed in i32 --
+        ``program_id`` is i32 and Triton specializes a stride below 2^31 to
+        i32 -- so the product wraps once a row offset reaches 2^31 elements
+        (a 4096 x 625000 table faults from row 3436 on MI355X).
+        ``torch.gather``, which this replaces, indexes in 64-bit and has no
+        such limit, so narrowing it would be a regression.
+        ``mamba_utils.py:43`` annotates its row stride the same way.
+
+    ``do_not_specialize_on_alignment`` on the three pointers
+        Triton puts pointer alignment in the specialization key, and the MRV1
+        DBO path hands this kernel ``seq_lens[request_slice]`` /
+        ``block_table_tensor[request_slice]`` VIEWS (ubatch_utils.py:278/316).
+        When a ubatch starts at a request index that is not a multiple of 4
+        the view is differently aligned and a fresh variant JIT-compiles
+        mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
+        ``jit_monitor_mode=error``. The torch expression this replaced never
+        compiled anything, so that recompile would be a regression introduced
+        by this change.
+    """
+    req_idx = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + req_idx * seq_lens_stride)
+    # A zero-length request in a CUDA graph has an invalid block table; clamp
+    # to 0 so it reads a valid row, exactly as the previous clamp_ did.
+    start = tl.maximum((seq_len - 1) // block_size, 0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < n_out
+    vals = tl.load(
+        block_table_ptr
+        + req_idx * block_table_stride_0
+        + (start + offs) * block_table_stride_1,
+        mask=mask,
+        other=0,
+    )
+    # `out` is freshly allocated by the caller and therefore contiguous, so its
+    # row stride is exactly n_out.
+    tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1140,11 +1271,6 @@ def mamba_get_block_table_tensor(
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks);
-               output (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks).
-
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).
 
@@ -1152,20 +1278,62 @@ def mamba_get_block_table_tensor(
                output (#requests, 1 + num_speculative_blocks), which are the last
                1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode in ("all", "none"):
+    if mamba_cache_mode == "none":
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
-        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
-        # to handle the invalid block table.
-        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
-        start_indices.clamp_(min=0)
-        # Use int32 for arithmetic to avoid dtype promotion overhead,
-        # then convert to int64 for gather (which requires Long indices)
-        offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks,
-            device=block_table.device,
-            dtype=torch.int32,
+        # The arithmetic here is trivial -- a divide, a clamp, an arange, an
+        # add, a cast and a gather -- but as PyTorch ops it was seven kernel
+        # launches over a (num_reqs,) tensor, which holds a single element in a
+        # one-request decode. One Triton kernel does the same work in one
+        # launch. Zero-length requests in a CUDA graph still clamp to row 0.
+        num_reqs = block_table.shape[0]
+        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        # The expression this replaced took its row count from `seq_lens` (a
+        # `torch.gather` whose index tensor is built from it), so a mismatch
+        # raised and a cross-device pair raised. Taking `num_reqs` from
+        # `block_table` instead silently changed all of that: with 4 block-table
+        # rows and 2 `seq_lens`, the old code returned 2 correct rows and the new
+        # kernel returns 4, two of them read from memory past the end of
+        # `seq_lens`; a pinned-CPU `seq_lens` with a GPU `block_table` used to
+        # raise and would now be read zero-copy from host memory.
+        #
+        # No in-tree caller does any of that today, but this helper is shared by
+        # gdn_attn, mamba_attn, short_conv_attn and linear_attn. Both are host
+        # metadata, so this costs no synchronisation, and it keeps the CPU
+        # branch below and the GPU kernel agreeing on the same inputs.
+        assert seq_lens.shape[0] == num_reqs, (
+            f"seq_lens has {seq_lens.shape[0]} rows, block_table has {num_reqs}"
         )
-        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
-        return torch.gather(block_table, 1, indices_to_gather)
+        assert seq_lens.device == block_table.device, (
+            f"seq_lens is on {seq_lens.device}, block_table on {block_table.device}"
+        )
+        if not block_table.is_cuda:
+            # Triton runs on the accelerator only, and this helper IS called
+            # with CPU tensors: the GDN and linear-attention metadata builders
+            # are unit-tested on CPU (`DEVICE = torch.device("cpu")`). The
+            # expression this replaced was plain torch and handled that, so
+            # keep it for the CPU path rather than narrowing the contract.
+            # kimi_k3/nvidia/kda_metadata.py asserts `is_cuda` instead; a
+            # shared utility cannot, because its callers legitimately pass CPU.
+            start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+            start_indices = start_indices.clamp(min=0)
+            offsets = torch.arange(n_out, device=block_table.device, dtype=torch.int32)
+            return torch.gather(
+                block_table, 1, (start_indices.unsqueeze(1) + offsets).to(torch.int64)
+            )
+        out = block_table.new_empty((num_reqs, n_out))
+        if num_reqs == 0:
+            return out
+        _mamba_align_block_table_kernel[(num_reqs,)](
+            out,
+            block_table,
+            block_table.stride(0),
+            block_table.stride(1),
+            seq_lens,
+            seq_lens.stride(0),
+            kv_cache_spec.block_size,
+            n_out,
+            BLOCK=triton.next_power_of_2(n_out),
+        )
+        return out

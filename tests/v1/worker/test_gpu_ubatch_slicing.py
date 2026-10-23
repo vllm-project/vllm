@@ -294,18 +294,17 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(6, dp_size, dtype=torch.int32)
+    reduced = torch.zeros(7, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
+    reduced[6] = 0  # allow_skip_drafts
 
-    with (
-        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
-        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
-    ):
+    dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
+    with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
@@ -350,10 +349,10 @@ def test_decode_threshold_only_applies_when_every_rank_is_a_uniform_decode():
 
 def test_microbatching_pads_all_ranks_to_the_largest():
     """Ranks must run the same token count so microbatch sizes line up."""
-    desc, dp_sync = _sync_dp([200, 256])
+    desc, dp_sync_state = _sync_dp([200, 256])
     assert desc.num_tokens == 256
-    assert dp_sync is not None
-    assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+    assert dp_sync_state is not None
+    assert dp_sync_state.num_tokens_across_dp.tolist() == [256, 256]
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():
@@ -756,7 +755,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         [1, 1, 10, 1, 1], [64, 96, 512, 32, 48]
     )
     # execute_model has populated the merged batch's DCP metadata already.
-    input_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+    input_batch.dcp_local_seq_lens = gpu_cp_utils.prepare_dcp_local_seq_lens(
         buffers.dcp_local_seq_lens,
         input_batch.seq_lens,
         input_batch.num_reqs,
@@ -765,6 +764,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         CP_INTERLEAVE,
         num_reqs_padded=input_batch.num_reqs_after_padding,
     )
+    assert input_batch.dcp_local_seq_lens is not None
     parent_lens = input_batch.dcp_local_seq_lens.clone()
 
     ubatches, _ = _slice_with_dcp(input_batch, dcp_rank)
@@ -785,6 +785,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
     # the parent's row would ship the stale value.
     assert ubatches[0].num_reqs == 3
     assert ubatches[0].seq_lens[2].item() == 507
+    assert ubatches[0].dcp_local_seq_lens is not None
     assert ubatches[0].dcp_local_seq_lens[2].item() != parent_lens[2].item()
 
 
@@ -959,7 +960,7 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.num_ubatches == 2
 
     # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
-    desc, dp_sync = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
-    assert dp_sync is not None and dp_sync.eager
+    assert dp_sync_state is not None and dp_sync_state.eager

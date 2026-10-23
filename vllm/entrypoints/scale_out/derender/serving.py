@@ -29,11 +29,19 @@ from ..token_in_token_out.protocol import (
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
     DerenderStreamState,
-    GenerateResponse,
+    GenerateTokensResponse,
     MultiModalFeatures,
 )
 
 logger = init_logger(__name__)
+
+# A stop string can span chunks, so cutting it needs text held back across
+# calls. The engine already does that for output_mode=text.
+_STREAM_STOP_STRINGS_ERROR = (
+    "stop strings are not supported by streaming derender because text "
+    "already sent cannot be cut. Use non-streaming derender or "
+    "output_mode=text on /inference/v1/generate which holds stop strings back."
+)
 
 
 class ServingDerender(BaseServing):
@@ -54,7 +62,7 @@ class ServingDerender(BaseServing):
 
     def _validate_derender_bounds(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
     ) -> ErrorResponse | None:
         """Reject derender payloads that exceed resource bounds.
 
@@ -117,6 +125,20 @@ class ServingDerender(BaseServing):
 
         return None
 
+    def _validate_prompt_token_ids(
+        self,
+        prompt_token_ids: list[list[int] | None],
+    ) -> ErrorResponse | None:
+        """Reject caller-supplied prompt_token_ids longer than max_model_len."""
+        max_model_len = self.model_config.max_model_len
+        for ids in prompt_token_ids:
+            if ids is not None and len(ids) > max_model_len:
+                return self.create_error_response(
+                    f"prompt_token_ids length ({len(ids)}) exceeds "
+                    f"max_model_len ({max_model_len})."
+                )
+        return None
+
     async def derender_chat_response(
         self,
         request: DerenderChatRequest,
@@ -138,6 +160,10 @@ class ServingDerender(BaseServing):
         if bounds_error is not None:
             return bounds_error
 
+        prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
+        if prompt_ids_error is not None:
+            return prompt_ids_error
+
         if self.online_derenderer.parser is not None and request.chat_request is None:
             return self.create_error_response(
                 "chat_request is required when a tool or reasoning parser is "
@@ -147,7 +173,9 @@ class ServingDerender(BaseServing):
 
         try:
             choices = await self.online_derenderer.derender_chat(
-                request.generate_response, request.chat_request
+                request.generate_response,
+                request.chat_request,
+                request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
@@ -178,7 +206,14 @@ class ServingDerender(BaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=gen.prompt_logprobs,
+            prompt_token_ids=(
+                gen.prompt_token_ids
+                if request.chat_request is not None
+                and request.chat_request.return_token_ids
+                else None
+            ),
             kv_transfer_params=gen.kv_transfer_params,
+            metrics=gen.metrics,
         )
 
     async def derender_completion_response(
@@ -202,6 +237,11 @@ class ServingDerender(BaseServing):
         if bounds_error is not None:
             return bounds_error
 
+        if request.prompt_token_ids is not None:
+            prompt_ids_error = self._validate_prompt_token_ids(request.prompt_token_ids)
+            if prompt_ids_error is not None:
+                return prompt_ids_error
+
         (
             choices,
             total_prompt_tokens,
@@ -210,6 +250,7 @@ class ServingDerender(BaseServing):
             request.generate_responses,
             request.prompt_tokens,
             completion_request=request.completion_request,
+            prompt_token_ids=request.prompt_token_ids,
         )
 
         first = request.generate_responses[0]
@@ -245,6 +286,9 @@ class ServingDerender(BaseServing):
             choices=choices,
             usage=usage,
             kv_transfer_params=kv_params,
+            # Metrics describe one prompt. Parallel samples are already
+            # suppressed by /generate; multi-prompt responses cannot be merged.
+            metrics=first.metrics if len(request.generate_responses) == 1 else None,
         )
 
     async def derender_chat_stream_response(
@@ -259,6 +303,9 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.chat_request is not None and request.chat_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
 
         if self.online_derenderer.parser is not None and request.chat_request is None:
             return self.create_error_response(
@@ -340,6 +387,9 @@ class ServingDerender(BaseServing):
             )
             return self.create_error_response("invalid stream_state: derender failed")
 
+        if request.chat_request is not None and request.chat_request.return_token_ids:
+            chunk.prompt_token_ids = request.generate_chunk.prompt_token_ids
+
         logger.debug(
             "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
             request.generate_chunk.request_id,
@@ -363,6 +413,13 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if request.completion_request is not None and request.completion_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
+
+        prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
+        if prompt_ids_error is not None:
+            return prompt_ids_error
+
         model_name = request.model or self.models.model_name()
         try:
             (
@@ -374,6 +431,7 @@ class ServingDerender(BaseServing):
                 state=request.stream_state,
                 prompt_tokens=request.prompt_tokens,
                 completion_request=request.completion_request,
+                prompt_token_ids=request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))

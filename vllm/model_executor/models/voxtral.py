@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import cast
 
@@ -149,19 +149,23 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
             )
         }
 
-    def get_dummy_processor_inputs(
+
+class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
+    def get_dummy_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
+        # For test_common.py only
         mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
+        builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
         feature_extractor = self.info.get_feature_extractor()
 
-        dummy_text = self.get_dummy_text(mm_counts)
+        dummy_text = builder.get_dummy_text(mm_counts)
         dummy_mm_data = (
-            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
             if mm_data is None
             else mm_data
         )
@@ -197,8 +201,6 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
-
-class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
     # The tokens are already inserted by the chat template,
     # so we just double check that they exist
     def _maybe_apply_prompt_updates(
@@ -315,7 +317,7 @@ class VoxtralForConditionalGeneration(
 
         # update quant config to so that ignored module and target module names
         # match the vLLM model names
-        if hasattr(vllm_config, "quant_config"):
+        if vllm_config.quant_config is not None:
             vllm_config.quant_config = self.maybe_update_quant_config(
                 vllm_config.quant_config
             )
@@ -722,6 +724,7 @@ class VoxtralEncoderModel(nn.Module):
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
         self.is_causal = getattr(self.config, "is_causal", False)
+        WhisperEncoderCls: Callable[..., WhisperEncoder | WhisperCausalEncoder]
         if self.is_causal:
             WhisperEncoderCls = WhisperCausalEncoder
         else:
@@ -828,7 +831,7 @@ class VoxtralEncoderModel(nn.Module):
         return results
 
     def load_weight(self, weight: tuple[str, torch.Tensor]) -> str:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
