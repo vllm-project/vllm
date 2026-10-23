@@ -1142,15 +1142,14 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(
-            interleaved_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         n_gates = materialize_residual_path_constants(self)
         logger.info(
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
-        return loaded
 
 
 __all__ = [
