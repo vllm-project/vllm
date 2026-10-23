@@ -2135,7 +2135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dp_sync_state = self.execute_model_state.dp_sync_state
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
-        cudagraph_stats = self.execute_model_state.cudagraph_stats
+        # cudagraph_stats = self.execute_model_state.cudagraph_stats  # unused
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         # Keep execute_model_state but update it with sampler output for generate_drafts
 
@@ -2209,7 +2209,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
-            cudagraph_stats=cudagraph_stats,
+            cudagraph_stats=self.execute_model_state.cudagraph_stats,
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
@@ -2327,7 +2327,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             dp_sync_state=dp_sync_state,
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
-            cudagraph_stats=cudagraph_stats,
+            cudagraph_stats=self.execute_model_state.cudagraph_stats,
             num_spec_tokens_to_schedule=num_spec_tokens,
             sampler_output=sampler_output,
             num_sampled=num_sampled,
@@ -2352,7 +2352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dp_sync_state = self.execute_model_state.dp_sync_state
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
-        cudagraph_stats = self.execute_model_state.cudagraph_stats
+        # cudagraph_stats = self.execute_model_state.cudagraph_stats  # unused
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         sampler_output = self.execute_model_state.sampler_output
         num_sampled = self.execute_model_state.num_sampled
