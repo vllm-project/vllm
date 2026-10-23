@@ -326,6 +326,81 @@ def _write_moe_output(output: torch.Tensor, result: torch.Tensor) -> None:
         output.copy_(result)
 
 
+def derive_aiter_quant_method(quant_config: FusedMoEQuantConfig) -> QuantMethod:
+    """Re-derive the `QuantMethod` an `AiterExperts` leaf would statically set
+    via `_AITER_QUANT_METHOD`. For callers that invoke
+    `rocm_aiter_fused_experts` directly instead of through a leaf."""
+    if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
+        return QuantMethod.BLOCK_1X32
+    if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
+        return QuantMethod.BLOCK_128x128
+    if quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
+        return QuantMethod.PER_TOKEN
+    if quant_config.use_fp8_w8a8:
+        return QuantMethod.PER_TENSOR
+    return QuantMethod.NO
+
+
+def mxfp4_w4a16_extra_kwargs(
+    quant_config: FusedMoEQuantConfig, moe_config: FusedMoEConfig
+) -> dict:
+    """The gate_mode/bias/q_dtype_a overrides `AiterMxfp4Experts` supplies via
+    `_extra_fused_moe_kwargs`. For callers that invoke
+    `rocm_aiter_fused_experts` directly instead of through that leaf."""
+    if not quant_config.use_mxfp4_w4a16:
+        return {}
+
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    if moe_config.use_mxfp4_w4a4_dsv4:
+        from aiter import dtypes
+
+        return {
+            "gate_mode_override": GateMode.SEPARATED.value,
+            "q_dtype_a": dtypes.fp4x2,
+            "bias1": quant_config.w1_bias,
+            "bias2": quant_config.w2_bias,
+        }
+    return {
+        "gate_mode_override": GateMode.INTERLEAVE.value,
+        "bias1": quant_config.w1_bias,
+        "bias2": quant_config.w2_bias,
+    }
+
+
+def _dispatch_aiter_tkw1(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    expert_mask: torch.Tensor | None,
+    activation: MoEActivation,
+) -> torch.Tensor:
+    """AITER's tkw1 kernel applies topk_weights to FC1's GEMM output instead
+    of FC2's, fusing `apply_router_weight_on_input` for FP8 per-channel
+    weights (topk=1 only). See vllm-project/vllm#54966."""
+    _assert_topk1_for_router_weight_on_input(topk_weights)
+    activation_method, _ = _resolve_aiter_activation(activation)
+    topk_weights, topk_ids = _prepare_aiter_topk(topk_weights, topk_ids)
+    return rocm_aiter_ops.asm_moe_tkw1(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        fc1_scale=quant_config.w1_scale,
+        fc2_scale=quant_config.w2_scale,
+        fc1_smooth_scale=None,
+        fc2_smooth_scale=None,
+        a16=False,
+        per_tensor_quant_scale=None,
+        expert_mask=expert_mask,
+        activation_method=activation_method,
+    )
+
+
 def rocm_aiter_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -354,15 +429,30 @@ def rocm_aiter_fused_experts(
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation.
 
-    `quant_method` and (for MXFP4 W4A16) `gate_mode_override`/`bias1`/`bias2`/
-    `q_dtype_a` are owned and supplied by the calling `AiterExperts` leaf
-    class (see `_AITER_QUANT_METHOD` / `_extra_fused_moe_kwargs`), rather than
-    being re-derived here from `quant_config` flags. The
-    topk=1/`apply_router_weight_on_input` AITER tkw1 kernel is a separate,
-    narrower entrypoint owned entirely by `AiterFp8ChannelExperts.apply`.
+    `quant_method` is owned and supplied by the calling `AiterExperts` leaf
+    (`_AITER_QUANT_METHOD`); direct callers should use
+    `derive_aiter_quant_method(quant_config)`. Likewise MXFP4 W4A16's
+    `gate_mode_override`/`bias1`/`bias2`/`q_dtype_a` come from
+    `AiterMxfp4Experts._extra_fused_moe_kwargs`, or `mxfp4_w4a16_extra_kwargs`
+    for direct callers.
     """
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    if apply_router_weight_on_input and quant_method == QuantMethod.PER_TOKEN:
+        assert num_local_tokens is None, (
+            "AITER tkw1 kernel does not support `num_local_tokens`"
+        )
+        return _dispatch_aiter_tkw1(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            quant_config,
+            expert_mask,
+            activation,
+        )
 
     activation_method, activation_interleave = _resolve_aiter_activation(activation)
     topk_weights, topk_ids = _prepare_aiter_topk(topk_weights, topk_ids)
@@ -696,30 +786,18 @@ class AiterFp8ChannelExperts(AiterExperts):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        # AITER's tkw1 kernel applies topk_weights to FC1's GEMM output
-        # instead of FC2's, fusing `apply_router_weight_on_input` for this
-        # scheme (topk=1 only). See vllm-project/vllm#54966.
         assert expert_tokens_meta is None, (
             "AITER tkw1 kernel does not support `num_local_tokens`"
         )
-        activation_method, _ = _resolve_aiter_activation(activation)
-        topk_weights, topk_ids = _prepare_aiter_topk(topk_weights, topk_ids)
-        _assert_topk1_for_router_weight_on_input(topk_weights)
-
-        result = rocm_aiter_ops.asm_moe_tkw1(
+        result = _dispatch_aiter_tkw1(
             hidden_states,
             w1,
             w2,
             topk_weights,
             topk_ids,
-            fc1_scale=self.quant_config.w1_scale,
-            fc2_scale=self.quant_config.w2_scale,
-            fc1_smooth_scale=None,
-            fc2_smooth_scale=None,
-            a16=False,
-            per_tensor_quant_scale=None,
-            expert_mask=expert_map,
-            activation_method=activation_method,
+            self.quant_config,
+            expert_map,
+            activation,
         )
         _write_moe_output(output, result)
 
@@ -746,29 +824,4 @@ class AiterMxfp4Experts(AiterExperts):
         return on_gfx950() and not on_gfx1250()
 
     def _extra_fused_moe_kwargs(self) -> dict:
-        # Only the W4A16 scheme (unquantized/bf16 activations) needs a
-        # gate_mode/bias override to match its weight shuffle at load time
-        # (oracle/mxfp4.py); plain symmetric W4A4 has no AITER-tuned kernel
-        # config for a non-default gate_mode and must fall through to the
-        # shared activation-based gate_mode resolution.
-        if not self.quant_config.use_mxfp4_w4a16:
-            return {}
-
-        from aiter.ops.flydsl.moe_common import GateMode
-
-        if self.moe_config.use_mxfp4_w4a4_dsv4:
-            # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
-            # Must match the SEPARATED weight shuffle from load time.
-            from aiter import dtypes
-
-            return {
-                "gate_mode_override": GateMode.SEPARATED.value,
-                "q_dtype_a": dtypes.fp4x2,
-                "bias1": self.quant_config.w1_bias,
-                "bias2": self.quant_config.w2_bias,
-            }
-        return {
-            "gate_mode_override": GateMode.INTERLEAVE.value,
-            "bias1": self.quant_config.w1_bias,
-            "bias2": self.quant_config.w2_bias,
-        }
+        return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)

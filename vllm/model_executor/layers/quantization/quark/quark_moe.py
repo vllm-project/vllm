@@ -1509,9 +1509,11 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            derive_aiter_quant_method,
             rocm_aiter_fused_experts,
         )
 
+        assert self.moe_quant_config is not None
         return rocm_aiter_fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -1521,6 +1523,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
+            quant_method=derive_aiter_quant_method(self.moe_quant_config),
             moe_config=layer.moe_config,
             expert_mask=layer.expert_mask,
         )
