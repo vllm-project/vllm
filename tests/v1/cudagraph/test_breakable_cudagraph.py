@@ -798,8 +798,10 @@ def test_breakable_keeps_fast_and_full_prefill_graphs_separate():
             ):
                 wrapper(1)
 
-    assert len(wrapper.entries) == 2
-    assert {desc.has_fast_prefill for desc in wrapper.entries} == {False, True}
+    assert set(wrapper.entries) == {
+        BatchDescriptor(num_tokens=4, has_lora=True, has_fast_prefill=fast_prefill)
+        for fast_prefill in (False, True)
+    }
 
 
 def test_wrapper_default_matches_any_non_none_mode():
