@@ -642,6 +642,8 @@ class AiterFp8BlockExperts(AiterExperts):
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
         # AITER's blockscale MoE dispatch faults or computes garbage otherwise.
+        # TODO: Drop once AITER supports hidden sizes that are not a multiple
+        # of 512 (https://github.com/vllm-project/vllm/pull/62092).
         return hidden_dim % 512 == 0
 
 
