@@ -79,15 +79,41 @@ mod tests {
 
     use llm_multimodal::{MediaContentPart, ModelSpecificValue, PreProcessorConfig};
     use ndarray::ArrayD;
-    use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
+    use vllm_engine_core_client::protocol::multimodal::{MmFeatures, MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
+    use crate::request::{ChatContentPart, ChatMessage, ChatRequest};
 
     const AUDIO_PAD_ID: u32 = 151_676;
     const INKLING_AUDIO_MARKER_ID: u32 = 200_020;
     const INKLING_AUDIO_EMBED_ID: i32 = 200_053;
+
+    /// The model's full special-token vocabulary: the native renderer's
+    /// chat-structure tokens plus the multimodal content markers and soft
+    /// placeholders, with the checkpoint's ids.
+    fn inkling_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|message_user|>", 200_000)
+            .with_regular_token("<|message_model|>", 200_001)
+            .with_regular_token("<|message_system|>", 200_002)
+            .with_regular_token("<|message_tool|>", 200_003)
+            .with_regular_token("<|content_text|>", 200_004)
+            .with_regular_token("<|content_image|>", 200_005)
+            .with_regular_token("<|content_model_end_sampling|>", 200_006)
+            .with_regular_token("<|content_thinking|>", 200_008)
+            .with_regular_token("<|end_message|>", 200_010)
+            .with_regular_token("<|content_audio_input|>", INKLING_AUDIO_MARKER_ID)
+            .with_regular_token("<|content_xml|>", 200_024)
+            .with_regular_token("<|audio_end|>", 200_043)
+            .with_regular_token("<|content_invoke_tool_json|>", 200_049)
+            .with_regular_token(
+                INKLING_AUDIO_SOFT_PLACEHOLDER,
+                INKLING_AUDIO_EMBED_ID as u32,
+            )
+            .with_regular_token(INKLING_IMAGE_SOFT_PLACEHOLDER, 200_054)
+    }
     const INKLING_AUDIO_SOFT_PLACEHOLDER: &str = "<|unused_200053|>";
     const INKLING_IMAGE_SOFT_PLACEHOLDER: &str = "<|unused_200054|>";
 
@@ -105,14 +131,7 @@ mod tests {
                 "dmel_max_value": 2.0
             }
         });
-        let tokenizer = TestTokenizer::new()
-            .with_regular_token("<|content_image|>", 200_005)
-            .with_regular_token("<|content_audio_input|>", INKLING_AUDIO_MARKER_ID)
-            .with_regular_token(
-                INKLING_AUDIO_SOFT_PLACEHOLDER,
-                INKLING_AUDIO_EMBED_ID as u32,
-            )
-            .with_regular_token(INKLING_IMAGE_SOFT_PLACEHOLDER, 200_054);
+        let tokenizer = inkling_tokenizer();
         let context = MultimodalModelContext {
             model_id: "inkling-test".to_string(),
             model_type: Some("inkling_mm_model".to_string()),
@@ -386,5 +405,85 @@ mod tests {
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
+    }
+
+    /// Render a chat request through the native renderer and run the full
+    /// multimodal finalize path (extract, fetch, preprocess, expand), like
+    /// the production chat path does.
+    async fn finalize_native(
+        info: &MultimodalModelInfo,
+        parts: Vec<ChatContentPart>,
+    ) -> (Vec<u32>, MmFeatures) {
+        use vllm_text::Prompt;
+
+        use crate::renderer::{ChatRenderer, InklingChatRenderer};
+
+        let renderer =
+            InklingChatRenderer::new(Arc::new(inkling_tokenizer()), HashMap::new()).unwrap();
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(parts)],
+            ..ChatRequest::for_test()
+        };
+        let rendered = renderer.render(&request).unwrap();
+        let (Prompt::TokenIds(tokens), Some(features)) =
+            crate::multimodal::finalize_rendered_prompt(
+                &request,
+                rendered,
+                Some(info),
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("native renderer produces token ids and features");
+        };
+        (tokens, features)
+    }
+
+    /// The native renderer emits the soft placeholders the crate's spec
+    /// anchors expansion on: an image or audio request renders, tokenizes
+    /// and expands instead of failing with "placeholder not found", keeping
+    /// the content marker as the structural prefix.
+    #[tokio::test]
+    async fn native_renderer_prompt_expands_image_and_audio_placeholders() {
+        use base64::Engine as _;
+
+        const TINY_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+        let info = inkling_info(serde_json::json!(1024));
+
+        let (tokens, features) =
+            finalize_native(&info, vec![ChatContentPart::image_url(TINY_PNG)]).await;
+        let marker =
+            tokens.iter().position(|&token| token == 200_005).expect("content image marker");
+        let run = tokens[marker + 1..].iter().take_while(|&&token| token == 200_054).count();
+        assert!(run > 0, "soft placeholder expands to feature tokens");
+        assert_eq!(tokens[marker + 1 + run], 200_010); // <|end_message|>
+        assert_eq!(features.len(), 1);
+        // The range covers the marker (structural prefix) plus the run.
+        assert_eq!(features[0].mm_position.offset, marker);
+        assert_eq!(features[0].mm_position.length, run + 1);
+
+        let wav =
+            base64::engine::general_purpose::STANDARD.encode(wav_i16_mono(16_000, &[0; 1_600]));
+        let (tokens, features) = finalize_native(
+            &info,
+            vec![ChatContentPart::input_audio(wav, Some("wav".to_string()))],
+        )
+        .await;
+        let marker = tokens
+            .iter()
+            .position(|&token| token == INKLING_AUDIO_MARKER_ID)
+            .expect("content audio marker");
+        let run = tokens[marker + 1..]
+            .iter()
+            .take_while(|&&token| token == INKLING_AUDIO_EMBED_ID as u32)
+            .count();
+        assert!(run > 0, "soft placeholder expands to feature tokens");
+        assert_eq!(tokens[marker + 1 + run], 200_043); // <|audio_end|>
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].mm_position.offset, marker);
+        assert_eq!(features[0].mm_position.length, run + 1);
     }
 }

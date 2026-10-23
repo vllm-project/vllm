@@ -43,6 +43,7 @@ xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true

@@ -30,6 +30,13 @@ const CONTENT_XML: &str = "<|content_xml|>";
 const CONTENT_INVOKE_TOOL_JSON: &str = "<|content_invoke_tool_json|>";
 const END_MESSAGE: &str = "<|end_message|>";
 const AUDIO_END: &str = "<|audio_end|>";
+/// Soft placeholder the checkpoint template emits immediately after
+/// `<|content_image|>`; multimodal expansion anchors on it.
+const IMAGE_SOFT_PLACEHOLDER: &str = "<|unused_200054|>";
+/// Soft placeholder the checkpoint template emits between
+/// `<|content_audio_input|>` and `<|audio_end|>`; multimodal expansion
+/// anchors on it.
+const AUDIO_SOFT_PLACEHOLDER: &str = "<|unused_200053|>";
 const MAX_REASONING_EFFORT: f64 = 0.99;
 
 /// Native Inkling renderer that emits token IDs directly.
@@ -55,6 +62,8 @@ struct InklingSpecialTokenIds {
     content_invoke_tool_json: u32,
     end_message: u32,
     audio_end: u32,
+    image_soft_placeholder: u32,
+    audio_soft_placeholder: u32,
 }
 
 impl InklingSpecialTokenIds {
@@ -76,6 +85,8 @@ impl InklingSpecialTokenIds {
             content_invoke_tool_json: resolve_special_token(tokenizer, CONTENT_INVOKE_TOOL_JSON)?,
             end_message: resolve_special_token(tokenizer, END_MESSAGE)?,
             audio_end: resolve_special_token(tokenizer, AUDIO_END)?,
+            image_soft_placeholder: resolve_special_token(tokenizer, IMAGE_SOFT_PLACEHOLDER)?,
+            audio_soft_placeholder: resolve_special_token(tokenizer, AUDIO_SOFT_PLACEHOLDER)?,
         })
     }
 }
@@ -127,23 +138,29 @@ impl InklingChatRenderer {
         Ok(())
     }
 
-    /// Write one image block holding only the `<|content_image|>` marker.
-    /// Multimodal preprocessing later expands the marker into per-patch
-    /// image placeholder tokens once the patch count is known, mirroring the
-    /// Python `InklingMultiModalProcessor` marker-anchored prompt updates.
+    /// Write one image block holding the `<|content_image|>` marker and the
+    /// soft placeholder the checkpoint template emits right after it.
+    /// Multimodal preprocessing later expands the soft placeholder into
+    /// per-patch image placeholder tokens once the patch count is known,
+    /// keeping the marker as the structural prefix, mirroring the Python
+    /// `InklingMultiModalProcessor` marker-anchored prompt updates.
     fn write_image_block(&self, out: &mut Vec<u32>, role_token_id: u32) {
         out.push(role_token_id);
         out.push(self.special.content_image);
+        out.push(self.special.image_soft_placeholder);
         out.push(self.special.end_message);
     }
 
-    /// Write one audio block holding the `<|content_audio_input|>` marker
-    /// followed by the `<|audio_end|>` terminator. Multimodal preprocessing
-    /// later expands the marker into per-frame audio placeholder tokens
-    /// (landing before `<|audio_end|>`) once the clip length is known.
+    /// Write one audio block holding the `<|content_audio_input|>` marker and
+    /// the soft placeholder the checkpoint template emits before the
+    /// `<|audio_end|>` terminator. Multimodal preprocessing later expands the
+    /// soft placeholder into per-frame audio placeholder tokens (landing
+    /// before `<|audio_end|>`) once the clip length is known, keeping the
+    /// marker as the structural prefix.
     fn write_audio_block(&self, out: &mut Vec<u32>, role_token_id: u32) {
         out.push(role_token_id);
         out.push(self.special.content_audio_input);
+        out.push(self.special.audio_soft_placeholder);
         out.push(self.special.audio_end);
         out.push(self.special.end_message);
     }
