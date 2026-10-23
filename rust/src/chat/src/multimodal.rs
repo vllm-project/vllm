@@ -894,7 +894,7 @@ impl MultimodalModelInfo {
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let image_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
+        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
@@ -904,7 +904,7 @@ impl MultimodalModelInfo {
                     fetched.images,
                     fetched.image_uuids,
                     model_dtype,
-                    image_context,
+                    vision_context,
                 )
                 .await?,
             );

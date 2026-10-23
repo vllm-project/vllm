@@ -30,12 +30,12 @@ impl MultimodalModelInfo {
         frames: Vec<Arc<ImageFrame>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
-        context: VisionPreprocessingContext,
+        preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
         let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Image.to_string(),
         })?;
-        let preprocessed = self.preprocess_images(support, &frames, context).await?;
+        let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
             bail_multimodal!(
@@ -66,7 +66,7 @@ impl MultimodalModelInfo {
         &self,
         support: &VisionModalitySupport,
         image_frames: &[Arc<ImageFrame>],
-        context: VisionPreprocessingContext,
+        preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs> {
         let processor = support.processor;
         let config = support.config.clone();
@@ -77,7 +77,7 @@ impl MultimodalModelInfo {
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
-            Ok(processor.preprocess_with_context(&images, &config, &context)?)
+            Ok(processor.preprocess_with_context(&images, &config, &preprocessing_context)?)
         })
         .await
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
