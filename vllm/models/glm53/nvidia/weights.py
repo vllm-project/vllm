@@ -419,6 +419,26 @@ def _norm(module: torch.nn.Module) -> torch.Tensor:
     return weight.data
 
 
+def wk_weights_proj(
+    indexer: torch.nn.Module, geometry: Glm53Geometry, layer: int
+) -> torch.Tensor:
+    """Return ``layer``'s vLLM BF16 ``wk_weights_proj`` weight (wk rows, then
+    weights_proj), read in place.
+    """
+    weight = indexer.wk_weights_proj.weight.data
+    shape = (geometry.index_dim + geometry.index_heads, geometry.hidden)
+    if (
+        weight.dtype != torch.bfloat16
+        or tuple(weight.shape) != shape
+        or not weight.is_contiguous()
+    ):
+        raise ValueError(
+            f"layer {layer}: vLLM's wk_weights_proj is not a contiguous BF16 "
+            f"{list(shape)} tensor"
+        )
+    return weight
+
+
 def attention_forms(
     model: torch.nn.Module, stash: CheckpointStash, layer: int, rank: int
 ) -> dict[str, torch.Tensor]:
@@ -452,20 +472,9 @@ def attention_forms(
     if g.is_shared(layer) or rank >= g.selector_ranks:
         return {prefix + name: tensor for name, tensor in worker.items()}
     indexer = attention.indexer
-    wk_weights_proj = indexer.wk_weights_proj.weight.data
-    shape = (g.index_dim + g.index_heads, g.hidden)
-    if (
-        wk_weights_proj.dtype != torch.bfloat16
-        or tuple(wk_weights_proj.shape) != shape
-        or not wk_weights_proj.is_contiguous()
-    ):
-        raise ValueError(
-            f"layer {layer}: vLLM's wk_weights_proj is not a contiguous BF16 "
-            f"{list(shape)} tensor"
-        )
     selector = {
         "gamma_x": gamma_x,
-        "wis_weight": wk_weights_proj,
+        "wis_weight": wk_weights_proj(indexer, g, layer),
         "key_gamma": _norm(indexer.k_norm).float().contiguous(),
         "key_bias": indexer.k_norm.bias.data.float().contiguous(),
         "gamma_q": gamma_q,

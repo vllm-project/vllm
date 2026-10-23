@@ -43,11 +43,25 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.sample_src_positions = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
         )
+        # The draft prefill's sampled-row positions and their +1, written with its
+        # inputs (prepare_prefill_inputs) instead of by a gather kernel at the start
+        # of the draft prefill.
+        self.prefill_positions = torch.zeros(
+            self.max_num_reqs, dtype=torch.int64, device=device
+        )
+        self.prefill_sample_src = torch.zeros(
+            self.max_num_reqs, dtype=torch.int64, device=device
+        )
 
         self.inputs_embeds: torch.Tensor | None = None
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        # The runner's per-request draft-token table (RequestState.draft_tokens):
+        # the fused draft decode stores each step's drafts there itself (in its
+        # graph), and drafts_stored says whether the last propose did.
+        self.draft_tokens_sink: torch.Tensor | None = None
+        self.drafts_stored = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -161,6 +175,87 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
+    def _prepare_prefill_inputs(
+        self,
+        input_batch: InputBatch,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dummy_run: bool = False,
+    ) -> torch.Tensor:
+        """Write the draft prefill's request inputs, input ids and positions;
+        return the target hidden states it reads."""
+        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
+        # number of rejected tokens, we maintain the size of input_ids and
+        # hidden_states the same as the target model's. This means, we pad each
+        # request's query length to include any rejected positions. By doing so,
+        # we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model.
+        if aux_hidden_states:
+            assert self.method == "eagle3"
+            hidden_states = self.model.combine_hidden_states(
+                torch.cat(aux_hidden_states, dim=-1)
+            )
+        else:
+            hidden_states = last_hidden_states
+        self._copy_request_inputs(
+            input_batch.num_reqs,
+            input_batch.idx_mapping,
+            temperature,
+            seeds,
+            dummy_run=dummy_run,
+        )
+
+        # Get the input ids and last token indices for the speculator.
+        prepare_prefill_inputs(
+            self.last_token_indices,
+            self.current_draft_step,
+            self.input_buffers,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            self.max_num_reqs,
+            prefill_positions=self.prefill_positions,
+            prefill_sample_src=self.prefill_sample_src,
+        )
+        return hidden_states
+
+    def prepare_draft_inputs(
+        self,
+        input_batch: InputBatch,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+    ) -> None:
+        """The device prefix of :meth:`propose` (no context parallelism): the
+        draft prefill's inputs and target hidden states. The post-forward CUDA
+        graph runs it; ``propose(..., inputs_prepared=True)`` then skips it."""
+        assert self.pcp_manager is None
+        hidden_states = self._prepare_prefill_inputs(
+            input_batch,
+            last_hidden_states,
+            aux_hidden_states,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            temperature,
+            seeds,
+        )
+        self.hidden_states[: input_batch.num_tokens_after_padding].copy_(hidden_states)
+
     @torch.inference_mode()
     def propose(
         self,
@@ -189,7 +284,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
+        inputs_prepared: bool = False,
     ) -> torch.Tensor:
+        """Propose the drafts of every request in ``input_batch``.
+
+        With ``inputs_prepared``, the draft prefill's device inputs were already
+        written by :meth:`prepare_draft_inputs` (the post-forward CUDA graph,
+        VLLM_POST_FORWARD_CUDA_GRAPH), so this starts at the dispatch.
+        """
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
@@ -201,49 +303,30 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             max_seq_len + num_speculative_tokens, self.max_model_len
         )
 
-        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we maintain the size of input_ids and
-        # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
-        if aux_hidden_states:
-            assert self.method == "eagle3"
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
+        if inputs_prepared:
+            assert self.pcp_manager is None and not dummy_run
         else:
-            hidden_states = last_hidden_states
-        self._copy_request_inputs(
-            num_reqs,
-            input_batch.idx_mapping,
-            temperature,
-            seeds,
-            dummy_run=dummy_run,
-        )
-
-        # Get the input ids and last token indices for the speculator.
-        prepare_prefill_inputs(
-            self.last_token_indices,
-            self.current_draft_step,
-            self.input_buffers,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            self.max_num_reqs,
-        )
-
-        if self.pcp_manager is not None:
-            self.pcp_manager.prepare_draft_prefill(
-                input_batch, self.input_buffers.input_ids[:num_tokens_padded]
+            hidden_states = self._prepare_prefill_inputs(
+                input_batch,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                temperature,
+                seeds,
+                dummy_run=dummy_run,
             )
-            prefill = self.pcp_manager.draft_prefill_batch
-            if prefill is not None:
-                num_tokens = prefill.num_tokens
-                num_tokens_padded = prefill.num_tokens_after_padding
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
+            if self.pcp_manager is not None:
+                self.pcp_manager.prepare_draft_prefill(
+                    input_batch, self.input_buffers.input_ids[:num_tokens_padded]
+                )
+                prefill = self.pcp_manager.draft_prefill_batch
+                if prefill is not None:
+                    num_tokens = prefill.num_tokens
+                    num_tokens_padded = prefill.num_tokens_after_padding
+            self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -294,6 +377,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             )
         self.on_prefill_end(num_reqs)
 
+        self.drafts_stored = False
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
@@ -367,6 +451,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             num_speculative_tokens,
         )
         self.on_multi_step_decode_end(num_reqs)
+        self.drafts_stored = (
+            self.supports_decode_metadata_update and self.draft_tokens_sink is not None
+        )
 
         return self.draft_tokens[:num_reqs]
 
@@ -449,11 +536,19 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         skip_sample: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
-        positions = self.input_buffers.positions[last_token_indices]
-        # The output hidden state at position P (= positions) and the token id
-        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
-        # position before the sampled token, so the net adjustment is +1.
-        sample_src_positions = positions + 1
+        # The positions and their +1 were written with the inputs
+        # (prepare_prefill_inputs), and one kernel stores the hidden rows and
+        # positions after the forward.
+        fused_io = self.pcp_manager is None
+        if fused_io:
+            positions = self.prefill_positions[:num_reqs]
+            sample_src_positions = self.prefill_sample_src[:num_reqs]
+        else:
+            positions = self.input_buffers.positions[last_token_indices]
+            # The output hidden state at position P (= positions) and the token id
+            # at P+1 are used to draft the token at P+2. Sampling keys a draw by
+            # the position before the sampled token, so the net adjustment is +1.
+            sample_src_positions = positions + 1
         idx_mapping = self.idx_mapping[:num_reqs]
 
         last_hidden_states, hidden_states = self._run_model(
@@ -472,6 +567,42 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             # No drafts are needed; this pass only keeps the drafter KV in sync.
             return
 
+        if (
+            fused_io
+            and last_hidden_states is hidden_states
+            and hidden_states.dim() == 2
+            and hidden_states.stride(1) == 1
+            and hidden_states.shape[1] == self.hidden_states.shape[1]
+            and hidden_states.dtype == self.hidden_states.dtype
+            and not _overlaps(hidden_states, self.hidden_states)
+        ):
+            # The stores first: sampling reads the same gathered rows from
+            # self.hidden_states (and nothing it reads is stored here).
+            width = hidden_states.shape[1]
+            block = 1024
+            _draft_prefill_store_kernel[(num_reqs, triton.cdiv(width, block))](
+                hidden_states,
+                hidden_states.stride(0),
+                last_token_indices,
+                self.hidden_states,
+                self.hidden_states.stride(0),
+                positions,
+                self.input_buffers.positions,
+                sample_src_positions,
+                self.sample_src_positions,
+                width,
+                BLOCK=block,
+            )
+            self.draft_tokens[:num_reqs, 0] = self.sample_draft(
+                self.hidden_states[:num_reqs],
+                self.sample_src_positions[:num_reqs],
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
+            return
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
             sample_hidden_states,
@@ -608,9 +739,15 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
+        # A drafter model that claims this captured draft decode reads neither the
+        # slot mappings nor the decode metadata: the capture records no updates.
+        claims = getattr(self.model, "claims_draft_decode_capture", None)
+        lean = claims is not None and claims()
         for step in range(1, num_speculative_steps):
-            if attn_metadata is not None and (
-                self.advance_draft_positions or step == 1
+            if (
+                attn_metadata is not None
+                and not lean
+                and (self.advance_draft_positions or step == 1)
             ):
                 self.block_tables.compute_slot_mappings(
                     idx_mapping,
@@ -629,6 +766,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp,
                 cudagraph_runtime_mode,
                 num_speculative_steps,
+                sink=self.draft_tokens_sink,
             )
 
     def _generate_draft(
@@ -640,7 +778,13 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode,
         num_speculative_steps: int,
+        sink: torch.Tensor | None = None,
     ) -> None:
+        """One draft decode forward, its sampling and the next step's inputs.
+
+        ``sink`` (the fused draft decode): the runner's draft-token table, which
+        the final step's input update fills with each request's drafts.
+        """
         self._prepare_eplb_forward(num_reqs)
 
         idx_mapping = self.idx_mapping[:num_reqs]
@@ -679,6 +823,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.max_model_len,
             num_speculative_steps,
             advance_draft_positions=self.advance_draft_positions,
+            idx_mapping=idx_mapping if sink is not None else None,
+            sink=sink,
         )
 
 
@@ -700,7 +846,10 @@ def _prepare_prefill_inputs_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     max_num_reqs,
+    prefill_positions_ptr,
+    prefill_sample_src_ptr,
     BLOCK_SIZE: tl.constexpr,
+    STORE_POSITIONS: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     num_reqs = tl.num_programs(0)
@@ -733,6 +882,12 @@ def _prepare_prefill_inputs_kernel(
     last_token_index = query_start + query_len - 1
     tl.store(last_token_indices_ptr + req_idx, last_token_index)
     tl.store(draft_input_ids_ptr + last_token_index, next_token)
+    if STORE_POSITIONS:
+        # The draft prefill's sampled-row position and +1 (the positions are copied
+        # below).
+        last_position = tl.load(target_positions_ptr + last_token_index)
+        tl.store(prefill_positions_ptr + req_idx, last_position)
+        tl.store(prefill_sample_src_ptr + req_idx, last_position + 1)
 
     # Copy positions.
     for i in range(0, query_len, BLOCK_SIZE):
@@ -748,6 +903,14 @@ def _prepare_prefill_inputs_kernel(
     if req_idx == (num_reqs - 1):
         # Reset the current draft step to 0.
         tl.store(draft_current_step_ptr, 0)
+        if STORE_POSITIONS:
+            # Padded rows gather positions[last_token_indices = 0].
+            first_position = tl.load(target_positions_ptr)
+            for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
+                mask = block < max_num_reqs
+                tl.store(prefill_positions_ptr + block, first_position, mask=mask)
+                tl.store(prefill_sample_src_ptr + block, first_position + 1, mask=mask)
         # Pad query_start_loc for CUDA graphs.
         for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
@@ -780,7 +943,11 @@ def prepare_prefill_inputs(
     # [max_num_reqs]
     next_prefill_tokens: torch.Tensor,
     max_num_reqs,
+    prefill_positions: torch.Tensor | None = None,
+    prefill_sample_src: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Write the draft prefill's inputs; with ``prefill_positions`` and
+    ``prefill_sample_src`` also each request's sampled-row position and +1."""
     num_reqs = input_batch.num_reqs
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         last_token_indices,
@@ -799,7 +966,10 @@ def prepare_prefill_inputs(
         input_batch.query_start_loc,
         input_batch.seq_lens,
         max_num_reqs,
+        prefill_positions,
+        prefill_sample_src,
         BLOCK_SIZE=1024,
+        STORE_POSITIONS=prefill_positions is not None,
     )
     return last_token_indices
 
@@ -904,8 +1074,14 @@ def _update_draft_inputs_kernel(
     hidden_size,
     max_model_len,
     num_speculative_steps,
+    idx_mapping_ptr,
+    sink_ptr,
+    sink_stride,
     BLOCK_SIZE: tl.constexpr,
     ADVANCE_DRAFT_POSITIONS: tl.constexpr,
+    HAS_SINK: tl.constexpr = False,
+    SINK_COLS: tl.constexpr = 1,
+    SINK_BLOCK: tl.constexpr = 1,
 ):
     req_idx = tl.program_id(0)
 
@@ -919,6 +1095,25 @@ def _update_draft_inputs_kernel(
 
     if step >= num_speculative_steps - 1:
         # This is the final step. Skip updating draft forward inputs.
+        if HAS_SINK:
+            # Store this request's drafts (the row just completed) into the
+            # runner's table, unless the row is padding (idx_mapping -1).
+            target = tl.load(idx_mapping_ptr + req_idx)
+            if target >= 0:
+                cols = tl.arange(0, SINK_BLOCK)
+                mask = cols < SINK_COLS
+                values = tl.load(
+                    output_draft_tokens_ptr
+                    + req_idx * output_draft_tokens_stride
+                    + cols,
+                    mask=mask,
+                )
+                values = tl.where(cols == step, draft_token, values)
+                tl.store(
+                    sink_ptr + target.to(tl.int64) * sink_stride + cols,
+                    values,
+                    mask=mask,
+                )
         return
 
     # Advance the draft sampling key.
@@ -971,7 +1166,14 @@ def update_draft_inputs(
     max_model_len: int,
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
+    idx_mapping: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
 ):
+    """Store this step's drafts and write the next draft forward's inputs.
+
+    With ``sink`` (and ``idx_mapping``) the final step also stores each
+    request's drafts into ``sink[idx_mapping[r]]``, as the runner would.
+    """
     _, hidden_size = hidden_states.shape
     _update_draft_inputs_kernel[(num_reqs,)](
         output_draft_tokens,
@@ -989,6 +1191,50 @@ def update_draft_inputs(
         hidden_size,
         max_model_len,
         num_speculative_steps,
+        idx_mapping,
+        sink,
+        sink.stride(0) if sink is not None else 0,
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
+        HAS_SINK=sink is not None,
+        SINK_COLS=output_draft_tokens.shape[1],
+        SINK_BLOCK=triton.next_power_of_2(output_draft_tokens.shape[1]),
     )
+
+
+def _overlaps(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether the storages of ``a`` and ``b`` share any bytes (conservative)."""
+    a_storage, b_storage = a.untyped_storage(), b.untyped_storage()
+    a_start, b_start = a_storage.data_ptr(), b_storage.data_ptr()
+    return (
+        a_start < b_start + b_storage.nbytes()
+        and b_start < a_start + a_storage.nbytes()
+    )
+
+
+@triton.jit
+def _draft_prefill_store_kernel(
+    src_ptr,
+    src_stride,
+    last_token_indices_ptr,
+    dst_ptr,
+    dst_stride,
+    positions_ptr,
+    dst_positions_ptr,
+    sample_src_ptr,
+    dst_sample_src_ptr,
+    width,
+    BLOCK: tl.constexpr,
+):
+    """hidden[r] = src[last_token_indices[r]] (bit copy), and the request's
+    position and sample-source position into their persistent buffers."""
+    req = tl.program_id(0)
+    block = tl.program_id(1)
+    index = tl.load(last_token_indices_ptr + req).to(tl.int64)
+    columns = block * BLOCK + tl.arange(0, BLOCK)
+    mask = columns < width
+    row = tl.load(src_ptr + index * src_stride + columns, mask=mask)
+    tl.store(dst_ptr + req * dst_stride + columns, row, mask=mask)
+    if block == 0:
+        tl.store(dst_positions_ptr + req, tl.load(positions_ptr + req))
+        tl.store(dst_sample_src_ptr + req, tl.load(sample_src_ptr + req))

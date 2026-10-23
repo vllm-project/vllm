@@ -583,6 +583,24 @@ class CudaGraphManager:
         return self.breakable_cg_runner(**model_inputs)
 
 
+def copy_small(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """``dst.copy_(src)``; while a graph is being captured, as a byte-wise kernel.
+
+    A captured copy of a few bytes becomes a memcpy node (from UVA host memory, a
+    host-staged one), which takes several times longer than a small kernel.
+    """
+    if (
+        torch.cuda.is_current_stream_capturing()
+        and dst.dtype == src.dtype
+        and dst.shape == src.shape
+        and dst.is_contiguous()
+        and src.is_contiguous()
+    ):
+        torch.bitwise_or(src.view(torch.uint8), 0, out=dst.view(torch.uint8))
+        return
+    dst.copy_(src)
+
+
 class ModelCudaGraphManager(CudaGraphManager):
     """CudaGraphManager with model-specific capture and hidden state management."""
 
@@ -651,7 +669,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     aux_hidden_states = []
                 if self.hidden_states is None:
                     self.hidden_states = torch.empty_like(hidden_states)
-                self.hidden_states[:num_tokens] = hidden_states
+                # Captured as a kernel: a [4, 6144] BF16 memcpy node takes several
+                # times longer than the same copy as a kernel.
+                copy_small(self.hidden_states[:num_tokens], hidden_states)
                 if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                     self.aux_hidden_states = [
                         torch.empty_like(x) for x in aux_hidden_states

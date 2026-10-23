@@ -1,0 +1,319 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""CUDA graphs of the device work between the target forward and the draft
+prefill of target-dependent autoregressive speculative decoding (MTP, EAGLE),
+enabled by VLLM_POST_FORWARD_CUDA_GRAPH.
+
+After the target model's FULL CUDA graph, a decode step runs about a dozen small
+kernels eagerly before the drafter's own graphs: the hidden-state gather and LM
+head, the logits all-gather, the rejection sampler, the request-state update
+(``post_update``), and the draft prefill's input preparation (the request
+inputs, ``prepare_prefill_inputs`` and the copy of the target hidden states). At
+batch size 1 their launches leave the GPU idle between them. For uniform decode
+steps whose sampling is fixed by the batch shape, this module captures that
+sequence in one CUDA graph per shape and replays it.
+
+What a graph may capture is decided per step on the host (``step_eligible``),
+from state every TP rank holds identically; anything that changes the op
+sequence or reads host state at run time sends the step down the eager path:
+logprobs, prompt logprobs, grammar bitmasks, logits processing (temperature
+other than 0 or 1, top-k/top-p/min-p, penalties, bias, bad words, thinking
+budget, custom processors), prefill, non-uniform batches and the acceptance
+estimator. Sampling randomness comes from the per-request seed and position
+tensors (counter-based Gumbel draws), not from a host-advanced generator, so a
+replay draws exactly what the eager kernels draw.
+
+A graph reads its inputs at the addresses it was captured with. The per-step
+tensors the eager path allocates (``idx_mapping``, ``cu_num_logits``, the
+expanded mapping and positions, ``logits_indices``) are written into the
+persistent buffers here instead (see ``GPUModelRunner.prepare_inputs``); the
+rest are runner, sampler and speculator buffers, or the target graph's
+hidden-state outputs. The key includes the address and layout of every per-step
+tensor the region reads, so an unexpected reallocation captures a new graph
+rather than replaying a stale one. The sampling temperatures and seeds and the
+prefill lengths live in host-backed buffers that rotate through a small pool
+(two slots by default) as the host stages writes, so a decode shape gets a
+graph per slot combination. Per key the first step runs eagerly (it
+compiles kernels and warms allocations), the second captures and replays, and
+later steps replay.
+
+The graph's outputs (sampled tokens, counts) are static. The step's async
+device-to-host output copy reads them on the output copy stream, so the next
+replay waits for that copy's event before overwriting them.
+"""
+
+from collections.abc import Callable, Hashable
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import torch
+
+import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+    RejectionSampler,
+    get_max_chunk_logits,
+)
+from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+from vllm.v1.worker.workspace import use_workspace_lane
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import GrammarOutput
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+logger = init_logger(__name__)
+
+_PostForwardOutput = tuple[SamplerOutput, torch.Tensor, torch.Tensor]
+
+
+def _tensor_key(t: torch.Tensor) -> tuple[Any, ...]:
+    return (t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype)
+
+
+def unsupported_reasons(runner: "GPUModelRunner") -> list[str]:
+    """Configuration that rules the post-forward graphs out (empty if none)."""
+    from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+        TargetDependentARSpeculator,
+    )
+
+    speculator = runner.speculator
+    sampler = runner.sampler
+    rejection_sampler = runner.rejection_sampler
+    unsupported = {
+        "a non-CUDA platform": not current_platform.is_cuda(),
+        "a speculator other than MTP/EAGLE": not isinstance(
+            speculator, TargetDependentARSpeculator
+        ),
+        "a custom or missing rejection sampler": type(rejection_sampler)
+        is not RejectionSampler,
+        "watermarking": isinstance(sampler, GPUWatermarkSampler)
+        or getattr(speculator, "draft_watermarker", None) is not None,
+        "VLLM_COMPUTE_NANS_IN_LOGITS": sampler is not None and sampler.compute_nans,
+        "return_sampling_mask": sampler is not None and sampler.return_sampling_mask,
+        "pipeline parallelism": runner.use_pp,
+        "prefill/decode context parallelism": runner.pcp_manager is not None
+        or runner.dcp_size > 1,
+        "batch-sharded sampling": runner.batch_sharder is not None,
+        "adaptive verification": runner.adaptive_verification is not None,
+        "LoRA": bool(runner.lora_config),
+        # A KV connector is allowed: its per-step work (start_load_kv before the
+        # forward, post_forward after the drafter) lies outside the region.
+        "the aux output connector": runner.aux_output_connector is not None,
+        "KV-sharing fast prefill": runner.fast_prefill is not None,
+        "trace replay": sampler is not None
+        and getattr(sampler, "trace_replay_state", None) is not None,
+    }
+    return [name for name, hit in unsupported.items() if hit]
+
+
+def maybe_create_post_forward_cudagraphs(
+    runner: "GPUModelRunner",
+) -> "PostForwardCudaGraphs | None":
+    """The runner's post-forward graphs, or None when the flag is off or the
+    configuration is unsupported (logged)."""
+    if not envs.VLLM_POST_FORWARD_CUDA_GRAPH:
+        return None
+    reasons = unsupported_reasons(runner)
+    if reasons:
+        logger.warning(
+            "VLLM_POST_FORWARD_CUDA_GRAPH is not supported with %s; the "
+            "post-forward region runs eagerly.",
+            ", ".join(reasons),
+        )
+        return None
+    logger.info("Capturing the post-forward region of MTP decode steps.")
+    return PostForwardCudaGraphs(
+        runner.max_num_reqs, runner.max_num_tokens, runner.device
+    )
+
+
+class PostForwardCudaGraphs:
+    """Per-shape CUDA graphs of the post-forward region, and the persistent
+    per-step inputs they read."""
+
+    # Uniform decode yields one key per batch size; more keys than this means
+    # addresses move, and the further shapes run eagerly.
+    MAX_GRAPHS = 32
+
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
+        int32, int64 = torch.int32, torch.int64
+        self.idx_mapping = torch.zeros(max_num_reqs, dtype=int64, device=device)
+        self.cu_num_logits = torch.zeros(max_num_reqs + 1, dtype=int32, device=device)
+        self.expanded_idx_mapping = torch.zeros(
+            max_num_tokens, dtype=int64, device=device
+        )
+        self.expanded_local_pos = torch.zeros(
+            max_num_tokens, dtype=int32, device=device
+        )
+        self.logits_indices = torch.zeros(
+            max_num_tokens, dtype=torch.int64, device=device
+        )
+
+        self.pool: Any = None  # A platform graph pool handle.
+        self.graphs: dict[Hashable, tuple[torch.cuda.CUDAGraph, Any]] = {}
+        self.warmed_up: set[Hashable] = set()
+        # Recorded after the async output copy of the last replayed step.
+        self.output_copy_event: torch.cuda.Event | None = None
+        self.num_replays = 0
+        self.warned_limit = False
+
+    def step_eligible(
+        self,
+        runner: "GPUModelRunner",
+        input_batch: "InputBatch",
+        grammar_output: "GrammarOutput | None",
+        full_cudagraph: bool,
+    ) -> bool:
+        """Whether this step's post-forward region has the captured op sequence.
+
+        Reads only host state that every TP rank holds identically."""
+        num_reqs = input_batch.num_reqs
+        if not full_cudagraph or num_reqs == 0 or input_batch.has_prefill:
+            return False
+        if grammar_output is not None or input_batch.has_structured_output_reqs:
+            return False
+        num_steps = runner.num_speculative_steps
+        if input_batch.num_draft_tokens != num_reqs * num_steps or not np.all(
+            input_batch.num_scheduled_tokens == num_steps + 1
+        ):
+            return False
+        if input_batch.num_tokens > get_max_chunk_logits(runner.vocab_size):
+            return False
+        sampler = runner.sampler
+        speculator = runner.speculator
+        prompt_logprobs = runner.prompt_logprobs_worker
+        assert sampler is not None and prompt_logprobs is not None
+        idx_mapping_np = input_batch.idx_mapping_np
+        return not (
+            np.any(sampler.needs_logits_processing[idx_mapping_np])
+            or sampler.sampling_states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS
+            or np.any(prompt_logprobs.uses_prompt_logprobs[idx_mapping_np])
+            or prompt_logprobs.token_id_scores
+            or getattr(speculator, "acceptance_estimator", None) is not None
+        )
+
+    def run(
+        self,
+        runner: "GPUModelRunner",
+        input_batch: "InputBatch",
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+    ) -> _PostForwardOutput:
+        """Sample, update the request states and prepare the draft inputs, as
+        the eager path does, by running or replaying this shape's graph."""
+        drafter_hidden_states = get_drafter_hidden_states(runner.model, hidden_states)
+        assert runner.speculator is not None and runner.sampler is not None
+        sampling_states = runner.sampler.sampling_states
+        # These host-backed buffers rotate through a small pool as the host
+        # stages writes (every step for the sampling states), so they key the
+        # graph too: each pool slot gets its own graph.
+        temperature = sampling_states.temperature.gpu
+        seeds = sampling_states.seeds.gpu
+        prefill_len = runner.req_states.prefill_len.gpu
+        key = (
+            input_batch.num_reqs,
+            input_batch.num_tokens,
+            *(
+                _tensor_key(t)
+                for t in (
+                    hidden_states,
+                    drafter_hidden_states,
+                    *(aux_hidden_states or ()),
+                    input_batch.idx_mapping,
+                    input_batch.cu_num_logits,
+                    input_batch.expanded_idx_mapping,
+                    input_batch.expanded_local_pos,
+                    input_batch.logits_indices,
+                    input_batch.input_ids,
+                    input_batch.positions,
+                    input_batch.query_start_loc,
+                    input_batch.seq_lens,
+                    temperature,
+                    seeds,
+                    prefill_len,
+                )
+            ),
+        )
+
+        def post_forward() -> _PostForwardOutput:
+            sampler_output, num_sampled, num_rejected = runner.sample(
+                hidden_states, input_batch, None
+            )
+            runner.postprocess_sampled(
+                input_batch.idx_mapping,
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch.query_start_loc,
+            )
+            assert runner.speculator is not None
+            with use_workspace_lane(runner._draft_workspace_lane):
+                runner.speculator.prepare_draft_inputs(
+                    input_batch,
+                    drafter_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    runner.req_states.last_sampled_tokens,
+                    runner.req_states.next_prefill_tokens,
+                    temperature,
+                    seeds,
+                )
+            return sampler_output, num_sampled, num_rejected
+
+        return self._run(key, post_forward)
+
+    def _run(
+        self, key: Hashable, fn: Callable[[], _PostForwardOutput]
+    ) -> _PostForwardOutput:
+        """Run ``fn`` eagerly (first step of a key, or past the graph limit),
+        capture it (second step), or replay its graph."""
+        entry = self.graphs.get(key)
+        if entry is None:
+            if key not in self.warmed_up:
+                # Only warmed-up keys capture, so this bounds the graphs.
+                if len(self.warmed_up) < self.MAX_GRAPHS:
+                    self.warmed_up.add(key)
+                elif not self.warned_limit:
+                    self.warned_limit = True
+                    logger.warning(
+                        "%d post-forward batch shapes seen; later shapes run eagerly.",
+                        self.MAX_GRAPHS,
+                    )
+                return fn()
+            if self.pool is None:
+                self.pool = current_platform.graph_pool_handle()
+            graph = torch.cuda.CUDAGraph()
+            # Captured while serving: other threads may use CUDA meanwhile.
+            with torch.cuda.graph(
+                graph,
+                pool=self.pool,
+                stream=current_stream(),
+                capture_error_mode="thread_local",
+            ):
+                outputs = fn()
+            entry = self.graphs[key] = (graph, outputs)
+        graph, outputs = entry
+        if self.output_copy_event is not None:
+            # The previous replay's outputs may still be in the copy to host.
+            current_stream().wait_event(self.output_copy_event)
+        graph.replay()
+        self.num_replays += 1
+        return outputs
+
+    def set_output_copy_event(self, event: torch.cuda.Event) -> None:
+        """Record the event after which this step's outputs are on the host."""
+        self.output_copy_event = event
+
+    def release(self) -> None:
+        """Drop the graphs, e.g. before the buffers they read are reallocated."""
+        self.graphs.clear()
+        self.warmed_up.clear()
+        self.output_copy_event = None
+        self.warned_limit = False

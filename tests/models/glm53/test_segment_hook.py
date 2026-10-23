@@ -69,3 +69,110 @@ def test_claimed_forward_returns_the_final_norm_of_the_segment_output(monkeypatc
     with torch.no_grad():
         output = model(torch.zeros(4, dtype=torch.int32), torch.arange(4))
     torch.testing.assert_close(output, hidden * torch.tensor([2.0, 3.0]))
+
+
+# The drafter's hook: Glm53MultiTokenPredictor.forward.
+
+from vllm.models.glm53.nvidia import mtp as glm53_mtp  # noqa: E402
+
+
+class _DraftSegment:
+    def __init__(self, result: torch.Tensor | None) -> None:
+        self.result = result
+        self.calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def forward(self, input_ids, positions, hidden_states):
+        self.calls.append((input_ids, positions, hidden_states))
+        return self.result
+
+    def after_stock_forward(self, input_ids, positions, hidden_states):
+        pass
+
+
+class _StockEmbedding(nn.Module):
+    def forward(self, input_ids):
+        raise _StockPath
+
+
+def _predictor() -> glm53_mtp.Glm53MultiTokenPredictor:
+    model = object.__new__(glm53_mtp.Glm53MultiTokenPredictor)
+    nn.Module.__init__(model)
+    layer = nn.Module()
+    layer.shared_head = nn.Module()
+    layer.shared_head.norm = nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        layer.shared_head.norm.weight.copy_(torch.tensor([[2.0, 0.0], [0.0, 3.0]]))
+    model.layers = nn.ModuleDict({"78": layer})
+    model.mtp_start_layer_idx = 78
+    model.num_mtp_layers = 1
+    model.replicated_embed = False
+    model.embed_tokens = _StockEmbedding()
+    return model
+
+
+def test_drafter_without_segment_or_declined_runs_stock():
+    assert glm53_mtp.Glm53MultiTokenPredictor.glm53_segment is None
+    model = _predictor()
+    args = (torch.zeros(4, dtype=torch.int32), torch.arange(4), torch.zeros(4, 2))
+    with pytest.raises(_StockPath):
+        model(*args)
+    segment = _DraftSegment(None)
+    model.glm53_segment = segment
+    with pytest.raises(_StockPath):
+        model(*args)
+    assert len(segment.calls) == 1 and segment.calls[0][2] is args[2]
+
+
+def test_drafter_claimed_rows_return_the_shared_head_norm_twice():
+    model = _predictor()
+    rows = torch.arange(8, dtype=torch.float32).view(4, 2)
+    model.glm53_segment = _DraftSegment(rows)
+    with torch.no_grad():
+        logits_hidden, recycled = model(
+            torch.zeros(4, dtype=torch.int32), torch.arange(4), torch.zeros(4, 2)
+        )
+    torch.testing.assert_close(logits_hidden, rows * torch.tensor([2.0, 3.0]))
+    assert recycled is logits_hidden
+
+
+def test_drafter_claimed_sampled_row_is_broadcast_over_the_rows():
+    model = _predictor()
+    row = torch.tensor([[1.0, 2.0]])
+    model.glm53_segment = _DraftSegment(row)
+    with torch.no_grad():
+        hidden, _ = model(
+            torch.zeros(4, dtype=torch.int32), torch.arange(4), torch.zeros(4, 2)
+        )
+    assert hidden.shape == (4, 2)
+    # vLLM's draft prefill reads row last_token_indices[r] of the result.
+    torch.testing.assert_close(hidden[torch.tensor([2])], torch.tensor([[2.0, 6.0]]))
+
+
+def test_drafter_normalized_rows_skip_the_norm_and_hand_over_their_tokens():
+    model = _predictor()
+    row = torch.tensor([[1.0, 2.0]])
+    tokens = torch.tensor([7], dtype=torch.int32)
+    segment = _DraftSegment(row)
+    segment.normalized = True
+    segment.claimed_tokens = lambda: tokens
+    model.glm53_segment = segment
+    with torch.no_grad():
+        hidden, _ = model(
+            torch.zeros(1, dtype=torch.int32), torch.arange(1), torch.zeros(1, 2)
+        )
+    torch.testing.assert_close(hidden, row)
+    # vLLM's local-argmax draft sampling (use_local_argmax_reduction) takes them.
+    assert model.get_top_tokens(hidden) is tokens
+
+
+def test_drafter_claims_the_draft_decode_capture_only_through_its_segment():
+    model = object.__new__(glm53_mtp.GlmMoeDsaMTP)
+    nn.Module.__init__(model)
+    model.model = _predictor()
+    assert not model.claims_draft_decode_capture()
+    segment = _DraftSegment(None)
+    segment.claims_capture = lambda: True
+    model.model.glm53_segment = segment
+    assert model.claims_draft_decode_capture()
+    segment.claims_capture = lambda: False
+    assert not model.claims_draft_decode_capture()

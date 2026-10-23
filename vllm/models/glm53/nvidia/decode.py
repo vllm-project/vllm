@@ -183,6 +183,7 @@ class SpecializedDecode:
         self._token_ids: int = 0
         self.captures: int = 0
         self._positions: int | None = None
+        self._reach: int = 0
 
     @property
     def built(self) -> bool:
@@ -192,6 +193,72 @@ class SpecializedDecode:
     def kv(self) -> glm53_kv.Glm53KvHygiene | None:
         """Return the KV hygiene (None before the build)."""
         return self._kv
+
+    def sync_block_table(self) -> None:
+        """Copy vLLM's block-table row into the kernels' padded copy, if any (stream-
+        ordered).
+        """
+        if self._padded is not None:
+            assert self._table is not None
+            self._padded[: self._table.numel()].copy_(self._table)
+
+    def shared_tensors(self) -> dict[str, torch.Tensor]:
+        """Return the tensors the drafter segment shares: the RoPE table and the block-
+        table row.
+        """
+        names = ("rope_table", glm53_launch.BLOCK_TABLE)
+        return {name: self._tensors[name] for name in names}
+
+    @property
+    def embedding_arena(self) -> glm53_arena.PeerArena:
+        """Return the peer arena of vLLM's embedding shards (the drafter's prologues
+        read it).
+        """
+        assert self._segment is not None and self._segment.embedding_arena is not None
+        return self._segment.embedding_arena
+
+    def add_layer(
+        self, layer: int, caches: dict[str, torch.Tensor], reach: int
+    ) -> None:
+        """Extend the KV hygiene to the drafter's layer, whose steps write ``reach``
+        more rows.
+        """
+        from vllm.distributed import get_tp_group
+
+        assert self._kv is not None
+        geometry = self.geometry
+        planes = {
+            **self._kv.planes,
+            **glm53_kv.pool_planes(caches, geometry, self._kv.block_size),
+        }
+        if any(key[0] != layer for key in planes if key not in self._kv.planes):
+            raise ValueError(f"caches of layers other than {layer}")
+        pending = self._kv.pending
+        # The selector ranks write every layer's index keys, the drafter's included.
+        selectors = frozenset(range(geometry.selector_ranks))
+        self._kv = glm53_kv.Glm53KvHygiene(
+            planes,
+            geometry,
+            rank=get_tp_group().rank_in_group,
+            block_size=self._kv.block_size,
+            partial_writers={
+                key: selectors
+                for key in planes
+                if key[1] in ("index_key", "index_scale")
+            },
+        )
+        self._kv.pending = pending
+        self._reach = reach
+
+    def owns_attn_metadata(self, num_tokens: int) -> bool:
+        """Return whether a FULL step of ``num_tokens`` tokens replays only claimed
+        graphs.
+        """
+        from vllm.models.glm53.nvidia import draft as glm53_draft
+
+        if self.captures == 0 or num_tokens != self.claim:
+            return False
+        return self.claim == 1 or glm53_draft.claims_draft_prefill()
 
     def forward(
         self, input_ids: torch.Tensor | None, positions: torch.Tensor
@@ -237,9 +304,7 @@ class SpecializedDecode:
             raise RuntimeError(
                 "GLM-5.3 segment: vLLM captures other positions than the segment binds"
             )
-        if self._padded is not None:
-            assert self._table is not None
-            self._padded[: self._table.numel()].copy_(self._table)
+        self.sync_block_table()
         if self.claim == 1:
             tokens = self._tensors["token_ids"]
             tokens[1:].copy_(tokens[:1].expand(self.rows - 1))
@@ -332,7 +397,9 @@ class SpecializedDecode:
         # The host's count runs up to two steps ahead of the device.
         start = self._reported[request_id] - 2 * self.rows
         self._kv.pending.decoded(
-            request_id, start, self._computed[request_id] + num_scheduled[0]
+            request_id,
+            start,
+            self._computed[request_id] + num_scheduled[0] + self._reach,
         )
 
     def _try_build(self, input_ids: torch.Tensor, positions: torch.Tensor) -> None:
@@ -439,6 +506,11 @@ class SpecializedDecode:
         """Drop the segment and its KV-bound state; the next eager T-row forward
         rebuilds it.
         """
+        from vllm.models.glm53.nvidia import draft as glm53_draft
+
+        draft = glm53_draft.current()
+        if draft is not None:
+            draft.close()
         if self._segment is not None:
             torch.cuda.synchronize()
             self._segment.close()

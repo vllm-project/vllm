@@ -69,12 +69,12 @@ _WORKER = {
 }
 
 
-def _sel(shard: int, packed: bool = False) -> CuteEntry:
-    """The full selector of key shard ``shard``; ``packed``: for an index-key cache with
-    packed UE8M0 scales (``_mx`` entries).
+def _sel(shard: int, packed: bool = False, cls: str = "SelectorFull") -> CuteEntry:
+    """The selector ``cls`` of key shard ``shard``; ``packed``: for an index-key cache
+    with packed UE8M0 scales (``_mx`` entries).
     """
     constants = (("SHARD", shard),) + ((("PACKED_SCALE", True),) if packed else ())
-    return CuteEntry("mla_selector", "SelectorFull", constants, _SELECTOR)
+    return CuteEntry("mla_selector", cls, constants, _SELECTOR)
 
 
 def _worker(cls: str, **host: int) -> CuteEntry:
@@ -107,6 +107,61 @@ ENTRIES: dict[str, CuteEntry] = {
     "mla_selector_q4_shard3r1_paged_vlin_mx": _sel(1, True),
     "mla_selector_q4_shard3r2_paged_vlin_mx": _sel(2, True),
 }
+
+
+_HEAD = {
+    "kMailboxBytes": 1024,
+    "kVocabShard": 19360,
+    "kHidden": 6144,
+    "kPaddedRows": 19362,
+}
+_DRAFT_WORKER = {"kMailboxBytes": 917504, "kFlagWords": 15804}
+_DRAFT_PRE = {"kMailboxBytes": 917504}
+DRAFT_ENTRIES: dict[str, CuteEntry] = {
+    "lm_head_top1_q1": CuteEntry(
+        "lm_head",
+        "LmHead",
+        (("ROWS", 1),),
+        {"kQTokens": 1, **_HEAD, "kDoneWords": 299, "kRecordWords": 4},
+    ),
+    "mla_worker_draft_q1_paged": CuteEntry(
+        "mla_draft",
+        "DraftWorker",
+        (("ROWS", 1),),
+        {
+            **_DRAFT_WORKER,
+            "kHandoffWords": 14848,
+            "kPartialOBytes": 524288,
+            "kPartialLseBytes": 1024,
+        },
+    ),
+    "mla_worker_draft_q4_paged": CuteEntry(
+        "mla_draft",
+        "DraftWorker",
+        (("ROWS", 4),),
+        {
+            **_DRAFT_WORKER,
+            "kHandoffWords": 59392,
+            "kPartialOBytes": 2097152,
+            "kPartialLseBytes": 4096,
+        },
+    ),
+    "mtp_preprocess_q1": CuteEntry(
+        "mtp_preprocess", "MtpPreprocess", (("ROWS", 1),), _DRAFT_PRE
+    ),
+    "mtp_preprocess_q4": CuteEntry(
+        "mtp_preprocess", "MtpPreprocess", (("ROWS", 4),), _DRAFT_PRE
+    ),
+    "prologue_vllm": CuteEntry("prologue", "PrologueVllm", (("ROWS", 1),)),
+    **{
+        f"mla_selector_q4_shard3r{shard}_only_row_paged{suffix}": _sel(
+            shard, bool(suffix), "SelectorOnlyRow"
+        )
+        for shard in range(3)
+        for suffix in ("", "_mx")
+    },
+}
+ENTRIES.update(DRAFT_ENTRIES)
 
 
 def kernel_class(name: str) -> type:

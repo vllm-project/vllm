@@ -107,6 +107,7 @@ def _unsupported(vllm_config: "VllmConfig") -> list[str]:
         LowLatencyDecode.ATTENTION_BACKEND,
     )
     moe_backend = vllm_config.kernel_config.moe_backend
+    speculative = getattr(vllm_config, "speculative_config", None)
     requirements = {
         "an SM100 or SM103 GPU": current_platform.is_cuda()
         and current_platform.is_device_capability_family(100),
@@ -135,6 +136,10 @@ def _unsupported(vllm_config: "VllmConfig") -> list[str]:
         "no batch-invariant mode (VLLM_BATCH_INVARIANT)": not envs.VLLM_BATCH_INVARIANT,
         f"--moe-backend {MOE_BACKEND} or auto (not {moe_backend})": (
             moe_backend in ("auto", MOE_BACKEND)
+        ),
+        "MTP with use_local_argmax_reduction "
+        "(the drafter hands over its greedy drafts)": (
+            speculative is None or bool(speculative.use_local_argmax_reduction)
         ),
     }
     return [need for need, ok in requirements.items() if not ok]

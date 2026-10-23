@@ -143,6 +143,10 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
+from vllm.v1.worker.gpu.post_forward_cudagraph import (
+    PostForwardCudaGraphs,
+    maybe_create_post_forward_cudagraphs,
+)
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
@@ -197,6 +201,9 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    # VLLM_POST_FORWARD_CUDA_GRAPH; created in initialize_kv_cache().
+    post_forward_graphs: PostForwardCudaGraphs | None = None
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -302,6 +309,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(
                     self.vllm_config, self.device, self.req_states
                 )
+                # The fused draft decode stores the drafts into the request
+                # states itself, inside its graph (the store below is skipped).
+                if hasattr(self.speculator, "draft_tokens_sink"):
+                    self.speculator.draft_tokens_sink = self.req_states.draft_tokens
 
             self.use_aux_hidden_state_outputs = requires_aux_hidden_states(
                 self.speculative_config
@@ -821,6 +832,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.aux_output_connector = get_aux_output_connector(
                     self.model, self.vllm_config, kv_cache_config
                 )
+            self.post_forward_graphs = maybe_create_post_forward_cudagraphs(self)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1125,6 +1137,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
+                    if self.post_forward_graphs is not None:
+                        self.post_forward_graphs.release()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
@@ -1390,10 +1404,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int64
-        )
         num_reqs = len(req_ids)
+        # The post-forward graphs read these per-step tensors at fixed addresses.
+        persistent = self.post_forward_graphs
+        if persistent is None:
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int64
+            )
+        else:
+            idx_mapping = persistent.idx_mapping[:num_reqs]
+            async_tensor_h2d(idx_mapping_np, dtype=torch.int64, out=idx_mapping)
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -1425,7 +1445,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
+            if persistent is None:
+                cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
+            else:
+                cu_num_logits = persistent.cu_num_logits[: num_reqs + 1]
+                async_tensor_h2d(cu_num_logits_np, out=cu_num_logits)
 
         # The general branch also serves a no-draft batch with k != 1, and
         # compact_batch's budget is only primed when drafts are scheduled.
@@ -1461,7 +1485,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
+                idx_mapping,
+                total_num_logits,
+                cu_num_logits,
+                self.decode_query_len,
+                out=(
+                    (persistent.expanded_idx_mapping, persistent.expanded_local_pos)
+                    if persistent is not None
+                    else None
+                ),
             )
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
@@ -1501,6 +1533,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
+            out=persistent.logits_indices if persistent is not None else None,
         )
 
         fast_prefill = None
@@ -2107,6 +2140,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            full_cudagraph=batch_desc.cg_mode == CUDAGraphMode.FULL,
         )
 
         if not self.is_last_pp_rank:
@@ -2137,6 +2171,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        full_cudagraph = self.execute_model_state.full_cudagraph
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2169,9 +2204,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
+        # With the post-forward graphs, sampling, the request-state update and
+        # the draft input preparation run (or replay) here as one region.
+        post_forward = self.post_forward_graphs
+        drafts_prepared = post_forward is not None and post_forward.step_eligible(
+            self, input_batch, grammar_output, full_cudagraph
         )
+        if drafts_prepared:
+            assert post_forward is not None
+            sampler_output, num_sampled, num_rejected = post_forward.run(
+                self, input_batch, hidden_states, aux_hidden_states
+            )
+        else:
+            sampler_output, num_sampled, num_rejected = self.sample(
+                hidden_states, input_batch, grammar_output
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2225,6 +2272,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
         )
+        if drafts_prepared:
+            assert post_forward is not None
+            post_forward.set_output_copy_event(async_output.copy_event)
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
         defer_kv_finalize = self.speculator is not None
@@ -2255,13 +2305,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-        self.postprocess_sampled(
-            input_batch.idx_mapping,
-            sampler_output.sampled_token_ids,
-            num_sampled,
-            num_rejected,
-            input_batch.query_start_loc,
-        )
+        if not drafts_prepared:
+            self.postprocess_sampled(
+                input_batch.idx_mapping,
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch.query_start_loc,
+            )
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2292,10 +2343,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_speculative_tokens=num_spec_tokens,
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
+                    **({"inputs_prepared": True} if drafts_prepared else {}),
                 )
             if num_spec_tokens < self.num_speculative_steps:
                 draft_tokens[:, num_spec_tokens:] = -1
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            # The fused draft decode stored them already (unless just truncated).
+            if not (
+                getattr(self.speculator, "drafts_stored", False)
+                and num_spec_tokens == self.num_speculative_steps
+            ):
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
@@ -2304,10 +2361,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
-            )
+            if drafts_prepared:
+                # No structured outputs (step_eligible), so only its shape is
+                # read: skip the gather.
+                step_draft_tokens = draft_tokens[:, :num_spec_tokens]
+            else:
+                step_draft_tokens = self.req_states.draft_tokens[
+                    input_batch.idx_mapping, :num_spec_tokens
+                ]
+            self.draft_tokens_handler.set_draft_tokens(input_batch, step_draft_tokens)
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
@@ -2387,6 +2449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.close()
         set_offloader(None)
         self.cudagraph_manager = None
+        self.post_forward_graphs = None
         self.fast_prefill = None
         self.pooling_runner = None
         if hasattr(self, "kv_caches"):
@@ -2456,6 +2519,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    full_cudagraph: bool = False
 
 
 class BatchReqState(NamedTuple):

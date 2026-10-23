@@ -78,6 +78,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
         speculative_config=SimpleNamespace(),
+        post_forward_graphs=None,
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):

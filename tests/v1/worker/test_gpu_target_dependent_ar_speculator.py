@@ -483,6 +483,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.idx_mapping = torch.arange(2)
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
+    speculator.model = None
+    speculator.draft_tokens_sink = None
     generate_draft = Mock()
     # Stub the bound method on a hand-built speculator to count eager draft calls.
     monkeypatch.setattr(speculator, "_generate_draft", generate_draft)

@@ -28,7 +28,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, copy_small
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -534,8 +534,9 @@ class DraftModelSpeculator(BaseSpeculator):
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        self.temperature.copy_(temperature)
-        self.seeds.copy_(seeds)
+        # Captured into the post-forward graph: kernel copies, not memcpy nodes.
+        copy_small(self.temperature, temperature)
+        copy_small(self.seeds, seeds)
         # idx_mapping == -1 marks a row the drafter must not act on: sampling
         # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
         # always get it; a dummy batch gets it for every row, since its arange
@@ -543,7 +544,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if dummy_run:
             self.idx_mapping.fill_(-1)
         else:
-            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            copy_small(self.idx_mapping[:num_reqs], idx_mapping)
             self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(

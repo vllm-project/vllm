@@ -49,6 +49,8 @@ def _outputs() -> dict[str, torch.Tensor]:
     out = {
         "hidden_q4": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
         "freq_q4": torch.empty(4, 64, device=device),
+        "hidden_v1": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
+        "freq_v1": torch.empty(4, 64, device=device),
         "hidden_v4": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
         "freq_v4": torch.empty(4, 64, device=device),
     }
@@ -80,17 +82,18 @@ def _launches(x, out) -> None:
             ROPE_CAPACITY,
         ],
     )
-    launch(
-        "prologue_vllm_q4",
-        [
-            *common,
-            x["rope"].data_ptr(),
-            out["hidden_v4"].data_ptr(),
-            out["freq_v4"].data_ptr(),
-            ROPE_CAPACITY,
-            *shards,
-        ],
-    )
+    for name, tag in (("prologue_vllm", "v1"), ("prologue_vllm_q4", "v4")):
+        launch(
+            name,
+            [
+                *common,
+                x["rope"].data_ptr(),
+                out[f"hidden_{tag}"].data_ptr(),
+                out[f"freq_{tag}"].data_ptr(),
+                ROPE_CAPACITY,
+                *shards,
+            ],
+        )
 
 
 def _programmatic_edges(graph: torch.cuda.CUDAGraph) -> int:
@@ -113,7 +116,7 @@ def test_cute_entries_build_and_bind():
         assert registry.executor(name, device) is registry.executor(name, device), name
 
 
-CHAINED = ("prologue_q4", "prologue_vllm_q4")
+CHAINED = ("prologue_q4", "prologue_vllm", "prologue_vllm_q4")
 
 
 @sm100

@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -28,7 +29,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.utils import AttentionGroup
 
 from . import attention as glm53_attention  # noqa: F401  (overrides FlashInfer MLA)
 from . import decode as glm53_decode
@@ -139,6 +142,10 @@ class GlmMoeDsaForCausalLM(DeepseekV32ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # The low-latency decode switch, read once; refuses an unsupported
         low_latency = switch.resolve(vllm_config)
+        if low_latency.enabled:
+            from vllm.models.glm53.nvidia import mtp as glm53_mtp
+
+            glm53_mtp.register()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.low_latency: switch.LowLatencyDecode = low_latency
         speculative = vllm_config.speculative_config
@@ -248,6 +255,10 @@ def warm_up_rejection_kernels(
 class Glm53ModelState(DefaultModelState):
     """``DefaultModelState`` plus the decode segment's runner-side hooks."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._metadata: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+
     def _segment(self) -> Any:
         return self.model.model.glm53_segment
 
@@ -307,3 +318,59 @@ class Glm53ModelState(DefaultModelState):
             input_batch.num_scheduled_tokens[:num_reqs].tolist(),
             input_batch.num_tokens_after_padding,
         )
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    ) -> dict[str, Any]:
+        """Return the cached metadata of a segment-owned FULL step, or build it."""
+        key = None
+        segment = self._segment()
+        if (
+            segment is not None
+            and cudagraph_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and ubatch_idx == 0
+            and not input_batch.has_prefill
+            and input_batch.max_query_len is None
+        ):
+            key = (
+                input_batch.num_reqs,
+                input_batch.num_reqs_after_padding,
+                input_batch.num_tokens,
+                input_batch.num_tokens_after_padding,
+            )
+            cached = self._metadata.get(key)
+            if cached is not None and segment.owns_attn_metadata(
+                input_batch.num_tokens_after_padding
+            ):
+                return cached
+        metadata = super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
+            model_specific_attn_metadata=model_specific_attn_metadata,
+        )
+        if key is not None:
+            self._metadata.setdefault(key, metadata)
+        return metadata
+
+    def capture_inner_cudagraphs(self, *args: Any, **kwargs: Any) -> None:
+        """Drop the cached metadata: a capture follows every reallocation of its
+        buffers.
+        """
+        self._metadata.clear()
+        return super().capture_inner_cudagraphs(*args, **kwargs)

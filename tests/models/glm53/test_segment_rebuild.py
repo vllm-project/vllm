@@ -106,3 +106,45 @@ def test_request_blocks_stay_on_the_device(monkeypatch, geometry):
         torch.Tensor, "tolist", lambda self: pytest.fail("host copy of the block table")
     )
     assert decode._request_blocks("r") is decode._table
+
+
+from vllm.models.glm53.nvidia import draft as glm53_draft  # noqa: E402
+
+
+def test_target_close_closes_the_installed_drafter(monkeypatch, geometry):
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args, **kwargs: None)
+    drafter = _Segment()
+    monkeypatch.setattr(glm53_draft, "_CURRENT", drafter)
+    _decode(geometry).close()
+    assert drafter.closed == 1
+
+
+def test_drafter_close_forgets_its_captures_and_bound_tensors(monkeypatch, geometry):
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args, **kwargs: None)
+    draft = glm53_draft.Glm53Draft(SimpleNamespace(), geometry, {}, drafts=3)
+    segment = _Segment()
+    draft._segment, draft._tensors = segment, {"token_ids": torch.zeros(4)}
+    draft._table, draft._cache, draft._positions = torch.zeros(2), 1, torch.zeros(4)
+    draft.captures = {"prefill": 1, "decode": 2}
+    draft._sequence_captures, draft._decoding, draft._warmed = 2, True, True
+    draft._tokens = torch.zeros(1)
+    draft.close()
+    assert segment.closed == 1 and not draft.built
+    assert (
+        draft.captures == {"prefill": 0, "decode": 0} and draft._sequence_captures == 0
+    )
+    assert not draft._decoding and not draft._warmed and draft._tokens is None
+    assert draft._tensors == {} and draft._table is None and draft._cache == 0
+    assert draft._positions is None
+    draft.decode_phase(True)  # a new capture sequence starts at proposal 0
+    draft.decode_phase(False)
+    assert not draft.claims_proposals()
+
+
+def test_drafter_segment_close_gives_its_placement_back():
+    events: list[str] = []
+    segment = object.__new__(glm53_draft.Glm53DraftSegment)
+    segment.arena = SimpleNamespace(close=lambda: events.append("arena"))
+    segment.placement = SimpleNamespace(release=lambda: events.append("placement"))
+    segment.close()
+    assert events == ["arena", "placement"]

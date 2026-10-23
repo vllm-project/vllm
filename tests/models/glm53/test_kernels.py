@@ -4,11 +4,12 @@
 
 import dataclasses
 import struct
+from collections.abc import Sequence
 from types import SimpleNamespace
 
 import torch
 
-from vllm.models.glm53.nvidia import providers
+from vllm.models.glm53.nvidia import draft_providers, providers
 from vllm.models.glm53.nvidia.ops import launch as glm53_launch
 from vllm.models.glm53.nvidia.ops.cute_dsl.mla_selector import IndexScale, StateWords
 from vllm.models.glm53.nvidia.ops.cute_dsl.mla_worker import Handoff, MlaWorker
@@ -41,7 +42,12 @@ class _ReplicatedEmbedding(_AnyTensors):
 
 
 class _Placement:
-    """CPU stand-in for ``Glm53Placement``: plain handoff and flags."""
+    """CPU stand-in for ``Glm53Placement``: plain handoff and flags (``issued``: the
+    ``moe_flags`` pairs handed out, in order).
+    """
+
+    def __init__(self) -> None:
+        self.issued: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def worker_handoff(self, by_sm: bool) -> SimpleNamespace:
         return SimpleNamespace(
@@ -51,13 +57,15 @@ class _Placement:
 
     def moe_flags(self) -> tuple[torch.Tensor, torch.Tensor]:
         words = glm53_launch.sizes_of("fused_moe_q4_ckpt_shared")["kFlagWords"]
-        return (
+        pair = (
             torch.zeros(words, dtype=torch.int32),
             torch.zeros(words, dtype=torch.int32),
         )
+        self.issued.append(pair)
+        return pair
 
 
-def _bound(program: list[providers.Provider]) -> list[glm53_launch.Launch]:
+def _bound(program: Sequence[providers.Provider]) -> list[glm53_launch.Launch]:
     """Bind ``program`` to a stand-in arena and return its launches."""
     launches = []
     for provider in program:
@@ -77,12 +85,29 @@ def test_shipped_kernels_are_the_served_kernels(geometry) -> None:
             for inputs in (_AnyTensors(), _ReplicatedEmbedding()):
                 program = providers.program(shape, rank, inputs, _Placement())
                 launched += _bound(program)
+            for part in draft_providers.program(
+                shape, rank, _AnyTensors(), _Placement()
+            ):
+                launched += _bound(part)
     for launch in launched:
         assert len(launch.arguments) == len(registry.arguments(launch.kernel)), (
             launch.site
         )
     kernels = {launch.kernel for launch in launched}
     assert set(registry.ENTRIES) == kernels, sorted(set(registry.ENTRIES) ^ kernels)
+
+
+def test_drafter_moe_flags_are_placed_like_the_targets(geometry) -> None:
+    placement = _Placement()
+    parts = draft_providers.program(geometry, 0, _AnyTensors(), placement)
+    assert len(placement.issued) == len(parts)
+    for part, (flags, mirror) in zip(parts, placement.issued):
+        moe = next(p for p in part if isinstance(p, draft_providers.DraftMoe))
+        assert moe.state[moe.prefix + "flags"] is flags
+        assert moe.state[moe.prefix + "flags_mirror"] is mirror
+    target = providers.program(geometry, 0, _AnyTensors(), _Placement())
+    ffn = next(p for p in target if isinstance(p, providers.Ffn) and p.layer > 3)
+    assert {n.rsplit(".", 1)[-1] for n in ffn.state} >= {"flags", "flags_mirror"}
 
 
 def test_layer_layout(geometry) -> None:
@@ -134,6 +159,26 @@ def test_selector_entry_follows_the_cache_scale_format(
                 "SHARD": rank,
                 **({"PACKED_SCALE": True} if packed else {}),
             }
+
+
+def test_drafter_selector_entry_follows_the_cache_scale_format(geometry) -> None:
+    from vllm.models.glm53.nvidia.ops.cute_dsl import registry
+
+    for packed, suffix in ((False, ""), (True, "_mx")):
+        shape = dataclasses.replace(geometry, index_scale_packed=packed)
+        for rank in range(3):
+            name = draft_providers.only_row_kernel(shape, rank)
+            assert name == f"mla_selector_q4_shard3r{rank}_only_row_paged{suffix}"
+            assert registry.ENTRIES[name].cls == "SelectorOnlyRow"
+            assert dict(registry.ENTRIES[name].constants) == {
+                "SHARD": rank,
+                **({"PACKED_SCALE": True} if packed else {}),
+            }
+        slices = {item.name: item.size for item in draft_providers.draft_slices(shape)}
+        assert slices[draft_providers.DRAFT_SELECTION] > 0
+    # The fp32 entries are the ones the older format served, unchanged.
+    old = registry.ENTRIES["mla_selector_q4_shard3r0_only_row_paged"]
+    assert dict(old.constants) == {"SHARD": 0}
 
 
 def test_index_scale_words() -> None:
