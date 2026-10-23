@@ -527,6 +527,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=True if request._grammar_from_parser else None,
+                max_tool_calls=request.max_tool_calls,
             )
             generators.append(generator)
 
@@ -649,12 +650,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        max_tool_calls: int | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
 
         orig_priority = priority
         sub_request = 0
+        num_tool_calls = 0
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
@@ -687,10 +690,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
+            if max_tool_calls is not None and num_tool_calls >= max_tool_calls:
+                # The built-in tool call budget is spent; ignore the call.
+                break
 
             # Call the tool and update the context with the result.
             context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
+            num_tool_calls += 1
             context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming

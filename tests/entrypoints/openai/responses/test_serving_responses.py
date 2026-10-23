@@ -1081,6 +1081,58 @@ class TestInitializeToolSessions:
         assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_tool_calls", [0, 2])
+    async def test_builtin_tool_loop_honors_max_tool_calls(
+        self, serving_responses_instance, max_tool_calls
+    ):
+        """Built-in tool calls past max_tool_calls are ignored, per the spec."""
+
+        class AlwaysToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self):
+                self._messages = []
+                self.request = None
+                self.num_tool_calls = 0
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return True
+
+            async def call_tool(self):
+                # Fail fast instead of hanging if the loop ignores the limit.
+                assert self.num_tool_calls < max_tool_calls
+                self.num_tool_calls += 1
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        async def generate_output(*args, **kwargs):
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = AlwaysToolCallingHarmonyContext()
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+            max_tool_calls=max_tool_calls,
+        ):
+            pass
+
+        assert context.num_tool_calls == max_tool_calls
+        assert (
+            serving_responses_instance.engine_client.generate.call_count
+            == max_tool_calls + 1
+        )
+
+    @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
         self, serving_responses_instance, mock_context, mock_exit_stack
     ):
