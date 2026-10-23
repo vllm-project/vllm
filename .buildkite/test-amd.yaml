@@ -1369,9 +1369,12 @@ steps:
   - vllm/models/minimax_m3/amd/
   - vllm/models/deepseek_v41/amd/mono/common/
   - tests/models/minimax_m3/amd_specialized_decode/
+  - tests/models/minimax_m3/test_index_cache_overrides.py
+  - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
   # the long TP4 hand-off stress
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
@@ -4285,9 +4288,11 @@ steps:
       kernels/test_kpool_decode_update_batched.py
       kernels/test_minimax_m3_amd_ops.py
       kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+      kernels/test_muse_spark_router_bf16x3.py
       kernels/test_onednn.py
       kernels/test_relu2_fp8_quant.py
       --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+  - pytest -v -s kernels/test_fused_muse_spark_qknorm_rope_kv_insert.py -k rocm
 
 - label: ":amd: (MI355) Gate Linear Router Kernels"
   timeout_in_minutes: 20
