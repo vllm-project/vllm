@@ -4,6 +4,7 @@ psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests >= 2.33.0
+certifi >= 2026.10.19
 tqdm
 blake3
 py-cpuinfo
@@ -19,6 +20,7 @@ aiohttp >= 3.14.4
 multidict >= 6.9.1
 openai >= 2.25.0  # For Responses API with namespace tools
 pydantic >= 2.12.0
+orjson>=3.11.6
 prometheus_client >= 0.18.0
 pillow >= 13.0.0  # Required for image processing
 prometheus-fastapi-instrumentator >= 8.0.0 # v8 unblocks starlette >= 1.0
