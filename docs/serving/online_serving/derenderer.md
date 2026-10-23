@@ -86,8 +86,9 @@ Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or 
 
 The derenderer builds its tool and reasoning parsers from its own server flags plus the `chat_request` sent with each call. It can't see how the request was rendered or served anywhere else, so for its output to match a `vllm serve` server:
 
-- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template` and `--default-chat-template-kwargs` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
+- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template`, `--default-chat-template-kwargs` and `--response-role` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
 - Send the full `chat_request` that went to `/render`, not just `messages` and `tools`. Fields like `chat_template_kwargs`, `reasoning_effort`, `tool_choice` and `include_reasoning` change how the output is parsed.
+- The message `role` is `--response-role`, or the last message's role when `add_generation_prompt` is `false`. With `echo: true`, the last message's content is prepended when its role matches, as on `/v1/chat/completions`. Streaming puts the echoed text at the start of the first chunk's `content` instead of in a chunk of its own.
 
 `/derender` decodes with the flags in `chat_request` which can differ from what the engine ran with. For parsers whose `adjust_request` changes decoding, use [`output_mode: "derender"`](token_in_token_out.md#derender) on `/inference/v1/generate`. It parses the engine's own text and matches coupled chat.
 
