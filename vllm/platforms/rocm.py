@@ -600,25 +600,17 @@ def _get_invalid_reasons(
 
 
 # Per-process VRAM for get_process_device_memory_bytes(), from DRM fdinfo.
-# DRM is the kernel's GPU driver interface. Each GPU has a render node
-# /dev/dri/renderD<minor>, a character device with major 226 (DRM's), which
-# HIP (the ROCm runtime) opens. /proc/self/fdinfo/<fd> of that file lists the
-# VRAM of the GPU address space behind it, which holds every HIP allocation
-# of this process on that GPU. /proc/self is the calling process in any PID
-# namespace, so this works in containers without --pid=host, unlike KFD's
-# per-process files (/sys/class/kfd/kfd/proc/<pid>, keyed by host PID). KFD
-# is the amdgpu part that serves HIP's compute queues and memory; its
-# topology is read only to map a torch device to its render node.
+# HIP opens the GPU's render node /dev/dri/renderD<minor> (DRM major 226).
+# /proc/self/fdinfo/<fd> of that file reports the VRAM of this process's GPU
+# address space, HIP's own allocations included. /proc/self works in any
+# container, unlike KFD's per-process files, which are keyed by host PID.
+# The KFD topology is read only to map a torch device to its render node.
 _KFD_TOPOLOGY_NODES = "/sys/class/kfd/kfd/topology/nodes"
 _DRM_MAJOR = 226
-# VRAM keys, both meaning "every buffer that prefers VRAM, wherever it
-# currently is" (Documentation/gpu/drm-usage-stats.rst): the generic DRM key
-# (Linux 6.13+), then the amdgpu key of older kernels, which amdgpu prints
-# from the same counters. Shared, purgeable and evicted buffers are included;
-# evicted buffers return to VRAM when used, so they count. drm-memory-vram is
-# not used: it is a deprecated alias for drm-resident-vram, which leaves out
-# evicted buffers. All keys are optional, e.g. MI300 partitions 1..N-1 omit
-# them; without one, the caller falls back.
+# Buffers that prefer VRAM, evicted ones included since they return when used
+# (drm-usage-stats.rst): the DRM key (Linux 6.13+), then amdgpu's key on older
+# kernels. Not drm-resident-vram, which leaves evicted buffers out. Without a
+# key, the caller falls back.
 _FDINFO_VRAM_KEYS = ("drm-total-vram", "amd-requested-vram")
 _FDINFO_UNITS = {"": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
 
@@ -1263,16 +1255,11 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
-        # Read from DRM fdinfo, not hipMemGetInfo (what
-        # torch.accelerator.get_memory_info() reports on ROCm): that free
-        # memory rounds every allocation up to 2 MiB, so small HIP
-        # allocations look larger than they are. fdinfo is exact but misses
-        # SVM memory (shared virtual memory, managed by KFD outside the render
-        # node), e.g. the CWSR (compute wave save/restore) save area KFD
-        # allocates for each new hardware queue (a GPU command ring HIP
-        # creates on demand): 28.4 MiB per queue measured on an R9700.
-        # ``None`` (caller falls back) when the render node or a VRAM key is
-        # not found.
+        # Read from DRM fdinfo, not hipMemGetInfo (torch's free memory on
+        # ROCm), which counts every allocation as at least 2 MB. fdinfo is
+        # exact but misses KFD's SVM memory, e.g. the CWSR save area of each
+        # hardware queue (about 30 MB per queue on an R9700). ``None``
+        # (caller falls back) when the render node or a VRAM key is missing.
         try:
             props = torch.cuda.get_device_properties(device)
             minor = _drm_render_minor(

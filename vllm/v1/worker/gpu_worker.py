@@ -720,7 +720,7 @@ class Worker(WorkerBase):
             )
             if process_before is not None and process_after is not None:
                 # Where the platform counts this process's memory (ROCm), use
-                # that: free memory there rounds each allocation up to 2 MiB.
+                # that: free memory there rounds each allocation up to 2 MB.
                 retained_memory = max(process_after - process_before, 0)
             profile_result.total_consumed += retained_memory
             profile_result.non_kv_cache_memory += retained_memory

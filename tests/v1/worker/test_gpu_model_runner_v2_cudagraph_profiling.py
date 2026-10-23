@@ -97,8 +97,9 @@ class _FakePlatform:
     def get_global_graph_pool(self) -> Any:
         return type(self)._global_graph_pool
 
-    # Per-process device memory counter readings; None means no counter (CUDA).
-    process_memory: list[int] | None = None
+    # Per-process device memory counter readings; None means no counter (CUDA),
+    # a None reading means the counter dropped out for that reading.
+    process_memory: list[int | None] | None = None
 
     def get_process_device_memory_bytes(self, device: Any) -> int | None:
         return None if self.process_memory is None else self.process_memory.pop(0)
@@ -204,6 +205,33 @@ def test_profile_cudagraph_memory_ignores_counter_below_reserved(monkeypatch):
     )
 
     assert cgu.profile_cudagraph_memory(runner) == 900 * mib
+
+
+def test_profile_cudagraph_memory_does_not_mix_counters(monkeypatch):
+    """If the per-process counter drops out between the two readings of one
+    difference, that difference uses free memory for both readings."""
+    mib = 1 << 20
+    _patch_module(monkeypatch, released_bytes=900 * mib)
+    _FakePlatform.process_memory = [2000 * mib, None]
+    monkeypatch.setattr(cgu.torch.accelerator, "memory_reserved", lambda *_: 0)
+    runner = _make_profiling_runner(
+        CUDAGraphMode.FULL_AND_PIECEWISE, piecewise_only=True
+    )
+
+    assert cgu.profile_cudagraph_memory(runner) == 900 * mib
+
+
+@pytest.mark.parametrize(
+    ("earlier", "later", "expected"),
+    [
+        ((100, 1000), (130, 1100), 30),  # both have the per-process count
+        ((100, 1000), (None, 1100), 100),  # later lacks it
+        ((None, 1000), (130, 1100), 100),  # earlier lacks it
+        ((None, 1000), (None, 1100), 100),  # no per-process counter
+    ],
+)
+def test_device_memory_difference_uses_one_counter(earlier, later, expected):
+    assert cgu.DeviceMemoryInUse(*later) - cgu.DeviceMemoryInUse(*earlier) == expected
 
 
 def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):

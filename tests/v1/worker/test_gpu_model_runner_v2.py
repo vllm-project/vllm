@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import DeviceMemoryInUse
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -283,6 +284,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     runner.kv_cache_config = None
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
+    runner.device = None
     return runner
 
 
@@ -296,7 +298,9 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+        model_runner_module,
+        "device_memory_in_use",
+        lambda _device: DeviceMemoryInUse(None, 0),
     )
     lock_calls = []
     monkeypatch.setattr(
@@ -306,6 +310,30 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+
+
+def test_capture_model_reports_process_memory(monkeypatch):
+    """Where the platform counts this process's memory (ROCm), the captured
+    graph size uses that count, like the graph memory estimate it is logged
+    against, not free memory (2 MiB-rounded on ROCm)."""
+    mib = 1 << 20
+    runner = _make_capture_runner(captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+    readings = iter(
+        (
+            DeviceMemoryInUse(1000 * mib, 5000 * mib),
+            DeviceMemoryInUse(1300 * mib, 8000 * mib),
+        )
+    )
+    monkeypatch.setattr(
+        model_runner_module, "device_memory_in_use", lambda _device: next(readings)
+    )
+
+    assert runner.capture_model() == 300 * mib
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
@@ -331,7 +359,9 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+        model_runner_module,
+        "device_memory_in_use",
+        lambda _device: DeviceMemoryInUse(None, 0),
     )
     lock_calls = []
     monkeypatch.setattr(

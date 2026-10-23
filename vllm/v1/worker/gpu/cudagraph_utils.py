@@ -969,7 +969,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
         spec_manager_names: list[str] = []
-        used_with_graphs: int | None = None
+        used_with_graphs: DeviceMemoryInUse | None = None
         uncaptured_graph_memory = 0
         graph_memory = 0
         try:
@@ -1052,24 +1052,40 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         platform_cls._global_graph_pool = saved_global_pool
 
 
-def device_memory_in_use(device: torch.device) -> int:
-    """Device memory in use, for the difference between two profiling readings.
+@dataclass(frozen=True)
+class DeviceMemoryInUse:
+    """One reading of device memory in use. Subtract two readings for the
+    memory used in between; both sides then come from the same counter."""
 
-    Where the platform counts this process's device memory (ROCm), that count:
-    it is exact and per process, and it includes memory the GPU runtime
-    allocates for graphs outside torch. ROCm's free memory rounds every
-    allocation up to 2 MiB, which inflates graph estimates several times over,
-    since each captured graph makes small runtime allocations. Elsewhere this
-    is the device-wide total minus free memory, so differences equal the
+    # This process's device memory, where the platform counts it (ROCm).
+    process: int | None
+    # Device-wide total minus free memory.
+    device: int
+
+    def __sub__(self, earlier: "DeviceMemoryInUse") -> int:
+        if self.process is not None and earlier.process is not None:
+            return self.process - earlier.process
+        return self.device - earlier.device
+
+
+def device_memory_in_use(device: torch.device) -> DeviceMemoryInUse:
+    """Device memory in use, for the difference between two readings.
+
+    Where the platform counts this process's device memory (ROCm), differences
+    use that count: it is exact and per process, and it includes memory the
+    GPU runtime allocates for graphs outside torch. ROCm's free memory rounds
+    every allocation up to 2 MB, which inflates graph estimates several times
+    over, since each captured graph makes small runtime allocations. Otherwise
+    differences use the device-wide total minus free memory, so they equal the
     free-memory deltas used before.
     """
-    used = current_platform.get_process_device_memory_bytes(device)
+    process = current_platform.get_process_device_memory_bytes(device)
     # Torch's reserved memory is part of this process's memory; a lower
     # reading means the counter is not what we expect, so it is not used.
-    if used is not None and used >= torch.accelerator.memory_reserved(device):
-        return used
+    if process is not None and process < torch.accelerator.memory_reserved(device):
+        process = None
     free, total = torch.accelerator.get_memory_info()
-    return total - free
+    return DeviceMemoryInUse(process, total - free)
 
 
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
