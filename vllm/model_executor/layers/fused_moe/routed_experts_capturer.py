@@ -180,36 +180,15 @@ class RoutedExpertsSink:
         self.capture_fn = capture_fn
 
 
-_CAPTURE_FN_OWNER_ATTR = "_routed_experts_capturer"
-
-
-def _make_capture_fn(
-    capturer: RoutedExpertsCapturer, layer_id: int
-) -> Callable[[torch.Tensor], None]:
-    capture_fn = partial(capturer.capture, layer_id)
-    setattr(capture_fn, _CAPTURE_FN_OWNER_ATTR, capturer)
-    return capture_fn
-
-
-def _reject_second_capturer(target: Any, attr: str) -> None:
-    """Reject a target already owned by an R3 capturer, keeping one owner."""
-    capture_fn = getattr(target, attr, None)
-    if getattr(capture_fn, _CAPTURE_FN_OWNER_ATTR, None) is not None:
-        raise ValueError(
-            "Routed-experts capture is already bound to a capturer on "
-            f"{type(target).__name__}; unbind the existing binding first."
-        )
-
-
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
 ) -> Callable[[], None]:
-    """Attach capture callbacks and return an idempotent ownership-aware cleanup.
+    """Attach routed-experts capture callbacks and return an idempotent cleanup.
 
-    Other components' callbacks are preserved and restored on cleanup, but a
-    target already bound to a routed-experts capturer is rejected: one capturer
-    owns the model. Sinks are allocated before any model attribute is modified.
+    The caller must ensure the model has no active R3 binding; nested bindings
+    of two capturers are not supported. Sinks are allocated before any model
+    attribute is modified.
     """
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -220,19 +199,18 @@ def bind_routed_experts_capturer(
     bindings: list[tuple[Any, str, Any, Any]] = []
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
-            _reject_second_capturer(module, "capture_fn")
             bindings.append(
                 (
                     module,
                     "capture_fn",
                     getattr(module, "capture_fn", None),
-                    _make_capture_fn(capturer, module.layer_id),
+                    partial(capturer.capture, module.layer_id),
                 )
             )
             continue
         if not isinstance(module, MoERunner):
             continue
-        capture_fn = _make_capture_fn(capturer, module.layer_id)
+        capture_fn = partial(capturer.capture, module.layer_id)
         quant_method = module._quant_method
         if quant_method.is_monolithic:
             moe_kernel = getattr(quant_method, "moe_kernel", None)
@@ -248,8 +226,6 @@ def bind_routed_experts_capturer(
                 )
             routed_experts = module.routed_experts
             routing_sink = getattr(routed_experts, "routing_sink", None)
-            if routing_sink is not None:
-                _reject_second_capturer(routing_sink, "capture_fn")
             bindings.append(
                 (
                     routed_experts,
@@ -259,7 +235,6 @@ def bind_routed_experts_capturer(
                 )
             )
         elif isinstance(module.router, BaseRouter):
-            _reject_second_capturer(module.router, "capture_fn")
             bindings.append(
                 (module.router, "capture_fn", module.router.capture_fn, capture_fn)
             )
