@@ -137,9 +137,9 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.empty(num_reqs, dtype=torch.int64, device=device)
         expanded_idx_mapping = idx_mapping
-        expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        expanded_local_pos = torch.empty(num_reqs, dtype=torch.int32, device=device)
 
         # Distribute the remainder evenly so that no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
@@ -153,33 +153,61 @@ class InputBatch:
             num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        # seq_len equals to query_len
-        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
-        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
-        # Pad for full CUDA graph mode.
-        input_buffers.seq_lens[num_reqs:] = 0
-        seq_lens = input_buffers.seq_lens[:num_reqs]
-
         query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-        input_buffers.query_start_loc[:1] = 0
-        torch.cumsum(
-            seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
-        )
-        # Pad for full CUDA graph mode.
-        input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
-        query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
-        input_ids = input_buffers.input_ids[:num_tokens].zero_()
-        positions = input_buffers.positions[:num_tokens].zero_()
-
-        input_buffers.is_padding[:num_tokens].fill_(is_padding)
-        is_padding = input_buffers.is_padding[:num_tokens]
-
-        logits_indices = query_start_loc[1:] - 1
-        cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        cu_num_logits = torch.empty(num_reqs + 1, dtype=torch.int32, device=device)
+        logits_indices = torch.empty(num_reqs, dtype=torch.int32, device=device)
+        max_num_reqs = input_buffers.seq_lens.shape[0]
+
+        # The scheduled lengths are base_tokens with a +1 on the last
+        # num_extra requests, so query_start_loc has the closed form
+        # k * base_tokens + max(0, k - (num_reqs - num_extra)); no cumsum
+        # kernel is needed. One launch writes every dummy-batch buffer.
+        if device.type == "cpu":
+            # No triton CPU backend; make_dummy runs on CPU tensors in tests.
+            idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32)
+            cu_num_logits = torch.arange(num_reqs + 1, dtype=torch.int32)
+            reqs = torch.arange(num_reqs + 1, dtype=torch.int32)
+            qsl = reqs * base_tokens + (reqs - (num_reqs - num_extra)).clamp(min=0)
+            logits_indices = (qsl[1:] - 1).to(torch.int32)
+            input_buffers.seq_lens.zero_()
+            input_buffers.seq_lens[:num_reqs] = base_tokens + (
+                reqs[:num_reqs] >= num_reqs - num_extra
+            )
+            input_buffers.query_start_loc[: num_reqs + 1] = qsl
+            input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+            input_buffers.input_ids[:num_tokens] = 0
+            input_buffers.positions[:num_tokens] = 0
+            input_buffers.is_padding[:num_tokens] = is_padding
+        else:
+            _init_dummy_batch_kernel[cdiv(max(max_num_reqs + 1, num_tokens), 1024)](
+                idx_mapping,
+                expanded_local_pos,
+                cu_num_logits,
+                logits_indices,
+                input_buffers.seq_lens,
+                input_buffers.query_start_loc,
+                input_buffers.input_ids,
+                input_buffers.positions,
+                input_buffers.is_padding,
+                num_reqs,
+                num_tokens,
+                base_tokens,
+                num_extra,
+                max_num_reqs,
+                is_padding,
+                BLOCK_SIZE=1024,  # type: ignore
+            )
+        seq_lens = input_buffers.seq_lens[:num_reqs]
+        query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
+        input_ids = input_buffers.input_ids[:num_tokens]
+        positions = input_buffers.positions[:num_tokens]
+        is_padding_buf = input_buffers.is_padding[:num_tokens]
+
         # Copy so set_dummy_context can add context in place without touching
         # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
@@ -210,7 +238,7 @@ class InputBatch:
             decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,
-            is_padding=is_padding,
+            is_padding=is_padding_buf,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -266,6 +294,66 @@ def set_dummy_context(
             % num_kv_blocks
         )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_reqs",
+        "num_tokens",
+        "base_tokens",
+        "num_extra",
+        "is_padding",
+    ]
+)
+def _init_dummy_batch_kernel(
+    idx_mapping_ptr,  # [num_reqs] int64
+    expanded_local_pos_ptr,  # [num_reqs] int32
+    cu_num_logits_ptr,  # [num_reqs + 1] int32
+    logits_indices_ptr,  # [num_reqs] int32
+    seq_lens_ptr,  # [max_num_reqs] int32
+    query_start_loc_ptr,  # [max_num_reqs + 1] int32
+    input_ids_ptr,  # [num_tokens] int32
+    positions_ptr,  # [num_tokens] int64
+    is_padding_ptr,  # [num_tokens] bool
+    num_reqs,
+    num_tokens,
+    base_tokens,
+    num_extra,
+    max_num_reqs,
+    is_padding,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+
+    is_req = offs < num_reqs
+    zeros_i32 = tl.zeros([BLOCK_SIZE], tl.int32)
+    tl.store(idx_mapping_ptr + offs, offs.to(tl.int64), mask=is_req)
+    tl.store(expanded_local_pos_ptr + offs, zeros_i32, mask=is_req)
+
+    # seq_len equals query_len; the last num_extra requests carry the remainder.
+    seq_len = base_tokens + tl.where(offs >= num_reqs - num_extra, 1, 0)
+    tl.store(
+        seq_lens_ptr + offs,
+        tl.where(is_req, seq_len, 0).to(tl.int32),
+        mask=offs < max_num_reqs,
+    )
+
+    # query_start_loc[k] = cumsum(seq_lens)[k] for k <= num_reqs, and the
+    # full-graph padding value num_tokens beyond that.
+    qsl = offs * base_tokens + tl.maximum(offs - (num_reqs - num_extra), 0)
+    qsl = tl.where(offs <= num_reqs, qsl, num_tokens)
+    tl.store(query_start_loc_ptr + offs, qsl.to(tl.int32), mask=offs < max_num_reqs + 1)
+
+    tl.store(cu_num_logits_ptr + offs, offs.to(tl.int32), mask=offs <= num_reqs)
+    next_qsl = (offs + 1) * base_tokens + tl.maximum(
+        offs + 1 - (num_reqs - num_extra), 0
+    )
+    tl.store(logits_indices_ptr + offs, (next_qsl - 1).to(tl.int32), mask=is_req)
+
+    is_tok = offs < num_tokens
+    tl.store(input_ids_ptr + offs, tl.zeros([BLOCK_SIZE], tl.int32), mask=is_tok)
+    tl.store(positions_ptr + offs, tl.zeros([BLOCK_SIZE], tl.int64), mask=is_tok)
+    tl.store(is_padding_ptr + offs, is_padding != 0, mask=is_tok)
 
 
 @triton.jit
