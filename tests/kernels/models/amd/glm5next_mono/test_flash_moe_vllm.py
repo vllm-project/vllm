@@ -19,11 +19,12 @@ import pytest
 import ray
 import torch
 
-from ....utils import (
+from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
 )
+
 from .test_flash_ffn_kernel import _dequant, _on_cdna4, _rel, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
@@ -161,10 +162,10 @@ def _check(rank: int, tp: int, device) -> None:
     )
     # the raw shards, for the exact reference, before post-load processing
     e = moe.experts.routed_experts
-    raw = [
+    w13, s13, w2, s2 = (
         getattr(e, n).data.view(torch.uint8).clone()
         for n in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
-    ]
+    )
     shared = N_EXPERTS
     if moe.shared_experts is not None:
         sh = moe.shared_experts
@@ -231,7 +232,14 @@ def _check(rank: int, tp: int, device) -> None:
         if not getattr(moe.experts, "reduce_results", True):
             dist.all_reduce(y)
         ref = _exact_moe(
-            k_in, moe.gate.weight, moe.gate.e_score_correction_bias, *raw, shared
+            k_in,
+            moe.gate.weight,
+            moe.gate.e_score_correction_bias,
+            w13,
+            s13,
+            w2,
+            s2,
+            shared,
         )
         dist.all_reduce(ref)  # this rank's intermediate shard
         e_kv = _rel(x, y)

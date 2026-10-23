@@ -247,7 +247,7 @@ steps:
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
-    - pytest -v -s models/glm5next --ignore=models/glm5next/amd_specialized_decode/test_flash_ffn_kernel.py --ignore=models/glm5next/amd_specialized_decode/test_flash_kda_kernel.py --ignore=models/glm5next/amd_specialized_decode/test_flash_dsa_kernel.py --ignore=models/glm5next/amd_specialized_decode/test_flash_moe_vllm.py
+    - pytest -v -s models/glm5next
   mirror:
     amd:
       label: ":amd: (MI355 DPX) GLM5Next"
@@ -339,10 +339,11 @@ steps:
   - image-build-amd
   source_file_dependencies:
   - docker/Dockerfile.rocm_base
-  - vllm/models/glm5next/amd/specialized_decode/
-  - tests/models/glm5next/amd_specialized_decode/
+  - vllm/models/glm5next/amd/
+  - vllm/models/glm5next/common/model.py
+  - tests/kernels/models/amd/glm5next_mono/
   commands:
-  - pytest -v -s tests/models/glm5next/amd_specialized_decode/test_flash_ffn_kernel.py tests/models/glm5next/amd_specialized_decode/test_flash_kda_kernel.py tests/models/glm5next/amd_specialized_decode/test_flash_dsa_kernel.py tests/models/glm5next/amd_specialized_decode/test_flash_moe_vllm.py
+  - pytest -v -s tests/kernels/models/amd/glm5next_mono/
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd

@@ -192,7 +192,7 @@ def build_flash_ffn_kernel(
     assert not dsa or (S <= 8 and max_pools % POOLS_PER_TASK == 0)
     W = npes
     SH = FlashShard(W)
-    P, H, NIN = SH.kda_proj, SH.kda_heads, SH.kda_in_rows
+    P, H, N_IN = SH.kda_proj, SH.kda_heads, SH.kda_in_rows
     MH = SH.mla_heads
     HG = MH // WAVES
     QB_ROWS = MH * NOPE_DIM
@@ -1060,7 +1060,7 @@ def build_flash_ffn_kernel(
             for t in range(start(stage), S, G):
                 s = fx.Int32(t)
                 stamp(stage)
-                gam = [ld_bf16(r_g, tid * CPT + q) for q in range(CPT)]
+                gamma = [ld_bf16(r_g, tid * CPT + q) for q in range(CPT)]
                 if tid < PMIX * NP:
                     k = tid // NP
                     part = tid % NP
@@ -1180,8 +1180,8 @@ def build_flash_ffn_kernel(
                         a_out,
                         (s * HIDDEN + tid * CPT + 2 * q) // 2,
                         bf16_pair(
-                            li[2 * q] * rstd * gam[2 * q],
-                            li[2 * q + 1] * rstd * gam[2 * q + 1],
+                            li[2 * q] * rstd * gamma[2 * q],
+                            li[2 * q + 1] * rstd * gamma[2 * q + 1],
                         ),
                     )
 
@@ -1235,14 +1235,14 @@ def build_flash_ffn_kernel(
 
         def run_inproj():
             r_w = _rsrc(w_in)
-            for t in range(start("inproj"), (NIN + IN_TILE - 1) // IN_TILE, G):
+            for t in range(start("inproj"), (N_IN + IN_TILE - 1) // IN_TILE, G):
                 t = fx.Int32(t)
                 stamp("inproj")
                 row0 = t * IN_TILE
 
                 def u_in(c):
                     kc = wave * IN_CPW + c
-                    return unit_rm(r_w, row0, kc, HIDDEN, NIN, n_sel() * XW + kc * 32)
+                    return unit_rm(r_w, row0, kc, HIDDEN, N_IN, n_sel() * XW + kc * 32)
 
                 pre = [u_in(c) for c in range(4)]
                 stage_rows(mb("a_in"), HIDDEN)
@@ -1251,8 +1251,8 @@ def build_flash_ffn_kernel(
 
                 def emit(rl, n, v):
                     row = row0 + rl
-                    if row < NIN:
-                        put(mb("proj"), n * NIN + row, bf16_round(v))
+                    if row < N_IN:
+                        put(mb("proj"), n * N_IN + row, bf16_round(v))
 
                 reduce_rows(1, acc, emit)
                 gpu.barrier()
@@ -1270,7 +1270,7 @@ def build_flash_ffn_kernel(
                 if tid < S * KD // 2:
                     n = tid // (KD // 2)
                     w = tid % (KD // 2)
-                    v0, v1 = get2_many([(mb("proj"), n * NIN + src + 2 * w)])[0]
+                    v0, v1 = get2_many([(mb("proj"), n * N_IN + src + 2 * w)])[0]
                     lds_st(xs, n * (KD // 2) + w, bf16_pair(v0, v1))
                 gpu.barrier()
                 row0 = t * FGB_TILE + wave * 16
@@ -1305,7 +1305,7 @@ def build_flash_ffn_kernel(
 
         def run_kda():
             r_cw = _rsrc(conv_w)
-            r_alog = _rsrc(a_log)
+            r_a_log = _rsrc(a_log)
             r_dtb = _rsrc(dt_bias)
             r_won = _rsrc(w_on)
             r_idx = _rsrc(state_idx)
@@ -1322,7 +1322,7 @@ def build_flash_ffn_kernel(
                 r_cs = _rsrc(conv_state + slot * conv_stride * fx.Int64(2))
                 if tid < 3 * KD:
                     ch = (tid // KD) * P + h * KD + tid % KD
-                    x = getf_many([(mb("proj"), s * NIN + ch)])[0]
+                    x = getf_many([(mb("proj"), s * N_IN + ch)])[0]
                     st = [ld_bf16(r_cs, conv_at(ch, j)) for j in range(CONV_TAPS - 1)]
                     cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
                     a = cw[CONV_TAPS - 1] * x
@@ -1341,7 +1341,7 @@ def build_flash_ffn_kernel(
                     )[0]
                     lds_st(xs, G1O + tid, g)
                 if tid == 0:
-                    lds_st(misc, 0, getf_many([(mb("proj"), s * NIN + 3 * P + h)])[0])
+                    lds_st(misc, 0, getf_many([(mb("proj"), s * N_IN + 3 * P + h)])[0])
                 gpu.barrier()
                 if wave < 2:
                     a0 = lds_ld(xs, wave * KD + lane)
@@ -1353,7 +1353,7 @@ def build_flash_ffn_kernel(
                 rq = _rsq(lds_ld(misc, 1) + L2_EPS) * (KD**-0.5)
                 rk = _rsq(lds_ld(misc, 2) + L2_EPS)
                 beta = sigmoid(lds_ld(misc, 0))
-                amp = _exp(ld_f32(r_alog, h))
+                amp = _exp(ld_f32(r_a_log, h))
                 vr = tid // 4
                 k0 = (tid % 4) * 32
                 r_rs = _rsrc(
@@ -1610,7 +1610,7 @@ def build_flash_ffn_kernel(
                 stamp("qnorm")
                 live = tid < NQ4
                 e0 = fx.min(tid, NQ4 - 1) * 4
-                gam = [ld_bf16(r_gqa, e0 + j) for j in range(4)]
+                gamma = [ld_bf16(r_gqa, e0 + j) for j in range(4)]
                 v2 = get2_many(
                     [(mb("qa"), s * Q_LORA + e0), (mb("qa"), s * Q_LORA + e0 + 2)]
                 )
@@ -1622,7 +1622,7 @@ def build_flash_ffn_kernel(
                     put_bf(
                         mb("q_an"),
                         s * Q_LORA + e0,
-                        [xv[j] * rstd * gam[j] for j in range(4)],
+                        [xv[j] * rstd * gamma[j] for j in range(4)],
                     )
                 gpu.barrier()
 
@@ -1637,8 +1637,8 @@ def build_flash_ffn_kernel(
             KVE = tv["kv_block_elems"]
             IPB = t32["idx_block_pools"]
             IBB = t32["idx_block_bytes"]
-            TBE = t32["tail_block_elems"]
-            TGE = t32["tail_gate_elems"]
+            TAIL_BLK = t32["tail_block_elems"]
+            TAIL_GATE = t32["tail_gate_elems"]
             r_gkv = _rsrc(tv["g_kv"])
             r_lnw, r_lnb = _rsrc(tv["ln_w"]), _rsrc(tv["ln_b"])
             r_ape = _rsrc(tv["ape"])
@@ -1694,7 +1694,9 @@ def build_flash_ffn_kernel(
                 # vLLM's caches can be views of pools past 4 GB: a 64-bit block base
                 r_tail = _rsrc(
                     tv["tail_cache"]
-                    + fx.Int64(fx.max(tslot, 0) // KPOOL) * fx.Int64(TBE) * fx.Int64(2)
+                    + fx.Int64(fx.max(tslot, 0) // KPOOL)
+                    * fx.Int64(TAIL_BLK)
+                    * fx.Int64(2)
                 )
                 tbase = fx.Int32(0)
                 complete = (pos >= 0) & (pslot >= 0) & (phase == KPOOL - 1)
@@ -1703,7 +1705,7 @@ def build_flash_ffn_kernel(
                         sj, kj = [], []
                         for j in range_constexpr(KPOOL - 1):
                             ring = tbase + j * INDEX_DIM + d
-                            sj.append(ld_bf16(r_tail, ring + TGE))
+                            sj.append(ld_bf16(r_tail, ring + TAIL_GATE))
                             kj.append(ld_bf16(r_tail, ring))
                         sj.append(graw)
                         kj.append(kn)
@@ -1756,7 +1758,7 @@ def build_flash_ffn_kernel(
                 if (pos >= 0) & (tslot >= 0) & lk:
                     e = tbase + phase * INDEX_DIM + d
                     bo.buffer_store(kn.to(fx.BFloat16), r_tail, e)
-                    bo.buffer_store(graw.to(fx.BFloat16), r_tail, e + TGE)
+                    bo.buffer_store(graw.to(fx.BFloat16), r_tail, e + TAIL_GATE)
                 fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
                 gpu.barrier()
                 if tid == 0:
