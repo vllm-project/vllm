@@ -33,8 +33,10 @@ def test_dspark_adaptive_verification_floor(vllm_runner, monkeypatch):
         max_num_batched_tokens=256,
         gpu_memory_utilization=0.3,
         enforce_eager=False,
+        enable_chunked_prefill=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
+        compilation_config=CompilationConfig(cudagraph_capture_sizes=[8, 16, 24, 32]),
     ) as runner:
         for batch_size in (1, 2, 3):
             previous = runner.llm.get_metrics()
