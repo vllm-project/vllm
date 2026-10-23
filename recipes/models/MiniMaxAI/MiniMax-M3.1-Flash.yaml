@@ -1,0 +1,216 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "MiniMax-M3.1-Flash"
+  slug: "minimax-m3.1-flash"
+  provider: "MiniMax"
+  description: "MiniMax M3.1 Flash: the MiniMax-M3 vision-language MoE (427B total / 26B active, MSA sparse attention, 1M context) with MXFP8 dense layers, NVFP4 routed experts and a bundled DSpark draft, served on Blackwell with NVFP4 KV and indexer caches."
+  date_added: 2026-10-23
+  date_updated: 2026-10-23
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "DSpark k=7 emits ~3.3 tokens per decode step with no accuracy loss (GB300, TP4)"
+  related_recipes: ["MiniMaxAI/MiniMax-M3"]
+  default_hardware: gb300
+  hardware:
+    gb300: verified
+
+model:
+  model_id: "MiniMaxAI/MiniMax-M3.1-Flash"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  install:
+    # The NVFP4 KV path JIT-compiles kernels against a CUDA 13.4 toolkit, which
+    # the published images do not ship.
+    docker: false
+    pip:
+      note: "Nightly wheel; the NVFP4 KV cache also needs a CUDA 13.4 toolkit (see Dependencies)"
+  architecture: moe
+  # 427.05B from the safetensors shapes (NVFP4 experts unpacked, scales
+  # excluded): 413.1B routed experts + 13.3B dense/attention/embeddings +
+  # 0.6B vision tower. Active matches MiniMax-M3 (same architecture).
+  parameter_count: "427B"
+  active_parameters: "26B"
+  context_length: 1048576
+  base_args:
+    # MSA's sparse block is 128 tokens; the KV cache block must match.
+    - "--block-size"
+    - "128"
+    - "--kv-cache-dtype"
+    - "nvfp4"
+    - "--attention-config"
+    - '{"indexer_kv_dtype": "nvfp4"}'
+    - "--disable-hybrid-kv-cache-manager"
+  base_env: {}
+
+dependencies:
+  - note: "NVFP4 KV JIT-compiles the MSA Q8KV4 prefill kernels on first use and needs a CUDA 13.4 toolkit"
+    command: "export CUDA_HOME=/usr/local/cuda-13.4"
+    brand: NVIDIA
+
+features:
+  reasoning:
+    description: "MiniMax M3 reasoning parser: returns `reasoning` separately from `content` in every `thinking_mode`."
+    args: ["--reasoning-parser", "minimax_m3"]
+  spec_decoding:
+    description: "DSpark speculative decoding with the draft in the checkpoint's `dspark/` folder: 7 draft tokens per step, FLASHINFER_TS draft attention and an FP8 draft KV cache."
+    args:
+      - "--speculative-config"
+      - '{"method": "dspark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_TS", "kv_cache_dtype": "fp8", "draft_sample_method": "probabilistic"}'
+  tool_calling:
+    description: "MiniMax M3 tool-call parser with automatic tool choice."
+    args: ["--tool-call-parser", "minimax_m3", "--enable-auto-tool-choice"]
+
+opt_in_features:
+  - tool_calling
+
+variants:
+  default:
+    precision: nvfp4
+    # Mixed precision (MXFP8 dense + NVFP4 experts): sized from the real
+    # checkpoint, 250.1 GB x 1.2.
+    vram_minimum_gb: 301
+    description: "MXFP8 dense layers and NVFP4 routed experts. The NVFP4 KV cache runs on the MSA Q8KV4 CUTLASS kernels (SM100/SM103)."
+    supported_hardware:
+      - "arch:sm100"
+      - "arch:sm103"
+    # The NVFP4 KV prefill needs 16 query heads per KV head: TP8 is rejected
+    # at startup.
+    tp: 4
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_dep
+
+strategy_min_gpus:
+  multi_node_dep: 8
+
+hardware_overrides: {}
+
+strategy_overrides:
+  multi_node_dep:
+    hardware_overrides:
+      # DeepGEMM NVFP4 MegaMoE exchanges tokens over multi-node NVLink, so it
+      # needs the GB300 trays' shared NVLink domain.
+      gb300:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+        extra_env:
+          NCCL_MNNVL_ENABLE: "1"
+
+guide: |
+  ## Overview
+
+  [MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)
+  has the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3)
+  architecture: a 427B-total / 26B-active vision-language MoE with MSA sparse
+  attention and a 1M-token context. The checkpoint stores the dense layers in
+  MXFP8 and the routed experts in NVFP4, and ships a DSpark draft model in its
+  `dspark/` folder.
+
+  This recipe serves it on Blackwell with an NVFP4 KV cache and an NVFP4
+  indexer cache. Tested: TP4 on one GB300 tray, with and without DSpark.
+
+  ## Prerequisites
+
+  - **GPUs:** NVIDIA SM100/SM103 (B200, GB200, B300, GB300).
+  - **CUDA 13.4 toolkit at runtime.** The NVFP4 KV cache JIT-compiles the MSA
+    Q8KV4 prefill kernels on first use. Point `CUDA_HOME` at a 13.4 toolkit and
+    keep `ninja` on `PATH`.
+  - **`--block-size 128`** (the MSA sparse block size).
+  - **TP4, or TP1 per rank under DEP.** The NVFP4 KV prefill kernel needs 16
+    query heads per KV head, so TP8 fails at startup. On an 8-GPU node, TP4
+    uses half the GPUs.
+
+  ## Launching the Server
+
+  ### TP4 (one GB300 tray)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --tensor-parallel-size 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4"}' \
+    --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_TS", "kv_cache_dtype": "fp8", "draft_sample_method": "probabilistic"}' \
+    --disable-hybrid-kv-cache-manager
+  ```
+
+  For plain decoding, drop `--speculative-config`.
+
+  ### DEP8 (two GB300 trays)
+
+  Each GPU runs its own attention data-parallel rank. The routed experts are
+  split across all 8 GPUs and run on DeepGEMM's NVFP4 MegaMoE kernel. This
+  layout has not been run end-to-end yet.
+
+  ```bash
+  # Node 0
+  NCCL_MNNVL_ENABLE=1 vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --data-parallel-size 8 --data-parallel-size-local 4 \
+    --data-parallel-address $NODE0_IP \
+    --enable-expert-parallel --moe-backend deep_gemm_mega_moe \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4"}' \
+    --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_TS", "kv_cache_dtype": "fp8", "draft_sample_method": "probabilistic"}' \
+    --disable-hybrid-kv-cache-manager
+
+  # Node 1: the same command, plus
+  #   --data-parallel-start-rank 4 --headless
+  ```
+
+  ## Client Usage
+
+  The checkpoint's generation config samples at `temperature = 1.0` and
+  `top_p = 0.95`. Choose a reasoning mode per request with the
+  `thinking_mode` chat-template kwarg (`enabled`, `disabled` or `adaptive`):
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "MiniMaxAI/MiniMax-M3.1-Flash",
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "messages": [{"role": "user", "content": "Prove there are infinitely many primes."}],
+      "chat_template_kwargs": {"thinking_mode": "enabled"}
+    }'
+  ```
+
+  ## Accuracy
+
+  TP4 on one GB300 tray, `thinking_mode: enabled`, `temperature = 1.0`,
+  `top_p = 0.95`. aime26 is mean@16 over 30 problems; MMMU-Pro is
+  strict-match accuracy over 3,460 questions. Higher is better for both.
+
+  | Arm | aime26 | MMMU-Pro |
+  |---|---|---|
+  | Plain decoding | 0.9458 | 0.7936 |
+  | DSpark k=7 (TP4 command above) | 0.9208 | 0.7861 |
+
+  The two rows are separate runs. A paired run with both arms on the same
+  build matched within noise: aime26 0.9229 for both; MMMU-Pro 0.7627 plain vs
+  0.7639 DSpark, McNemar p=0.88. With DSpark, each decode step emits 3.33
+  tokens on average on aime26 and 3.21 on MMMU-Pro (one target token plus the
+  accepted drafts).
+
+  ## Troubleshooting
+
+  - **The draft fails to start with the `FLASHINFER_TS` backend:** keep
+    `"kv_cache_dtype": "fp8"` in `--speculative-config`. Otherwise the draft
+    inherits `--kv-cache-dtype nvfp4`, which `FLASHINFER_TS` does not support.
+  - **`Q8KV4 prefill attention requires CUDA Toolkit 13.4`:** set `CUDA_HOME`
+    to a CUDA 13.4 toolkit.
+  - **NVFP4 KV error at startup with `--tensor-parallel-size 8`:** use TP4, or
+    DEP with one rank per GPU.
+
+  ## References
+
+  - [Model card](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)
+  - [vLLM support PR](https://github.com/vllm-project/vllm/pull/63232)
+  - [MiniMax-M3 recipe](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3)
