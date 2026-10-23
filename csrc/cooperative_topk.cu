@@ -12,12 +12,22 @@ namespace hist4096 = vllm::topk_histogram_4096;
 #endif
 
 #ifndef USE_ROCM
-template <uint32_t TopK, uint32_t CS>
+  #if defined(CUDART_VERSION) && CUDART_VERSION >= 13040
+constexpr bool kCudaSupportsOversizedSmem = true;
+  #else
+constexpr bool kCudaSupportsOversizedSmem = false;
+  #endif
+
+template <uint32_t TopK, uint32_t CS, bool kOversizedSmem = false>
 void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                                 size_t smem, cudaStream_t stream) {
   auto kernel = []() {
     if constexpr (CS == 2) {
       return &ct::cooperative_topk_cs2<TopK>;
+    } else if constexpr (CS == 24) {
+      return &ct::cooperative_topk_cs24<TopK>;
+    } else if constexpr (CS == 16 && kOversizedSmem) {
+      return &ct::cooperative_topk_cs16_oversized<TopK>;
     } else if constexpr (CS == 16) {
       return &ct::cooperative_topk_cs16<TopK>;
     } else if constexpr (CS == 8) {
@@ -31,18 +41,33 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
     cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed,
                          1);
   }
+  size_t max_dynamic_smem = smem;
+  if constexpr (kOversizedSmem) {
+    cudaFuncAttributes func_attrs{};
+    cudaFuncGetAttributes(&func_attrs, kernel);
+    max_dynamic_smem =
+        get_device_prop()->sharedMemPerBlockOptin - func_attrs.sharedSizeBytes;
+  }
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem);
+                       max_dynamic_smem);
 
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(params.num_rows, CS);
   cfg.blockDim = dim3(hist4096::kBlockSize);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = stream;
-  cudaLaunchAttribute attrs[1];
+  cudaLaunchAttribute attrs[2];
   attrs[0].id = cudaLaunchAttributeClusterDimension;
   attrs[0].val.clusterDim = {1, CS, 1};
   cfg.numAttrs = 1;
+  #if defined(CUDART_VERSION) && CUDART_VERSION >= 13040
+  if constexpr (kOversizedSmem) {
+    attrs[1].id = cudaLaunchAttributeSharedMemoryMode;
+    attrs[1].val.sharedMemoryMode =
+        cudaSharedMemoryModeAllowOversizedSharedMemory;
+    cfg.numAttrs = 2;
+  }
+  #endif
   cfg.attrs = attrs;
   cudaError_t err = cudaLaunchKernelEx(&cfg, kernel, params);
   STD_TORCH_CHECK(err == cudaSuccess,
@@ -81,18 +106,20 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   params.lengths = lengths.const_data_ptr<int32_t>();
   params.num_rows = static_cast<uint32_t>(num_rows);
   params.stride = stride;
-  params.tie_ws =
-      reinterpret_cast<hist4096::Tie*>(workspace.mutable_data_ptr<uint8_t>());
 
-  constexpr uint32_t kTieWsPerRow = ct::kCoarseTieCapacity;
-  STD_TORCH_CHECK(
-      workspace.size(0) >=
-          static_cast<int64_t>(num_rows * kTieWsPerRow * sizeof(hist4096::Tie)),
-      "workspace too small");
-
-  const bool supports_cluster16 = get_device_prop()->major >= 10;
-  if (num_rows <= 4 && supports_cluster16) {
+  const cudaDeviceProp* prop = get_device_prop();
+  const bool supports_cluster16 = prop->major >= 10;
+  const bool supports_cluster24 = prop->major == 10 && prop->minor == 7;
+  const bool supports_oversized_smem =
+      supports_cluster24 && kCudaSupportsOversizedSmem;
+  const bool long_stride = stride > ct::kFusedMaxStrideCS16;
+  if (num_rows <= 4 && long_stride && supports_cluster24) {
+    launch_cooperative_cluster<TopK, 24>(params, ct::kSmemSize24, stream);
+  } else if (num_rows <= 4 && supports_cluster16) {
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
+  } else if (num_rows <= 8 && long_stride && supports_oversized_smem) {
+    launch_cooperative_cluster<TopK, 16, true>(params, ct::kSmemSize16Oversized,
+                                               stream);
   } else if (num_rows <= 8) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
   } else if (num_rows <= 33) {
