@@ -20,6 +20,8 @@ class DraftModelSpeculatorConfig(CheckpointSpeculatorConfig):
     draft_has_own_vocab = True
     # Rejects recognized drafters (e.g. MTP heads).
     validates_checkpoint = True
+    # An independent model with its own positional limit.
+    shares_target_positions = False
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:

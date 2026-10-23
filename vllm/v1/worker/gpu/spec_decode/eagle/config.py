@@ -36,13 +36,6 @@ class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
 
     @classmethod
     def adapt_draft_model_config(cls, spec: SpeculativeConfig) -> None:
-        # EAGLE drafts share the target's positional space; a draft checkpoint
-        # with a smaller max_position_embeddings than the target under-sizes its
-        # rotary cache (#48894).
-        SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-            spec.draft_model_config.hf_config,
-            spec.target_model_config.max_model_len,
-        )
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
 
