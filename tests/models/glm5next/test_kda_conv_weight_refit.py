@@ -80,6 +80,8 @@ def _decode_layer(conv1d: nn.Module) -> kda.Glm5NextLinearAttention:
     layer.kda_safe_gate, layer.kda_lower_bound = True, -5.0
     layer.A_log = layer.dt_bias = None
     layer._conv_state_dim_first = True
+    layer.kda_decode_backend = layer.kda_spec_decode_backend = "triton"
+    layer._norm_in_forward = False
     layer.kv_cache = (torch.zeros(1, 3 * CHANNELS, KERNEL - 1), None)
     return layer
 
@@ -122,6 +124,7 @@ def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
             torch.zeros(1, 1, 1, CHANNELS),
             torch.zeros(1, 1, 1),
             torch.zeros(1, 1, 1, CHANNELS),
+            torch.zeros(1, 1, CHANNELS),
         )
         return seen.pop()
 
