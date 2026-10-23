@@ -365,7 +365,9 @@ def _run_savers(payloads, hold_replace_until_all_written=True):
             t.start()
         for t in threads:
             t.join(timeout=10)
-    assert not any(t.is_alive() for t in threads), "a saver did not finish"
+        # Checked before os.replace is restored, so a stuck saver never runs
+        # against the real function after the test has moved on.
+        assert not any(t.is_alive() for t in threads), "a saver did not finish"
     if errors:
         raise errors[0]
 
@@ -378,8 +380,8 @@ def test_startup_plan_concurrent_save(plan_env, caplog_vllm):
     _run_savers(payloads)
     assert not [r for r in caplog_vllm.records if "Failed to save" in r.message]
 
-    (plan_file,) = [f for f in os.listdir(_plan_dir()) if f.endswith(".json")]
-    assert not [f for f in os.listdir(_plan_dir()) if f.endswith(".tmp")]
+    (plan_file,) = os.listdir(_plan_dir())  # the plan and nothing else
+    assert plan_file.endswith(".json")
     with open(os.path.join(_plan_dir(), plan_file)) as f:
         plan = json.load(f)
     assert plan["kv_cache_memory_bytes"] in payloads  # last writer wins
@@ -400,7 +402,8 @@ def test_startup_plan_save_failure_keeps_old_plan(plan_env, caplog_vllm):
     with patch.object(startup_plan.os, "replace", replace_fails):
         maybe_save_startup_plan(_plan_worker(), 51 * GiB_bytes)
     assert [r for r in caplog_vllm.records if "Failed to save" in r.message]
-    assert not [f for f in os.listdir(_plan_dir()) if f.endswith(".tmp")]
+    (plan_file,) = os.listdir(_plan_dir())  # the old plan and nothing else
+    assert plan_file.endswith(".json")
 
     applied = _plan_worker()
     maybe_apply_startup_plan(applied)
