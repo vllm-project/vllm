@@ -121,6 +121,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.worker.workspace import WorkspaceManager
 
 if current_platform.is_rocm():
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -4085,6 +4086,7 @@ def _fa4_impl(topk_indices_buffer, **fields):
         dcp_world_size=1,
         dcp_rank=0,
         pcp_world_size=1,
+        staged_kv_shape=None,
         need_to_return_lse_for_decode=False,
         is_nope_mla=False,
         _workspace_buffer=None,
@@ -4358,6 +4360,7 @@ def _fa4_prefill_inputs(num_heads, query_lens, seq_lens, *, topk=256, device):
         metadata=SimpleNamespace(
             req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=device),
             block_table=block_table.to(device),
+            seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
             block_size=block_size,
             num_decode_tokens=query_lens[0],
             num_decodes=1,
@@ -4419,6 +4422,14 @@ def test_fa4_sparse_grouped_prefill_correctness(monkeypatch, num_heads):
     # Both prefills are grouped on the first layer; the second reuses the unions.
     assert group_sizes.count(group) == 4 and len(builds) == 2
 
+    reference = _fa4_prefill_reference(
+        inputs, torch.cat(inputs.q, dim=-1), inputs.kv_cache
+    )
+    torch.testing.assert_close(outs[0][0].float(), reference, rtol=0.01, atol=0.01)
+
+
+def _fa4_prefill_reference(inputs, q, kv_cache):
+    """fp32 attention of every token over its logical top-k."""
     md = inputs.metadata
     logical = inputs.logical.long()
     block = md.block_table[
@@ -4427,12 +4438,84 @@ def test_fa4_sparse_grouped_prefill_correctness(monkeypatch, num_heads):
     physical = (block.long() * 64 + logical.clamp(min=0) % 64).masked_fill(
         logical < 0, 0
     )
-    kv_flat = inputs.kv_cache.view(-1, inputs.kv_cache.shape[-1])
-    keys = kv_flat[physical].float()
-    scores = torch.einsum("thd,tkd->thk", torch.cat(inputs.q, dim=-1).float(), keys)
+    keys = kv_cache.reshape(-1, kv_cache.shape[-1])[physical].float()
+    scores = torch.einsum("thd,tkd->thk", q.float(), keys)
     scores = (scores * inputs.scale).masked_fill((logical < 0)[:, None, :], -math.inf)
-    reference = torch.einsum("thk,tkd->thd", torch.softmax(scores, -1), keys[..., :512])
-    torch.testing.assert_close(outs[0][0].float(), reference, rtol=0.01, atol=0.01)
+    return torch.einsum("thk,tkd->thd", torch.softmax(scores, -1), keys[..., :512])
+
+
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+def test_fa4_sparse_grouped_prefill_fp8_kv_cache(monkeypatch, num_heads):
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    group = 128 // num_heads
+    query_lens = [1, 3 * group + 5, 2 * group + 1]
+    inputs = _fa4_prefill_inputs(num_heads, query_lens, [300, 700, 650], device="cuda")
+    # Peaked attention and non-unit scales make a missing dequantization show.
+    inputs.scale *= 16
+    q_scale, k_scale = 0.5, 0.25
+    fp8 = current_platform.fp8_dtype()
+    # The packed FP8 query and the cache the DSA model passes with an FP8 cache.
+    q = (torch.cat(inputs.q, dim=-1).float() / q_scale).to(fp8)
+    kv_cache = (inputs.kv_cache.float() / k_scale).to(fp8)
+    layer = SimpleNamespace(
+        _q_scale_float=q_scale,
+        _k_scale_float=k_scale,
+        _k_scale=torch.tensor(k_scale, device="cuda"),
+    )
+    builder = SparseMLAIndexGroupBuilder(inputs.logical)
+    layers = [
+        _fa4_impl(
+            inputs.logical,
+            scale=inputs.scale,
+            kv_cache_dtype="fp8",
+            staged_kv_shape=(1024, 576),
+            index_group=group_and_index[0],
+            index_group_index=group_and_index[1],
+        )
+        for group_and_index in (
+            builder.register_layer(True),
+            builder.register_layer(False),
+        )
+    ]
+    workspace_manager = WorkspaceManager(torch.device("cuda"))
+    monkeypatch.setattr(
+        flashattn_sparse_module, "current_workspace_manager", lambda: workspace_manager
+    )
+    group_sizes = []
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+
+    def fa4(**kwargs):
+        group_sizes.append(kwargs["gather_kv_query_group_size"])
+        return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+
+    with torch.inference_mode():
+        outs = [
+            impl.forward_mqa(q, kv_cache, inputs.metadata, layer) for impl in layers
+        ]
+
+    assert torch.equal(outs[0][0], outs[1][0])
+    # FA4 runs only the grouped rows; decode rows and tails take trtllm-gen.
+    assert group_sizes == [group] * 4
+
+    reference = _fa4_prefill_reference(
+        inputs, q.float() * q_scale, kv_cache.float() * k_scale
+    )
+    out = outs[0][0].float()
+    grouped = torch.zeros(out.shape[0], dtype=torch.bool, device=out.device)
+    first = query_lens[0]
+    for num_tokens in query_lens[1:]:
+        grouped[first : first + num_tokens // group * group] = True
+        first += num_tokens
+    torch.testing.assert_close(out[grouped], reference[grouped], rtol=0.01, atol=0.01)
+    # trtllm-gen's FP8 kernel, with the tolerance of the other FP8 backend tests.
+    torch.testing.assert_close(
+        out[~grouped], reference[~grouped], rtol=0.065, atol=0.05
+    )
 
 
 @pytest.mark.parametrize(

@@ -807,6 +807,23 @@ def _query_group_emit_kernel(
     tl.store(lens_ptr + group + tl.arange(0, 1), count)
 
 
+@triton.jit(do_not_specialize=["numel"])
+def _dequantize_fp8_kernel(src_ptr, dst_ptr, scale, numel, BLOCK: tl.constexpr):
+    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(src_ptr + offs, offs < numel)
+    tl.store(dst_ptr + offs, (x.to(tl.float32) * scale).to(tl.bfloat16), offs < numel)
+
+
+def dequantize_fp8(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """BF16 `x * scale` of a contiguous FP8 tensor, at memory bandwidth (several
+    times faster than torch's FP8 cast)."""
+    assert x.is_contiguous()
+    out = torch.empty(x.shape, dtype=torch.bfloat16, device=x.device)
+    numel = x.numel()
+    _dequantize_fp8_kernel[(cdiv(numel, 4096),)](x, out, scale, numel, BLOCK=4096)
+    return out
+
+
 def build_query_group_union(
     logical_topk: torch.Tensor,
     block_table_row: torch.Tensor,
