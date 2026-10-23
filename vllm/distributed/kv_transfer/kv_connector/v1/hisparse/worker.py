@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
     )
-    from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+    from vllm.v1.hisparse.shared_host_pool import HiSparseSharedHostPool
 
 
 class _DMADescriptors(NamedTuple):
@@ -154,13 +154,13 @@ def _select_written_row_mirrors(
 
 
 def _is_hisparse_host_writer(
-    shared_host_region: SharedOffloadRegion | None,
+    shared_host_region: HiSparseSharedHostPool | None,
 ) -> bool:
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
 def _create_hisparse_host_events(
-    shared_host_region: SharedOffloadRegion | None,
+    shared_host_region: HiSparseSharedHostPool | None,
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
@@ -212,7 +212,7 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
         hot_backings: dict[int, torch.Tensor] = {}
         registered_host_pools: dict[int, torch.Tensor] = {}
-        shared_host_regions: dict[int, SharedOffloadRegion] = {}
+        shared_host_regions: dict[int, HiSparseSharedHostPool] = {}
         for cache in cache_handles:
             hot_backing = cache.runtime.hot_backing
             hot_backings[hot_backing.untyped_storage().data_ptr()] = hot_backing
@@ -268,7 +268,7 @@ class HiSparseConnectorWorker:
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
         *,
-        shared_host_region: SharedOffloadRegion | None = None,
+        shared_host_region: HiSparseSharedHostPool | None = None,
         is_host_writer: bool = True,
     ) -> None:
         if self._initialized:
