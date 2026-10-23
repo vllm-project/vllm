@@ -113,6 +113,15 @@ LONG_WAIT_TIME_LOG_MSG = (
 )
 
 
+def _make_cancel_sockets(context: zmq.Context) -> tuple[zmq.Socket, zmq.Socket]:
+    cancel_path = get_open_zmq_inproc_path()
+    writer = context.socket(zmq.PAIR)
+    writer.bind(cancel_path)
+    reader = context.socket(zmq.PAIR)
+    reader.connect(cancel_path)
+    return writer, reader
+
+
 class SpinCondition:
     """This class implements an interface similar to a threading.Condition. It
     allows a writer to notify readers to wake up and read from the shared memory
@@ -156,11 +165,9 @@ class SpinCondition:
             self.local_notify_socket.connect(notify_address)
 
             # Readers require a process-local socket to poll for cancellation
-            cancel_path = get_open_zmq_inproc_path()
-            self.write_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
-            self.write_cancel_socket.bind(cancel_path)
-            self.read_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
-            self.read_cancel_socket.connect(cancel_path)
+            self.write_cancel_socket, self.read_cancel_socket = _make_cancel_sockets(
+                context
+            )
 
             # Poller allows waiting on either `.notify()` or `.cancel()`
             self.poller = zmq.Poller()
@@ -481,6 +488,11 @@ def _close_zmq(context: zmq.Context, sockets: list[zmq.Socket]) -> None:
 
 
 class MessageQueue:
+    # Socket receive state is initialized by the reader factory.
+    _read_cancel_socket: zmq.Socket
+    _write_cancel_socket: zmq.Socket
+    _socket_poller: zmq.Poller
+
     def __init__(
         self,
         n_reader,  # number of all readers
@@ -501,6 +513,7 @@ class MessageQueue:
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
         self.shutting_down = False
+        self._shutdown_lock = threading.Lock()
         context = Context()
 
         self.tensor_arena: ShmTensorArena | None = None
@@ -598,6 +611,8 @@ class MessageQueue:
                 self._spin_condition.read_cancel_socket,
                 self._spin_condition.write_cancel_socket,
             ]
+        elif self._is_remote_reader:
+            sockets += [self._read_cancel_socket, self._write_cancel_socket]
         finalizer = weakref.finalize(
             self, _close_zmq, context, [s for s in sockets if s is not None]
         )
@@ -611,6 +626,7 @@ class MessageQueue:
         self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
+        self._shutdown_lock = threading.Lock()
 
         context = Context()
 
@@ -651,6 +667,7 @@ class MessageQueue:
             self._spin_condition = SpinCondition(
                 is_reader=True, context=context, notify_address=handle.local_notify_addr
             )
+            self._read_cancel_socket = self._spin_condition.read_cancel_socket
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -668,6 +685,16 @@ class MessageQueue:
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
             self._spin_condition = None  # type: ignore
+            self._write_cancel_socket, self._read_cancel_socket = _make_cancel_sockets(
+                context
+            )
+
+        self._socket_poller = zmq.Poller()
+        self._socket_poller.register(self._read_cancel_socket, zmq.POLLIN)
+        self._socket_poller.register(
+            self.local_socket if self._is_local_reader else self.remote_socket,
+            zmq.POLLIN,
+        )
 
         self.shutting_down = False
         self._close_zmq_on_collect(context)
@@ -707,11 +734,17 @@ class MessageQueue:
             assert recv == b"READY"
 
     def shutdown(self):
-        """If this is an idle reader, wakes it up so it can clean up and shut
-        down"""
-        self.shutting_down = True
-        if self._spin_condition is not None:
-            self._spin_condition.cancel()
+        """Wake blocked readers without closing sockets owned by another thread."""
+        # A cancellation sender may be used by different shutdown threads,
+        # but must never be used concurrently or enqueue more than one ping.
+        with self._shutdown_lock:
+            if self.shutting_down:
+                return
+            self.shutting_down = True
+            if self._spin_condition is not None:
+                self._spin_condition.cancel()
+            elif self._is_remote_reader:
+                self._write_cancel_socket.send(b"\x00")
 
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
@@ -990,19 +1023,23 @@ class MessageQueue:
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
-                obj = MessageQueue.recv(self.local_socket, timeout)
+                obj = self.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
-            obj = MessageQueue.recv(self.remote_socket, timeout)
+            obj = self.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
 
-    @staticmethod
-    def recv(socket: zmq.Socket, timeout: float | None) -> Any:
+    def recv(self, socket: zmq.Socket, timeout: float | None) -> Any:
         # Ensure non-negative timeout passed to zmq poll.
         timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
-        if not socket.poll(timeout=timeout_ms):
+        events = dict(self._socket_poller.poll(timeout=timeout_ms))
+        if socket not in events:
+            if self.shutting_down or self._read_cancel_socket in events:
+                raise RuntimeError("cancelled")
             raise TimeoutError
+        # Preserve replies flushed before a worker disconnected, as SHM readers
+        # do. Cancellation must unblock an empty queue, not discard its contents.
         recv, *recv_oob = socket.recv_multipart(copy=False)
         return pickle.loads(recv, buffers=recv_oob)
 

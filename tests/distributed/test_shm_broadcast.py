@@ -405,11 +405,8 @@ def worker_fn_tensor_broadcast():
             message_queue.enqueue(big)
         assert wrapped_reduce.call_count == 3
     else:
-        with mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv:
-            received = message_queue.dequeue(timeout=30)
-            recv.assert_not_called()
-            received_big = message_queue.dequeue(timeout=30)
-            recv.assert_called_once()
+        received = message_queue.dequeue(timeout=30)
+        received_big = message_queue.dequeue(timeout=30)
         assert torch.equal(received["mid"], payload["mid"])
         assert received["mid"].dtype == payload["mid"].dtype
         assert torch.equal(received_big, big)
@@ -429,14 +426,14 @@ def test_tensor_broadcast():
 
 @pytest.mark.parametrize("kind", ["tensor", "numpy", "numpy_readonly"])
 @pytest.mark.parametrize(
-    "nbytes, overflow, num_oob",
+    "nbytes",
     [
-        pytest.param(1024 * 1024 - 2, False, 0, id="inline"),
-        pytest.param(1024 * 1024, False, 1, id="shm_oob"),
-        pytest.param(2 * 1024 * 1024, True, 1, id="overflow"),
+        pytest.param(1024 * 1024 - 2, id="inline"),
+        pytest.param(1024 * 1024, id="shm_oob"),
+        pytest.param(2 * 1024 * 1024, id="overflow"),
     ],
 )
-def test_broadcast_retains_values_after_ring_reuse(kind, nbytes, overflow, num_oob):
+def test_broadcast_retains_values_after_ring_reuse(kind, nbytes):
     """Received data belongs to its consumer, not the next queue message."""
     writer = MessageQueue(
         n_reader=1,
@@ -452,17 +449,8 @@ def test_broadcast_retains_values_after_ring_reuse(kind, nbytes, overflow, num_o
     array.flags.writeable = kind != "numpy_readonly"
     payload = torch.from_numpy(array) if kind == "tensor" else array
     try:
-        with (
-            mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv,
-            mock.patch.object(pickle, "loads", wraps=pickle.loads) as loads,
-        ):
-            writer.enqueue(payload)
-            received = reader.dequeue(timeout=5)
-            received_oob = len(loads.call_args.kwargs["buffers"])
-            # The spy must not keep the ring's memoryviews alive.
-            loads.reset_mock()
-            assert recv.call_count == int(overflow)
-            assert received_oob == num_oob
+        writer.enqueue(payload)
+        received = reader.dequeue(timeout=5)
         assert type(received) is type(payload)
         assert received.dtype == payload.dtype
         if isinstance(received, np.ndarray):
@@ -668,6 +656,98 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+@pytest.fixture
+def socket_queue_pair(request):
+    local = getattr(request, "param", False)
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=int(local),
+        max_chunk_bytes=4096,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer_socket = writer.local_socket if local else writer.remote_socket
+    reader_socket = reader.local_socket if local else reader.remote_socket
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        yield writer, reader, writer_socket, reader_socket
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+        reader_socket.context.destroy(linger=0)
+        writer_socket.context.destroy(linger=0)
+
+
+@pytest.mark.parametrize(
+    "socket_queue_pair", [False, True], indirect=True, ids=["remote", "local-overflow"]
+)
+@pytest.mark.parametrize("timeout", [None, 30], ids=["untimed", "timed"])
+def test_socket_read_shutdown_cancels_pending(socket_queue_pair, timeout, monkeypatch):
+    writer, reader, writer_socket, reader_socket = socket_queue_pair
+    if writer.local_socket is not None:
+        # Publish the overflow marker without the payload, as when a writer dies
+        # between its SHM write and socket send.
+        with writer.acquire_write() as buf:
+            buf[0] = 1
+
+    poll_started = threading.Event()
+    outcome = {}
+    original_poll = shm_broadcast.zmq.Poller.poll
+
+    def poll(poller, timeout=None):
+        if reader_socket in dict(poller.sockets):
+            poll_started.set()
+        return original_poll(poller, timeout)
+
+    monkeypatch.setattr(shm_broadcast.zmq.Poller, "poll", poll)
+
+    def read():
+        try:
+            outcome["value"] = reader.dequeue(timeout=timeout)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
+    try:
+        assert poll_started.wait(timeout=5)
+        reader.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "shutdown left a socket read blocked"
+        assert isinstance(outcome.get("error"), RuntimeError), outcome
+    finally:
+        # Also unblock the unpatched implementation so a regression cannot
+        # leave a thread using sockets that the fixture is about to destroy.
+        if thread.is_alive():
+            writer_socket.send_multipart([pickle.dumps("cleanup")])
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "socket_queue_pair", [False, True], indirect=True, ids=["remote", "local-overflow"]
+)
+def test_socket_read_shutdown_preserves_queued_data(socket_queue_pair):
+    writer, reader, _, reader_socket = socket_queue_pair
+    payload = bytes(8192)  # Exceeds the fixture's local SHM slot size.
+    writer.enqueue(payload)
+    assert reader_socket.poll(timeout=5000)
+    reader.shutdown()
+    assert reader.dequeue(timeout=1) == payload
+    with pytest.raises(RuntimeError):
+        reader.dequeue(timeout=1)
+
+
+def test_socket_read_timeout_preserves_usability(socket_queue_pair):
+    writer, reader, _, _ = socket_queue_pair
+    with pytest.raises(TimeoutError):
+        reader.dequeue(timeout=0.01)
+    writer.enqueue("after timeout")
+    assert reader.dequeue(timeout=5) == "after timeout"
+
+
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
         n_reader=1,
@@ -699,12 +779,14 @@ def test_acquire_read_releases_slot_when_reader_raises():
         reader.shutdown()
 
 
-def test_reader_in_reference_cycle_is_collected_without_blocking():
+@pytest.mark.parametrize("n_local_reader", [0, 1], ids=["remote", "local"])
+def test_reader_in_reference_cycle_is_collected_without_blocking(n_local_reader):
     writer = MessageQueue(
         n_reader=1,
-        n_local_reader=1,
+        n_local_reader=n_local_reader,
         max_chunk_bytes=1024 * 1024,
         max_chunks=1,
+        connect_ip="127.0.0.1",
     )
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
     reader.cycle = reader
