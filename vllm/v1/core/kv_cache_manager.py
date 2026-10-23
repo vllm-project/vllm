@@ -543,8 +543,12 @@ class KVCacheManager:
 
         full_sequence_shortfall = 0
         if full_sequence_must_fit:
-            # First check whether the full request sequence fits.
-            full_num_tokens = min(request.num_tokens, self.max_model_len)
+            # First check whether the full request sequence fits, including
+            # the lookahead slots its last chunk allocates.
+            full_num_tokens_main_model = min(request.num_tokens, self.max_model_len)
+            full_num_tokens = min(
+                request.num_tokens + num_lookahead_tokens, self.max_model_len
+            )
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
                 request_id=request.request_id,
@@ -553,7 +557,7 @@ class KVCacheManager:
                 num_encoder_tokens=num_encoder_tokens,
                 total_computed_tokens=total_computed_tokens,
                 num_local_computed_tokens=num_local_computed_tokens,
-                num_tokens_main_model=full_num_tokens,
+                num_tokens_main_model=full_num_tokens_main_model,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
             )
