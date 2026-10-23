@@ -143,6 +143,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
+from vllm.v1.worker.gpu.post_forward_cudagraph import PostForwardCudaGraphs
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
@@ -345,6 +346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.post_forward_graphs: PostForwardCudaGraphs | None = None
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -821,6 +823,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.aux_output_connector = get_aux_output_connector(
                     self.model, self.vllm_config, kv_cache_config
                 )
+            self.post_forward_graphs = PostForwardCudaGraphs.create(self)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2169,7 +2172,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
+        # Sampling, postprocess_sampled and the draft input preparation, as
+        # one CUDA graph on eligible steps.
+        post_forward = self.post_forward_graphs and self.post_forward_graphs.run(
+            self, input_batch, hidden_states, aux_hidden_states, grammar_output
+        )
+        sampler_output, num_sampled, num_rejected = post_forward or self.sample(
             hidden_states, input_batch, grammar_output
         )
 
@@ -2255,13 +2263,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-        self.postprocess_sampled(
-            input_batch.idx_mapping,
-            sampler_output.sampled_token_ids,
-            num_sampled,
-            num_rejected,
-            input_batch.query_start_loc,
-        )
+        if not post_forward:
+            self.postprocess_sampled(
+                input_batch.idx_mapping,
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch.query_start_loc,
+            )
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2387,6 +2396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.close()
         set_offloader(None)
         self.cudagraph_manager = None
+        self.post_forward_graphs = None
         self.fast_prefill = None
         self.pooling_runner = None
         if hasattr(self, "kv_caches"):
