@@ -1308,18 +1308,21 @@ def _engram_gate_partials_kernel(
 
     `kv` holds this rank's `WIDTH` columns of every key and of the value. The
     row of `send` is the value slice followed by (sum key^2, sum hidden*q*k*key)
-    as FP32 pairs, one per hc copy.
+    as FP32 pairs, one per hc copy. Each program handles one hc copy, or the
+    value slice, of one token.
     """
-    token_idx = tl.program_id(0).to(tl.int64)
+    program_idx = tl.program_id(0)
+    token_idx = (program_idx // (HC_MULT + 1)).to(tl.int64)
+    hc_idx = program_idx % (HC_MULT + 1)
     offsets = tl.arange(0, BLOCK_SIZE)
     valid = offsets < WIDTH
-    value = tl.load(
-        kv + token_idx * kv_stride_t + (HC_MULT * WIDTH + offsets) * kv_stride_d,
-        mask=valid,
-    )
-    tl.store(send + token_idx * send_stride_t + offsets, value, mask=valid)
-    partials = send_f32 + token_idx * send_f32_stride_t + WIDTH // 2
-    for hc_idx in tl.static_range(HC_MULT):
+    if hc_idx == HC_MULT:
+        value = tl.load(
+            kv + token_idx * kv_stride_t + (HC_MULT * WIDTH + offsets) * kv_stride_d,
+            mask=valid,
+        )
+        tl.store(send + token_idx * send_stride_t + offsets, value, mask=valid)
+    else:
         hidden = tl.load(
             hidden_states
             + token_idx * hidden_stride_t
@@ -1343,8 +1346,9 @@ def _engram_gate_partials_kernel(
             mask=valid,
             other=0.0,
         ).to(tl.float32)
-        tl.store(partials + 2 * hc_idx, tl.sum(key * key, axis=0))
-        tl.store(partials + 2 * hc_idx + 1, tl.sum(hidden * q * k * key, axis=0))
+        partials = send_f32 + token_idx * send_f32_stride_t + WIDTH // 2 + 2 * hc_idx
+        tl.store(partials, tl.sum(key * key, axis=0))
+        tl.store(partials + 1, tl.sum(hidden * q * k * key, axis=0))
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -1939,7 +1943,7 @@ class Engram(nn.Module):
         # [value slice | FP32 (sum key^2, sum hidden*q*k*key) per hc] per token.
         send = kv.new_empty(num_tokens, width + 4 * hc_mult)
         send_f32 = send.view(torch.float32)
-        _engram_gate_partials_kernel[(num_tokens,)](
+        _engram_gate_partials_kernel[(num_tokens * (hc_mult + 1),)](
             hidden_states,
             kv,
             self.q_weight,
