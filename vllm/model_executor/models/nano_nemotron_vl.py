@@ -1172,9 +1172,15 @@ class NemotronH_Nano_VL_V2(
 
         if self.dynamic_resolution:
             assert isinstance(pixel_values_flat, (list, torch.Tensor))
-            pixel_values_flat = DynamicResolutionImageTiler.stack(
-                pixel_values_flat, self.patch_size
-            )
+            if isinstance(pixel_values_flat, torch.Tensor) and pixel_values_flat.ndim == 2:
+                # The Rust frontend ships images already packed as (N, 3*p*p)
+                # patch rows — the shape stack() produces; stack() itself
+                # expects raw (3,H,W) images.
+                pixel_values_flat = pixel_values_flat.unsqueeze(0)
+            else:
+                pixel_values_flat = DynamicResolutionImageTiler.stack(
+                    pixel_values_flat, self.patch_size
+                )
             imgs_sizes = kwargs.pop("imgs_sizes")
             num_tokens_per_image = kwargs.pop("num_tokens_per_image")
             assert isinstance(imgs_sizes, list)
