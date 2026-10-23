@@ -31,6 +31,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
     num_computed_tokens,  # (batch,)
+    write_cache_indices_ptr,  # (batch,) optional destination block indices for CoW
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
@@ -56,6 +57,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
+    HAS_WRITE_CACHE_INDICES: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -139,9 +141,19 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     conv_states_input_coord = tl.load(
         conv_state_indices_ptr + idx_seq * stride_cache_indices + conv_state_init_index
     ).to(tl.int64)
+    if HAS_WRITE_CACHE_INDICES:
+        conv_states_output_coord = tl.load(write_cache_indices_ptr + idx_seq).to(
+            tl.int64
+        )
+    else:
+        conv_states_output_coord = tl.load(
+            conv_state_indices_ptr
+            + idx_seq * stride_cache_indices
+            + current_last_index
+        ).to(tl.int64)
 
     if HAS_NULL_BLOCK:  # noqa
-        if conv_states_input_coord == null_block_id:
+        if conv_states_output_coord == null_block_id:
             # not processing as this is a null block (padding)
             if launch_pdl:
                 tl.extra.cuda.gdc_launch_dependents()
@@ -149,6 +161,11 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     conv_states_base = (
         conv_states_ptr
         + (conv_states_input_coord * stride_conv_state_seq)
+        + (idx_feats * stride_conv_state_dim)
+    )  # [BLOCK_N,]
+    conv_states_out_base = (
+        conv_states_ptr
+        + (conv_states_output_coord * stride_conv_state_seq)
         + (idx_feats * stride_conv_state_dim)
     )  # [BLOCK_N,]
 
@@ -224,20 +241,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             loaded_x = tl.load(x_ptrs, mask_x, 0.0)
             idx_tokens_conv = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
 
-            # Compute the offset where the last block should be written in the conv_states
-            conv_states_output_coord = tl.load(
-                conv_state_indices_ptr
-                + idx_seq * stride_cache_indices
-                + current_last_index
-            ).to(tl.int64)
-
             conv_states_ptrs_target = (
-                conv_states_ptr
-                + (conv_states_output_coord * stride_conv_state_seq)  # Offset from seq
-                + (idx_feats * stride_conv_state_dim)
-            )[None, :] + (  # [BLOCK_N,]
-                idx_tokens_conv * stride_conv_state_tok
-            )[:, None]
+                conv_states_out_base[None, :]
+                + (idx_tokens_conv * stride_conv_state_tok)[:, None]
+            )
 
             mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[None, :]
             tl.debug_barrier()  #  NOTE: use this due to bug in Triton compiler
@@ -280,7 +287,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     mask, conv_state, loaded_x
                 )  # BUG in 'tl.where'  which requires a barrier before this
                 conv_states_ptrs_target = (
-                    conv_states_base
+                    conv_states_out_base[None, :]
                     + (idx_tokens_conv * stride_conv_state_tok)[:, None]
                 )  # [BLOCK_M, BLOCK_N]
                 mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[
@@ -307,7 +314,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 new_conv_state = tl.load(x_ptrs, mask_x, 0.0)
 
                 conv_states_ptrs_target = (
-                    conv_states_base
+                    conv_states_out_base[None, :]
                     + (idx_tokens_conv * stride_conv_state_tok)[:, None]
                 )  # [BLOCK_M, BLOCK_N]
                 mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[
@@ -496,6 +503,7 @@ def causal_conv1d_fn(
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
+    write_cache_indices: torch.Tensor | None = None,
 ):
     """Support varlen + continuous batching when x is 2D tensor.
 
@@ -724,6 +732,7 @@ def causal_conv1d_fn(
         block_idx_last_scheduled_token,
         initial_state_idx,
         num_computed_tokens,
+        write_cache_indices,
         out,
         # Matrix dimensions
         dim,
@@ -749,6 +758,7 @@ def causal_conv1d_fn(
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         HAS_NULL_BLOCK=null_block_id is not None,
+        HAS_WRITE_CACHE_INDICES=write_cache_indices is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,

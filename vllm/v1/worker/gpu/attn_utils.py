@@ -527,8 +527,11 @@ def build_attn_metadata(
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             reuse_key = None
-            if attn_metadata_builder.supports_update_block_table and isinstance(
-                attn_group.kv_cache_spec, MambaSpec
+            if (
+                attn_metadata_builder.supports_update_block_table
+                and isinstance(attn_group.kv_cache_spec, MambaSpec)
+                and common_attn_metadata.mamba_checkpoint_source_block_ids is None
+                and common_attn_metadata.mamba_prefix_producer_indices is None
             ):
                 reuse_key = (attn_group.kv_cache_spec, type(attn_metadata_builder))
             if reuse_key in cached_metadata:

@@ -95,10 +95,14 @@ class GDNAttentionMetadata:
     producer_token_indices: torch.Tensor | None = None
     producer_query_start_loc: torch.Tensor | None = None
     producer_conv_metadata: CausalConv1dMetadata | None = None
+    producer_chunk_indices: torch.Tensor | None = None
+    producer_chunk_offsets: torch.Tensor | None = None
     consumer_ranges: torch.Tensor | None = None
     consumer_token_indices: torch.Tensor | None = None
     consumer_query_start_loc: torch.Tensor | None = None
     consumer_conv_metadata: CausalConv1dMetadata | None = None
+    consumer_chunk_indices: torch.Tensor | None = None
+    consumer_chunk_offsets: torch.Tensor | None = None
     shared_initial_state_source: torch.Tensor | None = None
     shared_state_destinations: torch.Tensor | None = None
     consumer_shared_state_sources: torch.Tensor | None = None
@@ -551,10 +555,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         producer_token_indices = None
         producer_query_start_loc = None
         producer_conv_metadata = None
+        producer_chunk_indices = None
+        producer_chunk_offsets = None
         consumer_ranges = None
         consumer_token_indices = None
         consumer_query_start_loc = None
         consumer_conv_metadata = None
+        consumer_chunk_indices = None
+        consumer_chunk_offsets = None
         shared_initial_state_source = None
         shared_state_destinations = None
         consumer_shared_state_sources = None
@@ -563,49 +571,57 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         consumer_slice = None
         producer_indices = m.mamba_prefix_producer_indices
         source_block_ids = m.mamba_checkpoint_source_block_ids
-        has_producers = producer_indices is not None and bool(
-            torch.any(producer_indices >= 0).item()
+        has_producers = producer_indices is not None and (
+            getattr(producer_indices, "_has_valid", None)
+            if hasattr(producer_indices, "_has_valid")
+            else bool(torch.any(producer_indices >= 0).item())
         )
-        has_consumers = source_block_ids is not None and bool(
-            torch.any(source_block_ids >= 0).item()
+        has_consumers = source_block_ids is not None and (
+            getattr(source_block_ids, "_has_valid", None)
+            if hasattr(source_block_ids, "_has_valid")
+            else bool(torch.any(source_block_ids >= 0).item())
         )
         enable_grouped_gdn = (
-            (has_producers or has_consumers)
+            has_producers
             and spec_sequence_masks is None
             and num_decodes == 0
+        ) or (
+            not has_producers
+            and has_consumers
+            and spec_sequence_masks is None
+            and num_prefills > 0
         )
         if enable_grouped_gdn:
             device = query_start_loc.device
-            producer_indices_cpu = (
-                producer_indices.cpu().tolist()
-                if producer_indices is not None
-                else [-1] * m.num_reqs
-            )
-            source_block_ids_cpu = (
-                source_block_ids.cpu().tolist()
-                if source_block_ids is not None
-                else [-1] * m.num_reqs
-            )
             if not has_producers and has_consumers:
-                consumer_srcs = []
-                consumer_dsts = []
-                for consumer_idx, src_id in enumerate(source_block_ids_cpu):
-                    if src_id >= 0:
-                        consumer_srcs.append(src_id)
-                        consumer_dsts.append(
-                            int(prefill_state_indices[consumer_idx].item())
-                        )
-                if consumer_srcs:
-                    consumer_shared_state_sources = torch.tensor(
-                        consumer_srcs, dtype=torch.long, device=device
-                    )
-                    private_final_state_destination = torch.tensor(
-                        consumer_dsts, dtype=torch.long, device=device
-                    )
+                assert prefill_state_indices is not None
+                assert source_block_ids is not None
+                src_ids = source_block_ids[
+                    num_decodes : num_decodes + prefill_state_indices.shape[0]
+                ].to(device=device, dtype=prefill_state_indices.dtype)
+                consumer_shared_state_sources = torch.where(
+                    src_ids >= 0, src_ids, prefill_state_indices
+                )
+                private_final_state_destination = prefill_state_indices
             else:
+                producer_indices_cpu = (
+                    getattr(producer_indices, "_cpu_list", None)
+                    or producer_indices.cpu().tolist()
+                    if producer_indices is not None
+                    else [-1] * m.num_reqs
+                )
+                source_block_ids_cpu = (
+                    getattr(source_block_ids, "_cpu_list", None)
+                    or source_block_ids.cpu().tolist()
+                    if source_block_ids is not None
+                    else [-1] * m.num_reqs
+                )
                 checkpoint_positions = m.mamba_checkpoint_positions
                 assert checkpoint_positions is not None
-                checkpoint_positions_cpu = checkpoint_positions.cpu().tolist()
+                checkpoint_positions_cpu = (
+                    getattr(checkpoint_positions, "_cpu_list", None)
+                    or checkpoint_positions.cpu().tolist()
+                )
                 query_starts = query_start_loc_cpu.tolist()
                 producer_ranges_list = []
                 consumer_ranges_list = []
@@ -659,6 +675,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         int(prefill_state_indices[consumer_idx].item())
                     )
                 assert prefill_state_indices is not None
+                has_init_list = (
+                    has_initial_state.cpu().tolist()
+                    if has_initial_state is not None
+                    else [False] * m.num_reqs
+                )
                 for request_idx in range(m.num_reqs):
                     if request_idx in producer_rows or request_idx in consumer_rows:
                         continue
@@ -666,27 +687,49 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     if start == end:
                         continue
                     destination = int(prefill_state_indices[request_idx].item())
+                    source = (
+                        destination
+                        if has_init_list[request_idx]
+                        else NULL_BLOCK_ID
+                    )
                     consumer_ranges_list.append([start, end])
-                    consumer_sources_list.append(destination)
+                    consumer_sources_list.append(source)
                     private_destinations_list.append(destination)
 
                 def build_packed_phase(
                     ranges: list[list[int]],
+                    is_contiguous: bool = False,
+                    build_chunks: bool = False,
                 ) -> tuple[
                     torch.Tensor,
                     torch.Tensor,
                     CausalConv1dMetadata | None,
+                    torch.Tensor | None,
+                    torch.Tensor | None,
                 ]:
-                    token_indices = [
-                        token for start, end in ranges for token in range(start, end)
-                    ]
+                    if is_contiguous:
+                        token_indices_gpu = torch.empty(
+                            0, dtype=torch.long, device=device
+                        )
+                    else:
+                        token_indices = [
+                            token
+                            for start, end in ranges
+                            for token in range(start, end)
+                        ]
+                        token_indices_gpu = async_tensor_h2d(
+                            token_indices, device, torch.long
+                        )
                     query_start_loc = [0]
                     for start, end in ranges:
                         query_start_loc.append(query_start_loc[-1] + end - start)
                     query_start_loc_cpu = torch.tensor(
                         query_start_loc, dtype=torch.int32
                     )
+                    query_start_loc_gpu = async_tensor_h2d(query_start_loc_cpu, device)
                     conv_metadata = None
+                    phase_chunk_indices = None
+                    phase_chunk_offsets = None
                     if ranges:
                         nums_dict, batch_ptr, token_chunk_offset_ptr = (
                             compute_causal_conv1d_metadata(
@@ -699,25 +742,27 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                             batch_ptr,
                             token_chunk_offset_ptr,
                         )
+                        if build_chunks and self.gdn_prefill_backend not in (
+                            "aiter_flydsl",
+                            "flashinfer",
+                        ):
+                            phase_chunk_indices, phase_chunk_offsets = (
+                                self._build_chunk_metadata(
+                                    query_start_loc_gpu,
+                                    query_start_loc_cpu,
+                                    device,
+                                )
+                            )
                     return (
-                        async_tensor_h2d(token_indices, device, torch.long),
-                        async_tensor_h2d(query_start_loc_cpu, device),
+                        token_indices_gpu,
+                        query_start_loc_gpu,
                         conv_metadata,
+                        phase_chunk_indices,
+                        phase_chunk_offsets,
                     )
 
                 if has_producers:
-                    (
-                        producer_token_indices,
-                        producer_query_start_loc,
-                        producer_conv_metadata,
-                    ) = build_packed_phase(producer_ranges_list)
-                    (
-                        consumer_token_indices,
-                        consumer_query_start_loc,
-                        consumer_conv_metadata,
-                    ) = build_packed_phase(consumer_ranges_list)
-
-                    if (
+                    is_contiguous_phases = bool(
                         producer_ranges_list
                         and consumer_ranges_list
                         and all(
@@ -730,13 +775,37 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                             == consumer_ranges_list[idx + 1][0]
                             for idx in range(len(consumer_ranges_list) - 1)
                         )
-                    ):
+                    )
+                    if is_contiguous_phases:
                         p_start = producer_ranges_list[0][0]
                         p_end = producer_ranges_list[-1][1]
                         c_start = consumer_ranges_list[0][0]
                         c_end = consumer_ranges_list[-1][1]
                         producer_slice = slice(p_start, p_end)
                         consumer_slice = slice(c_start, c_end)
+
+                    (
+                        producer_token_indices,
+                        producer_query_start_loc,
+                        producer_conv_metadata,
+                        producer_chunk_indices,
+                        producer_chunk_offsets,
+                    ) = build_packed_phase(
+                        producer_ranges_list,
+                        is_contiguous=is_contiguous_phases,
+                        build_chunks=True,
+                    )
+                    (
+                        consumer_token_indices,
+                        consumer_query_start_loc,
+                        consumer_conv_metadata,
+                        consumer_chunk_indices,
+                        consumer_chunk_offsets,
+                    ) = build_packed_phase(
+                        consumer_ranges_list,
+                        is_contiguous=is_contiguous_phases,
+                        build_chunks=True,
+                    )
 
                     prefix_producer_ranges = torch.tensor(
                         producer_ranges_list, dtype=torch.int32, device=device
@@ -852,10 +921,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             producer_token_indices=producer_token_indices,
             producer_query_start_loc=producer_query_start_loc,
             producer_conv_metadata=producer_conv_metadata,
+            producer_chunk_indices=producer_chunk_indices,
+            producer_chunk_offsets=producer_chunk_offsets,
             consumer_ranges=consumer_ranges,
             consumer_token_indices=consumer_token_indices,
             consumer_query_start_loc=consumer_query_start_loc,
             consumer_conv_metadata=consumer_conv_metadata,
+            consumer_chunk_indices=consumer_chunk_indices,
+            consumer_chunk_offsets=consumer_chunk_offsets,
             shared_initial_state_source=shared_initial_state_source,
             shared_state_destinations=shared_state_destinations,
             consumer_shared_state_sources=consumer_shared_state_sources,
