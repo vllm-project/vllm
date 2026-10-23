@@ -1383,15 +1383,18 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     Below M=32 the preshuffled Triton GEMM takes unshuffled per-1x32 scales,
     which is the layout AITER's fused AR+RMSNorm+MXFP4 epilogue writes, so
     there the quant runs in the all-reduce kernel instead of as a separate
-    launch. Everywhere else this is the unfused sequence.
+    launch. Everywhere else this is the unfused sequence. Batch-invariant mode
+    always takes the unfused sequence, as ``gemm_with_dynamic_quant`` skips the
+    preshuffled GEMM there and would read these scales as shuffled.
+
+    The pattern only matches linears with ``use_asm_gemm``, which requires a
+    tuned preshuffled config for the weight shape.
     """
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     m = input_.shape[0]
     stage = None
-    if m < 32 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(
-        weight.shape[0], weight.shape[1]
-    ):
+    if m < 32 and not envs.VLLM_BATCH_INVARIANT:
         stage = aiter_ar.mxfp4_fused_ar_rms_stage(input_)
     if stage is None:
         norm_out, residual_out = _rocm_aiter_fused_allreduce_rmsnorm_impl(

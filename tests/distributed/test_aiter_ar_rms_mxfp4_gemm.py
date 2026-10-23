@@ -24,7 +24,7 @@ def _inputs(m: int):
     return inp, residual, norm_weight, weight, weight_scale
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, tuned: bool):
+def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = False):
     calls: dict[str, list] = {"stage": [], "fused_quant": [], "gemm": [], "ar_rms": []}
 
     class FakeAiterCA:
@@ -53,11 +53,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, tuned: bool):
     monkeypatch.setattr(
         aiter_ops.rocm_aiter_ops, "get_aiter_allreduce", lambda: FakeAiterAllReduce()
     )
-    monkeypatch.setattr(
-        aiter_ops.rocm_aiter_ops,
-        "is_triton_gemm_afp4wfp4_presh_ws_tuned",
-        lambda n, k_bytes: tuned,
-    )
+    monkeypatch.setattr(aiter_ops.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
     monkeypatch.setattr(
         aiter_ops, "_rocm_aiter_fused_allreduce_rmsnorm_impl", fake_ar_rms
     )
@@ -72,7 +68,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, tuned: bool):
 def test_decode_quantizes_in_the_allreduce_kernel(
     monkeypatch: pytest.MonkeyPatch, gemma_norm: bool
 ):
-    calls = _patch(monkeypatch, stage=True, tuned=True)
+    calls = _patch(monkeypatch, stage=True)
     inp, residual, norm_weight, weight, weight_scale = _inputs(4)
 
     out, norm_out, residual_out = (
@@ -104,21 +100,21 @@ def test_decode_quantizes_in_the_allreduce_kernel(
 
 
 @pytest.mark.parametrize(
-    ("m", "stage", "tuned"),
+    ("m", "stage", "batch_invariant"),
     [
         # From M=32 the preshuffled GEMM takes shuffled scales, which the
         # fused epilogue does not write.
-        (32, True, True),
-        # Untuned shapes run the ASM GEMM, which also takes shuffled scales.
-        (4, True, False),
+        (32, True, False),
+        # Batch-invariant mode skips the preshuffled GEMM.
+        (4, True, True),
         # Neither fused AR+RMSNorm+MXFP4 launcher accepts the shape.
-        (16, None, True),
+        (16, None, False),
     ],
 )
 def test_falls_back_to_the_unfused_sequence(
-    monkeypatch: pytest.MonkeyPatch, m: int, stage, tuned: bool
+    monkeypatch: pytest.MonkeyPatch, m: int, stage, batch_invariant: bool
 ):
-    calls = _patch(monkeypatch, stage=stage, tuned=tuned)
+    calls = _patch(monkeypatch, stage=stage, batch_invariant=batch_invariant)
     inp, residual, norm_weight, weight, weight_scale = _inputs(m)
 
     out, norm_out, residual_out = (
@@ -147,15 +143,10 @@ def test_falls_back_to_the_unfused_sequence(
 @pytest.mark.parametrize(
     ("m", "k", "dtype", "expected"),
     [
-        (4, 8192, torch.bfloat16, True),
-        (8, 8192, torch.bfloat16, True),
-        (16, 8192, torch.bfloat16, False),
-        (31, 8192, torch.bfloat16, False),
-        (64, 8192, torch.bfloat16, None),
-        (16, 4096, torch.bfloat16, False),
-        (32, 4096, torch.bfloat16, False),
+        (4, 8192, torch.bfloat16, True),  # one-stage
+        (16, 8192, torch.bfloat16, False),  # two-stage
+        (64, 8192, torch.bfloat16, None),  # neither launcher accepts it
         (4, 8192, torch.float32, None),
-        (4, 8200, torch.bfloat16, None),
     ],
 )
 def test_mxfp4_fused_ar_rms_stage_at_tp8(
