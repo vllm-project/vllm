@@ -958,7 +958,11 @@ def init_mxfp8_linear_kernel(
     possible: list[type[Mxfp8LinearKernel]]
     if bmm_batch_size is not None:
         possible = (
-            [DeepGemmMxfp8BmmLinearKernel, EmulationMxfp8LinearKernel]
+            [
+                DeepGemmMxfp8BmmLinearKernel,
+                HummingMxfp8LinearKernel,
+                EmulationMxfp8LinearKernel,
+            ]
             if current_platform.is_cuda()
             else []
         )
