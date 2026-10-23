@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.speculative import XPRESS_ARCHITECTURES
 from vllm.v1.spec_decode.registry import get_speculative_method
 
 if TYPE_CHECKING:
@@ -30,15 +31,20 @@ def init_speculator(
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     elif speculative_config.method == "dflash":
-        if "LiLiCorrDraftModel" in speculative_config.draft_model_config.architectures:
+        architectures = speculative_config.draft_model_config.architectures
+        if any(arch in XPRESS_ARCHITECTURES for arch in architectures):
+            from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
+                XPressSpeculator,
+            )
+
+            return XPressSpeculator(vllm_config, device)
+        if "LiLiCorrDraftModel" in architectures:
             from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
                 LiLiCorrSpeculator,
             )
 
             return LiLiCorrSpeculator(vllm_config, device)
-        if {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(
-            speculative_config.draft_model_config.architectures
-        ):
+        if {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(architectures):
             from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
                 DFlash2Speculator,
             )

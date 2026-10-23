@@ -1914,6 +1914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             uniform_decode=uniform_tok_count
             == (1 if native_target else self.decode_query_len),
+            allow_skip_drafts=scheduler_output.skip_drafts,
         )
 
         if batch_desc.num_tokens == 0:
@@ -2196,6 +2197,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         finished_req_ids = scheduler_output.finished_req_ids
+        # Propose no drafts (K=0) when no DP rank's scheduled requests can use them.
+        skip_drafts = (
+            dp_sync_state.skip_drafts
+            if dp_sync_state is not None
+            else scheduler_output.skip_drafts
+        )
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
             attn_metadata=attn_metadata,
@@ -2206,7 +2213,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
-            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            num_spec_tokens_to_schedule=(
+                0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
+            ),
         )
 
         if not self.is_last_pp_rank:

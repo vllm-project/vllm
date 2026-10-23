@@ -293,6 +293,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
+                skip_sample=num_speculative_tokens == 0,
             )
         self.on_prefill_end(num_reqs)
 
@@ -448,6 +449,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_sample: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -469,6 +471,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
                 last_hidden_states, hidden_states
             )
+        if skip_sample:
+            # No drafts are needed; this pass only keeps the drafter KV in sync.
+            return
 
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(

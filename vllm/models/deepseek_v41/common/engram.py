@@ -1053,7 +1053,8 @@ class ParallelEngramEmbedding(nn.Module):
                 ),
                 torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
             )
-        if self.use_thp:
+        # pin_memory rounds up to a power of two. ROCm pins huge pages either way.
+        if self.use_thp or current_platform.is_rocm():
             weight_bytes = self.part_num_embeddings * self.dim
             packed = _allocate_huge_page_storage(
                 weight_bytes + weight_bytes // self.block_size
