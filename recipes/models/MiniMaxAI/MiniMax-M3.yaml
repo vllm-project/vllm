@@ -90,6 +90,12 @@ features:
             args:
               - "--speculative-config"
               - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3-GQA", "num_speculative_tokens": 3, "attention_backend": "FLASHINFER", "use_local_argmax_reduction": true}'
+          # B200 AgentX lane (InferenceX #4382): same draft settings; only
+          # NVFP4 was qualified.
+          b200:
+            args:
+              - "--speculative-config"
+              - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3-GQA", "num_speculative_tokens": 3, "attention_backend": "FLASHINFER", "use_local_argmax_reduction": true}'
           amd:
             args:
               - "--speculative-config"
@@ -236,6 +242,20 @@ variants:
       VLLM_FLOAT32_MATMUL_PRECISION: "high"
       VLLM_FLASHINFER_ALLREDUCE_BACKEND: "trtllm"
     hardware_overrides:
+      # B200 AgentX lane (InferenceX #4382): TP4 on four of the node's eight
+      # GPUs. Per-concurrency --max-num-seqs, active-sequence caps and CUDA
+      # graph sizes are in the guide.
+      b200:
+        docker_image: "vllm/vllm-openai:nightly-af7f9488c2210d67e1033ecdc845b087ee7fe92b"
+        extra_args:
+          - "--enable-prefix-caching"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--disable-flashinfer-autotune"
+          - "--stream-interval"
+          - "20"
       # GB200 AgentX lane (InferenceX #4281, run 39150937290): one tray per TP4
       # worker, two trays for TP8. Per-concurrency --max-num-seqs and CUDA
       # graph sizes are in the guide.
@@ -776,6 +796,72 @@ guide: |
   ```bash
   --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}'
   ```
+
+  ## B200: InferenceX AgentX aggregated (vLLM)
+
+  The B200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp4-b200-vllm-agentic-mtp` and `minimaxm3-fp4-b200-vllm-agentic-mtp-c10`, [SemiAnalysisAI/InferenceX#4382](https://github.com/SemiAnalysisAI/InferenceX/pull/4382)) serves the NVFP4 checkpoint with the GQA EAGLE3 draft as one aggregated vLLM worker on a single 8-GPU B200 node. Most points run TP4; the concurrency-10 arm also has a TP8 point. The two keys use different images: `vllm/vllm-openai:nightly-af7f9488c2210d67e1033ecdc845b087ee7fe92b@sha256:8e2ffbb9f866de678b22e7446903b1ee5a5766c51a948013277477c462a68a77` for the first and `vllm/vllm-openai:nightly-ac7509e2b1db40fec2f03dde1ed4e9dfdc2338c9@sha256:98adb2311118263a453ec0acd5d4b72bda3db26cecc0fe8ffc94b9ab03c951f9` for the second.
+
+  In the command builder, pick **B200** and the **NVFP4** variant (the builder keeps the current variant when you switch hardware, so select NVFP4 explicitly), turn on **Spec Decoding → GQA** and **Text-only**, and use **Single-node TP**. On an 8-GPU B200 node the builder sizes TP to 8, so change `--tensor-parallel-size` to `4` for the TP4 points. That renders the flags and environment below as a `vllm serve` command; the per-point settings in the tables stay in this guide. The B200 **Verified** badge is recipe-wide; this profile covers the NVFP4 variant only, and the GQA draft override also applies to the other variants on B200, which were not qualified.
+
+  For the host-KV-offload points, don't use the **KV Offload → Simple** pill as is: replace its `--kv-transfer-config` with the qualified one below and set `VLLM_USE_SIMPLE_KV_OFFLOAD=1`.
+
+  ### `-vllm-agentic-mtp` (three-token draft, `nightly-af7f9488`)
+
+  Every point uses the GQA draft with FlashInfer draft attention and local argmax reduction, `--gpu-memory-utilization 0.95`, and `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm`.
+
+  | Clients | TP | `--max-num-seqs` | Host KV offload | `--max-cudagraph-capture-size` |
+  |---:|---:|---:|---|---:|
+  | 15 | 4 | 30 | none | 120 |
+  | 30 | 4 | 60 | SimpleCPUOffload | 4096 (explicit list below) |
+  | 32 | 4 | 64 | SimpleCPUOffload | 256 |
+  | 38 | 4 | 76 | SimpleCPUOffload | 4096 (explicit list below) |
+
+  The concurrency-30 and -38 points also set `"minimax_m3_msa_decode_backend":"cutlass"` in `--attention-config` (the builder's NVFP4 default) and an explicit `--cudagraph-capture-sizes`:
+
+  - 30: `1,2,4,8`, every 8 from `16` to `232`, then `240,256,320,384,448,512,640,768,896,1024,1280,1536,1792,2048,2560,3072,3584,4096`
+  - 38: `1,2,4,8`, every 8 from `16` to `248`, then `256,272,288,304,320,384,448,512,640,768,896,1024,1280,1536,1792,2048,2560,3072,3584,4096`
+
+  The other points omit `minimax_m3_msa_decode_backend`, so the pinned image's default applies.
+
+  ### `-vllm-agentic-mtp-c10` (active-sequence caps, `nightly-ac7509e2`)
+
+  These arms cap the number of sequences the scheduler keeps active with `--max-num-active-seqs`, well below the client count, and set `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. They use the GQA draft with FlashInfer draft attention but without local argmax reduction, and leave `--max-num-seqs` at its default.
+
+  | Clients | TP | `--max-num-active-seqs` | Draft tokens | Host KV offload | `--gpu-memory-utilization` |
+  |---:|---:|---:|---:|---|---:|
+  | 10 | 4 | 1 | 5 | none | 0.925 |
+  | 10 | 8 | 1 | 5 | none | 0.9 (FlashInfer autotune on) |
+  | 20 | 4 | 4 | 3 | SimpleCPUOffload | 0.9 |
+  | 20 | 4 | 3 | 3 | SimpleCPUOffload | 0.9 |
+  | 32 | 4 | 6 | 3 | SimpleCPUOffload | 0.925 |
+  | 32 | 4 | 16 | 3 | SimpleCPUOffload | 0.925 |
+
+  The draft is `{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":<K>,"attention_backend":"FLASHINFER"}`. Every point sets `--max-cudagraph-capture-size` to the last entry of its `--cudagraph-capture-sizes`: `1,2,4,8`, every 4 from `12` to `256`, every 16 from `272` to `512`, then `640,768,1024,1536,2048,3072,4096` (max `4096`). The concurrency-20 points append `6144,8192` (max `8192`).
+
+  ### Host KV offload
+
+  ```bash
+  export VLLM_USE_SIMPLE_KV_OFFLOAD=1
+  --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1073000000000,"lazy_offload":true}}'
+  ```
+
+  That is 1,073 GB of pinned host memory for KV blocks across the node.
+
+  ### Command
+
+  ```bash
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm \
+  vllm serve nvidia/MiniMax-M3-NVFP4 --tensor-parallel-size 4 --trust-remote-code \
+    --attention-config '{"backend":"FLASHINFER","use_trtllm_attention":true,"indexer_kv_dtype":"fp8"}' \
+    --kv-cache-dtype fp8 --block-size 128 --enable-prefix-caching --enable-chunked-prefill \
+    --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}' \
+    --max-num-batched-tokens 16384 --max-num-seqs <S> --max-cudagraph-capture-size <N> \
+    --gpu-memory-utilization 0.95 --disable-flashinfer-autotune --stream-interval 20 --language-model-only \
+    --reasoning-parser minimax_m3 --tool-call-parser minimax_m3 --enable-auto-tool-choice \
+    --default-chat-template-kwargs '{"thinking_mode":"enabled"}'
+  ```
+
+  The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler, as in the command above.
 
   ## GB200: InferenceX AgentX aggregated (Dynamo + vLLM)
 
