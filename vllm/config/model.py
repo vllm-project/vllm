@@ -794,9 +794,16 @@ class ModelConfig:
                         pooler_config_sources[k] = "sentence_transformers"
 
             # Sentence Transformers v6 saves the CrossEncoder activation outside
-            # config.json; put it where the classifier activation lookup reads it.
-            if act_fn := get_sentence_transformers_activation_fn(
-                self.model, self.revision
+            # config.json; put it where the classifier activation lookup reads it,
+            # unless hf_overrides already set the activation explicitly.
+            overrides = self.hf_overrides if isinstance(self.hf_overrides, dict) else {}
+            act_fn_overridden = "sbert_ce_default_activation_function" in overrides or (
+                "activation_fn" in (overrides.get("sentence_transformers") or {})
+            )
+            if not act_fn_overridden and (
+                act_fn := get_sentence_transformers_activation_fn(
+                    self.model, self.revision
+                )
             ):
                 self.hf_config.sentence_transformers = {
                     **(getattr(self.hf_config, "sentence_transformers", None) or {}),
