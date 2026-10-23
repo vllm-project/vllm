@@ -158,11 +158,9 @@ def make(NR, swa, cpg=0, pd=0, opts=None, kvl="", maxk=VLLM_MAX_KEYS):
     """The fragment for NR requests; swa = SWA (window 2047) or full attention. pd: K / V steps in flight.
     kvl = "lbhnc": the vLLM build (bf16 LBHNC cache, int32 seq_lens, scale from the descriptor, window 2048), which
     stages enough page ids a CTA for maxk keys a request (PGN; SGLang builds: PGMAX, 262k keys at CPG = 32)."""
-    import os
-
     assert kvl in ("", "lbhnc"), kvl
     VL = kvl == "lbhnc"
-    O = parse_opts(os.environ.get("MK_FA_OPTS", "") if opts is None else opts)
+    O = parse_opts(opts)
     KCM, TAG = (
         O["cm"],
         O["tag"],
@@ -946,9 +944,7 @@ with open(__file__, "rb") as _f:
 
 def build_standalone(NR, swa, cpg=0, mode=0, pd=0, kvl=""):
     """Mode 0: split + merge; 1: empty kernel (the launch baseline, same LDS); 2: split only."""
-    import os
-
-    k = (NR, swa, cpg, mode, pd, os.environ.get("MK_FA_OPTS", ""), kvl)
+    k = (NR, swa, cpg, mode, pd, kvl)
     if k in _SA:
         return _SA[k]
     F = make(NR, swa, cpg, pd, kvl=kvl)

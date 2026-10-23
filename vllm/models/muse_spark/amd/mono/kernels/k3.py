@@ -59,7 +59,6 @@ epoch bumped in lockstep by every rank once per forward.
 """
 
 import math
-import os
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
@@ -3402,9 +3401,7 @@ def build(key: Build):
                 True,
                 layer,
             )
-            if const_expr(
-                FA.AOT
-            ):  # stage O polls the tagged rows (no all-rows wait)
+            if const_expr(FA.AOT):  # stage O polls the tagged rows (no all-rows wait)
                 attn_o, ao_t = attn_o
         if const_expr(FA is None or key.attn_olate):
             o_ops = o_loads(w_o, bid, lane, wave)
@@ -3535,9 +3532,7 @@ def build(key: Build):
                 task = task + 3
                 it = it + 3
         while task < t1:
-            nxt = gu_loads(
-                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-            )
+            nxt = gu_loads(w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1)
             gu_compute(
                 q[0],
                 task,
@@ -4324,67 +4319,6 @@ def build(key: Build):
 
     _BUILDS[key] = launch
     return launch
-
-
-def _eplb_for(S):
-    from .eplb import eplb_for
-
-    return eplb_for(S)
-
-
-def build_from_env(S=8, W=4, **over):
-    # TEP8 (W = 8) defaults of the S3 front: MK_S3Q=19 (QKV: MFMA-layout weights 16 + x in registers 2 + head
-    # finish in the K-split owners 1), MK_QKV_PF=4, MK_S3O=1 (O: MFMA-layout weights); 0 = the previous kernels
-    S3Q_W8 = int(os.environ.get("MK_S3Q", "19"))
-    kw = dict(
-        S=S,
-        W=W,
-        shard=os.environ.get("MK_SHARD", "1") == "1",
-        pf_gu=int(os.environ.get("MK_PF_GU", "2" if S <= 8 else "1")),
-        pf_dn=int(os.environ.get("MK_PF_DN", "2")),
-        gusplit=os.environ.get("MK_GUSPLIT", "1" if S > 8 else "0") == "1",
-        ac_cap=int(os.environ.get("MK_AC_CAP", "0")),
-        pp_early=os.environ.get("MK_PP_EARLY", "1" if over.get("shard", True) else "0")
-        == "1",
-        next_rope=over.pop("next_rope", True),
-        qkv_pf=int(os.environ.get("MK_QKV_PF", "4" if W == 8 and S3Q_W8 else "3")),
-        timeline=os.environ.get("MK_TIMELINE", "0") == "1",
-        stop=int(os.environ.get("MK_STOP", "99")),
-        onepass=os.environ.get("MK_ONEPASS", "0") == "1",
-        eplb=_eplb_for(S),
-        xrs=os.environ.get("MK_XRS", "0") == "1",
-        unr=int(os.environ.get("MK_UNR", "-1")),
-        p12=os.environ.get("MK_P12", "1") == "1"
-        and W == 8
-        and os.environ.get("MK_XRS", "0") == "1"
-        and os.environ.get("MK_ONEPASS", "0") == "1",
-        s3q=S3Q_W8 if W == 8 else 0,
-        s3o=int(os.environ.get("MK_S3O", "1")) if W == 8 else 0,
-        shuffled_w=os.environ.get("MK_SHUFFLED_W", "0") == "1",
-        shuffled_s=os.environ.get("MK_SHUFFLED_S", "0") == "1",
-    )
-    if (
-        os.environ.get("MK_FUSED_ATTN", "0") == "1" and W == 8
-    ):  # the caller passes attn= the layer's type
-        kw["attn_olate"] = (
-            os.environ.get("MK_FA_OLATE", "1") == "1"
-        )  # S4: #10 (weights during the attention) did not help
-    else:
-        over.pop("attn", None)
-    # vLLM flags (default off): MK_VLLM=1 turns on all three; MK_MULT1 / MK_VQK / MK_KVL set them one by one
-    vl = os.environ.get("MK_VLLM", "0") == "1"
-    for name, env, conv in (
-        ("mult1", "MK_MULT1", lambda v: v == "1"),
-        ("vqk", "MK_VQK", lambda v: v == "1"),
-        ("kvl", "MK_KVL", str),
-    ):
-        v = os.environ.get(env)
-        if v is not None:
-            kw[name] = conv(v)
-        elif vl:
-            kw[name] = "lbhnc" if name == "kvl" else True
-    kw.update(over)
-    return Build(**kw)
 
 
 def build_vllm(S=8, W=8, next_rope=True, **over):
