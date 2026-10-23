@@ -23,6 +23,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.longspark.cudagraph import (
+    LongSparkCudaGraphManager,
+)
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
 )
@@ -56,6 +59,62 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.num_speculative_tokens = 0
     vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
+
+
+def test_longspark_uses_native_capture_sizes_and_padding(monkeypatch):
+    capture_sizes = [1, 2, 4, 8, 24]
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=capture_sizes,
+    )
+    compilation_config.max_cudagraph_capture_size = max(capture_sizes)
+    compilation_config.post_init_cudagraph_sizes()
+
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig.default_factory(max_num_seqs=24)
+    )
+    vllm_config.compilation_config = compilation_config
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+
+    manager = LongSparkCudaGraphManager(
+        vllm_config,
+        torch.device("cpu"),
+        dtype=torch.bfloat16,
+        selected_layers=2,
+        hidden_size=16,
+        query_heads=4,
+        global_slots=3,
+        head_dim=4,
+        block_size=5,
+    )
+
+    captured_sizes = [
+        desc.num_reqs for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    ]
+    assert captured_sizes == list(reversed(capture_sizes))
+
+    largest_inputs = manager._make_inputs(24)
+    small_inputs = manager._make_inputs(4)
+    assert small_inputs.selected_hidden.data_ptr() == (
+        largest_inputs.selected_hidden.data_ptr()
+    )
+
+    manager._graphs_captured = True
+    desc = manager.select(3)
+    assert desc is not None and desc.num_reqs == 4
+    desc = manager.select(17)
+    assert desc is not None and desc.num_reqs == 24
+    assert manager.select(25) is None
 
 
 def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):

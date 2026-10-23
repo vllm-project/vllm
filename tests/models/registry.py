@@ -38,6 +38,9 @@ class _HfExamplesInfo:
     The method to use for speculative decoding.
     """
 
+    speculative_num_speculative_tokens: int = 1
+    """The number of speculative tokens used by model initialization tests."""
+
     min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -1681,6 +1684,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         ),
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
+    ),
+    # [LongSpark]
+    "DraftFreeKVModel": _HfExamplesInfo(
+        "Qwen/Qwen3-4B",
+        speculative_model="Hehy/LongSpark-Qwen3-4B",
+        speculative_method="longspark",
+        speculative_num_speculative_tokens=7,
+        dtype="bfloat16",
+        enable_prefix_caching=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
     ),
     # [PEagle]
     "PEagleDraftModel": _HfExamplesInfo(

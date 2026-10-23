@@ -68,6 +68,7 @@ MTPModelTypes = Literal[
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
+LongSparkModelTypes = Literal["longspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -79,6 +80,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
+    LongSparkModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -657,6 +659,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
+            "longspark",
         )
         factors.append(uses_aux_hidden_states)
         if self.method == "dspark":
@@ -1377,6 +1380,7 @@ class SpeculativeConfig:
                     "eagle3",
                     "dflash",
                     "dspark",
+                    "longspark",
                 ):
                     pass
                 # examples:
@@ -1408,6 +1412,12 @@ class SpeculativeConfig:
                     )
                 ):
                     self.method = "dspark"
+                elif (
+                    self.draft_model_config.hf_config.model_type == "draftfreekv"
+                    or "DraftFreeKVModel" in self.draft_model_config.architectures
+                    or "longspark" in self.draft_model_config.model.lower()
+                ):
+                    self.method = "longspark"
                 elif self.draft_model_config.hf_config.model_type in get_args(
                     MTPModelTypes
                 ):
@@ -1518,7 +1528,7 @@ class SpeculativeConfig:
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
 
-                if self.method in ("dflash", "dspark"):
+                if self.method in ("dflash", "dspark", "longspark"):
                     self.parallel_drafting = True
 
                 n_predict = getattr(
@@ -1529,9 +1539,9 @@ class SpeculativeConfig:
                     and self.num_speculative_tokens not in (None, 1)
                 ):
                     raise ValueError("Parse 3.5 has only one trained MTP step")
-                if self.use_dspark():
+                if self.use_dspark() or self.use_longspark():
                     if self.num_speculative_tokens is None:
-                        # DSpark's parallel width is independent of MTP stages.
+                        # Parallel draft width is independent of MTP stages.
                         hf_config = self.draft_model_config.hf_config
                         block_size = getattr(hf_config, "block_size", None)
                         if block_size is None:
@@ -1925,6 +1935,9 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
+        if self.use_longspark():
+            self._verify_longspark_config()
+
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
             raise ValueError(
                 "use_heterogeneous_vocab only works with method='draft_model'"
@@ -1970,6 +1983,93 @@ class SpeculativeConfig:
             self.verify_equal_vocab_size_if_draft_model()
         return self
 
+    def _verify_longspark_config(self) -> None:
+        if self.target_model_config is None or self.draft_model_config is None:
+            raise ValueError("LongSpark requires target and draft model configs")
+        draft = self.draft_model_config.hf_config
+        target = self.target_model_config.hf_text_config
+        if "DraftFreeKVModel" not in self.draft_model_config.architectures:
+            raise ValueError("LongSpark requires a DraftFreeKVModel checkpoint")
+        if self.target_model_config.architecture != "Qwen3ForCausalLM":
+            raise ValueError(
+                "LongSpark MRV2 currently supports only Qwen3ForCausalLM targets"
+            )
+
+        target_fields = {
+            "hidden_size": "hidden_size",
+            "vocab_size": "vocab_size",
+            "num_key_value_heads": "num_key_value_heads",
+            "qwen_num_attention_heads": "num_attention_heads",
+            "qwen_intermediate_size": "intermediate_size",
+            "qwen_rms_norm_eps": "rms_norm_eps",
+            "qwen_rope_theta": "rope_theta",
+            "num_target_layers": "num_hidden_layers",
+            "head_dim": "head_dim",
+        }
+
+        def target_value(name: str) -> Any:
+            value = getattr(target, name, None)
+            if name == "rope_theta" and value is None:
+                rope_parameters = getattr(target, "rope_parameters", None)
+                if isinstance(rope_parameters, dict):
+                    value = rope_parameters.get("rope_theta")
+            return value
+
+        mismatches = [
+            f"{draft_name}={getattr(draft, draft_name, None)} "
+            f"(target {target_name}={target_value(target_name)})"
+            for draft_name, target_name in target_fields.items()
+            if getattr(draft, draft_name, None) != target_value(target_name)
+        ]
+        if mismatches:
+            raise ValueError(
+                "LongSpark checkpoint does not match the target: "
+                + ", ".join(mismatches)
+            )
+        target_layer_ids = tuple(getattr(draft, "target_layer_ids", ()))
+        if (
+            not target_layer_ids
+            or len(set(target_layer_ids)) != len(target_layer_ids)
+            or tuple(sorted(target_layer_ids)) != target_layer_ids
+            or target_layer_ids[0] < 0
+            or target_layer_ids[-1] >= target.num_hidden_layers
+        ):
+            raise ValueError(
+                "LongSpark target_layer_ids must be unique, ordered target "
+                "layer indices"
+            )
+        mask_token_id = getattr(draft, "mask_token_id", None)
+        if mask_token_id is None or not 0 <= mask_token_id < target.vocab_size:
+            raise ValueError("LongSpark mask_token_id must be in the target vocabulary")
+        if self.num_speculative_tokens != getattr(draft, "block_size", None):
+            raise ValueError(
+                "LongSpark num_speculative_tokens must match checkpoint "
+                f"block_size={getattr(draft, 'block_size', None)}"
+            )
+        parallel = self.target_parallel_config
+        topology = {
+            "TP": parallel.tensor_parallel_size,
+            "PP": parallel.pipeline_parallel_size,
+            "DCP": parallel.decode_context_parallel_size,
+            "PCP": parallel.prefill_context_parallel_size,
+        }
+        invalid = [f"{name}={value}" for name, value in topology.items() if value != 1]
+        if invalid:
+            raise ValueError(
+                "LongSpark MRV2 currently requires TP=PP=DCP=PCP=1; got "
+                + ", ".join(invalid)
+            )
+        if self.draft_tensor_parallel_size != 1:
+            raise ValueError("LongSpark MRV2 currently requires draft TP=1")
+        if self.enable_adaptive_verification:
+            raise ValueError(
+                "LongSpark MRV2 does not yet support adaptive verification"
+            )
+        if self.num_speculative_tokens_per_batch_size is not None:
+            raise ValueError(
+                "LongSpark MRV2 does not yet support dynamic speculative decoding"
+            )
+
     def verify_equal_vocab_size_if_draft_model(self):
         if (
             self.method == "draft_model"
@@ -2012,7 +2112,7 @@ class SpeculativeConfig:
         """
         num_draft_tokens = self.num_speculative_tokens
 
-        if self.use_dflash() or self.use_dspark():
+        if self.use_dflash() or self.use_dspark() or self.use_longspark():
             return 0
 
         if self.parallel_drafting:
@@ -2050,16 +2150,26 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in (
+            "eagle",
+            "eagle3",
+            "mtp",
+            "dflash",
+            "dspark",
+            "longspark",
+        )
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token.
 
         EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        and the next token. DFlash/DSpark build it from the target hidden state,
+        while LongSpark keeps no persistent draft KV, so only EAGLE/EAGLE3/MTP
+        require the trailing-block drop.
         """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+        return self.use_eagle() and not (
+            self.use_dflash() or self.use_dspark() or self.use_longspark()
+        )
 
     def is_xpress(self) -> bool:
         """Whether the dflash draft carries an XPress refiner.
@@ -2086,6 +2196,9 @@ class SpeculativeConfig:
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"
+
+    def use_longspark(self) -> bool:
+        return self.method == "longspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None

@@ -2167,6 +2167,7 @@ def test_draft_parallel_config_preserves_ep_without_model(
         pytest.param("eagle3", True, 7, id="p-eagle"),
         pytest.param("dflash", True, 0, id="dflash"),
         pytest.param("dspark", True, 0, id="dspark"),
+        pytest.param("longspark", True, 0, id="longspark"),
         pytest.param("mtp", False, 0, id="mtp"),
         pytest.param("ngram", False, 0, id="ngram"),
         pytest.param("draft_model", False, 1, id="draft-model"),
@@ -3634,7 +3635,13 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 @pytest.mark.parametrize(
     ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    [
+        ("eagle3", True),
+        ("mtp", True),
+        ("dflash", False),
+        ("dspark", False),
+        ("longspark", False),
+    ],
 )
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(

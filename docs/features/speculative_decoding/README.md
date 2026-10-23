@@ -9,6 +9,7 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models and PARD provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
+- [LongSpark](longspark.md)
 - [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
@@ -30,6 +31,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | Method | Low QPS (latency focused) | High QPS (throughput focused) | Notes |
 | --- | --- | --- | --- |
 | EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
+| LongSpark | Workload dependent | Workload dependent | Checkpoint-configured Global + Raw + Local context with a CUDA-graphed greedy draft path on supported Qwen3 pairs. |
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
@@ -77,16 +79,16 @@ and the API docs for [vllm.config.SpeculativeConfig][].
 
 These keys are commonly used across speculative decoding setups, though some
 only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
-`dflash`.
+`dflash` or `longspark`.
 
 | Key | Type | Default | Allowed values / meaning |
 | --- | --- | --- | --- |
-| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
+| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, `dflash`, and `longspark`. If omitted, vLLM infers the method from the provided configuration when possible. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
-| `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
+| `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Native parallel methods such as DFlash, DSpark, and LongSpark set this automatically. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
