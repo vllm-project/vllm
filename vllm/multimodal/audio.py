@@ -26,6 +26,11 @@ except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
 
 try:
+    import silero_vad
+except ImportError:
+    silero_vad = PlaceholderModule("silero_vad")  # type: ignore[assignment]
+
+try:
     import soxr as soxr
 except ImportError:
     soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
@@ -408,19 +413,11 @@ class VAD:
         if self._get_speech_timestamps is not None and self.model is not None:
             return
 
-        try:
-            from silero_vad import get_speech_timestamps_sequence, load_silero_vad
-
-            # The sequence model runs one ONNX call per block of frames
-            # instead of one per 32ms frame, so the GIL is released for
-            # almost all of the VAD compute.
-            self.model = load_silero_vad(sequence=True)
-            self._get_speech_timestamps = get_speech_timestamps_sequence
-        except ImportError as exc:
-            raise ImportError(
-                "Silero VAD is not installed. Please install it using "
-                "`pip install silero-vad` and `pip install onnxruntime`."
-            ) from exc
+        # The sequence model runs one ONNX call per block of frames
+        # instead of one per 32ms frame, so the GIL is released for
+        # almost all of the VAD compute.
+        self.model = silero_vad.load_silero_vad(sequence=True)
+        self._get_speech_timestamps = silero_vad.get_speech_timestamps_sequence
 
     def ensure_loaded(self) -> None:
         self._ensure_loaded()
