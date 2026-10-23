@@ -357,7 +357,8 @@ class SamplingParams(
     """Token IDs to score per causal prompt row: an integer array of shape
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
-    prompt_logprob_start + i + 1, so the last prompt row is excluded."""
+    prompt_logprob_start + i + 1, so the last prompt row is excluded.
+    See docs/training/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score; defaults to the first row.
     Set skip_reading_prefix_cache=False to reuse local cached rows before it

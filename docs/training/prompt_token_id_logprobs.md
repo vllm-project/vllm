@@ -55,10 +55,12 @@ lists of Python ints are much slower to copy and serialize. With a logits
 - The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 
-Scoring skips prefix-cache reads by default. With `skip_reading_prefix_cache=False`,
-local reuse ends before `prompt_logprob_start` (default: 0), following the existing
-cache lookup alignment. Ordinary `prompt_logprobs` or a KV connector disable
-cache reads; connector admission must also honor the skip flag.
+Scoring requests skip prefix-cache reads by default. Set
+`skip_reading_prefix_cache=False` to reuse locally cached KV for the rows before
+`prompt_logprob_start`; every scored row is still computed, and the hit is
+block-aligned, so reuse can end a few rows earlier. Requests that also set
+`prompt_logprobs` have no unscored prefix and reuse nothing. With a KV connector,
+scoring requests always recompute the whole prompt.
 
 ## Limitations
 

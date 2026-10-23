@@ -314,7 +314,8 @@ class Request:
 
     def get_prefix_cache_hit_limit(self) -> int | None:
         """First prompt row that must be computed rather than read from the
-        cache, i.e. the first scored row; None when no prompt rows are scored."""
+        cache, i.e. the first scored row; None when no prompt rows are scored.
+        See docs/training/prompt_token_id_logprobs.md."""
         params = self.sampling_params
         if params is None:
             return None
