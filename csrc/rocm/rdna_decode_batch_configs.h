@@ -2,9 +2,9 @@
 // grid.y. A batch whose shape has no entry runs on Triton.
 #pragma once
 
-#include "rdna_singleseq_decode_configs.h"
+#include "rdna_decode_configs.h"
 
-namespace rdna_singleseq {
+namespace rdna {
 
 // One entry per line, in DecodeConfig order.
 // clang-format off
@@ -684,4 +684,4 @@ inline constexpr DecodeConfig kDecodeBatchConfigs[] = {
 };
 // clang-format on
 
-}  // namespace rdna_singleseq
+}  // namespace rdna

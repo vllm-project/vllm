@@ -1,7 +1,7 @@
 // The head dims and element types the RDNA3.5 attention kernels are built for.
 #pragma once
 
-namespace rdna_singleseq {
+namespace rdna {
 
 enum class HeadDim : int {
   k64 = 64,
@@ -13,4 +13,4 @@ enum class HeadDim : int {
 
 enum class Dtype : int { kFp16 = 0, kBf16 = 1 };
 
-}  // namespace rdna_singleseq
+}  // namespace rdna

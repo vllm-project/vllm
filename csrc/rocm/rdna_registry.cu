@@ -1,6 +1,6 @@
 // Torch ops over the RDNA3.5 attention kernels built into _rocm_C.
-// rdna_singleseq_*_configs list a table's entries and
-// rdna_singleseq_{decode,prefill}_attn launch a build by its index.
+// rdna_*_configs list a table's entries and
+// rdna_{decode,prefill}_attn launch a build by its index.
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -12,34 +12,32 @@
 #include <string>
 #include <vector>
 
-#include "rdna_singleseq_attn_launch.h"
-#include "rdna_singleseq_decode_batch_configs.h"
-#include "rdna_singleseq_decode_configs.h"
-#include "rdna_singleseq_prefill_batch_configs.h"
-#include "rdna_singleseq_prefill_configs.h"
+#include "rdna_attn_launch.h"
+#include "rdna_decode_batch_configs.h"
+#include "rdna_decode_configs.h"
+#include "rdna_prefill_batch_configs.h"
+#include "rdna_prefill_configs.h"
 
-rdna_singleseq::LaunchFn* rdna_singleseq::decode_launchers() {
+rdna::LaunchFn* rdna::decode_launchers() {
   static LaunchFn launchers[std::size(kDecodeConfigs)] = {};
   return launchers;
 }
 
-rdna_singleseq::LaunchFn* rdna_singleseq::decode_batch_launchers() {
+rdna::LaunchFn* rdna::decode_batch_launchers() {
   static LaunchFn launchers[std::size(kDecodeBatchConfigs)] = {};
   return launchers;
 }
 
-rdna_singleseq::PrefillFn* rdna_singleseq::prefill_launchers() {
+rdna::PrefillFn* rdna::prefill_launchers() {
   static PrefillFn launchers[std::size(kPrefillConfigs)] = {};
   return launchers;
 }
 
 namespace {
 
-constexpr int64_t kNumDecodeConfigs = std::size(rdna_singleseq::kDecodeConfigs);
-constexpr int64_t kNumDecodeBatchConfigs =
-    std::size(rdna_singleseq::kDecodeBatchConfigs);
-constexpr int64_t kNumPrefillConfigs =
-    std::size(rdna_singleseq::kPrefillConfigs);
+constexpr int64_t kNumDecodeConfigs = std::size(rdna::kDecodeConfigs);
+constexpr int64_t kNumDecodeBatchConfigs = std::size(rdna::kDecodeBatchConfigs);
+constexpr int64_t kNumPrefillConfigs = std::size(rdna::kPrefillConfigs);
 
 bool on_gfx1151() {
   const std::string arch = at::cuda::getCurrentDeviceProperties()->gcnArchName;
@@ -71,18 +69,17 @@ void check_device(const torch::Tensor& q,
 
 // Every build of a decode table, its DecodeConfig fields in order; none off
 // gfx1151. Raises if a build has no instantiation unit.
-std::vector<int64_t> decode_configs(const rdna_singleseq::DecodeConfig* configs,
-                                    int64_t n,
-                                    rdna_singleseq::LaunchFn* launchers,
+std::vector<int64_t> decode_configs(const rdna::DecodeConfig* configs,
+                                    int64_t n, rdna::LaunchFn* launchers,
                                     const char* kernel) {
   std::vector<int64_t> fields;
   if (!on_gfx1151()) return fields;
   for (int64_t i = 0; i < n; ++i) {
-    const rdna_singleseq::DecodeConfig& c = configs[i];
+    const rdna::DecodeConfig& c = configs[i];
     TORCH_CHECK(launchers[i], kernel, " build ", i, " (head dim ",
                 static_cast<int>(c.head_dim), ", bf16 ",
-                c.dtype == rdna_singleseq::Dtype::kBf16,
-                ") has no unit in cmake/rocm_rdna_singleseq_attn.cmake");
+                c.dtype == rdna::Dtype::kBf16,
+                ") has no unit in cmake/rocm_rdna_attn.cmake");
     fields.insert(
         fields.end(),
         {static_cast<int>(c.head_dim), c.num_q_heads, c.num_kv_heads, c.window,
@@ -93,28 +90,27 @@ std::vector<int64_t> decode_configs(const rdna_singleseq::DecodeConfig* configs,
   return fields;
 }
 
-std::vector<int64_t> rdna_singleseq_decode_configs() {
-  return decode_configs(rdna_singleseq::kDecodeConfigs, kNumDecodeConfigs,
-                        rdna_singleseq::decode_launchers(), "decode");
+std::vector<int64_t> rdna_decode_configs() {
+  return decode_configs(rdna::kDecodeConfigs, kNumDecodeConfigs,
+                        rdna::decode_launchers(), "decode");
 }
 
-std::vector<int64_t> rdna_singleseq_decode_batch_configs() {
-  return decode_configs(
-      rdna_singleseq::kDecodeBatchConfigs, kNumDecodeBatchConfigs,
-      rdna_singleseq::decode_batch_launchers(), "batched decode");
+std::vector<int64_t> rdna_decode_batch_configs() {
+  return decode_configs(rdna::kDecodeBatchConfigs, kNumDecodeBatchConfigs,
+                        rdna::decode_batch_launchers(), "batched decode");
 }
 
 // Every prefill build, its PrefillConfig fields in order; none off gfx1151.
 // Raises if a build has no instantiation unit.
-std::vector<int64_t> rdna_singleseq_prefill_configs() {
+std::vector<int64_t> rdna_prefill_configs() {
   std::vector<int64_t> fields;
   if (!on_gfx1151()) return fields;
   for (int64_t i = 0; i < kNumPrefillConfigs; ++i) {
-    const rdna_singleseq::PrefillConfig& c = rdna_singleseq::kPrefillConfigs[i];
-    TORCH_CHECK(rdna_singleseq::prefill_launchers()[i], "prefill build ", i,
+    const rdna::PrefillConfig& c = rdna::kPrefillConfigs[i];
+    TORCH_CHECK(rdna::prefill_launchers()[i], "prefill build ", i,
                 " (head dim ", static_cast<int>(c.head_dim), ", bf16 ",
-                c.dtype == rdna_singleseq::Dtype::kBf16,
-                ") has no unit in cmake/rocm_rdna_singleseq_attn.cmake");
+                c.dtype == rdna::Dtype::kBf16,
+                ") has no unit in cmake/rocm_rdna_attn.cmake");
     fields.insert(
         fields.end(),
         {static_cast<int>(c.head_dim), c.num_q_heads, c.num_kv_heads, c.window,
@@ -127,8 +123,8 @@ std::vector<int64_t> rdna_singleseq_prefill_configs() {
 
 // Every prefill batch cell, its fields in order; none off gfx1151. Raises if
 // a cell names no prefill build.
-std::vector<int64_t> rdna_singleseq_prefill_batch_configs() {
-  using namespace rdna_singleseq;
+std::vector<int64_t> rdna_prefill_batch_configs() {
+  using namespace rdna;
   std::vector<int64_t> fields;
   if (!on_gfx1151()) return fields;
   for (const PrefillBatchConfig& b : kPrefillBatchConfigs) {
@@ -156,15 +152,13 @@ std::vector<int64_t> rdna_singleseq_prefill_batch_configs() {
 }
 
 // The caller allocates the scratch: this runs under CUDA-graph capture.
-void rdna_singleseq_decode_attn(int64_t config, torch::Tensor& q,
-                                torch::Tensor& kv_cache,
-                                torch::Tensor& block_table, torch::Tensor& out,
-                                torch::Tensor& acc, torch::Tensor& m,
-                                torch::Tensor& l, torch::Tensor& cnt,
-                                torch::Tensor& seq_lens, double scale,
-                                const std::optional<torch::Tensor>& mm_ranges,
-                                bool batched) {
-  using namespace rdna_singleseq;
+void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
+                      torch::Tensor& block_table, torch::Tensor& out,
+                      torch::Tensor& acc, torch::Tensor& m, torch::Tensor& l,
+                      torch::Tensor& cnt, torch::Tensor& seq_lens, double scale,
+                      const std::optional<torch::Tensor>& mm_ranges,
+                      bool batched) {
+  using namespace rdna;
   LaunchFn* launchers = batched ? decode_batch_launchers() : decode_launchers();
   TORCH_CHECK(
       config >= 0 &&
@@ -278,15 +272,17 @@ void rdna_singleseq_decode_attn(int64_t config, torch::Tensor& q,
 
 // One sequence, or a batch with a plan; runs outside CUDA graphs, so
 // max_seq_len may size the split.
-void rdna_singleseq_prefill_attn(
-    int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
-    torch::Tensor& block_table, torch::Tensor& out, torch::Tensor& partial_o,
-    torch::Tensor& partial_ml, torch::Tensor& counters, torch::Tensor& seq_lens,
-    int64_t max_seq_len, double scale,
-    const std::optional<torch::Tensor>& mm_ranges,
-    const std::optional<torch::Tensor>& plan,
-    const std::optional<torch::Tensor>& query_start_loc, int64_t head_group) {
-  using namespace rdna_singleseq;
+void rdna_prefill_attn(int64_t config, torch::Tensor& q,
+                       torch::Tensor& kv_cache, torch::Tensor& block_table,
+                       torch::Tensor& out, torch::Tensor& partial_o,
+                       torch::Tensor& partial_ml, torch::Tensor& counters,
+                       torch::Tensor& seq_lens, int64_t max_seq_len,
+                       double scale,
+                       const std::optional<torch::Tensor>& mm_ranges,
+                       const std::optional<torch::Tensor>& plan,
+                       const std::optional<torch::Tensor>& query_start_loc,
+                       int64_t head_group) {
+  using namespace rdna;
   TORCH_CHECK(
       config >= 0 && config < kNumPrefillConfigs && prefill_launchers()[config],
       "no prefill build ", config);

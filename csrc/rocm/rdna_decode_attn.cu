@@ -1,7 +1,7 @@
 // RDNA3.5 decode attention over the paged KV cache
 // (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM), K and V packed per row,
-// as a template on one entry of rdna_singleseq_decode_configs.h, or of
-// rdna_singleseq_decode_batch_configs.h (one sequence per grid.y).
+// as a template on one entry of rdna_decode_configs.h, or of
+// rdna_decode_batch_configs.h (one sequence per grid.y).
 //
 // One workgroup per (kv head, row group, KV segment) handles all query rows of
 // its kv head, so the KV is read once. Both products are WMMA 16x16x16:
@@ -17,12 +17,12 @@
 #include <cstring>
 #include <type_traits>
 
-#include "rdna_singleseq_attn_common.cuh"
-#include "rdna_singleseq_attn_launch.h"
-#include "rdna_singleseq_decode_batch_configs.h"
-#include "rdna_singleseq_decode_configs.h"
+#include "rdna_attn_common.cuh"
+#include "rdna_attn_launch.h"
+#include "rdna_decode_batch_configs.h"
+#include "rdna_decode_configs.h"
 
-namespace rdna_singleseq {
+namespace rdna {
 
 // Profiling only, gives wrong results: 1 skips V loads, 2 one P@V WMMA per
 // tile, 4 skips K loads, 16 one Q@K WMMA per tile, 32 returns at once, 64 only
@@ -1272,7 +1272,7 @@ __global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
   }
 }
 
-// Arguments are checked by rdna_singleseq_registry.cu.
+// Arguments are checked by rdna_registry.cu.
 template <DecodeConfig C, bool kBatched = false>
 void launch_decode(const LaunchArgs& a) {
   using K = Decode<C, kBatched>;
@@ -1332,4 +1332,4 @@ void launch_decode(const LaunchArgs& a) {
                      a.scale, cooperative, batch, a.mm_ranges, a.mm_capacity);
 }
 
-}  // namespace rdna_singleseq
+}  // namespace rdna

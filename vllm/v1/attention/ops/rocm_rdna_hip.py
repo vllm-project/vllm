@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Lookup of the RDNA3.5 attention kernels built into ``_rocm_C``.
 
-Each entry of ``csrc/rocm/rdna_singleseq_{decode,prefill}_configs.h`` is one
+Each entry of ``csrc/rocm/rdna_{decode,prefill}_configs.h`` is one
 build, with its shape and launch knobs as compile-time constants; those of
-``rdna_singleseq_decode_batch_configs.h`` serve a batch.
+``rdna_decode_batch_configs.h`` serve a batch.
 """
 
 import contextlib
@@ -55,7 +55,7 @@ class KernelVariant:
     def name(self) -> str:
         """The DecodeConfig fields joined by "_"."""
         kernel = "decode_batch" if self.batched else "decode"
-        return f"rdna_singleseq_{kernel}_" + "_".join(map(str, config_fields(self)))
+        return f"rdna_{kernel}_" + "_".join(map(str, config_fields(self)))
 
     @property
     def rows_padded(self) -> int:
@@ -81,9 +81,9 @@ class KernelVariant:
         return (rows, self.head_size), (rows,), cnt
 
 
-# DecodeConfig's fields (csrc/rocm/rdna_singleseq_decode_configs.h) in order,
+# DecodeConfig's fields (csrc/rocm/rdna_decode_configs.h) in order,
 # as KernelVariant fields; the dtype is 0 for fp16 and 1 for bf16 (Dtype in
-# rdna_singleseq_attn_types.h). Every build is HND.
+# rdna_attn_types.h). Every build is HND.
 DECODE_CONFIG_FIELDS = (
     "head_size",
     "num_q_heads",
@@ -150,11 +150,7 @@ def _built_configs(op_name: str, fields: tuple[str, ...]) -> list[dict]:
 @functools.cache
 def _builds(batched: int = 0) -> list[KernelVariant]:
     """The decode builds in _rocm_C, by index."""
-    op = (
-        "rdna_singleseq_decode_batch_configs"
-        if batched
-        else "rdna_singleseq_decode_configs"
-    )
+    op = "rdna_decode_batch_configs" if batched else "rdna_decode_configs"
     return [
         KernelVariant(**f, layout=_HND, batched=batched)
         for f in _built_configs(op, DECODE_CONFIG_FIELDS)
@@ -207,7 +203,7 @@ class _Builtin:
         self.batched = bool(batched)
 
     def decode_attn(self, q, kv_cache, block_table, out, *scratch_and_args):
-        torch.ops._rocm_C.rdna_singleseq_decode_attn(
+        torch.ops._rocm_C.rdna_decode_attn(
             self.index,
             q,
             kv_cache,
@@ -286,7 +282,7 @@ def prefill_target_workgroups(device: torch.device) -> int:
     return 4 * torch.cuda.get_device_properties(device).multi_processor_count
 
 
-# PrefillConfig's fields (csrc/rocm/rdna_singleseq_prefill_configs.h) in order,
+# PrefillConfig's fields (csrc/rocm/rdna_prefill_configs.h) in order,
 # as PrefillVariant fields, the dtype as for decode.
 PREFILL_CONFIG_FIELDS = (
     "head_size",
@@ -330,9 +326,7 @@ class PrefillVariant:
     @property
     def name(self) -> str:
         """The PrefillConfig fields joined by "_"."""
-        return "rdna_singleseq_prefill_" + "_".join(
-            map(str, prefill_config_fields(self))
-        )
+        return "rdna_prefill_" + "_".join(map(str, prefill_config_fields(self)))
 
     @property
     def block_rows(self) -> int:
@@ -357,7 +351,7 @@ def _prefill_builds() -> list[PrefillVariant]:
     """The prefill builds in _rocm_C, by index."""
     return [
         PrefillVariant(**f)
-        for f in _built_configs("rdna_singleseq_prefill_configs", PREFILL_CONFIG_FIELDS)
+        for f in _built_configs("rdna_prefill_configs", PREFILL_CONFIG_FIELDS)
     ]
 
 
@@ -458,9 +452,7 @@ def _prefill_batch_table() -> dict[tuple, list[tuple[int, int, int, int]]]:
     """Per (Hq, Hkv, D, page, window), its cells (min mean M, min keys,
     min_query_len, head group)."""
     table: dict[tuple, list[tuple[int, int, int, int]]] = {}
-    for f in _built_fields(
-        "rdna_singleseq_prefill_batch_configs", PREFILL_BATCH_CONFIG_FIELDS
-    ):
+    for f in _built_fields("rdna_prefill_batch_configs", PREFILL_BATCH_CONFIG_FIELDS):
         key = (
             f["num_q_heads"],
             f["num_kv_heads"],
@@ -646,7 +638,7 @@ class _BuiltinPrefill:
         query_start_loc=None,
         head_group=0,
     ):
-        torch.ops._rocm_C.rdna_singleseq_prefill_attn(
+        torch.ops._rocm_C.rdna_prefill_attn(
             self.index,
             q,
             kv_cache,

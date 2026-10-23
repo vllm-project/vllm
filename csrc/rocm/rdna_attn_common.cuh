@@ -6,7 +6,7 @@
 #include <cmath>
 #include <type_traits>
 
-namespace rdna_singleseq {
+namespace rdna {
 
 typedef _Float16 h16 __attribute__((ext_vector_type(16)));
 typedef _Float16 h2 __attribute__((ext_vector_type(2)));
@@ -81,4 +81,4 @@ __device__ __forceinline__ float weight_of(float partMax, float maxAll) {
   return (maxAll == -INFINITY) ? 0.f : __builtin_amdgcn_exp2f(partMax - maxAll);
 }
 
-}  // namespace rdna_singleseq
+}  // namespace rdna
