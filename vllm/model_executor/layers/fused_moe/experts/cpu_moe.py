@@ -644,6 +644,14 @@ def prepare_mxfp4_moe_layer_for_cpu(
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """VNNI-prepack MXFP4 MoE weights and repack scales for CPU AMX kernel."""
+    zero_scales = w2_scale == 0
+    if zero_scales.any():
+        # E8M0 byte zero is valid; require zero magnitude in both FP4 nibbles.
+        zero_weights = (w2.unflatten(-1, (-1, 16))[zero_scales] & 0x77).eq(0).all(-1)
+        channel_max = w2_scale.amax(dim=-1, keepdim=True).expand_as(w2_scale)
+        w2_scale[zero_scales] = torch.where(
+            zero_weights, channel_max[zero_scales], w2_scale[zero_scales]
+        )
     packed_w13 = torch.ops._C.convert_weight_packed(w13)
     packed_w2 = torch.ops._C.convert_weight_packed(w2)
     packed_w13_scale = torch.ops._C.convert_scale_packed(w13_scale)
