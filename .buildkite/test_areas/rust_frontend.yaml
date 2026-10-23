@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -18,6 +18,11 @@ steps:
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+  - tests/entrypoints/openai/chat_completion/test_chat_echo.py
+  - tests/entrypoints/openai/chat_completion/test_logprob_token_ids.py
+  - tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/test_chunked_prompt.py
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
@@ -32,6 +37,12 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_echo.py
+  - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
+  # The Qwen3.5-35B FP8 MTP case needs two GPUs.
+  - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35"
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+  - pytest -v -s entrypoints/openai/test_chunked_prompt.py
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
@@ -44,7 +55,7 @@ steps:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -58,6 +69,11 @@ steps:
       - tests/entrypoints/openai/chat_completion/test_chat_completion.py
       - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
       - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+      - tests/entrypoints/openai/chat_completion/test_chat_echo.py
+      - tests/entrypoints/openai/chat_completion/test_logprob_token_ids.py
+      - tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py
+      - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+      - tests/entrypoints/openai/test_chunked_prompt.py
       - tests/entrypoints/launchers/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/serve/instrumentator/test_uds.py
@@ -66,7 +82,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
   key: rust-frontend-serve-admin-coverage
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -80,6 +96,9 @@ steps:
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
   - tests/entrypoints/serve/tokenize/test_tokenization.py
+  - tests/entrypoints/serve/middleware/test_optional_middleware.py
+  - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+  - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -92,12 +111,17 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
   # /tokenizer_info returns 501 in the Rust frontend.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+  # test_v2_endpoint_accepts_valid_api_token calls /v2/embed; the Rust frontend serves no pooling routes.
+  - pytest -v -s entrypoints/serve/middleware/test_optional_middleware.py -k "not test_v2_endpoint_accepts_valid_api_token"
+  # The Rust frontend ignores --api-server-count and runs one server, so this only checks the flag is accepted.
+  - pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
+  - pytest -v -s entrypoints/rl/return_routed_experts/test_scale_out_api.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Serve/Admin Coverage"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 40
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -111,6 +135,9 @@ steps:
       - tests/entrypoints/serve/instrumentator/test_basic.py
       - tests/entrypoints/serve/instrumentator/test_metrics.py
       - tests/entrypoints/serve/tokenize/test_tokenization.py
+      - tests/entrypoints/serve/middleware/test_optional_middleware.py
+      - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+      - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
@@ -145,7 +172,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
   key: rust-frontend-tool-use
   device: h200_35gb
-  timeout_in_minutes: 25
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - rust/
@@ -153,17 +180,25 @@ steps:
   - vllm/tool_parsers/
   - tests/utils.py
   - tests/tool_use/
+  - tests/entrypoints/openai/chat_completion/test_completion_with_function_calling.py
+  - tests/entrypoints/tool_parsers/test_granite4_tool_parser.py
+  - tests/entrypoints/tool_parsers/test_hermes_tool_parser.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # The Rust frontend has no `mistral` tokenizer mode or renderer.
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
+  # The Rust renderer rejects empty tool-call arguments in the history (Python treats them as {}).
+  - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
+  - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
+  # The llama cases use --lora-modules, which fails at startup until the Rust LoRA request drops tensorizer_config_dict.
+  - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Tool Use"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 30
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -172,6 +207,9 @@ steps:
       - vllm/tool_parsers/
       - tests/utils.py
       - tests/tool_use/
+      - tests/entrypoints/openai/chat_completion/test_completion_with_function_calling.py
+      - tests/entrypoints/tool_parsers/test_granite4_tool_parser.py
+      - tests/entrypoints/tool_parsers/test_hermes_tool_parser.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
