@@ -1716,7 +1716,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 tokens_per_frame = [tokens_per_frame_base] * num_frames
                 select_token_id = True
 
-            return Qwen3VLMultiModalProcessor.get_video_repl(
+            replacement = Qwen3VLMultiModalProcessor.get_video_repl(
                 tokens_per_frame=tokens_per_frame,
                 timestamps=timestamps,
                 tokenizer=tokenizer,
@@ -1725,6 +1725,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 video_token_id=video_token_id,
                 select_token_id=select_token_id,
             )
+            if pruning_spec is not None:
+                replacement.num_encoder_tokens = num_frames * tokens_per_frame_base
+            return replacement
 
         if self._expands_only_video_token(hf_processor):
             # transformers>=5.10 expands only the bare video_token
