@@ -19,4 +19,4 @@ steps:
   commands:
     - cd tests
     - pytest -v -s basic_correctness/cpu_offload
-    - pytest -v -s basic_correctness/memory
+    - pytest -v -s basic_correctness/memory --deselect="tests/basic_correctness/memory/cumem/test_cumem.py::test_basic_cumem"

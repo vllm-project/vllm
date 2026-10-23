@@ -1572,7 +1572,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       endforeach()
     endif()
   endforeach()
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+  # Compress the offloaded device binaries. The 9-arch release build packs
+  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
+  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
+  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
+  # .eh_frame out of range". --offload-compress keeps the device debug info
+  # (so the RelWithDebInfo build type is unchanged) while shrinking the
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
