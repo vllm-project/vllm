@@ -73,6 +73,13 @@ class PreparedDenseMLP:
         self.gate.prepare(), self.down.prepare()
         self.activation = _compile_activation(hidden, padded, architecture(self.device))
 
+    @torch.no_grad()
+    def refresh_weights(self, mlp):
+        """After a weight reload: the padded TP16 down copy is ours, refill it in
+        place (padding columns stay zero). Unpadded, it is the backbone weight."""
+        if self.padded != self.hidden:
+            self.down.weight[:, : self.hidden].copy_(mlp.down_proj.weight)
+
     def run(self, x, out):
         gate, hidden = self.gates[: x.shape[0]], self.hidden_rows[: x.shape[0]]
         self.gate.run(x, gate)

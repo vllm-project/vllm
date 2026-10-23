@@ -657,6 +657,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
+        wrapper.process_weights_after_loading()
         assert wrapper.model.lilicorr._attn_bias is not None
 
 

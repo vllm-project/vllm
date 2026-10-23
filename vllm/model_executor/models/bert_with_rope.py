@@ -34,7 +34,10 @@ from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    stash_weight_part,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -634,43 +637,36 @@ class JinaRobertaModel(BertWithRope):
         scaling = self.config.lora_alpha / self.config.lora_rank
         device = self.vllm_config.device_config.device
 
-        weights_dict = {name: weight for name, weight in weights}
-
-        o = ".original"
-        a = ".0.lora_A"
-        b = ".0.lora_B"
+        suffixes = {".original": "o", ".0.lora_A": "a", ".0.lora_B": "b"}
 
         # text-matching
         i = -1
 
-        for name in list(weights_dict.keys()):
-            if o in name:
-                dtype = weights_dict[name].dtype
-                shape = weights_dict[name].shape
-                weight_name = name[: -len(o)]
+        for name, loaded_weight in weights:
+            suffix = next((s for s in suffixes if name.endswith(s)), None)
+            if suffix is None:
+                yield name, loaded_weight
+                continue
+            weight_name = name[: -len(suffix)]
+            parts = stash_weight_part(
+                self, weight_name, suffixes[suffix], loaded_weight, ("o", "a", "b")
+            )
+            if parts is None:
+                continue
+            dtype = parts["o"].dtype
+            shape = parts["o"].shape
 
-                if "embeddings" in weight_name:
-                    B = weights_dict[weight_name + a][i].to(device).float()
-                    A = weights_dict[weight_name + b][i].to(device).float()
-                else:
-                    B = weights_dict[weight_name + b][i].to(device).float()
-                    A = weights_dict[weight_name + a][i].to(device).float()
+            if "embeddings" in weight_name:
+                B = parts["a"][i].to(device).float()
+                A = parts["b"][i].to(device).float()
+            else:
+                B = parts["b"][i].to(device).float()
+                A = parts["a"][i].to(device).float()
 
-                weight = (
-                    weights_dict[weight_name + o].to(device)
-                    + torch.matmul(B, A).view(shape) * scaling
-                )
-                weight = weight.cpu().to(dtype)
+            weight = parts["o"].to(device) + torch.matmul(B, A).view(shape) * scaling
+            weight = weight.cpu().to(dtype)
 
-                weights_dict[weight_name.replace(".parametrizations", "")] = weight
-
-                del (
-                    weights_dict[weight_name + o],
-                    weights_dict[weight_name + a],
-                    weights_dict[weight_name + b],
-                )
-
-        return [(name, weight) for name, weight in weights_dict.items()]
+            yield weight_name.replace(".parametrizations", ""), weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.jina_merge_lora_weights(weights)

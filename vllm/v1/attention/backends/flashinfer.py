@@ -2062,6 +2062,26 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        # Host-scalar kernel arguments (o_sf_scale; bmm scales under DCP) are
+        # baked into a FULL decode CUDA graph, so a reload must not change them.
+        self._full_decode_graphs = (
+            vllm_config is not None
+            and vllm_config.compilation_config.cudagraph_mode.decode_mode()
+            == CUDAGraphMode.FULL
+        )
+        self._dcp = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+        )
+        # Device copies of the decode bmm scales (trtllm-gen, and XQA with and
+        # without FP8 query). A FULL decode CUDA graph bakes host scalars into
+        # the captured launch; these views of one buffer keep their address and
+        # are refreshed in place after a reload.
+        self._bmm_scales_dev: torch.Tensor | None = None
+        self._bmm1_scale_dev: torch.Tensor | None = None
+        self._bmm2_scale_dev: torch.Tensor | None = None
+        self._xqa_bmm1_scale_fp8q_dev: torch.Tensor | None = None
+        self._xqa_bmm1_scale_dev: torch.Tensor | None = None
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.nvfp4_trtllm and vllm_config is not None:
@@ -2101,6 +2121,69 @@ class FlashInferImpl(AttentionImpl):
             and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
+
+    def refresh_layer_scales(self, layer: torch.nn.Module) -> None:
+        """Recompute bmm1/bmm2_scale from the layer's (re)loaded q/k/v scales.
+
+        Called by the attention layer at the end of its post-load hook, so it
+        runs after the cold load and after every weight reload."""
+        old_host = (self.bmm1_scale, self.bmm2_scale, self.o_sf_scale)
+        self.bmm1_scale = self.scale
+        self.bmm2_scale = 1.0
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+            self.bmm2_scale *= layer._v_scale_float
+        o_scale = getattr(layer, "_o_scale_ref", None)
+        if o_scale is not None:
+            # input scale of the fused output quant, which may be reloaded too
+            layer._o_scale_float = o_scale.item()
+        if layer._o_scale_float is not None:
+            if self.o_sf_scale is not None:
+                # NVFP4 output. FlashInfer takes o_sf_scale only as a host
+                # float, so a FULL decode CUDA graph keeps the captured value.
+                self.o_sf_scale = layer._o_scale_float
+            else:
+                self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
+        self._check_host_scales(layer, old_host)
+        self._set_bmm_scales_dev(layer, layer._k_scale.device)
+
+    def _check_host_scales(self, layer: torch.nn.Module, old: tuple) -> None:
+        """Fail loudly instead of decoding with a stale captured host scalar."""
+        if not self._full_decode_graphs:
+            return
+        new = (self.bmm1_scale, self.bmm2_scale, self.o_sf_scale)
+        host = (self._dcp, self._dcp, True)  # which values reach kernels as floats
+        for name, was, now, is_host in zip(("bmm1", "bmm2", "o_sf"), old, new, host):
+            if is_host and was is not None and now is not None and was != now:
+                where = getattr(layer, "layer_name", layer)
+                raise RuntimeError(
+                    f"{where}: reloaded weights change the {name} scale "
+                    f"({was} -> {now}), which FlashInfer takes as a host scalar "
+                    "captured in the FULL decode CUDA graph. Reload with the same "
+                    "attention/output scales, or decode without FULL CUDA graphs "
+                    "(enforce_eager; attention+quant fusion forces FULL). This reload "
+                    "was only partly applied; restart the engine."
+                )
+
+    def _set_bmm_scales_dev(self, layer: torch.nn.Module, device: torch.device) -> None:
+        assert self.bmm1_scale is not None and self.bmm2_scale is not None
+        values = torch.tensor(
+            [
+                self.bmm1_scale,
+                self.bmm2_scale,
+                self.get_xqa_bmm1_scale(layer, FP8_DTYPE),
+                self.get_xqa_bmm1_scale(layer, torch.bfloat16),
+            ],
+            dtype=torch.float32,
+        )
+        if self._bmm_scales_dev is None:
+            self._bmm_scales_dev = values.to(device)
+            dev = self._bmm_scales_dev
+            self._bmm1_scale_dev, self._bmm2_scale_dev = dev[0:1], dev[1:2]
+            self._xqa_bmm1_scale_fp8q_dev = dev[2:3]
+            self._xqa_bmm1_scale_dev = dev[3:4]
+        else:
+            self._bmm_scales_dev.copy_(values)
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -2192,6 +2275,9 @@ class FlashInferImpl(AttentionImpl):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._v_scale_float
 
+        if self._bmm_scales_dev is None:
+            self._set_bmm_scales_dev(layer, query.device)
+
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_kernel = (
             attn_metadata.decode.kernel
@@ -2234,8 +2320,11 @@ class FlashInferImpl(AttentionImpl):
             # not enabled
             if layer._o_scale_float is None:
                 layer._o_scale_float = output_scale.cpu().item()
+                # kept so refresh_layer_scales re-reads it after a reload
+                layer._o_scale_ref = output_scale
                 if output.dtype == FP8_DTYPE:
                     self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
+                    self._set_bmm_scales_dev(layer, query.device)
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
 
@@ -2510,8 +2599,8 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.prefill.max_q_len,
                     max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
+                    bmm1_scale=self._bmm1_scale_dev,
+                    bmm2_scale=self._bmm2_scale_dev,
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
@@ -2650,8 +2739,11 @@ class FlashInferImpl(AttentionImpl):
                     decode_query = canonicalize_singleton_dim_strides(decode_query)
 
                 if decode_with_xqa:
-                    bmm1_scale = self.get_xqa_bmm1_scale(
-                        layer, attn_metadata.q_data_type_decode
+                    bmm1_scale = (
+                        self._xqa_bmm1_scale_fp8q_dev
+                        if attn_metadata.q_data_type_decode
+                        in (torch.float8_e4m3fn, torch.float8_e5m2)
+                        else self._xqa_bmm1_scale_dev
                     )
                     q_len_per_req: int | None = attn_metadata.decode.q_len_per_req
 
@@ -2666,7 +2758,7 @@ class FlashInferImpl(AttentionImpl):
                         seq_lens=seq_lens_decode,
                         max_seq_len=attn_metadata.decode.max_seq_len,
                         bmm1_scale=bmm1_scale,
-                        bmm2_scale=self.bmm2_scale,
+                        bmm2_scale=self._bmm2_scale_dev,
                         window_left=self.window_left,
                         out=output_padded[:decode_query_tokens],
                         sinks=self.sinks,
@@ -2731,8 +2823,9 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.decode.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
+                    # FlashInfer's DCP decode takes only host scalar scales
+                    bmm1_scale=self.bmm1_scale if use_dcp else self._bmm1_scale_dev,
+                    bmm2_scale=self.bmm2_scale if use_dcp else self._bmm2_scale_dev,
                     window_left=self.window_left,
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,

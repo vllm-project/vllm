@@ -2143,7 +2143,7 @@ def test_glm5next_attn_loader_accepts_quark_weight_scale():
     prefix = "layers.3.self_attn"
     target = _GLM5RecordingParam()
     params_dict = {f"{prefix}.fused_qkv_a_proj.weight": target}
-    buf: dict = {}
+    buf = torch.nn.Module()
     loaded: set = set()
 
     weight, scale = _glm5_block_fp8(256, 256)
@@ -2184,7 +2184,7 @@ def test_glm5next_attn_loader_accepts_deepseek_weight_scale_inv():
     prefix = "layers.7.self_attn"
     target = _GLM5RecordingParam()
     params_dict = {f"{prefix}.o_proj.weight": target}
-    buf: dict = {}
+    buf = torch.nn.Module()
     loaded: set = set()
 
     weight, scale = _glm5_block_fp8(128, 256)

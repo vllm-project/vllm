@@ -472,12 +472,18 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
         # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        # Refresh in place on a reload: CUDA graphs and the specialized decode
+        # path hold these buffers' addresses.
+        for name, scale in (
+            ("_q_scale_inv", self._q_scale),
+            ("_k_scale_inv", self._k_scale),
+        ):
+            inv = scale.reciprocal().reshape(1)
+            buf = self._buffers.get(name)
+            if buf is not None and buf.shape == inv.shape and buf.dtype == inv.dtype:
+                buf.copy_(inv)
+            else:
+                self.register_buffer(name, inv, persistent=False)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""
