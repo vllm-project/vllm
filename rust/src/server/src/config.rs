@@ -18,6 +18,7 @@ use vllm_chat::{
     ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -296,6 +297,9 @@ pub struct Config {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
+    /// Replacement bucket bounds for the core histogram families
+    /// (`--custom-histogram-buckets`); empty keeps the defaults.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
     /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
     /// default 10s), or `None` to never log while still recording stats.
     pub log_stats_interval: Option<Duration>,

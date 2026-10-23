@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -305,6 +306,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1263,6 +1265,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
+    # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
+    "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
+    ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -2120,6 +2126,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # Cohere2 MoE runs the MLP/MoE of its parallel blocks on a side CUDA stream,
+    # overlapping it with attention, for batches of at most this many tokens.
+    # Larger batches and piecewise CUDA graphs (prefill / mixed batches) run
+    # the MLP inline. Set to 0 to disable the dual stream.
+    "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD", "256")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
