@@ -307,3 +307,50 @@ purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
   requis par le min-age du pruner, connu de l'index de la génération.
 - Purge `/dev/shm` : 14 fichiers / **17,28 GiB** (orphelins du restart
   19:01) → 8,1 G. Commit 75,9 % ; 0×500 sur 564 req.
+
+## 23/10 21:15-21:45Z — FENÊTRE DE MAINTENANCE (GO user Q27a+Q27b+Q26)
+
+**Contexte** : 19 wedges en ~28 h (le watchdog tuait des moteurs sains-qui-
+travaillaient, 9 cas documentés) + course pruneur/lecture 9/9 (~1 requête/2 h
+perdue sur un bloc supprimé) + disque invité 92-93 % serrant le cap du tier.
+
+**(a) Porte watchdog « prefill en vol » — Watchdog v6, ARMÉE 21:41Z.**
+Sur `fail 1/2` : snapshot `vllm:prompt_tokens_total` + `generation_tokens_total`
+lus sur `/metrics`. Sur `fail 2/2` : si les compteurs ont avancé → **WEDGE-BUSY**
+(ligne dédiée, pas de restart, WEDGE_FAIL repositionné pour ré-évaluer à la
+sonde suivante) ; si plats → restart comme avant (« counters flat » dans le
+motif). **Plafond anti-dérive : 10 cycles BUSY (~5 min) puis restart**, et
+réinit de BUSY_COUNT à chaque decode OK. Repli sûr : `/metrics` illisible →
+compteurs 0 → plat → comportement v5. **Test à blanc 3 scénarios PASSÉ**
+(avance→BUSY×3+restart au plafond ; plat→restart immédiat ; metrics KO→restart).
+Recréation du seul service watchdog ; **le `depends_on` a aussi recréé le
+moteur** (portait déjà le delta (b)) — l'indispo annoncée « en fin de fenêtre »
+a donc eu lieu à ce moment (21:38:10Z, moteur healthy 21:40:27, decode OK
+21:41:01). Première trace vivante : `21:41:32 WEDGE fail 1/2 (snapshot p=32
+g=42)` — l'instrumentation fonctionne sous trafic réel.
+
+**(b) `kv_load_failure_policy: recompute` — APPLIQUÉ, confirmé au boot.**
+Une clé ajoutée au `--kv-transfer-config` du profil (champ top-level de
+`KVTransferConfig`, `config/kv_transfer.py:88`). Vérifié dans les non-default
+args du boot 21:38 : `kv_load_failure_policy='recompute'`, **KV 750 747
+inchangé**. Effet : un bloc supprimé par le pruneur entre test d'existence et
+lecture devient un re-préfill au lieu d'une requête perdue.
+
+**Q26 — suppression 237,9 Go de modèles HF rejetés (GO user).** Liste
+nominative publiée sur le dashboard AVANT le geste ; suppression via
+`shutil.rmtree` in-container (le garde `guard-bash-composite` a refusé le
+premier jet `cd`+`rm` — réécrit, comportement attendu). 10 repos supprimés
+(tous « Models Tested and Rejected » : Ornith-1.0/1.5 ×5 quants, Qwen3.8-27B
+×2 quants, Qwen3.6-27B dense, Qwen3.6-35B-A3B-FP8, dspark speculator) ;
+**conservés** : Swift prod 19,6 + rollback MoE AWQ 49,5 (intact, refs=4) +
+2 drafters des profils opt-in (2,3). **Disque invité 92 % → 60 %** (84 →
+390 GB libres) — le cap du tier (min(48, libre−40, C:−12 %)) est désormais
+plafonné par sa borne nominale 48 en toutes circonstances.
+
+**Gates post-fenêtre** : health 200 (3,3 ms), génération réelle correcte
+(« Quatre »), KV 750 747, shm purgé des orphelins du boot (8,49 GiB → 8,0 G),
+watchdog v6 actif, tiers fs intact.
+
+**Repli** : (a) = revert une ligne du service watchdog + recreate ; (b) = retirer
+la clé du JSON et recreater ; Q26 = re-téléchargement HF (coût bande passante,
+pas de perte irréversible : tous les repos sont publics).

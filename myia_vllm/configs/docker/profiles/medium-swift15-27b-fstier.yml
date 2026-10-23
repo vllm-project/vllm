@@ -127,7 +127,7 @@ services:
           --enable-chunked-prefill \
           --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-8} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
-          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
+          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
           --enable-prefix-caching \
           --prefix-caching-hash-algo sha256 \
           --prefix-match-unit 16 \
@@ -224,9 +224,18 @@ services:
         STARTING_CHURN=0
         STALL_MAX=24
         STARTING_CYCLES=0
+        BUSY_MAX=10
+        BUSY_COUNT=0
+        SNAP_PTOKS=-1
+        SNAP_GTOKS=-1
 
-        echo "Watchdog v5 for Swift-1.5-27B (wedge + hard-hang + crash-loop + boot-stall)"
-        echo "  Interval: $${INTERVAL}s. Probes host.docker.internal."
+        read_counters() {
+          curl -s --max-time 5 "http://host.docker.internal:$$PORT/metrics" 2>/dev/null \
+            | awk '/^vllm:prompt_tokens_total\{/{p=$$2} /^vllm:generation_tokens_total\{/{g=$$2} END{printf "%d %d", p, g}'
+        }
+
+        echo "Watchdog v6 for Swift-1.5-27B (v5 + prefill-in-flight gate)"
+        echo "  Interval: $${INTERVAL}s. Probes host.docker.internal. BUSY ceiling $${BUSY_MAX} cycles."
 
         while true; do
           TS=$$(date '+%Y-%m-%d %H:%M:%S')
@@ -246,28 +255,57 @@ services:
             STARTING_CYCLES=0
             if [ "$$G" = "200" ]; then
               if [ $$WEDGE_FAIL -gt 0 ]; then
-                echo "$$TS RECOVERED (decode ok after $$WEDGE_FAIL wedge fails)"
+                echo "$$TS RECOVERED (decode ok after $$WEDGE_FAIL wedge fails, BUSY streak was $$BUSY_COUNT)"
               elif [ $$WARMUP_LEFT -gt 0 ]; then
                 echo "$$TS OK health=200 decode=200 (warm-up grace consumed — engine is warm)"
               else
                 echo "$$TS OK health=200 decode=200"
               fi
               WEDGE_FAIL=0
+              BUSY_COUNT=0
+              SNAP_PTOKS=-1
               WARMUP_LEFT=0
             elif [ $$WARMUP_LEFT -gt 0 ]; then
               WARMUP_LEFT=$$((WARMUP_LEFT - 1))
               echo "$$TS WARMUP health=200 decode=$$G — post-boot grace, $$WARMUP_LEFT probe(s) left, NOT counted as wedge"
             else
-              WEDGE_FAIL=$$((WEDGE_FAIL + 1))
-              echo "$$TS WEDGE health=200 decode=$$G (fail $$WEDGE_FAIL/$$WEDGE_MAX)"
-              if [ $$WEDGE_FAIL -ge $$WEDGE_MAX ]; then
-                echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck)"
-                docker restart $$CONTAINER
-                WEDGE_FAIL=0
-                WARMUP_LEFT=$$WARMUP_PROBES
-                echo "$$TS Restart issued. Waiting 600s for boot..."
-                sleep 600
-                continue
+              NEWFAIL=$$((WEDGE_FAIL + 1))
+              if [ $$NEWFAIL -ge $$WEDGE_MAX ]; then
+                CT="$$(read_counters)"
+                PT="$${CT%% *}"; GT="$${CT##* }"
+                if [ "$$SNAP_PTOKS" -ge 0 ] && { [ "$$PT" -gt "$$SNAP_PTOKS" ] || [ "$$GT" -gt "$$SNAP_GTOKS" ]; }; then
+                  BUSY_COUNT=$$((BUSY_COUNT + 1))
+                  echo "$$TS WEDGE-BUSY health=200 decode=$$G — counters ADVANCED (p $$SNAP_PTOKS->$$PT g $$SNAP_GTOKS->$$GT), engine is working, NOT restarting ($$BUSY_COUNT/$$BUSY_MAX)"
+                  SNAP_PTOKS=$$PT
+                  SNAP_GTOKS=$$GT
+                  WEDGE_FAIL=$$((WEDGE_MAX - 1))
+                  if [ $$BUSY_COUNT -ge $$BUSY_MAX ]; then
+                    echo "$$TS RESTARTING $$CONTAINER (BUSY ceiling $$BUSY_MAX reached ~5min — anti-drift fallback)"
+                    docker restart $$CONTAINER
+                    WEDGE_FAIL=0
+                    BUSY_COUNT=0
+                    SNAP_PTOKS=-1
+                    WARMUP_LEFT=$$WARMUP_PROBES
+                    echo "$$TS Restart issued. Waiting 600s for boot..."
+                    sleep 600
+                    continue
+                  fi
+                else
+                  echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters flat p=$$PT g=$$GT)"
+                  docker restart $$CONTAINER
+                  WEDGE_FAIL=0
+                  BUSY_COUNT=0
+                  SNAP_PTOKS=-1
+                  WARMUP_LEFT=$$WARMUP_PROBES
+                  echo "$$TS Restart issued. Waiting 600s for boot..."
+                  sleep 600
+                  continue
+                fi
+              else
+                WEDGE_FAIL=$$NEWFAIL
+                CT="$$(read_counters)"
+                SNAP_PTOKS="$${CT%% *}"; SNAP_GTOKS="$${CT##* }"
+                echo "$$TS WEDGE health=200 decode=$$G (fail $$WEDGE_FAIL/$$WEDGE_MAX; snapshot p=$$SNAP_PTOKS g=$$SNAP_GTOKS)"
               fi
             fi
           else
