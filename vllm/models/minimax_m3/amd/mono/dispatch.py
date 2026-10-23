@@ -136,14 +136,16 @@ class MonoDecode:
         self.off_reason = "closed"
 
     def _say(self, what: str) -> None:
-        """Every step, from every rank, at debug level.
+        """One-time decisions (armed, off). Per-step traffic uses ``_note``.
 
-        Not deduplicated: while the path is being brought up, a step that says
-        nothing is indistinguishable from one that was never offered. The rank is
-        in the message because what a rank decided is only meaningful against what
-        the others decided, and a step the kernels serve has to be unanimous.
+        An info line on every skipped prefill is written twice, once from each
+        rank, through the engine log. Those steps are the common case on this
+        sweep, and the write sits on the critical path in front of the layer.
         """
         logger.info("[mono][rank %d] %s", self.rank, what)
+
+    def _note(self, what: str) -> None:
+        logger.debug("[mono][rank %d] %s", self.rank, what)
 
     def _declined(
         self, n: int, positions: torch.Tensor, residual: torch.Tensor | None
@@ -250,7 +252,7 @@ class MonoDecode:
             return False
         why = self._declined(rows, positions, residual)
         if why is not None:
-            self._say(f"skip ({rows} rows): {why}")
+            self._note(f"skip ({rows} rows): {why}")
             return False
         if self.runner is None:
             try:
@@ -266,7 +268,7 @@ class MonoDecode:
         decode = self.runner.metadata_of(self._fwd, self.runner.sparse[0]).decode
         self._rows = token_rows(decode, rows)
         self.active = True
-        self._say(f"serve {rows} rows")
+        self._note(f"serve {rows} rows")
         return True
 
     def run_layer(
