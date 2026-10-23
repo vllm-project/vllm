@@ -47,8 +47,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
-        is_xe3p = torch.ops._xpu_C.is_cri(0) or torch.ops._xpu_C.is_nvl_p(0)
-        self._expects_unquantized_inputs = not is_xe3p
+        # Only the Xe3P grouped GEMM consumes quantized activations natively.
+        self._expects_unquantized_inputs = not torch.ops._xpu_C.is_xe3p_arch()
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -89,7 +89,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             (None, None),
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -156,8 +155,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
-        if a1q_scale is not None and a1q_scale.ndim == 0:
-            a1q_scale = a1q_scale.reshape(1)
         if self.moe_config.ep_size > 1:
             # Avoid topk_ids = -1, remap them to an
             # expert not owned by this rank so they are skipped.
@@ -169,7 +166,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             a1q_scale=a1q_scale,
-            a2_scale=a2_scale,
         )
 
 
@@ -196,7 +192,6 @@ class XPUExpertsFp8(XPUExperts):
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
