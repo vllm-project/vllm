@@ -3091,12 +3091,20 @@ async fn non_stream_chat_returns_json_response() {
     let choice = json["choices"][0].as_object().expect("choice object");
     let message = choice["message"].as_object().expect("message object");
     for (object, key) in [
+        (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
         (response_object, "prompt_token_ids"),
+        (response_object, "prompt_text"),
         (response_object, "kv_transfer_params"),
         (choice, "logprobs"),
         (choice, "stop_reason"),
         (choice, "token_ids"),
+        (choice, "routed_experts"),
+        (choice, "weight_versions"),
+        (message, "refusal"),
+        (message, "annotations"),
+        (message, "audio"),
+        (message, "function_call"),
         (message, "reasoning"),
     ] {
         assert!(

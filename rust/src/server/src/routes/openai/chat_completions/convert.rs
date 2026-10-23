@@ -1377,6 +1377,10 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
+            refusal: None,
+            annotations: None,
+            audio: None,
+            function_call: None,
             tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
