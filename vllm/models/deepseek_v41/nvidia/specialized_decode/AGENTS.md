@@ -21,7 +21,7 @@ startup on every TP rank with the missing requirements:
   sparse logits.
 - CUDA graphs: FULL graphs for decode batches only (`FULL_AND_PIECEWISE` or
   `FULL_DECODE_ONLY`).
-- No `torch.compile` of the model, no sleep mode.
+- No `torch.compile` of the model, no sleep mode, no runtime weight updates.
 - No LoRA, KV transfer or batch invariance.
 - DeepGEMM and NVLink multicast for the fused all-reduce + mHC.
 
@@ -36,8 +36,8 @@ collectives and would hang. Which forward steps use the executor depends
 only on the batch, which every TP rank receives identically, so that needs no
 collective.
 
-Four features run only on flashinfer-python 0.7.2 (`FLASHINFER_VERSION`, the
-version `requirements/cuda.txt` pins). Three use FlashInfer internals:
+Five features run only on flashinfer-python 0.7.2 (`FLASHINFER_VERSION`, the
+version `requirements/cuda.txt` pins). Four use FlashInfer internals:
 
 - the publishing `wo_b` GEMM: the CuTe DSL low-latency block-scaled GEMM
   kernel, and `mm_mxfp8`'s private runner and tuning config
@@ -45,9 +45,14 @@ version `requirements/cuda.txt` pins). Three use FlashInfer internals:
 - the fused kernel's MXFP8 layer input: the CuTe DSL MXFP8 quantize helpers
   (`flashinfer.quantization.quantization_cute_dsl_utils`,
   `flashinfer.cute_dsl.fp4_common`);
-- the pinned MXFP8 GEMM tactics: the low-latency GEMM's `autotune_tactics`.
+- the pinned MXFP8 GEMM tactics: the low-latency GEMM's `autotune_tactics`,
+  and `mm_mxfp8`'s private `cute-dsl` runner and workspace
+  (`flashinfer.gemm.gemm_base`), called with the pinned tactic;
+- the low-latency MXFP8 GEMM above 8 rows: the kernel class
+  (`flashinfer.gemm.kernels.cute_dsl.low_latency_blockscaled_gemm`) built
+  with a 16-, 32- or 48-row activation tile.
 
-The fourth, the sparse-MLA decode's persistent KV counters, passes the
+The fifth, the sparse-MLA decode's persistent KV counters, passes the
 `multi_ctas_kv_counter_buffer` argument that 0.7.1 added.
 
 On any other version each logs a warning once and the executor goes without
@@ -69,6 +74,7 @@ forward runs the stock layers, which the executor does not modify.
 | `boundary/` | The mHC between sublayers on the fused all-reduce + mHC kernel, and the publishing `wo_b` GEMM |
 | `attention/` | The attention step: low-batch MXFP8 and BF16 projections, the row-sharded indexer, candidate overlap, shared sparse-index tables and the sparse-MLA decode |
 | `moe/` | The MoE step with a deferred finalize, and the low-batch routed-expert GEMMs |
+| `embedding/` | The embedding and first-layer hc streams from a replicated table |
 | `engram/` | The Engram WKV ahead of the decoder layers |
 | `logits/` | The low-batch LM head and the logits gather |
 
@@ -90,7 +96,7 @@ forward runs the stock layers, which the executor does not modify.
 | The embedding and the first layer's hc streams looked up from a full copy of the table on every rank (1.32 GB a GPU), without the all-reduce | all executor steps |
 | Indexer query, compressor and index key on side streams, each joined at its first reader | all executor steps; the side projections up to `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` rows |
 | Candidate consumers' candidate expansion and MQA-logits schedule on a side stream after the candidate source's indexer | all executor steps |
-| Dense indexer rows sharded over the TP ranks, a contiguous even slice per rank (the last ones may be short or empty), and all-gathered over NCCL | uniform decode steps of at least 12 rows |
+| Dense indexer rows sharded over the TP ranks, a contiguous even slice per rank (the last ones may be short or empty), and all-gathered with the executor's Lamport all-gather (`ops/cute_dsl/all_gather.py`), over NCCL above its 4 MiB a rank | uniform decode steps of at least 12 rows |
 | Token top-k, and the candidate source's blocks, selected from the BF16 logits with `decode_topk` (`attention/decode_topk_cute.py`) | up to 64 rows per rank; the candidate source while its 16-CTA rows fit two waves (14 rows on a GB300) |
 | Otherwise the candidate blocks selected with `cooperative_topk` on the upcast logits | up to 64 rows per rank |
 | Compressed layers sharing an index source reuse one sparse-index table; the first of them builds the other KV-cache groups' tables on a side stream | all executor steps |
@@ -99,7 +105,7 @@ forward runs the stock layers, which the executor does not modify.
 | Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
-| Logits gathered with the custom all-gather | whenever it accepts the input |
+| Logits gathered with the executor's Lamport all-gather | up to 4 MiB a rank (at TP4, 32 FP32 or 64 BF16 rows) |
 
 ## Dispatch
 
@@ -108,4 +114,4 @@ rather than fall back. Every per-step gate reads only host state that all TP
 ranks share (row and request counts, graph mode, the attention metadata's host
 fields); nothing is read back from the GPU. The LM head and logits gather run
 outside the CUDA graph (Model Runner V2 computes logits eagerly), gated by row
-count and by the custom all-gather.
+count and by the all-gather's size limit.

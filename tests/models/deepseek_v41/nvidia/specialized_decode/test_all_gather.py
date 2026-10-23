@@ -17,7 +17,11 @@
 Needs four SM100-family GPUs with NVLink multicast; about a minute. For a
 stress run, run this file as a module
 (``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_all_gather``)
-with ``--replays 2000000``.
+with ``--replays 2000000``. With ``--custom-all-gather`` it replays the same
+graphs on vLLM's custom all-gather (``CustomAllreduce.custom_all_gather``, the
+MNNVL Lamport kernel) instead and only counts the mismatched words: that
+kernel never waits for a rank's own multicast copy, and words of an earlier
+call can reach a later one.
 """
 
 import argparse
@@ -118,8 +122,9 @@ def _pattern(rank: int, kind: int, words: int) -> torch.Tensor:
     return (rank << 28) | (kind << 26) | index
 
 
-def _check_replays(all_gather, rank, replays):
-    """Gather graphs replayed in a random order; returns the mismatch count."""
+def _check_replays(all_gather, rank, replays, stop=True):
+    """Gather graphs replayed in a random order; returns the mismatch count,
+    after the first 1000 replays with a mismatch if ``stop``."""
     from vllm.distributed.parallel_state import graph_capture
 
     counter = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -154,18 +159,18 @@ def _check_replays(all_gather, rank, replays):
                 # The graph keeps raw pointers: keep its tensors alive too.
                 graphs.append((graph, (mine, want, inputs)))
     torch.accelerator.synchronize()
-    assert errors.item() == 0, "eager warm-up"
+    assert not stop or errors.item() == 0, "eager warm-up"
     order = random.Random(1234)
     for start in range(0, replays, 1000):
         for _ in range(min(1000, replays - start)):
             graphs[order.randrange(len(graphs))][0].replay()
         torch.accelerator.synchronize()
-        if errors.item():
+        if stop and errors.item():
             break
     return int(errors.item())
 
 
-def _worker(rank: int, port: int, replays: int, skip_path: str) -> None:
+def _worker(rank: int, port: int, replays: int, skip_path: str, custom: bool) -> None:
     from tests.utils import init_test_distributed_environment
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
@@ -187,33 +192,45 @@ def _worker(rank: int, port: int, replays: int, skip_path: str) -> None:
                     f.write("no NVLink multicast")
             cleanup_dist_env_and_memory()
             return
-        all_gather = LamportAllGather(
-            rank_capacity_bytes=CAPACITY, device=torch.device("cuda", rank)
-        )
-        _check_accepts(all_gather)
-        _check_eager(all_gather, rank)
-        _check_sentinel(all_gather, rank)
-        errors = _check_replays(all_gather, rank, replays)
+        if custom:
+
+            def all_gather(x):
+                # It takes floating-point inputs only; the int32 words pass
+                # bitwise as FP32.
+                out = ca_comm.custom_all_gather(x.view(torch.float32))
+                assert out is not None, x.nbytes
+                return out.view(x.dtype)
+
+        else:
+            all_gather = LamportAllGather(
+                rank_capacity_bytes=CAPACITY, device=torch.device("cuda", rank)
+            )
+            _check_accepts(all_gather)
+            _check_eager(all_gather, rank)
+            _check_sentinel(all_gather, rank)
+        errors = _check_replays(all_gather, rank, replays, stop=not custom)
         total = torch.tensor([errors])
         torch.distributed.all_reduce(total, group=get_tp_group().cpu_group)
         print(
-            f"rank {rank}: {replays} replays ({3 * replays} gathers), "
-            f"{errors} mismatched words here, {int(total.item())} on all ranks",
+            f"rank {rank}: {replays} replays ({3 * replays} gathers) on the "
+            f"{'custom' if custom else 'Lamport'} all-gather, {errors} mismatched "
+            f"words here, {int(total.item())} on all ranks",
             flush=True,
         )
-        assert total.item() == 0
+        assert custom or total.item() == 0
         torch.accelerator.synchronize()
         cleanup_dist_env_and_memory()
 
 
-def run(replays: int) -> str | None:
-    """Run the checks on four GPUs; returns why they were skipped, if so."""
+def run(replays: int, custom: bool = False) -> str | None:
+    """Run the checks on four GPUs (only the replays on the custom all-gather
+    if ``custom``); returns why they were skipped, if so."""
     from vllm.utils.network_utils import get_open_port
 
     with tempfile.TemporaryDirectory() as tmp:
         skip_path = os.path.join(tmp, "skipped")
         torch.multiprocessing.spawn(
-            _worker, args=(get_open_port(), replays, skip_path), nprocs=TP
+            _worker, args=(get_open_port(), replays, skip_path, custom), nprocs=TP
         )
         if os.path.exists(skip_path):
             with open(skip_path) as f:
@@ -236,5 +253,11 @@ def test_lamport_all_gather():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--replays", type=int, default=REPLAYS)
-    skipped = run(parser.parse_args().replays)
-    print(f"skipped: {skipped}" if skipped else "passed")
+    parser.add_argument(
+        "--custom-all-gather",
+        action="store_true",
+        help="replay the graphs on vLLM's custom all-gather and count mismatches",
+    )
+    args = parser.parse_args()
+    skipped = run(args.replays, args.custom_all_gather)
+    print(f"skipped: {skipped}" if skipped else "done")

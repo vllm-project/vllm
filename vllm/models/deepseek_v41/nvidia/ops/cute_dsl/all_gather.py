@@ -75,6 +75,8 @@ GENERATION = 0
 ARRIVALS = 1
 
 
+# The PTX helpers below follow the inline-asm wrappers of FlashInfer's
+# cute_dsl_primitives.py (see the notice in primitives.py).
 def _asm(result, operands, text, constraints, *, loc, ip):
     return llvm.inline_asm(
         result,

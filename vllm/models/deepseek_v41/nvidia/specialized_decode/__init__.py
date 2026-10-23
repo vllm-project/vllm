@@ -116,6 +116,8 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
         ),
         # The routed-expert GEMMs and the publishing wo_b bind weight addresses.
         "no sleep mode": not vllm_config.model_config.enable_sleep_mode,
+        # The replicated embedding table is copied from the shards once, at load.
+        "no runtime weight updates": vllm_config.weight_transfer_config is None,
         "no LoRA, KV transfer or batch invariance": (
             vllm_config.lora_config is None
             and vllm_config.kv_transfer_config is None
