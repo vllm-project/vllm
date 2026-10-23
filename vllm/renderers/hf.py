@@ -1013,7 +1013,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         return self.tokenizer is not None and self.tokenizer.is_fast
 
     @override
-    def _can_defer_uuid_media(self) -> bool:
+    def _can_defer_uuid_media_fetching(self) -> bool:
         return not self.use_unified_vision_chunk
 
     def render_messages(
@@ -1021,22 +1021,22 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        return self._render_messages(messages, params, defer_uuid_media=False)
+        return self._render_messages(messages, params, defer_uuid_media_fetching=False)
 
     @override
-    def _render_messages_deferring_media(
+    def _render_messages_deferring_uuid_media_fetching(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        return self._render_messages(messages, params, defer_uuid_media=True)
+        return self._render_messages(messages, params, defer_uuid_media_fetching=True)
 
     def _render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
         *,
-        defer_uuid_media: bool,
+        defer_uuid_media_fetching: bool,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1059,7 +1059,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            defer_uuid_media=defer_uuid_media,
+            defer_uuid_media_fetching=defer_uuid_media_fetching,
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -1147,17 +1147,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         return await self._render_messages_async(
-            messages, params, defer_uuid_media=False
+            messages, params, defer_uuid_media_fetching=False
         )
 
     @override
-    async def _render_messages_deferring_media_async(
+    async def _render_messages_deferring_uuid_media_fetching_async(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         return await self._render_messages_async(
-            messages, params, defer_uuid_media=True
+            messages, params, defer_uuid_media_fetching=True
         )
 
     async def _render_messages_async(
@@ -1165,7 +1165,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
         *,
-        defer_uuid_media: bool,
+        defer_uuid_media_fetching: bool,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1188,7 +1188,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            defer_uuid_media=defer_uuid_media,
+            defer_uuid_media_fetching=defer_uuid_media_fetching,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

@@ -1417,15 +1417,16 @@ Just like with offline inference, you can skip sending media if you expect cache
 
     ```
 
-#### UUID-Only Rendering
+#### Deferred Media Fetching
 
-The HF renderer first attempts to render a conversation without loading media when
+The HF renderer first attempts to render a conversation without fetching media when
 every media item has a UUID and at least one image, audio, or video item is supplied as
 a URL or inline data. This is enabled by default. Set `skip_early_mm_lookup=True` to
 opt out per request.
 
-- If every media item is in the processor cache, loading and decoding are skipped.
-- If any item misses, vLLM retries that conversation once, loading the supplied media
+- If every media item is in the processor cache, fetching (downloading and decoding)
+  is skipped.
+- If any item misses, vLLM retries that conversation once, fetching the supplied media
   normally. Other conversations in the batch are not retried.
 
 This optimization requires the processor cache and is disabled for unified vision

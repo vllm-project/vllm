@@ -345,8 +345,8 @@ TEXT_PART_TYPES = frozenset(
 _TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
 # Keys that mark a content part as multimodal, whatever its ``type``.
 _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
-# Content part types whose media is loaded from a URL or inline data.
-_LOADED_MEDIA_PART_TYPES = frozenset(
+# Content part types whose media is fetched from a URL or inline data.
+_FETCHED_MEDIA_PART_TYPES = frozenset(
     {"image_url", "audio_url", "input_audio", "video_url"}
 )
 
@@ -376,9 +376,11 @@ def has_non_text_content(messages: Any) -> bool:
     return False
 
 
-def can_conversation_defer_media(messages: list[ChatCompletionMessageParam]) -> bool:
+def can_conversation_defer_media_fetching(
+    messages: list[ChatCompletionMessageParam],
+) -> bool:
     """Whether every media part in ``messages`` has a UUID and at least one
-    has data to load.
+    has data to fetch.
 
     Only list content is inspected, so content that is a one-shot iterator is
     never consumed; messages with such content cannot defer.
@@ -396,7 +398,7 @@ def can_conversation_defer_media(messages: list[ChatCompletionMessageParam]) -> 
             if part.get("uuid") is None:
                 return False
             part_type, data = parse_chat_message_content_mm_part(part)
-            if part_type in _LOADED_MEDIA_PART_TYPES:
+            if part_type in _FETCHED_MEDIA_PART_TYPES:
                 # `input_audio` carries its data inside a dict.
                 has_data |= bool(data.get("data") if isinstance(data, dict) else data)
     return has_data
@@ -785,7 +787,7 @@ def parse_chat_messages(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    defer_uuid_media: bool = False,
+    defer_uuid_media_fetching: bool = False,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -795,7 +797,7 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
-        defer_uuid_media=defer_uuid_media,
+        defer_uuid_media_fetching=defer_uuid_media_fetching,
     )
 
     for msg in messages:
@@ -826,7 +828,7 @@ async def parse_chat_messages_async(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    defer_uuid_media: bool = False,
+    defer_uuid_media_fetching: bool = False,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -836,7 +838,7 @@ async def parse_chat_messages_async(
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
-        defer_uuid_media=defer_uuid_media,
+        defer_uuid_media_fetching=defer_uuid_media_fetching,
     )
 
     for msg in messages:

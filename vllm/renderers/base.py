@@ -53,7 +53,7 @@ from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
-from .chat_utils import can_conversation_defer_media, uses_audio_in_video
+from .chat_utils import can_conversation_defer_media_fetching, uses_audio_in_video
 from .embed_utils import safe_load_prompt_embeds
 from .inputs import (
     DictPrompt,
@@ -1294,30 +1294,30 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         )
 
-    def _can_defer_uuid_media(self) -> bool:
-        """Whether this renderer implements `_render_messages_deferring_media`."""
+    def _can_defer_uuid_media_fetching(self) -> bool:
+        """Whether this renderer can render messages without fetching UUID media."""
         return False
 
-    def _render_messages_deferring_media(
+    def _render_messages_deferring_uuid_media_fetching(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
-        """Like `render_messages`, but without loading media that has a UUID."""
+        """Like `render_messages`, but without fetching media that has a UUID."""
         raise NotImplementedError
 
-    async def _render_messages_deferring_media_async(
+    async def _render_messages_deferring_uuid_media_fetching_async(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
-        return self._render_messages_deferring_media(messages, params)
+        return self._render_messages_deferring_uuid_media_fetching(messages, params)
 
-    def _should_defer_uuid_media(
+    def _should_defer_uuid_media_fetching(
         self, chat_params: ChatParams, skip_mm_cache: bool
     ) -> bool:
         return (
-            self._can_defer_uuid_media()
+            self._can_defer_uuid_media_fetching()
             and self._mm_processor_cache is not None
             and not skip_mm_cache
             and not chat_params.skip_early_mm_lookup
@@ -1331,24 +1331,30 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams,
         prompt_extras: dict[str, Any],
         *,
-        defer_uuid_media: bool,
+        defer_uuid_media_fetching: bool,
     ) -> tuple[list[list["ConversationMessage"]], list[TokPrompt], list[bool]]:
         """Render and tokenize `conversations`.
 
         Returns:
             The rendered conversations, their prompts, and whether each prompt
-            had its media loading deferred.
+            had its media fetching deferred.
 
         """
 
         def render(conversation: list["ChatCompletionMessageParam"]):
-            deferred = defer_uuid_media and can_conversation_defer_media(conversation)
+            is_media_fetching_deferred = (
+                defer_uuid_media_fetching
+                and can_conversation_defer_media_fetching(conversation)
+            )
             render_messages = (
-                self._render_messages_deferring_media
-                if deferred
+                self._render_messages_deferring_uuid_media_fetching
+                if is_media_fetching_deferred
                 else self.render_messages
             )
-            return *render_messages(conversation, chat_params), deferred
+            return (
+                *render_messages(conversation, chat_params),
+                is_media_fetching_deferred,
+            )
 
         rendered = [render(conversation) for conversation in conversations]
 
@@ -1360,7 +1366,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return (
             [conv for conv, _, _ in rendered],
             tok_prompts,
-            [deferred for _, _, deferred in rendered],
+            [is_deferred for _, _, is_deferred in rendered],
         )
 
     async def _render_chat_prompts_async(
@@ -1370,16 +1376,22 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams,
         prompt_extras: dict[str, Any],
         *,
-        defer_uuid_media: bool,
+        defer_uuid_media_fetching: bool,
     ) -> tuple[list[list["ConversationMessage"]], list[TokPrompt], list[bool]]:
         async def render(conversation: list["ChatCompletionMessageParam"]):
-            deferred = defer_uuid_media and can_conversation_defer_media(conversation)
+            is_media_fetching_deferred = (
+                defer_uuid_media_fetching
+                and can_conversation_defer_media_fetching(conversation)
+            )
             render_messages = (
-                self._render_messages_deferring_media_async
-                if deferred
+                self._render_messages_deferring_uuid_media_fetching_async
+                if is_media_fetching_deferred
                 else self.render_messages_async
             )
-            return *await render_messages(conversation, chat_params), deferred
+            return (
+                *await render_messages(conversation, chat_params),
+                is_media_fetching_deferred,
+            )
 
         rendered = await asyncio.gather(*(render(c) for c in conversations))
 
@@ -1391,7 +1403,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return (
             [conv for conv, _, _ in rendered],
             tok_prompts,
-            [deferred for _, _, deferred in rendered],
+            [is_deferred for _, _, is_deferred in rendered],
         )
 
     def render_chat(
@@ -1411,15 +1423,18 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras = dict(prompt_extras or {})
         prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
 
-        out_conversations, tok_prompts, deferred = self._render_chat_prompts(
+        rendered = self._render_chat_prompts(
             conversations,
             chat_params,
             tok_params,
             prompt_extras,
-            defer_uuid_media=self._should_defer_uuid_media(chat_params, skip_mm_cache),
+            defer_uuid_media_fetching=self._should_defer_uuid_media_fetching(
+                chat_params, skip_mm_cache
+            ),
         )
+        out_conversations, tok_prompts, media_fetching_deferred = rendered
 
-        def process(prompt: TokPrompt, is_deferred: bool = False):
+        def process(prompt: TokPrompt, is_media_fetching_deferred: bool = False):
             try:
                 return self.process_for_engine(
                     prompt,
@@ -1428,20 +1443,22 @@ class BaseRenderer(ABC, Generic[_T]):
                     tok_params=tok_params,
                 )
             except MultiModalProcessorCacheMissError:
-                if not is_deferred:
+                if not is_media_fetching_deferred:
                     raise
                 return None
 
-        eng_prompts = [process(p, d) for p, d in zip(tok_prompts, deferred)]
+        eng_prompts = [
+            process(p, d) for p, d in zip(tok_prompts, media_fetching_deferred)
+        ]
 
-        # Retry the deferred prompts that missed the cache with their media loaded.
+        # Retry the deferred prompts that missed the cache with their media fetched.
         if missed := [i for i, prompt in enumerate(eng_prompts) if prompt is None]:
             retry_conversations, retry_prompts, _ = self._render_chat_prompts(
                 [conversations[i] for i in missed],
                 chat_params,
                 tok_params,
                 prompt_extras,
-                defer_uuid_media=False,
+                defer_uuid_media_fetching=False,
             )
             for i, conv, prompt in zip(missed, retry_conversations, retry_prompts):
                 out_conversations[i] = conv
@@ -1471,11 +1488,13 @@ class BaseRenderer(ABC, Generic[_T]):
             chat_params,
             tok_params,
             prompt_extras,
-            defer_uuid_media=self._should_defer_uuid_media(chat_params, skip_mm_cache),
+            defer_uuid_media_fetching=self._should_defer_uuid_media_fetching(
+                chat_params, skip_mm_cache
+            ),
         )
-        out_conversations, tok_prompts, deferred = rendered
+        out_conversations, tok_prompts, media_fetching_deferred = rendered
 
-        async def process(prompt: TokPrompt, is_deferred: bool = False):
+        async def process(prompt: TokPrompt, is_media_fetching_deferred: bool = False):
             try:
                 return await self.process_for_engine_async(
                     prompt,
@@ -1484,22 +1503,22 @@ class BaseRenderer(ABC, Generic[_T]):
                     tok_params=tok_params,
                 )
             except MultiModalProcessorCacheMissError:
-                if not is_deferred:
+                if not is_media_fetching_deferred:
                     raise
                 return None
 
         eng_prompts = await asyncio.gather(
-            *(process(p, d) for p, d in zip(tok_prompts, deferred))
+            *(process(p, d) for p, d in zip(tok_prompts, media_fetching_deferred))
         )
 
-        # Retry the deferred prompts that missed the cache with their media loaded.
+        # Retry the deferred prompts that missed the cache with their media fetched.
         if missed := [i for i, prompt in enumerate(eng_prompts) if prompt is None]:
             retried = await self._render_chat_prompts_async(
                 [conversations[i] for i in missed],
                 chat_params,
                 tok_params,
                 prompt_extras,
-                defer_uuid_media=False,
+                defer_uuid_media_fetching=False,
             )
             retry_conversations, retry_prompts, _ = retried
             retry_eng_prompts = await asyncio.gather(

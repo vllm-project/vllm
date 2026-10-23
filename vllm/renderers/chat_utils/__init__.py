@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .chat_message import (
-    can_conversation_defer_media,
+    can_conversation_defer_media_fetching,
     has_non_text_content,
     parse_chat_message_content,
     parse_chat_message_content_parts,
@@ -34,7 +34,7 @@ __all__ = [
     "BaseMultiModalItemTracker",
     "MultiModalItemTracker",
     "AsyncMultiModalItemTracker",
-    "can_conversation_defer_media",
+    "can_conversation_defer_media_fetching",
     "has_non_text_content",
     "parse_chat_message_content",
     "parse_chat_message_content_parts",

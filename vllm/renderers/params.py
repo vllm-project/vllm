@@ -96,7 +96,7 @@ class ChatParams:
     """The kwargs to pass to the multi-modal processor."""
 
     skip_early_mm_lookup: bool = False
-    """Opt out of deferring media loading to a processor cache lookup."""
+    """Fetch media with UUIDs upfront instead of first trying the processor cache."""
 
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
