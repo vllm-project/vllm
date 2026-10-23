@@ -1261,6 +1261,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
+    "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
@@ -1856,6 +1859,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",
         speculative_model="nvidia/Nemotron-Super-Placeholder",
+        is_available_online=False,
+    ),
+    "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
         is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(

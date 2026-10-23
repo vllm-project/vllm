@@ -855,6 +855,15 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
             video_kwargs.setdefault("video_backend", "nemotron_vl")
 
 
+class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1243,6 +1252,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        Nemotron3_5TranscribeForConditionalGenerationConfig
+    ),
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
