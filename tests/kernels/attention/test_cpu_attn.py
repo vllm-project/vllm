@@ -10,13 +10,15 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.platforms.cpu import CpuPlatform
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
     should_use_zentorch_sdpa,
     zentorch_sdpa_attn,
 )
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -52,7 +54,7 @@ SEQ_LENS = [  # (q_len, kv_len)
 _FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
 _FP8_RTOL = 0.1
 ENCODER_SEQ_LENS = [
-    [1, 678, 2367, 145, 4162, 36, 7812],
+    [1, 4, 678, 2367, 145, 4162, 36, 7812],
 ]
 # Uniform (dense zentorch_sdpa call) and ragged (per-sequence loop).
 ZEN_ENCODER_SEQ_LENS = [
@@ -1405,6 +1407,60 @@ def test_varlen_with_paged_kv_dynamic_causal(
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        pytest.param(
+            [(5, 513), (1, 193), (4, 4097)],
+            (32, 4),
+            128,
+            64,
+            id="mixed_5_1_4",
+        ),
+        pytest.param([(4, 8192)], (8, 1), 128, 256, id="q4_singleton"),
+        pytest.param(
+            [(16, 8192)],
+            (32, 8),
+            128,
+            128,
+            id="q16_singleton_split_reduction",
+        ),
+        pytest.param([(16, 8192)], (16, 1), 256, 256, id="q16_single_kv"),
+        pytest.param(
+            [(17, 8192)] * 4,
+            (32, 8),
+            128,
+            128,
+            id="q17_b4_fragments",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=num_blocks,
+        use_alibi=True,
+        use_sink=True,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+
 # ---------------------------------------------------------------------------
 # AMX_FP8 (Diamond Rapids) tests
 # ---------------------------------------------------------------------------
@@ -1535,3 +1591,38 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
+
+
+def _select_attn_backend(kv_cache_dtype: str, use_mla: bool = False) -> str:
+    config = AttentionSelectorConfig(
+        head_size=576 if use_mla else 64,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=128,
+        use_mla=use_mla,
+    )
+    return CpuPlatform.get_attn_backend_cls(None, config)
+
+
+@pytest.mark.parametrize("fp8_isa", [True, False])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "bfloat16", "fp8", "turboquant_k8v4", "nvfp4"],
+)
+def test_cpu_attn_kv_cache_dtype_validation(
+    monkeypatch: pytest.MonkeyPatch, kv_cache_dtype: str, fp8_isa: bool
+) -> None:
+    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr("torch.cpu._is_avx512_supported", lambda: fp8_isa)
+
+    if kv_cache_dtype in ("auto", "bfloat16") or (kv_cache_dtype == "fp8" and fp8_isa):
+        assert _select_attn_backend(kv_cache_dtype).endswith("CPUAttentionBackend")
+    else:
+        with pytest.raises(ValueError, match=kv_cache_dtype):
+            _select_attn_backend(kv_cache_dtype)
+
+
+def test_cpu_mla_rejects_quantized_kv_cache() -> None:
+    assert "MLA" in _select_attn_backend("auto", use_mla=True)
+    with pytest.raises(ValueError, match="fp8"):
+        _select_attn_backend("fp8", use_mla=True)
