@@ -9,7 +9,7 @@ pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
-pub use qwen::Qwen3XmlToolParser;
+pub use qwen::Qwen3JsonToolParser;
 
 mod granite4;
 mod hermes;
@@ -19,6 +19,7 @@ mod mistral;
 mod phi4mini;
 mod qwen;
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
@@ -98,8 +99,8 @@ impl JsonToolCallParser {
         }
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
@@ -378,9 +379,16 @@ fn safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
+    // Stop only where a tool call can start: with exact whitespace, a bare
+    // start marker without it is text.
+    let with_whitespace = |marker: &str| match config.marker_whitespace {
+        JsonToolCallWhitespace::Optional => marker.to_string(),
+        JsonToolCallWhitespace::Exact(whitespace) => format!("{marker}{whitespace}"),
+    };
+    let start_marker = with_whitespace(config.start_marker);
     match config.framed_start_marker {
-        Some(marker) => safe_text_len_mul(input, &[marker, config.start_marker]),
-        None => safe_text_len(input, config.start_marker),
+        Some(marker) => safe_text_len_mul(input, &[with_whitespace(marker), start_marker]),
+        None => safe_text_len(input, start_marker),
     }
     .map(|len| JsonToolCallEvent::Text { len })
 }
@@ -388,6 +396,7 @@ fn safe_text_event(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use vllm_tokenizer::DecodedText;
 
     use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
     use crate::tool::ToolParserOutput;
@@ -414,7 +423,7 @@ mod tests {
     fn collect_chunks(parser: &mut JsonToolCallParser, chunks: &[&str]) -> ToolParserOutput {
         let mut output = ToolParserOutput::default();
         for chunk in chunks {
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output.coalesce()

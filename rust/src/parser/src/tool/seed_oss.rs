@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -10,6 +12,7 @@ const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
     first_tool_call_start: "\n\n<seed:tool_call>",
     next_tool_call_start: "\n<seed:tool_call>",
     tool_call_end: "</seed:tool_call>",
+    trim_parameter_newlines: true,
 };
 
 /// Tool parser for Seed-OSS XML-style tool calls.
@@ -54,14 +57,14 @@ impl SeedOssToolParser {
 }
 
 impl ToolParser for SeedOssToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 

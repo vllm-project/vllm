@@ -1,0 +1,1 @@
+Qwen3.8-Flash-Next-FP8-rocm.yaml
