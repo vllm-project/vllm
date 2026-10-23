@@ -339,18 +339,17 @@ def _plan_dir():
     return os.path.join(os.environ["VLLM_CACHE_ROOT"], "startup_plan")
 
 
-def _run_savers(payloads, hold_replace_until_all_written=True):
-    """Save plans for each payload on its own thread (same PID, same
-    fingerprint). With the hold, os.replace waits until every staging file is
-    written and closed, which is the ordering that breaks a shared staging
-    name. Re-raises any worker exception."""
+def _run_savers(payloads):
+    """Save a plan for each payload on its own thread (same PID, same
+    fingerprint), holding os.replace until every staging file is written and
+    closed: the ordering that breaks a shared staging name. Re-raises any
+    worker exception."""
     barrier = threading.Barrier(len(payloads), timeout=10)
     real_replace = os.replace
     errors: list[BaseException] = []
 
     def replace(src, dst):
-        if hold_replace_until_all_written:
-            barrier.wait()
+        barrier.wait()
         return real_replace(src, dst)
 
     def save(kv):
@@ -384,7 +383,7 @@ def test_startup_plan_concurrent_save(plan_env, caplog_vllm):
     assert plan_file.endswith(".json")
     with open(os.path.join(_plan_dir(), plan_file)) as f:
         plan = json.load(f)
-    assert plan["kv_cache_memory_bytes"] in payloads  # last writer wins
+    assert plan["kv_cache_memory_bytes"] in payloads  # whichever replaced last
 
     applied = _plan_worker()
     maybe_apply_startup_plan(applied)

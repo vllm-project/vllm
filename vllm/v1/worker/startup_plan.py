@@ -185,11 +185,9 @@ def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> Non
             "kv_cache_memory_bytes": int(kv_cache_memory_bytes),
             "free_memory_baseline": int(worker.init_snapshot.free_memory),
         }
-        # Stage the plan in a uniquely named file in the same directory, then
-        # publish it with one rename. A PID-based staging name is not unique
-        # when several containers share VLLM_CACHE_ROOT (a network volume on
-        # a serverless fleet) and boot the same config at once: two workers
-        # can truncate each other's staging file and the second rename fails.
+        # mkstemp, not <path>.tmp.<pid>: PIDs repeat across containers that
+        # share VLLM_CACHE_ROOT, so two workers could truncate one staging
+        # file and the second rename failed.
         fd, tmp = tempfile.mkstemp(
             dir=plan_dir, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
         )
