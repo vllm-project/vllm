@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for `max_priority_preemptions_per_step`: under the priority policy, the
-waiting request of the highest priority preempts running requests of a lower
-priority for KV cache blocks.
+"""Tests for `max_priority_preemptions_per_step` and `priority_prefill_budget_cap`:
+under the priority policy, the waiting request of the highest priority preempts
+running requests of a lower priority for KV cache blocks, and prefills of a lower
+priority sit out the steps of its first tokens.
 
 Unless a test says otherwise, the KV cache holds 32 blocks of 16 tokens (33
 with the null block) and prefix caching is off, so requests share no block.
@@ -18,7 +19,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from .test_scheduler import create_requests_with_priority
@@ -67,9 +68,12 @@ def _request(
 
 
 def _model_runner_output(
-    scheduler: Scheduler, scheduler_output: SchedulerOutput
+    scheduler: Scheduler,
+    scheduler_output: SchedulerOutput,
+    finished_recving: set[str] | None = None,
 ) -> ModelRunnerOutput:
-    """A sampled token for each scheduled request but partial prefills."""
+    """A sampled token for each scheduled request but partial prefills, and the
+    async KV loads that are done."""
     req_ids = list(scheduler_output.num_scheduled_tokens)
     return ModelRunnerOutput(
         req_ids=req_ids,
@@ -81,13 +85,21 @@ def _model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        kv_connector_output=(
+            KVConnectorOutput(finished_recving=finished_recving)
+            if finished_recving
+            else None
+        ),
     )
 
 
-def _step(scheduler: Scheduler) -> SchedulerOutput:
+def _step(
+    scheduler: Scheduler, finished_recving: set[str] | None = None
+) -> SchedulerOutput:
     scheduler_output = scheduler.schedule()
     scheduler.update_from_output(
-        scheduler_output, _model_runner_output(scheduler, scheduler_output)
+        scheduler_output,
+        _model_runner_output(scheduler, scheduler_output, finished_recving),
     )
     return scheduler_output
 
@@ -162,11 +174,13 @@ def test_make_room_is_off_by_default():
     assert "hi" not in output.num_scheduled_tokens
 
 
-def test_make_room_requires_the_priority_policy():
+@pytest.mark.parametrize(
+    "option",
+    [{"max_priority_preemptions_per_step": 1}, {"priority_prefill_budget_cap": True}],
+)
+def test_make_room_requires_the_priority_policy(option):
     with pytest.raises(ValueError, match="the priority scheduling policy"):
-        SchedulerConfig.default_factory(
-            policy="fcfs", max_priority_preemptions_per_step=1
-        )
+        SchedulerConfig.default_factory(policy="fcfs", **option)
 
 
 def test_preempts_the_lowest_priority_first_and_only_as_many_as_needed():
@@ -503,6 +517,168 @@ def test_deferred_frees_count_as_free():
     assert {"hi", "bg2"} <= output.num_scheduled_tokens.keys()
 
 
+@pytest.mark.parametrize("priority_prefill_budget_cap", [True, False])
+def test_lower_priority_prefill_sits_out_a_requests_first_tokens(
+    priority_prefill_budget_cap,
+):
+    """The priority 0 request that fits takes its whole prompt in a step that the
+    running priority 2 prefill sits out; then the prefill and a waiting priority
+    2 request sit out the steps until it has its first 4 tokens, while the
+    priority 2 decode keeps its token, and both go on. The first tokens of the
+    decode hold back no prefill of its own priority. With the cap off, the
+    prefill is scheduled in every step."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=priority_prefill_budget_cap,
+        priority_prefill_budget_cap_tokens=4,
+        long_prefill_token_threshold=256,
+        max_model_len=2048,
+        num_blocks=400,
+    )
+    _run_until_decoding(scheduler, _request("decode", 40, priority=2, arrival_time=0))
+    scheduler.add_request(_request("prefill", 2000, priority=2, arrival_time=1))
+    assert _step(scheduler).num_scheduled_tokens == {"decode": 1, "prefill": 256}
+    hi = _request("hi", 100, priority=0, arrival_time=2)
+    scheduler.add_request(hi)
+    num_scheduled_tokens = _step(scheduler).num_scheduled_tokens
+    assert num_scheduled_tokens["hi"] == 100
+    assert ("prefill" in num_scheduled_tokens) != priority_prefill_budget_cap
+    assert hi.num_output_tokens == 1
+
+    scheduler.add_request(_request("late", 300, priority=2, arrival_time=3))
+    steps = [_step(scheduler).num_scheduled_tokens for _ in range(4)]
+    assert all(tokens["decode"] == tokens["hi"] == 1 for tokens in steps)
+    if priority_prefill_budget_cap:
+        assert steps[:3] == [{"decode": 1, "hi": 1}] * 3
+        assert steps[3]["prefill"] == 256 and steps[3]["late"] > 0
+    else:
+        assert all(tokens["prefill"] == 256 for tokens in steps)
+
+
+def test_budget_cap_holds_nothing_back_for_a_request_that_does_not_fit():
+    """A waiting priority 0 request of 10 blocks does not fit beside the priority
+    2 prefill in flight, which still needs 10 of the 12 free blocks: the prefill,
+    whose blocks it waits for, goes on."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True, max_num_batched_tokens=64
+    )
+    _run_until_decoding(
+        scheduler, _request("decode", _num_tokens(16), priority=2, arrival_time=0)
+    )
+    scheduler.add_request(
+        _request("prefill", 14 * BLOCK_SIZE, priority=2, arrival_time=1)
+    )
+    # 63 of its 224 tokens beside the decode.
+    _step(scheduler)
+    assert _num_free_blocks(scheduler) == 12
+
+    scheduler.add_request(_request("hi", _num_tokens(10), priority=0, arrival_time=2))
+    for _ in range(2):
+        num_scheduled_tokens = _step(scheduler).num_scheduled_tokens
+        assert num_scheduled_tokens["prefill"] == 63
+        assert "hi" not in num_scheduled_tokens
+
+
+def test_budget_cap_counts_deferred_frees():
+    """With deferred block frees, the blocks of the request preempted to make
+    room are free once the step in flight is processed, and the waiting request
+    runs a step later. It fits meanwhile, as the deferred blocks count as free,
+    so the priority 2 prefill sits out these steps too."""
+    scheduler = _create_deferring_scheduler(
+        max_priority_preemptions_per_step=2,
+        priority_prefill_budget_cap=True,
+        long_prefill_token_threshold=64,
+    )
+    schedule, process = _in_flight_steps(scheduler)
+    scheduler.add_request(_request("bg", _num_tokens(16), priority=2, arrival_time=0))
+    schedule()
+    for _ in range(3):  # One step stays in flight, as in the engine.
+        schedule()
+        process()
+    scheduler.add_request(
+        _request("prefill", 12 * BLOCK_SIZE, priority=2, arrival_time=1)
+    )
+    schedule()
+    process()
+    assert _num_free_blocks(scheduler) == 12
+
+    # 13 blocks and the 8 that the prefill still needs: 9 more than are free.
+    scheduler.add_request(_request("hi", _num_tokens(13), priority=0, arrival_time=2))
+    output = schedule()
+    assert output.preempted_req_ids == {"bg"}
+    assert not output.num_scheduled_tokens
+    # Before the step in flight is processed.
+    assert not schedule().num_scheduled_tokens
+    process()
+    process()
+    assert schedule().num_scheduled_tokens == {"hi": 64}
+
+
+@pytest.mark.parametrize("priority_prefill_budget_cap", [True, False])
+def test_budget_cap_holds_prefill_while_a_request_loads_its_kv(
+    priority_prefill_budget_cap,
+):
+    """A priority 0 request admitted with an async KV load is an in-flight
+    prefill: the running priority 2 prefill sits out the steps while it loads,
+    as once its load is done, the waiting loop promotes it only on budget the
+    running loop leaves. The priority 2 decode keeps its token. With the cap
+    off, the prefill gets its chunk."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=priority_prefill_budget_cap,
+        long_prefill_token_threshold=256,
+        max_model_len=2048,
+        num_blocks=400,
+        # Each request loads its first 256 tokens asynchronously.
+        use_kv_connector=mock_kv(matched_tokens=256, is_async=True),
+    )
+    scheduler.add_request(_request("decode", 300, priority=2, arrival_time=0))
+    scheduler.add_request(_request("prefill", 2000, priority=2, arrival_time=1))
+    _step(scheduler, finished_recving={"decode", "prefill"})
+    for _ in range(2):
+        _step(scheduler)
+    hi = _request("hi", 300, priority=0, arrival_time=2)
+    scheduler.add_request(hi)
+    _step(scheduler)
+    assert hi.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    num_scheduled_tokens = _step(scheduler).num_scheduled_tokens
+    if priority_prefill_budget_cap:
+        assert num_scheduled_tokens == {"decode": 1}
+    else:
+        assert num_scheduled_tokens == {"decode": 1, "prefill": 256}
+
+
+def test_budget_cap_holds_nothing_back_for_a_loading_request_without_a_slot():
+    """With two running slots, a priority 2 request whose async KV load lands
+    first is promoted into the second one, still prefilling. When the load of
+    the priority 0 request lands, it has no slot to be promoted into, so it
+    holds nothing back: both prefills go on, rather than sit out every step."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True,
+        long_prefill_token_threshold=64,
+        max_num_seqs=2,
+        max_model_len=2048,
+        num_blocks=400,
+        # Each request loads its first 256 tokens asynchronously.
+        use_kv_connector=mock_kv(matched_tokens=256, is_async=True),
+    )
+    scheduler.add_request(_request("prefill", 2000, priority=2, arrival_time=0))
+    _step(scheduler, finished_recving={"prefill"})
+    _step(scheduler)
+    scheduler.add_request(_request("loading", 1000, priority=2, arrival_time=1))
+    _step(scheduler)
+    scheduler.add_request(_request("hi", 300, priority=0, arrival_time=2))
+    _step(scheduler, finished_recving={"loading"})
+
+    # While a slot is free, "hi" holds the prefill back.
+    num_scheduled_tokens = _step(
+        scheduler, finished_recving={"hi"}
+    ).num_scheduled_tokens
+    assert num_scheduled_tokens == {"loading": 64}
+    for _ in range(2):
+        num_scheduled_tokens = _step(scheduler).num_scheduled_tokens
+        assert num_scheduled_tokens == {"prefill": 64, "loading": 64}
+
+
 def _trace(scheduler: Scheduler, priorities: list[int]) -> list[tuple]:
     """Each step's scheduled tokens, preempted and new requests, for 24 requests
     of mixed sizes arriving every other step, more than 48 blocks hold."""
@@ -536,9 +712,10 @@ def _trace(scheduler: Scheduler, priorities: list[int]) -> list[tuple]:
 
 @pytest.mark.parametrize("mixed_priorities", [False, True])
 def test_make_room_acts_only_across_priorities(mixed_priorities):
-    """At one priority (the default 0) make-room never acts, and the schedules
-    match those with it off, through preemptions in the running loop and chunked
-    prefills. Across priorities, the same workload is scheduled differently."""
+    """At one priority (the default 0) neither option acts, and the schedules
+    match those with both off, through preemptions in the running loop and
+    chunked prefills. Across priorities, the same workload is scheduled
+    differently."""
     options = dict(
         num_blocks=48, max_num_batched_tokens=128, long_prefill_token_threshold=64
     )
@@ -547,7 +724,11 @@ def test_make_room_acts_only_across_priorities(mixed_priorities):
     assert any(preempted for _, preempted, _ in trace)
 
     trace_with_make_room = _trace(
-        _create_scheduler(**options, max_priority_preemptions_per_step=4),
+        _create_scheduler(
+            **options,
+            max_priority_preemptions_per_step=4,
+            priority_prefill_budget_cap=True,
+        ),
         priorities,
     )
     assert (trace_with_make_room != trace) == mixed_priorities

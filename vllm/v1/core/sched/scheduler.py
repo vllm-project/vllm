@@ -414,6 +414,12 @@ class Scheduler(SchedulerInterface):
         self.max_priority_preemptions_per_step = (
             self.scheduler_config.max_priority_preemptions_per_step
         )
+        self.priority_prefill_budget_cap = (
+            self.scheduler_config.priority_prefill_budget_cap
+        )
+        self.priority_prefill_budget_cap_tokens = (
+            self.scheduler_config.priority_prefill_budget_cap_tokens
+        )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -773,10 +779,13 @@ class Scheduler(SchedulerInterface):
         # priority first, so that no request scheduled in this step is preempted.
         make_room_req = self._peek_make_room_request(defer_prefills)
         make_room_preempted_reqs: set[Request] = set()
-        if make_room_req is not None:
+        if make_room_req is not None and self.max_priority_preemptions_per_step:
             make_room_preempted_reqs = self._make_room(
                 make_room_req, scheduled_timestamp
             )
+        # Prefills of a lower priority sit out the steps of a request's first
+        # tokens.
+        first_tokens_priority = self._first_tokens_priority(make_room_req)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -834,6 +843,12 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
+            if (
+                first_tokens_priority is not None
+                and request.is_prefill_chunk
+                and request.priority > first_tokens_priority
+            ):
+                num_new_tokens = 0
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -1082,6 +1097,13 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
                     continue
+
+                if (
+                    request_queue is self.waiting
+                    and first_tokens_priority is not None
+                    and request.priority > first_tokens_priority
+                ):
+                    break
 
                 if (
                     request_queue is self.waiting
@@ -3285,10 +3307,13 @@ class Scheduler(SchedulerInterface):
         )
 
     def _peek_make_room_request(self, defer_prefills: bool) -> Request | None:
-        """The waiting request of the highest priority, if room is made for it in
-        this step."""
+        """The waiting request of the highest priority, if room or budget is made
+        for it in this step."""
         if (
-            not self.max_priority_preemptions_per_step
+            not (
+                self.max_priority_preemptions_per_step
+                or self.priority_prefill_budget_cap
+            )
             or defer_prefills
             or self._pause_state != PauseState.UNPAUSED
         ):
@@ -3343,6 +3368,34 @@ class Scheduler(SchedulerInterface):
                 victim, timestamp, drop_stale_output=self.requires_kv_delivery
             )
         return set(victims)
+
+    def _first_tokens_priority(self, make_room_req: Request | None) -> int | None:
+        """With the budget cap, the highest priority of the requests whose first
+        tokens are due: the running requests with fewer than
+        `priority_prefill_budget_cap_tokens` output tokens, the in-flight
+        prefills (async KV loads included) and the waiting `make_room_req` if it
+        fits. Without a free running slot only the running requests count: the
+        others could not be admitted or promoted, so they hold nothing back."""
+        if not self.priority_prefill_budget_cap:
+            return None
+        priorities = [
+            req.priority
+            for req in self.running
+            if req.num_output_tokens < self.priority_prefill_budget_cap_tokens
+        ]
+        num_running = len(self.running) + self.num_waiting_for_streaming_input
+        if num_running >= self.max_num_active_reqs:
+            return min(priorities, default=None)
+        # Once its load is done, a request loading its KV is promoted only on
+        # budget the running loop leaves.
+        priorities.extend(req.priority for req in self._inflight_prefills)
+        if make_room_req is not None:
+            num_deferred_blocks = self._num_freeable_blocks(
+                *(blocks for _, blocks in self.deferred_frees)
+            )
+            if self._num_blocks_short(make_room_req) <= num_deferred_blocks:
+                priorities.append(make_room_req.priority)
+        return min(priorities, default=None)
 
     def _num_blocks_short(self, request: Request) -> int:
         """Free blocks the waiting `request` lacks for its whole sequence beside
