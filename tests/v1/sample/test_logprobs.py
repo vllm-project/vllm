@@ -1532,10 +1532,13 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
-    """Prefix reuse preserves every requested suffix score."""
+@pytest.mark.parametrize("start", [16, 17])
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch, start):
+    """Prefix reuse preserves every requested suffix score, whether the hit
+    ends exactly at the first scored row or earlier."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    # Cached and uncached prefills have different execution shapes.
+    # Cached and uncached prefills have different execution shapes; batch
+    # invariance makes their scores comparable bit for bit.
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
@@ -1553,8 +1556,10 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=1,
-            prompt_logprob_start=17,
-            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 18, 1)),
+            prompt_logprob_start=start,
+            prompt_logprob_token_ids=np.tile(
+                [10, 100, 1000], (len(token_ids) - 1 - start, 1)
+            ),
             skip_reading_prefix_cache=True,
         )
 
@@ -1565,12 +1570,9 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert second.num_cached_tokens == 16
-        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 18, 3)
-        np.testing.assert_allclose(
-            second.prompt_token_id_logprobs,
-            first.prompt_token_id_logprobs,
-            rtol=1e-3,
-            atol=1e-2,
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 1 - start, 3)
+        np.testing.assert_array_equal(
+            second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
         )
 
 

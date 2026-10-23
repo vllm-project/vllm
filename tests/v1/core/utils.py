@@ -267,6 +267,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    sampling_params: SamplingParams | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -274,12 +275,13 @@ def create_requests(
         _none_hash_initialized = True
 
     block_hasher = get_request_block_hasher(block_size, sha256)
-    sampling_params = SamplingParams(
-        ignore_eos=ignore_eos,
-        max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
-        prompt_logprobs=prompt_logprobs,
-    )
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 

@@ -3052,8 +3052,9 @@ def test_computed_blocks_not_evicted():
         (None, False, 0, 0),
     ],
 )
+@pytest.mark.parametrize("for_connector", [False, True])
 def test_fixed_token_scores_reuse_only_unscored_prefix(
-    start, skip_reading_prefix_cache, prompt_logprobs, expected_hit
+    start, skip_reading_prefix_cache, prompt_logprobs, expected_hit, for_connector
 ):
     block_size = 4
     manager = make_kv_cache_manager(
@@ -3080,8 +3081,12 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
             skip_reading_prefix_cache=skip_reading_prefix_cache,
         ),
     )
-    _, hit, _ = manager.get_computed_blocks(scoring)
-    assert hit == expected_hit
+    lookup = (
+        manager.get_computed_blocks_for_connector
+        if for_connector
+        else manager.get_computed_blocks
+    )
+    assert lookup(scoring)[1] == expected_hit
 
 
 def test_basic_prefix_caching_disabled():

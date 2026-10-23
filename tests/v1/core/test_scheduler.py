@@ -3185,16 +3185,22 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async)
         use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=is_async),
         block_size=BLOCK_SIZE,
     )
-    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
-    scoring.sampling_params = scoring.sampling_params.clone()
-    if suffix_scoring:
-        scoring.sampling_params.prompt_logprob_token_ids = [[1]] * (BLOCK_SIZE * 3 - 1)
-        scoring.sampling_params.prompt_logprob_start = BLOCK_SIZE
-    else:
-        scoring.sampling_params.prompt_logprobs = 1
-    # Re-resolve the fields the request derives from its params at construction.
-    scoring.skip_reading_prefix_cache = scoring.get_skip_reading_prefix_cache()
-    scoring.prefix_cache_hit_limit = scoring.get_prefix_cache_hit_limit()
+    scoring_params = (
+        SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (BLOCK_SIZE * 3 - 1),
+            prompt_logprob_start=BLOCK_SIZE,
+            skip_reading_prefix_cache=False,
+        )
+        if suffix_scoring
+        else SamplingParams(prompt_logprobs=1)
+    )
+    (plain,) = create_requests(1, num_tokens=BLOCK_SIZE * 4, req_ids=["plain"])
+    (scoring,) = create_requests(
+        1,
+        num_tokens=BLOCK_SIZE * 4,
+        req_ids=["scoring"],
+        sampling_params=scoring_params,
+    )
     admission = []
     scheduler.connector.on_new_request = lambda req: admission.append(
         req.skip_reading_prefix_cache
