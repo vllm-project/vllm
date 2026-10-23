@@ -24,7 +24,6 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
     }
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "target_opt_in"
     supports_pcp = True
-    validates_checkpoint = True
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:

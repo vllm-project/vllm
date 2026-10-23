@@ -60,9 +60,6 @@ class SpeculatorConfig:
     # The draft model has its own vocabulary, which must match the target's
     # unless use_heterogeneous_vocab.
     draft_has_own_vocab: ClassVar[bool] = False
-    # The draft model takes the target's positions, so its
-    # max_position_embeddings may be raised to the target's max_model_len.
-    shares_target_positions: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
@@ -121,6 +118,12 @@ class SpeculatorConfig:
         return 0
 
     @property
+    def max_model_len(self) -> int | None:
+        """The longest sequence the speculator can draft for, or None if
+        unlimited. A smaller limit lowers overall max_model_len."""
+        return None
+
+    @property
     def num_prefill_lookahead_tokens(self) -> int:
         """See `VllmConfig.num_prefill_lookahead_tokens`."""
         # Hidden-state drafters read only the immediate next token.
@@ -153,10 +156,28 @@ class SpeculatorConfig:
 class DraftModelSpeculatorConfig(SpeculatorConfig):
     """A speculator whose draft model is loaded from the `model` checkpoint."""
 
-    # Whether an explicitly configured method is checked against the draft
-    # checkpoint (otherwise it's trusted).
-    validates_checkpoint: ClassVar[bool] = False
-    shares_target_positions = True
+    # The draft model takes the target's positions, so its
+    # max_position_embeddings is raised to the target's max_model_len where its
+    # RoPE type allows.
+    shares_target_positions: ClassVar[bool] = True
+
+    @property
+    def max_model_len(self) -> int | None:
+        from vllm.config.speculative import _rope_only_sizes_cache
+
+        draft = self.spec_config.draft_model_config
+        if draft is None or (
+            # Its max_position_embeddings was raised to the target's.
+            self.shares_target_positions and _rope_only_sizes_cache(draft.hf_config)
+        ):
+            return None
+        return draft.max_model_len
+
+    @classmethod
+    def accepts_checkpoint(cls, recognized_cls: type[SpeculatorConfig]) -> bool:
+        """Whether an explicitly configured speculator can use a draft
+        checkpoint recognized as `recognized_cls`'s."""
+        return recognized_cls.base_method == cls.base_method
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
@@ -393,16 +414,15 @@ def _resolve_checkpoint_config_class(
     configured_cls: type[DraftModelSpeculatorConfig],
 ) -> type[DraftModelSpeculatorConfig]:
     """The built-in config for the draft checkpoint: detected if no method is
-    configured, else the configured one (checked if it `validates_checkpoint`).
+    configured, else the configured one, checked against the checkpoint if it's
+    recognized.
     """
     if spec_config.method is not None:
-        if configured_cls.validates_checkpoint:
+        # Not checked for a custom speculator that isn't based on a built-in one.
+        if configured_cls.base_method is not None:
             recognized_cls = _recognize_checkpoint_config_class(spec_config)
-            if not (
-                # The same built-in speculator (or one based on it).
-                recognized_cls.base_method == configured_cls.base_method
-                if recognized_cls is not None
-                else configured_cls.matches(spec_config)
+            if recognized_cls is not None and not configured_cls.accepts_checkpoint(
+                recognized_cls
             ):
                 raise ValueError(
                     _checkpoint_mismatch_message(spec_config, recognized_cls)
@@ -434,23 +454,15 @@ def _recognize_checkpoint_config_class(
 
 def _checkpoint_mismatch_message(
     spec_config: "SpeculativeConfig",
-    recognized_cls: type[SpeculatorConfig] | None,
+    recognized_cls: type[SpeculatorConfig],
 ) -> str:
     draft = spec_config.draft_model_config
-    if recognized_cls is not None:
-        recognized = recognized_cls.base_method
-        looks = f"looks like a {recognized!r} checkpoint"
-        hint = f" Use method={recognized!r} if that is what you intended."
-    else:
-        looks = (
-            "is not recognized as any drafter type (a plain causal LM can be "
-            "used with method='draft_model')"
-        )
-        hint = ""
+    recognized = recognized_cls.base_method
     return (
         f"speculative_config requested method={spec_config.method!r}, but the "
-        f"draft model {draft.model!r} {looks} "
+        f"draft model {draft.model!r} looks like a {recognized!r} checkpoint "
         f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
         f"architectures={getattr(draft, 'architectures', None)}). Pass a matching "
-        f"method or a matching draft checkpoint.{hint}"
+        f"method or a matching draft checkpoint. Use method={recognized!r} if that "
+        "is what you intended."
     )
