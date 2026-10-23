@@ -526,7 +526,13 @@ def _make_gpu_ctx(
     ],
 )
 def test_replayssm_precopy_moves_packed_state_and_trackers(
-    use_v2, layout, previous_column, computed, scheduled, destination_column
+    monkeypatch,
+    use_v2,
+    layout,
+    previous_column,
+    computed,
+    scheduled,
+    destination_column,
 ):
     device = torch.device("cuda")
     conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
@@ -614,7 +620,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         model_state = object.__new__(MambaHybridModelState)
         model_state._align_mode = True
         model_state._mamba_ctx = ctx
-        model_state._get_mamba_group_info = lambda _: ([0], spec)
+        monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
         model_state._mamba_state_idx_gpu = torch.tensor(
             [-1, previous_column], dtype=torch.int32, device=device
         )

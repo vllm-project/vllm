@@ -8,6 +8,7 @@ from inspect import signature
 import pytest
 
 import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -32,13 +33,23 @@ try:
 except ImportError:
     HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = False
 
-if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1" and not (
-    HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE
-):
-    raise RuntimeError(
-        "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
-        "materialization APIs, including active_request_indices"
-    )
+if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
+    if not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE):
+        raise RuntimeError(
+            "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
+            "materialization APIs, including active_request_indices"
+        )
+    if (
+        not current_platform.is_cuda()
+        or current_platform.device_count() < 2
+        or any(
+            current_platform.get_device_total_memory(device) < 40_000_000_000
+            for device in range(2)
+        )
+    ):
+        raise RuntimeError(
+            "Dedicated ReplaySSM CI requires two CUDA GPUs with at least 40 GB each"
+        )
 
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"

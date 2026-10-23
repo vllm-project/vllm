@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 itertools.workspace = true
 prometheus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

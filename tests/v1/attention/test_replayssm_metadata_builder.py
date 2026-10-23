@@ -291,6 +291,8 @@ def test_resumed_request_differs_from_fresh():
     )
     meta = builder.build(0, common)
 
+    assert meta.write_pos_d is not None
+    assert meta.is_flush_d is not None
     assert meta.write_pos_d.tolist()[:2] == [5, 0]
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
 

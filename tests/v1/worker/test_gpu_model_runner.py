@@ -47,6 +47,7 @@ from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 from vllm.v1.core.kv_cache_planning import (
     _estimate_max_model_len_from_groups,
     get_kv_cache_configs,
@@ -56,6 +57,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -343,7 +345,7 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
 
     selected_size = select_common_block_size(
         16,
-        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],  # type: ignore[type-abstract]  # not instantiated
     )
     assert selected_size == 16
 
@@ -394,8 +396,10 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         nonlocal receive_calls
         receive_calls += 1
 
-    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
-        receive_prev_sampled_token_ids
+    monkeypatch.setattr(
+        runner,
+        "_pp_receive_prev_sampled_token_ids_to_input_batch",
+        receive_prev_sampled_token_ids,
     )
     monkeypatch.setattr(
         gpu_model_runner_module,
@@ -446,7 +450,9 @@ def _mock_backend(supported: list, *, exact: bool = False):
             return "MOCK_EXACT" if exact else "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ) -> list[int | MultipleOf]:
             return list(supported)
 
         if exact:
@@ -980,14 +986,13 @@ def test_replayssm_acceptance_survives_reordering_without_cpu_counts(monkeypatch
     runner._replayssm_acceptance_indices = SimpleNamespace(
         np=index_tensor.numpy(), gpu=index_tensor, copy_to_gpu=lambda: None
     )
-    runner.input_batch = SimpleNamespace(
-        req_ids=["a", "b"], req_id_to_index={"a": 0, "b": 1}
-    )
+    input_batch = SimpleNamespace(req_ids=["a", "b"], req_id_to_index={"a": 0, "b": 1})
+    runner.input_batch = input_batch
     runner.cache_config = SimpleNamespace(mamba_cache_mode="align", use_replayssm=True)
     runner.kv_cache_config = Mock()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
-    runner._get_mamba_bufs = Mock()
-    runner._get_mamba_state_copy_funcs = Mock()
+    monkeypatch.setattr(runner, "_get_mamba_bufs", Mock())
+    monkeypatch.setattr(runner, "_get_mamba_state_copy_funcs", Mock())
 
     def postprocess(**kwargs):
         assert kwargs["num_accepted_tokens_cpu_tensor"] is None
@@ -1000,17 +1005,17 @@ def test_replayssm_acceptance_survives_reordering_without_cpu_counts(monkeypatch
     runner._update_states_after_model_execute(
         torch.tensor([[11, 12, 13, -1], [21, 22, -1, -1]]), Mock()
     )
-    runner.input_batch.req_ids = ["b", "new", "a"]
+    input_batch.req_ids = ["b", "new", "a"]
     runner.num_accepted_tokens.gpu.fill_(99)
     runner._restore_replayssm_accepted_tokens()
     assert runner.num_accepted_tokens.gpu.tolist() == [2, 1, 1, 1]
     # Pausing b must retain its scalar even if another batch reuses its row.
     runner._pause_replayssm_accepted_tokens("b")
     runner._replayssm_accepted_tokens[1] = 4
-    runner.input_batch.req_ids = ["a"]
+    input_batch.req_ids = ["a"]
     runner._restore_replayssm_accepted_tokens()
     assert "b" in runner._replayssm_paused_accepted_tokens
-    runner.input_batch.req_ids = ["new", "b"]
+    input_batch.req_ids = ["new", "b"]
     runner._restore_replayssm_accepted_tokens()
     assert runner.num_accepted_tokens.gpu.tolist() == [1, 2, 1, 1]
     assert not runner._replayssm_paused_accepted_tokens
@@ -1433,7 +1438,10 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len = _estimate_max_model_len_from_groups(
-        vllm_config, kv_cache_config.kv_cache_groups, 5 * GiB_bytes
+        get_kv_cache_config_builder(vllm_config),
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+        5 * GiB_bytes,
     )
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
@@ -1510,7 +1518,10 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len = _estimate_max_model_len_from_groups(
-        vllm_config, kv_cache_config.kv_cache_groups, 5 * GiB_bytes
+        get_kv_cache_config_builder(vllm_config),
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+        5 * GiB_bytes,
     )
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
@@ -1756,8 +1767,9 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         logitsprocs=None,
         logitsprocs_need_output_token_ids=False,
     )
-    runner.jit_warmup_registry = Mock()
-    runner.jit_warmup_registry.activate.return_value = nullcontext()
+    jit_warmup_registry = Mock()
+    jit_warmup_registry.activate.return_value = nullcontext()
+    runner.jit_warmup_registry = jit_warmup_registry  # type: ignore[attr-defined]  # set by JitWarmupRegistry.capture
 
     spec = SimpleNamespace(
         block_size=16,

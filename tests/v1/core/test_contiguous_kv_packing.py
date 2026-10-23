@@ -17,14 +17,17 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
+    _pool_bytes_per_block_from_builder,
     get_kv_cache_config_from_groups,
+    get_kv_cache_configs,
     get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -165,11 +168,20 @@ def test_replayssm_low_head_packed_alignment(layout):
         KVCacheGroupSpec(["a0", "a1"], spec),
         KVCacheGroupSpec(["other"], other),
     ]
-    config = get_kv_cache_config_from_groups(
-        _mock_vllm_config(layout.name),
-        groups,
-        4 * _get_kv_cache_bytes_per_block(groups, layout),
+    vllm_config = _mock_vllm_config(layout.name)
+    bytes_per_block = _get_kv_cache_bytes_per_block(groups, layout)
+    assert (
+        _pool_bytes_per_block_from_builder(
+            get_kv_cache_config_builder(vllm_config), vllm_config, groups
+        )
+        == bytes_per_block
     )
+    config = get_kv_cache_config_from_groups(
+        vllm_config,
+        groups,
+        4 * bytes_per_block,
+    )
+    assert config.num_blocks == 4
     pages = allocate_kv_cache(config, torch.device("cpu"), layout)
     states = [_mamba_states(pages[name], spec) for name in ("a0", "a1")]
     for layer_states in states:
@@ -184,6 +196,15 @@ def test_replayssm_low_head_packed_alignment(layout):
         state[1].fill_(index)
     for index, state in enumerate((*states[0], *states[1]), start=1):
         assert torch.all(state[1] == index)
+
+    # The builder must reserve tracker bytes before selecting the block count.
+    # One byte below four complete blocks must admit only three blocks.
+    admission_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    admission_config.cache_config.kv_cache_layout = layout.name
+    admission = get_kv_cache_configs(
+        admission_config, [{"a0": spec}], [4 * (spec.page_size_bytes + 8) - 1]
+    )[0]
+    assert admission.num_blocks == 3
 
 
 def test_generic_mamba_keeps_unaligned_packed_layout():

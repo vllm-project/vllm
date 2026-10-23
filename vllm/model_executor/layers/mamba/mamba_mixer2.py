@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import itertools
 from dataclasses import replace
 
 import torch
@@ -651,12 +652,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
+        final_states = torch.empty(
+            batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
+        )
+        final_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
-        # HAS_INITSTATES as a constexpr, producing separate compiled
-        # binaries. Warm up both code paths so neither triggers
-        # JIT compilation during inference.
-        for use_initial_states in (False, True):
+        # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
+        # HAS_FINAL_STATES, producing separate compiled binaries. Warm up
+        # all code paths so none triggers JIT compilation during inference.
+        for use_initial_states, write_final_states in itertools.product(
+            (False, True), repeat=2
+        ):
             initial_states = (
                 torch.randn(
                     batch,
@@ -689,14 +696,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dt_softplus=True,
                     dt_limit=(0.0, float("inf")),
                     state_dtype=ssm_state_dtype,
+                    final_states_out=final_states if write_final_states else None,
+                    final_state_indices=(
+                        final_state_indices if write_final_states else None
+                    ),
                 )
             except Exception:
                 logger.warning(
                     "Mamba2 SSD kernel warmup failed for layer %s "
-                    "(initial_states=%s). First inference may experience "
-                    "latency spike or OOM due to autotuner.",
+                    "(initial_states=%s, final_states=%s). First inference may "
+                    "experience latency spike or OOM due to autotuner.",
                     self.prefix,
                     use_initial_states,
+                    write_final_states,
                     exc_info=True,
                 )
 
@@ -837,7 +849,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
+            assert state_indices_tensor_p is not None
             has_checkpoints = checkpoint_chunk_idx is not None
+            # Without checkpoints, the SSD scan writes each sequence's final
+            # state straight into its ssm_state slot.
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -860,15 +875,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
+                final_states_out=None if has_checkpoints else ssm_state,
+                final_state_indices=None if has_checkpoints else state_indices_tensor_p,
             )
 
-            assert state_indices_tensor_p is not None
-            final_states = (
-                varlen_states[last_chunk_indices_p]
-                if has_checkpoints
-                else varlen_states
-            )
             if has_checkpoints:
+                # update ssm states
+                # - varlen state is a (num_chunks, nheads, headdim, dstate)
+                #   tensor
+                final_states = varlen_states[last_chunk_indices_p]
                 assert checkpoint_meta is not None
                 assert query_start_loc_p is not None
                 store_prefill_checkpoint(
@@ -881,7 +896,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     query_start_loc_p,
                     state_len=self.conv_kernel_size - 1,
                 )
-            ssm_state[state_indices_tensor_p] = final_states
+                ssm_state[state_indices_tensor_p] = final_states
 
         # Process decode requests
         if has_decode:

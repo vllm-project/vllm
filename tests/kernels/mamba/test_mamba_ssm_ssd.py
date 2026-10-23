@@ -6,6 +6,10 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
+    _chunk_scan_fwd,
+    _chunk_scan_fwd_kernel,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -263,6 +267,54 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
         atol=atol,
         rtol=rtol,
     )
+
+
+def test_direct_final_states_preserve_padded_cache_pages():
+    """Direct writes preserve the ring bytes and unrelated cached states."""
+    heads, head_dim, chunk_size = 4, 8, 32
+    inputs = generate_random_inputs(1, 98, heads, head_dim, torch.float32)
+    A, dt, x, B, C = (t.squeeze(0) if t.ndim > 1 else t for t in inputs)
+    cu_seqlens = torch.tensor([0, 67, 98], dtype=torch.int32, device=DEVICE)
+    cu_chunks, last_chunks, seq_idx = compute_varlen_chunk_metadata(
+        cu_seqlens, chunk_size
+    )
+    initial_states = torch.randn(2, heads, head_dim, head_dim, device=DEVICE)
+    common = dict(
+        cu_seqlens=cu_seqlens,
+        cu_chunk_seqlens=cu_chunks,
+        last_chunk_indices=last_chunks,
+        seq_idx=seq_idx,
+        initial_states=initial_states,
+        state_dtype=torch.float16,
+    )
+    expected_output = torch.empty_like(x)
+    expected_states = mamba_chunk_scan_combined_varlen(
+        x, dt, A, B, C, chunk_size, out=expected_output, **common
+    )
+    state_size = heads * head_dim * head_dim
+    pages = torch.full((5, state_size + 16), 23.0, dtype=torch.float16, device=DEVICE)
+    states = pages[:, :state_size].view(5, heads, head_dim, head_dim)
+    slots = torch.tensor([3, 99, 1, 99], dtype=torch.int32, device=DEVICE)[::2]
+    expected_pages = pages.clone()
+    expected_pages[:, :state_size].view_as(states)[slots] = expected_states
+
+    output = torch.empty_like(x)
+    result = mamba_chunk_scan_combined_varlen(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        out=output,
+        final_states_out=states,
+        final_state_indices=slots,
+        **common,
+    )
+
+    assert result is None
+    torch.testing.assert_close(output, expected_output)
+    torch.testing.assert_close(pages, expected_pages)
 
 
 @pytest.mark.parametrize("itype", [torch.float32])
@@ -578,3 +630,46 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+def test_chunk_scan_fwd_every_config_matches(monkeypatch):
+    """The autotuner picks a config by speed only, so every config in the list
+    must give the same finite output. On sm90, configs that pipeline a wgmma
+    with `cb` in registers wrote NaN into whole rows (#61603)."""
+    from triton.runtime.errors import OutOfResources
+
+    set_random_seed(0)
+    nheads, headdim, ngroups, dstate, chunk_size = 64, 64, 8, 128, 128
+    cu_chunk_seqlens = torch.tensor([0, 128, 181], dtype=torch.int32, device=DEVICE)
+    seqlen, nchunks = 181, 2
+    x = torch.randn(seqlen, nheads, headdim, dtype=torch.bfloat16, device=DEVICE)
+    C = torch.randn(seqlen, ngroups, dstate, dtype=torch.bfloat16, device=DEVICE)
+    cb = torch.randn(nchunks, ngroups, chunk_size, chunk_size, device=DEVICE)
+    dt = torch.rand(nheads, nchunks, chunk_size, device=DEVICE) * 0.1
+    dA_cumsum = -torch.rand(nheads, nchunks, chunk_size, device=DEVICE).cumsum(-1)
+    states = torch.randn(nchunks, nheads, headdim, dstate, device=DEVICE) * 0.1
+    seq_idx = torch.zeros(nchunks, dtype=torch.int32, device=DEVICE)
+    D = torch.randn(nheads, headdim, device=DEVICE) * 0.1
+
+    ref = None
+    for config in list(_chunk_scan_fwd_kernel.configs):
+        monkeypatch.setattr(_chunk_scan_fwd_kernel, "configs", [config])
+        for _ in range(10):
+            out = torch.empty_like(x)
+            try:
+                _chunk_scan_fwd(
+                    cb, x, dt, dA_cumsum, C, states, cu_chunk_seqlens, out, seq_idx, D
+                )
+            except OutOfResources:
+                # The autotuner skips configs that do not fit this device.
+                break
+            assert torch.isfinite(out).all(), f"non-finite output with {config}"
+            if ref is None:
+                ref = out
+            torch.testing.assert_close(
+                out,
+                ref,
+                atol=2e-2,
+                rtol=2e-2,
+                msg=lambda m, config=config: f"{config}: {m}",
+            )

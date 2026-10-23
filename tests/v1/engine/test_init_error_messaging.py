@@ -6,20 +6,21 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_planning import check_enough_kv_cache_memory
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 def test_kv_cache_oom_no_memory():
     config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        model_config=SimpleNamespace(
+            max_model_len=2048, supports_kv_cache_grouping=False
         ),
+        cache_config=CacheConfig(),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
+    config.cache_config.kv_cache_layout = "BLHNC"
 
     spec = {
         "layer_0": FullAttentionSpec(
@@ -36,14 +37,15 @@ def test_kv_cache_oom_no_memory():
 
 def test_kv_cache_oom_insufficient_memory():
     config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        model_config=SimpleNamespace(
+            max_model_len=2048, supports_kv_cache_grouping=False
         ),
+        cache_config=CacheConfig(),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
+    config.cache_config.kv_cache_layout = "BLHNC"
 
     spec = {
         "layer_0": FullAttentionSpec(

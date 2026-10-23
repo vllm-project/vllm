@@ -24,9 +24,13 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
-_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
-    "qwen3_5_text",
-    "qwen3_5_moe_text",
+# Model type -> Blackwell device capability families to auto-disable DeepGemm on.
+_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: dict[str, tuple[int, ...]] = {
+    # Accuracy
+    "qwen3_5_text": (100, 120),
+    "qwen3_5_moe_text": (100, 120),
+    # Latency
+    "kolibri1": (120,),
 }
 
 
@@ -39,17 +43,15 @@ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """Check if DeepGemm should be auto-disabled for this model on Blackwell.
 
-    Returns True if the model is known to have accuracy degradation with
-    DeepGemm's E8M0 scale format on Blackwell GPUs (SM100+).
+    Returns True if DeepGemm is known to hurt this model's accuracy or
+    latency on the current Blackwell GPU family.
     """
     if model_type is None:
         return False
-    if not (
-        current_platform.is_device_capability_family(100)
-        or current_platform.is_device_capability_family(120)
-    ):
-        return False
-    return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
+    return any(
+        current_platform.is_device_capability_family(family)
+        for family in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES.get(model_type, ())
+    )
 
 
 class DeepGemmQuantScaleFMT(Enum):
@@ -946,7 +948,7 @@ def fp8_fp4_paged_sparse_mqa_logits(
     Args:
         q: ``(q_values, q_scale)``; q_values is [num_q_tokens, 1, H, D].
         kv_cache: Fused paged cache [num_pages, page_kv, 1, D' + 4] uint8,
-            page stride 512B-aligned.
+            page stride 256B-aligned.
         weights: [num_q_tokens, H] ``torch.bfloat16``.
         metadata: From `get_paged_sparse_mqa_logits_metadata`.
         num_max_sparse_blocks: Candidate blocks per row.
