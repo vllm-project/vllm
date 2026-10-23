@@ -40,10 +40,11 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pp_group, get_tp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -364,6 +365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb = EPLBController(self.parallel_config, self.device)
         # The AuxOutput Connector owns R3 capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
+        self.indexer_capturer: IndexerCapturer | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -407,6 +409,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
+                )
+
+            if self.vllm_config.aux_output_config.enable_return_indexer_topk:
+                self.indexer_capturer = IndexerCapturer(
+                    self.model,
+                    self.vllm_config,
+                    output_rank=get_tp_group().is_first_rank,
                 )
 
             if self.use_aux_hidden_state_outputs:
@@ -819,7 +828,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
                 self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
+                    self.model,
+                    self.vllm_config,
+                    kv_cache_config,
+                    indexer_capturer=self.indexer_capturer,
                 )
 
     def _init_kv_zero_meta(self) -> None:
@@ -2385,6 +2397,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             BreakableCUDAGraphWrapper.clear_all_graphs()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
+        indexer_capturer = getattr(self, "indexer_capturer", None)
+        if indexer_capturer is not None:
+            indexer_capturer.close()
+            self.indexer_capturer = None
         set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None

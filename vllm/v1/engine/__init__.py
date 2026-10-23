@@ -246,6 +246,10 @@ class EngineCoreOutput(
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
 
+    indexer_topk: np.ndarray | None = None
+    indexer_profile: dict[str, Any] | None = None
+    indexer_output_format: str = "raw"
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

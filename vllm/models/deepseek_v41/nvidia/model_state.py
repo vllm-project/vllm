@@ -283,7 +283,7 @@ class DeepseekV41ModelState(DefaultModelState):
                     params.prompt_logprobs is not None
                     or params.prompt_logprob_token_ids is not None
                 )
-            ) or self.vllm_config.aux_output_config.enable_return_routed_experts
+            ) or self.vllm_config.aux_output_config.enabled
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState

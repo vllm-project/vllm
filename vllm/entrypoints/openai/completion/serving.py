@@ -22,6 +22,7 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
     format_token_id_placeholder,
+    indexer_response_fields,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -447,6 +448,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
+                                **indexer_response_fields(output),
                                 prompt_token_ids=prompt_token_ids_to_return,
                                 token_ids=(
                                     as_list(output.token_ids)
@@ -642,6 +644,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    **indexer_response_fields(output),
                     weight_versions=(
                         output.weight_versions
                         if request.return_weight_versions

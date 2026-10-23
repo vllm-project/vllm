@@ -730,7 +730,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    monkeypatch.setattr(aux_output_worker, "AuxOutputBuffer", Mock())
 
     config = SimpleNamespace(
         aux_output_config=SimpleNamespace(max_bytes=None),

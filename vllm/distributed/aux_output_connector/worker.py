@@ -13,30 +13,39 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
 )
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
+from vllm.distributed.aux_output_connector.memory import (
+    get_available_host_memory,
+    validate_shm_budget,
 )
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -60,11 +69,14 @@ class PendingAuxOutput:
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     # GPU snapshot taken on the main stream.
-    routed_experts_gpu: torch.Tensor
+    routed_experts_gpu: torch.Tensor | None
     # Filled by enqueue_cpu_copy on the output copy stream.
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
+    indexer_gpu: torch.Tensor | None = None
+    indexer: np.ndarray | None = None
+    indexer_snapshot_slot: int | None = None
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -72,9 +84,16 @@ class PendingAuxOutput:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled
         self.num_rejected = num_rejected
-        self.routed_experts = self.routed_experts_gpu.to(
-            "cpu", non_blocking=True
-        ).numpy()
+
+        def copy_rows(tensor: torch.Tensor) -> np.ndarray:
+            host = torch.empty_like(tensor, device="cpu", pin_memory=tensor.is_cuda)
+            host.copy_(tensor, non_blocking=True)
+            return host.numpy()
+
+        if self.routed_experts_gpu is not None:
+            self.routed_experts = copy_rows(self.routed_experts_gpu)
+        if self.indexer_gpu is not None:
+            self.indexer = copy_rows(self.indexer_gpu)
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
@@ -89,15 +108,38 @@ class AuxOutputWorkerConnector:
         vllm_config: VllmConfig,
         model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
+        indexer_capturer: IndexerCapturer | None = None,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+        self._capturer: RoutedExpertsCapturer | None = None
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            self._capturer = RoutedExpertsCapturer(
+                max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+            )
+            bind_routed_experts_capturer(model, self._capturer)
+        self._indexer = indexer_capturer
+        if (
+            self._indexer is None
+            and vllm_config.aux_output_config.enable_return_indexer_topk
+        ):
+            self._indexer = IndexerCapturer(
+                model,
+                vllm_config,
+                output_rank=get_tp_group().is_first_rank,
+            )
+        self._r3_shape = self._capturer.shape_per_token if self._capturer else ()
+        self._r3_dtype = (
+            np.dtype(self._capturer.output_dtype_name)
+            if self._capturer
+            else np.dtype("uint8")
         )
-        bind_routed_experts_capturer(model, capturer)
-        self._capturer = capturer
+        self._r3_nbytes = (
+            int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
+            if self._capturer
+            else 0
+        )
         self._store: BackgroundBlockObjectStore | None = None
-        self._buffer: RoutedExpertsBuffer | None = None
+        self._buffer: AuxOutputBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -112,21 +154,59 @@ class AuxOutputWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
 
-        shape_per_token = self._capturer.shape_per_token
-        dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
+        shape_per_token: tuple[int, ...]
+        if self._indexer is None:
+            assert self._capturer is not None
+            shape_per_token = self._capturer.shape_per_token
+            dtype: np.dtype[Any] = self._r3_dtype
+        else:
+            shape_per_token = (
+                self._r3_nbytes + self._indexer.profile.fixed_bytes_per_token,
+            )
+            dtype = np.dtype("uint8")
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
-        block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
-        if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+        bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
+        block_nbytes = hash_block_size * bytes_per_token
+        max_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_step_blocks = (
+            max_num_batched_tokens + hash_block_size - 1
+        ) // hash_block_size + max_seqs
+        staging_blocks = self._max_concurrent_batches * max_step_blocks + max_seqs
+        staging_bytes = (
+            staging_blocks * block_nbytes
+            + self._max_concurrent_batches * max_num_batched_tokens * bytes_per_token
+        )
+        if self._indexer is not None:
+            # The combined byte record is assembled after the D2H copy.
+            staging_bytes += max_num_batched_tokens * bytes_per_token
+        logger.info(
+            "AuxOutput payload: R3=%d B/token, indexer=%d B/token; "
+            "scheduler block=%d tokens, SHM object=%d tokens (%d B)",
+            self._r3_nbytes,
+            self._indexer.profile.fixed_bytes_per_token if self._indexer else 0,
+            scheduler_block_size,
+            hash_block_size,
+            block_nbytes,
+        )
+        max_bytes = validate_shm_budget(
+            num_blocks=kv_cache_config.num_blocks,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            bytes_per_token=bytes_per_token,
+            max_bytes=vllm_config.aux_output_config.max_bytes,
+            available_host_bytes=get_available_host_memory(),
+            staging_bytes=staging_bytes,
+            local_output_workers=max(
+                1, vllm_config.parallel_config.data_parallel_size_local
+            ),
+        )
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        self._buffer = RoutedExpertsBuffer(
+        self._buffer = AuxOutputBuffer(
             dtype,
             shape_per_token,
             hash_block_size,
@@ -143,12 +223,19 @@ class AuxOutputWorkerConnector:
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
-            token_starts=input_batch.num_computed_tokens_np,
-            query_start_loc=query_start_loc,
-            routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            token_starts=input_batch.num_computed_tokens_np[: len(request_ids)].copy(),
+            query_start_loc=query_start_loc.copy(),
+            routed_experts_gpu=(
+                self._capturer.snapshot_routing_data(num_rows)
+                if self._capturer
+                else None
+            ),
+            indexer_gpu=snapshot.rows if snapshot else None,
+            indexer_snapshot_slot=snapshot.slot if snapshot else None,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -171,6 +258,11 @@ class AuxOutputWorkerConnector:
             try:
                 outputs = self._commit_output(pending)
             finally:
+                if (
+                    self._indexer is not None
+                    and pending.indexer_snapshot_slot is not None
+                ):
+                    self._indexer.release_snapshot(pending.indexer_snapshot_slot)
                 self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
                     state = self._requests[request_id]
@@ -190,6 +282,17 @@ class AuxOutputWorkerConnector:
         block_size = buffer.block_size
 
         routed_experts = pending.routed_experts
+        if self._indexer is not None:
+            assert pending.indexer is not None
+            parts = []
+            if routed_experts is not None:
+                parts.append(
+                    np.ascontiguousarray(routed_experts)
+                    .view(np.uint8)
+                    .reshape(len(routed_experts), -1)
+                )
+            parts.append(np.ascontiguousarray(pending.indexer).view(np.uint8))
+            routed_experts = np.concatenate(parts, axis=1)
         num_sampled = pending.num_sampled
         num_rejected = pending.num_rejected
         assert (
@@ -252,7 +355,7 @@ class AuxOutputWorkerConnector:
 
             if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = AuxRequestOutput(
+                    outputs[request_id] = self._make_output(
                         emit_start, rows[emit_start - capture_start :]
                     )
                     state.emit_cursor = token_end
@@ -269,7 +372,7 @@ class AuxOutputWorkerConnector:
             )
             if emit_start < stored_end:
                 first_block = emit_start // block_size
-                stored = materialize_routed_experts(
+                stored = materialize_aux_output(
                     store,
                     state.aux_output_keys[first_block : stored_end // block_size],
                     shape_per_token=buffer.shape_per_token,
@@ -283,9 +386,29 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxRequestOutput(emit_start, rows)
+            outputs[request_id] = self._make_output(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
+
+    def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
+        if self._indexer is None:
+            return AuxRequestOutput(token_start=token_start, routed_rows=rows)
+        n = len(rows)
+        routed_rows = None
+        if self._capturer is not None:
+            routed_rows = (
+                rows[:, : self._r3_nbytes]
+                .copy()
+                .view(self._r3_dtype)
+                .reshape(n, *self._r3_shape)
+            )
+        indexer = rows[:, self._r3_nbytes :].copy().view(np.int32)
+        return AuxRequestOutput(
+            token_start=token_start,
+            routed_rows=routed_rows,
+            indexer_rows=indexer,
+            indexer_profile=self._indexer.profile_metadata,
+        )
 
     def _publish_blocks(
         self,
@@ -309,7 +432,7 @@ class AuxOutputWorkerConnector:
             if ready:
                 ready_batches.append((state.aux_output_keys, ready))
         if ready_batches or retain_keys or release_keys:
-            publish_routed_experts(
+            publish_aux_output(
                 store,
                 batches=ready_batches,
                 block_size=buffer.block_size,
@@ -377,7 +500,12 @@ class AuxOutputWorkerConnector:
             retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
-                keys = routed_experts_keys(block_hashes, str(self._generation))
+                namespace = str(self._generation)
+                if self._indexer is not None:
+                    namespace += "/" + self._indexer.profile.profile_id
+                    if self._capturer is not None:
+                        namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
+                keys = aux_output_keys(block_hashes, namespace)
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))
@@ -395,18 +523,26 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
-            if self._store is not None:
-                try:
+            try:
+                if self._store is not None:
                     self._store.close()
-                finally:
-                    self._store = None
+            finally:
+                self._store = None
+                if self._indexer is not None:
+                    self._indexer.close()
+                    self._indexer = None
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module,
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    *,
+    indexer_capturer: IndexerCapturer | None = None,
 ) -> AuxOutputWorkerConnector:
     return AuxOutputWorkerConnector(
         model=model,
         kv_cache_config=kv_cache_config,
         vllm_config=vllm_config,
+        indexer_capturer=indexer_capturer,
     )

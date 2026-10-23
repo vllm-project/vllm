@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -38,13 +38,44 @@ class AuxOutputConnectorMetadata:
 @dataclass
 class AuxRequestOutput:
     token_start: int
-    rows: np.ndarray
+    """Logical token offset of the first row in both payloads."""
+    routed_rows: np.ndarray | None = None
+    """Routed expert IDs per token, or None when disabled."""
+    indexer_rows: np.ndarray | None = None
+    """Raw or encoded indexer selections per token, or None when disabled."""
+    indexer_profile: dict[str, Any] | None = None
+    """Metadata describing indexer sources and decoding, if enabled."""
+
+    def get_num_rows(self) -> int:
+        """Return the common token-axis length of the present artifacts."""
+        row_counts = {
+            len(rows)
+            for rows in (self.routed_rows, self.indexer_rows)
+            if rows is not None
+        }
+        assert row_counts, "auxiliary output has no artifact rows"
+        assert len(row_counts) == 1, "auxiliary output artifact row counts differ"
+        return row_counts.pop()
 
 
 class AuxOutputSchedulerConnector:
     """Build worker metadata without owning auxiliary output payloads or stores."""
 
-    def __init__(self, hash_block_size: int) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        *,
+        enable_routed_experts: bool = True,
+        enable_indexer: bool = False,
+    ) -> None:
+        self._output_fields = tuple(
+            (rows, prompt_start)
+            for enabled, rows, prompt_start in (
+                (enable_routed_experts, "routed_rows", "routed_experts_prompt_start"),
+                (enable_indexer, "indexer_rows", "indexer_topk_prompt_start"),
+            )
+            if enabled
+        )
         self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -68,15 +99,7 @@ class AuxOutputSchedulerConnector:
             )
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
-            assert request.sampling_params is not None
-            # A P/D prefiller may cut the prompt short of the requested start.
-            scheduled_requests[request_id] = max(
-                min(
-                    request.sampling_params.routed_experts_prompt_start,
-                    request.num_prompt_tokens,
-                ),
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
-            )
+            scheduled_requests[request_id] = self._get_request_start(request)
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -102,17 +125,29 @@ class AuxOutputSchedulerConnector:
             finished_requests,
         )
 
+    def _get_request_start(self, request: Request) -> int:
+        assert request.sampling_params is not None
+        prompt_start: int = min(
+            getattr(request.sampling_params, field) for _, field in self._output_fields
+        )
+        # A P/D prefiller may cut the prompt short of the requested start.
+        return max(
+            min(prompt_start, request.num_prompt_tokens),
+            0 if request.num_output_tokens == 0 else request.num_tokens - 1,
+        )
+
     def take_output(
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-    ) -> np.ndarray | None:
-        """Return the accepted R3 rows for one scheduled request."""
+    ) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
+        """Return accepted artifacts with independent prompt-prefix offsets."""
         request_id = request.request_id
         assert output is not None and request_id in output, (
             f"auxiliary output worker output is missing {request_id}"
         )
         request_output = output[request_id]
+        num_rows = request_output.get_num_rows()
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
@@ -120,17 +155,36 @@ class AuxOutputSchedulerConnector:
                 "finished auxiliary output output has no accepted token range: "
                 f"request={request_id}, token_end={token_end}, "
                 f"output_start={request_output.token_start}, "
-                "output_end="
-                f"{request_output.token_start + len(request_output.rows)}"
+                f"output_end={request_output.token_start + num_rows}"
             )
-            return None
-        assert local_end <= len(request_output.rows), (
+            return None, None, None
+        assert local_end <= num_rows, (
             "auxiliary output worker output has an invalid token range: "
             f"request={request_id}, token_end={token_end}, "
             f"output_start={request_output.token_start}, "
-            f"output_end={request_output.token_start + len(request_output.rows)}"
+            f"output_end={request_output.token_start + num_rows}"
         )
-        return request_output.rows[:local_end]
+        assert request.sampling_params is not None
+        accepted: dict[str, np.ndarray] = {}
+        for row_field, prompt_start_field in self._output_fields:
+            rows: np.ndarray | None = getattr(request_output, row_field)
+            assert rows is not None, f"auxiliary output is missing {row_field}"
+            start = max(
+                0,
+                min(
+                    getattr(request.sampling_params, prompt_start_field),
+                    request.num_prompt_tokens,
+                )
+                - request_output.token_start,
+            )
+            accepted[row_field] = rows[start:local_end]
+        indexer_rows = accepted.get("indexer_rows")
+        assert indexer_rows is None or request_output.indexer_profile is not None
+        return (
+            accepted.get("routed_rows"),
+            indexer_rows,
+            request_output.indexer_profile if indexer_rows is not None else None,
+        )
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

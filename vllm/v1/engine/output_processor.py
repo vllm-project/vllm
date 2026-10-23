@@ -237,6 +237,9 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
+        self.indexer_chunks: list[np.ndarray] | None = None
+        self.indexer_profile: dict[str, Any] | None = None
+        self.indexer_output_format = "raw"
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -514,11 +517,31 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        indexer_topk = None
+        indexer_payload = None
+        if finished and self.indexer_chunks:
+            from vllm.distributed.aux_output_connector.profile import (
+                AuxOutputProfile,
+                decode_indexer,
+            )
+
+            rows = np.concatenate(self.indexer_chunks, axis=0)
+            assert self.indexer_profile is not None
+            if self.indexer_output_format == "packed":
+                indexer_payload = rows.tobytes()
+            else:
+                indexer_topk = decode_indexer(
+                    rows, AuxOutputProfile.from_dict(self.indexer_profile)
+                )
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            indexer_topk=indexer_topk,
+            indexer_payload=indexer_payload,
+            indexer_profile=self.indexer_profile if finished else None,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -782,6 +805,19 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if engine_core_output.indexer_topk is not None:
+                if (
+                    req_state.indexer_profile is not None
+                    and req_state.indexer_profile != engine_core_output.indexer_profile
+                ):
+                    raise ValueError("Indexer profile changed during a request")
+                if req_state.indexer_chunks is None:
+                    req_state.indexer_chunks = []
+                req_state.indexer_chunks.append(engine_core_output.indexer_topk)
+                req_state.indexer_profile = engine_core_output.indexer_profile
+                req_state.indexer_output_format = (
+                    engine_core_output.indexer_output_format
+                )
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
@@ -913,6 +949,9 @@ class OutputProcessor:
             )
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
+        if output.indexer_topk is not None:
+            assert req_state.indexer_chunks is not None
+            req_state.indexer_chunks[-1] = output.indexer_topk[:-num_dropped]
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

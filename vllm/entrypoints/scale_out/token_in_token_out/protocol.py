@@ -503,6 +503,15 @@ class GenerateChoiceBase(BaseModel):
     # `None` if (a) the request was aborted before any forward pass,
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -540,6 +549,15 @@ class GenerateStreamChoiceBase(BaseModel):
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None

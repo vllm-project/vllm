@@ -41,10 +41,15 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.aux_output_connector.profile import IndexerSource
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSink,
+    configure_indexer_capture,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -318,6 +323,23 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
                 aux_stream=indexer_aux_stream,
+            )
+
+        self.indexer_capture: IndexerCaptureSink | None = None
+        if (
+            vllm_config.aux_output_config.enable_return_indexer_topk
+            and self.indexer is not None
+        ):
+            configure_indexer_capture(
+                self,
+                vllm_config,
+                IndexerSource(
+                    layer_id,
+                    (self.indexer.topk_tokens,),
+                    "compressed_cache_index",
+                    ratio=self.compress_ratio,
+                    consumer_layer_ids=(layer_id,),
+                ),
             )
 
         self._prepare_and_attn_fn = self._prepare_and_attn
@@ -755,6 +777,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 None,
                 index_weights,
             )
+
+            if self.indexer_capture is not None:
+                assert self.topk_indices_buffer is not None
+                self.indexer_capture.capture(
+                    self.topk_indices_buffer[
+                        : len(hidden_states), : self.indexer_capture.rows.shape[1]
+                    ]
+                )
 
         # MLA attention writes into the pre-allocated `out` buffer
         # (see _alloc_attn_out).

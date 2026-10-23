@@ -359,3 +359,67 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
+
+
+@pytest.mark.parametrize("surface", ["chat", "completion", "tito"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("output_format", ["disabled", "raw", "packed"])
+def test_indexer_wire_extensions_preserve_payload_and_omit_disabled_fields(
+    surface,
+    stream,
+    output_format,
+):
+    import io
+
+    import numpy as np
+    import pybase64 as base64
+
+    from vllm.entrypoints.generate.base.serving import indexer_response_fields
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionResponseChoice,
+        ChatCompletionResponseStreamChoice,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionResponseChoice,
+        CompletionResponseStreamChoice,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateTokensStreamChoice,
+    )
+    from vllm.outputs import CompletionOutput
+
+    rows = np.array([[[3, -1]], [[2, 0]]], dtype=np.int32)
+    output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[1],
+        cumulative_logprob=None,
+        logprobs=None,
+        indexer_topk=rows if output_format == "raw" else None,
+        indexer_payload=rows.tobytes() if output_format == "packed" else None,
+        indexer_profile={"codec_version": 1} if output_format != "disabled" else None,
+    )
+    kwargs = dict(index=0, finish_reason="length", **indexer_response_fields(output))
+    if surface == "chat":
+        if stream:
+            choice = ChatCompletionResponseStreamChoice(delta={}, **kwargs)
+        else:
+            choice = ChatCompletionResponseChoice(
+                message={"role": "assistant", "content": ""}, **kwargs
+            )
+    elif surface == "completion":
+        cls = CompletionResponseStreamChoice if stream else CompletionResponseChoice
+        choice = cls(text="", logprobs=None, **kwargs)
+    else:
+        cls = GenerateTokensStreamChoice if stream else GenerateTokensChoice
+        choice = cls(token_ids=[1], **kwargs)
+    wire = choice.model_dump(mode="json")
+    if output_format == "disabled":
+        assert not {"indexer_topk", "indexer_payload", "indexer_profile"} & wire.keys()
+    elif output_format == "raw":
+        restored = np.load(io.BytesIO(base64.b64decode(wire["indexer_topk"])))
+        np.testing.assert_array_equal(restored, rows)
+        assert "indexer_payload" not in wire
+    else:
+        assert base64.b64decode(wire["indexer_payload"]) == rows.tobytes()
+        assert "indexer_topk" not in wire
