@@ -291,7 +291,9 @@ class CudaGraphManager:
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
-        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        max_decode_tokens = (
+            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
+        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
