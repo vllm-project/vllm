@@ -79,6 +79,7 @@ def get_flash_attn_version(
     requires_softcap: bool = False,
     kv_cache_block_size: int | None = None,
     supports_fa4_hd256: bool = False,
+    fp8_kv_cache: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -158,6 +159,18 @@ def get_flash_attn_version(
                 and vllm_config.model_config.is_diffusion
             ):
                 upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
+            elif (
+                fp8_kv_cache
+                and (
+                    vllm_config is None
+                    or vllm_config.attention_config.flash_attn_version is None
+                )
+                and head_size in (64, 96, 128, 192, 256)
+                and head_size_v in (None, head_size)
+                and not requires_softcap
+                and not envs.VLLM_BATCH_INVARIANT
+            ):
+                upgrade_reason = "FA4 runs FP8 KV cache natively on SM90"
             if upgrade_reason:
                 logger.info_once(
                     "%s: upgrading FlashAttention 3 -> 4",
@@ -302,10 +315,13 @@ def flash_attn_supports_kv_cache_dtype(
         requires_softcap=requires_softcap,
         kv_cache_block_size=kv_cache_block_size,
         supports_fa4_hd256=supports_fa4_hd256,
+        fp8_kv_cache=kv_cache_dtype in ("fp8", "fp8_e4m3"),
     )
     is_sm90 = current_platform.is_device_capability_family(90)
     sm90_fp8_kv_supported = fa_version == 3 or (
-        fa_version == 4 and head_size in (None, 512)
+        fa_version == 4
+        and head_size in (None, 64, 96, 128, 192, 256, 512)
+        and head_size_v in (None, head_size)
     )
     return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)

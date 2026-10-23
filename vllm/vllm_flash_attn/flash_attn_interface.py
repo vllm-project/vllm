@@ -446,8 +446,10 @@ def flash_attn_varlen_func(
         # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
         # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
         # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
+        # With fp8 e4m3 Q, SM90 FA4 runs its native FP8 forward instead.
         fa4_fp8_kv_dequant = (
             k.dtype == torch.float8_e4m3fn
+            and q.dtype != torch.float8_e4m3fn
             and torch.cuda.get_device_capability()[0] == 9
         )
 

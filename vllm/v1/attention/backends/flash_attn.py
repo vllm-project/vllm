@@ -488,8 +488,8 @@ class FlashAttentionBackend(AttentionBackend):
             )
         ):
             return (
-                "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
-                "on SM90, or FA4 on SM100"
+                "FP8 KV cache requires FA3 on SM90, FA4 with head_size 64, 96, "
+                "128, 192, 256 or 512 on SM90, or FA4 on SM100"
             )
         if (
             use_mm_prefix
@@ -700,14 +700,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
         head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
             head_size_v=head_size_v,
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
+            fp8_kv_cache=kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
         )
+        self.aot_schedule = fa_version == 3
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
             self.headdim, head_size_v
         )
@@ -1102,6 +1103,7 @@ class FlashAttentionImpl(AttentionImpl):
             has_sinks=sinks is not None,
             requires_softcap=bool(self.logits_soft_cap),
             supports_fa4_hd256=True,
+            fp8_kv_cache=self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
         )
         self.fa4_hd256 = self.vllm_flash_attn_version == 4 and uses_fa4_hd256_kernel(
             head_size
@@ -1153,6 +1155,7 @@ class FlashAttentionImpl(AttentionImpl):
         uses_sm90_fa4_fp8_kv_dequant = (
             self.vllm_flash_attn_version == 4
             and current_platform.is_device_capability_family(90)
+            and head_size == 512
             and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
         )
         self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
