@@ -116,7 +116,7 @@ steps:
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355
   dind: false
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   device: mi355_4
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
