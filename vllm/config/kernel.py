@@ -296,11 +296,11 @@ class KernelConfig:
     monokernel: bool = False
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
-    in a single launch (DeepSeek-V4.1 on MI355X; Muse Spark on MI355X with
-    tensor parallel size 8 and expert parallelism, for one-request
-    speculative verify steps, with bf16 MoE activations instead of the
-    checkpoint's MXFP4). A deployment that cannot run it is refused at
-    startup."""
+    in a single launch (DeepSeek-V4.1 on MI355X; Muse Spark MXFP4 on MI355X
+    with tensor parallel size 8, expert parallelism and a 7-token DSpark
+    draft, for speculative verify steps of 1-16 requests, with bf16 MoE
+    activations instead of the checkpoint's MXFP4). A deployment that cannot
+    run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
