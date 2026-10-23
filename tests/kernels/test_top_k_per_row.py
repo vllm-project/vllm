@@ -22,6 +22,12 @@ def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
 
+def _has_cooperative_topk() -> bool:
+    return _has_device_capability(
+        90
+    ) and not current_platform.is_device_capability_family(120)
+
+
 def _on_gfx950() -> bool:
     if not current_platform.is_rocm():
         return False
@@ -1515,7 +1521,9 @@ def test_deepseek_topk_backends_no_error_and_reference(
     )
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _has_cooperative_topk(), reason="cooperative_topk requires SM90+ (non-SM12x)"
+)
 @pytest.mark.parametrize("top_k", [512, 2048])
 # 1-4 rows take the 16-CTA cluster on SM100 (8-CTA below), then 8, 4 and 2.
 @pytest.mark.parametrize("num_rows", [1, 4, 8, 33, 64])
@@ -2153,12 +2161,6 @@ def _has_flashinfer_topk() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("flashinfer") is not None
-
-
-def _has_cooperative_topk() -> bool:
-    return _has_device_capability(
-        90
-    ) and not current_platform.is_device_capability_family(120)
 
 
 SPARSE_INDEXER_EXPLICIT_BACKENDS = [
