@@ -88,7 +88,13 @@ def _make_outputs(inputs, num_heads, num_kv_heads):
 
 def _run_impl(inputs, outputs, num_heads, num_kv_heads) -> None:
     prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-        *inputs,
+        inputs[0],
+        inputs[1],
+        inputs[2],
+        inputs[3],
+        inputs[4],
+        inputs[5],
+        inputs[6],
         "layer",
         1.0e-6,
         num_heads,

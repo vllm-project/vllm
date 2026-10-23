@@ -43,7 +43,9 @@ def test_make_prequantized_qkv_requires_all_tensors():
 
     tensors = _make_tensors(2, 4, 1, 8)
     with pytest.raises(ValueError, match="requires query, key, value"):
-        attention_module._make_prequantized_qkv(*tensors[:5], None)
+        attention_module._make_prequantized_qkv(
+            tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], None
+        )
 
 
 @WORKLOADS
