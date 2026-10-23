@@ -56,7 +56,6 @@ disjoint); peer regions double buffered by tag parity.
 """
 
 import math
-import os
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
@@ -80,7 +79,6 @@ from .dev import (
     bf_lo,
     bpermute,
     butterfly,
-    cache_inv,
     fp8x2,
     fresh,
     hw_exp2,
@@ -129,11 +127,10 @@ OK_K = 2048
 QK_SCALE = 5.4730064863875
 TL_POINTS = 32
 # loads of peer-written data (after its system-scope flag): device scope = past the per-XCD L2,
-# served by the memory-side cache, which every write to this memory passes (MK5_XCM=sys: system scope)
-XCM = CM_SYS if os.environ.get("MK5_XCM", "dev") == "sys" else CM_DEV
-# activations re-read by many CTAs: cached loads after an acquire invalidate (MK5_YCM=dev: device scope)
-YCM = 0 if os.environ.get("MK5_YCM", "dev") == "l2" else CM_DEV
-ACM = 0 if os.environ.get("MK5_ACM", "dev") == "l2" else XCM  # stage A's x tiles
+# served by the memory-side cache, which every write to this memory passes
+XCM = CM_DEV
+YCM = CM_DEV  # activations re-read by many CTAs
+ACM = CM_DEV  # stage A's x tiles
 HEALTH_WORDS = 8 + 8 * BLOCKS
 REGION_IDS = {
     "yf": 1,
@@ -455,7 +452,7 @@ def build(key: Build):
     WN = "" if W == 4 else f"_w{W}"  # the TP4 kernel names are unchanged
     BN = (f"_bnd{BND}" if BND else "") + ("_qr1" if QR1 else "")
     name_a = (
-        f"muse_k5a_s{S}_t{int(TL)}_x{key.stop}_c{XCM}_y{YCM}_a{ACM}_i{os.environ.get('MK5_NOINV', '0')}{WN}"
+        f"muse_k5a_s{S}_t{int(TL)}_x{key.stop}_c{XCM}_y{YCM}_a{ACM}_i0{WN}"
         + BN
         + (f"_fa{key.attn}{int(key.attn_olate)}" if key.attn else "")
         + ("_m1" if key.mult1 else "")
@@ -473,6 +470,7 @@ def build(key: Build):
     assert key.kvl in ("", "lbhnc"), key.kvl
     # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
     assert not key.attn or VQK == VKV, key
+
     @traced
     def flush_range(tls, tl, tid, bid, lo, hi):
         if const_expr(TL):  # noqa: SIM102
@@ -711,9 +709,6 @@ def build(key: Build):
                 REGION_IDS["yf"],
             )
         gpu.barrier()
-        if const_expr((YCM == 0) & (os.environ.get("MK5_NOINV", "0") != "1")):
-            if wave == 0:
-                cache_inv(False)
         ybase = scratch + fx.Int64(lay["y"][0])
         # MFMA A operands once (reused by every row tile)
         oa = [
@@ -1022,11 +1017,6 @@ def build(key: Build):
                     cm=CM_SYS,
                 )
         gpu.barrier()
-        if const_expr(ACM == 0):
-            if wave == 0:
-                cache_inv(True)
-                rocdl.s_waitcnt(0)
-            gpu.barrier()
         stamp(TL, tls, tid, 13)
         if const_expr(BND):
             xb = scratch + fx.Int64(lay["xinb"][0])
@@ -3090,9 +3080,7 @@ def build(key: Build):
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         ppo = pp_loads(w_pp, bid, lane, wave)
-        if const_expr(
-            not key.hm
-        ):  # the library-MoE push (not in the HM build)
+        if const_expr(not key.hm):  # the library-MoE push (not in the HM build)
             stage_push(part, pl, tag, tid, bid, rank)
         stamp(TL, tls, tid, 6)
         if bid // CPR == rank:
@@ -3772,54 +3760,10 @@ def build(key: Build):
     return _BUILDS[key]
 
 
-def build_from_env(S=32, **over):
-    kw = dict(
-        S=S,
-        W=over.pop("W", 4),
-        next_rope=over.pop("next_rope", True),
-        qkv_pf=int(os.environ.get("MK_QKV_PF", "3")),
-        timeline=os.environ.get("MK_TIMELINE", "0") == "1",
-        stop=int(os.environ.get("MK5_STOP", "99")),
-        hm=os.environ.get("MK5_HM", "1") == "1",
-    )
-    W_ = kw["W"] if "W" not in over else over["W"]
-    # MK5_BND: the TEP8 c = 4 boundaries (W = 8, S = 32 only; other builds ignore it)
-    # default at W = 8, S = 32: #11 + #1 with the column-group one-hop norms (#20); MK5_BND=2: the reducer-round
-    # version, MK5_BND=0: the token-owner boundaries (shipped)
-    if int(os.environ.get("MK5_BND", "3")) and W_ == 8 and S == 32:
-        kw["bnd"] = int(os.environ.get("MK5_BND", "3"))
-    if (
-        os.environ.get("MK5_QR1", "1") == "1" and W_ == 8 and S == 32
-    ):  # default on (R2 #4, bit-identical)
-        kw["qr1"] = True
-    if (
-        os.environ.get("MK_FUSED_ATTN", "0") == "1" and W_ == 8
-    ):  # the caller passes attn= the layer's type
-        kw["attn_olate"] = (
-            os.environ.get("MK_FA_OLATE", "1") == "1"
-        )  # S4: #10 (weights during the attention) did not help
-    else:
-        over.pop("attn", None)
-    # vLLM flags (default off): MK_VLLM=1 turns on all three; MK_MULT1 / MK_VQK / MK_KVL set them one by one
-    vl = os.environ.get("MK_VLLM", "0") == "1"
-    for name, env, conv in (
-        ("mult1", "MK_MULT1", lambda v: v == "1"),
-        ("vqk", "MK_VQK", lambda v: v == "1"),
-        ("kvl", "MK_KVL", str),
-    ):
-        v = os.environ.get(env)
-        if v is not None:
-            kw[name] = conv(v)
-        elif vl:
-            kw[name] = "lbhnc" if name == "kvl" else True
-    kw.update(over)
-    return Build(**kw)
-
-
 def build_vllm(S=32, W=8, next_rope=True, **over):
     """HA / HB for vLLM main (TEP8, S = 32 / 64 / 96 / 128). No env reads: the shipped TEP8 knobs (qkv_pf 3, hm, at
     S = 32 bnd 3 + qr1, else the token-owner boundaries; no fused attention) plus the vLLM flags (mult1, vqk,
-    kvl = "lbhnc"). The module-level MK5_XCM / MK5_YCM / MK5_ACM / MK5_NOINV env reads stay (defaults = shipped)."""
+    kvl = "lbhnc")."""
     assert W == 8 and S in (32, 64, 96, 128), (S, W)
     kw = dict(
         S=S,

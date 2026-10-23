@@ -46,7 +46,6 @@ Same tag as HA / HB of the layer (epoch * 64 + layer + 1).
 """
 
 import math
-import os
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
@@ -120,9 +119,7 @@ class BuildM:
     timeline: bool = False
     eplb: int = 0  # M7: replica expert slots (mk/eplb.py)
     W: int = 4  # TP = EP group (4 / 8)
-    unr: int = int(
-        os.environ.get("MK5M_UNR", "-1")
-    )  # down task-loop ring (unroll 3, fixed slots; PF_DN 2): 1 on, 0 off, -1 auto (on at W = 8, S != 96)
+    unr: int = -1  # down task-loop ring (unroll 3, fixed slots; PF_DN 2): 1 on, 0 off, -1 auto (on at W = 8, S != 96)
     # vLLM layouts of the MXFP4 experts, read in place (mk/shuffle.py; = mk/k3.py Build.shuffled_w / shuffled_s):
     # w13 / w2 in aiter shuffle_weight((16, 16)), w13s / w2s in aiter e8m0_shuffle. False: the native layouts
     shuffled_w: bool = False
@@ -241,6 +238,7 @@ def build(key: BuildM):
         + ("_shs" if key.shuffled_s else "")
     )
     SHUF_W, SHUF_S = key.shuffled_w, key.shuffled_s
+
     def sel_peer(pl, d):
         p = pl[0]
         for r_ in range_constexpr(1, W):
@@ -953,9 +951,7 @@ def build(key: BuildM):
         it = fx.Int32(0)
         tsplit = fx.min(t1, (v0 + 1) << 8)
         while task < tsplit:
-            nxt = gu_loads(
-                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-            )
+            nxt = gu_loads(w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1)
             gu_compute(
                 q[0],
                 task,
@@ -977,9 +973,7 @@ def build(key: BuildM):
             gpu.barrier()
             load_rows_h(h, rt, 1, mg.h.ptr, tid)
         while task < t1:
-            nxt = gu_loads(
-                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-            )
+            nxt = gu_loads(w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1)
             gu_compute(
                 q[0],
                 task,
