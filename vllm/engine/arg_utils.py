@@ -2639,6 +2639,7 @@ class EngineArgs:
         diffusion_config = self.create_diffusion_config()
         watermark_config = self.create_watermark_config()
 
+        user_specified_max_num_batched_tokens = self.max_num_batched_tokens is not None
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
             model_config,
@@ -2658,6 +2659,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            user_specified_max_num_batched_tokens=user_specified_max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,

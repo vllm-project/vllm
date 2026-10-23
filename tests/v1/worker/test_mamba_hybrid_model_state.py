@@ -38,6 +38,7 @@ HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
@@ -82,6 +83,7 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     """A drafter group can lower cache_config.block_size below the mamba
     block size; the seeded column must still be in mamba blocks."""
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
     state._align_mode = True
     state.rope_state = None
@@ -104,6 +106,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     """
     k = 3
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
@@ -169,6 +172,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
 
 def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
@@ -355,6 +359,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
     num_sampled: int, expected_value: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state.num_accepted_tokens_gpu = torch.full(
         (4,), 9, dtype=torch.int32, device=GPU_DEVICE
     )
@@ -406,6 +411,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
     computed: int, sampled: int, expected_column: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
+    state.supports_mm_inputs = False
     state._align_mode = True
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full(

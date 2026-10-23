@@ -1164,6 +1164,139 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
             pooler_config.use_activation = False
 
 
+class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        overrides = getattr(hf_config, "modeling_overrides", None)
+        served = {
+            "attention": {
+                "full_attention": "block_bidirectional",
+                "linear_attention": "causal",
+            },
+            "readout": "slot_lm",
+        }
+        found = dict(overrides) if isinstance(overrides, dict) else {}
+        found.pop("head_dim", None)
+        n_slots = found.pop("n_slots", 256)
+        if found != served or type(n_slots) is not int or not 1 <= n_slots <= 256:
+            raise ValueError(
+                f"unsupported modeling_overrides {overrides!r}; vLLM serves "
+                f"{served} with 1 to 256 n_slots"
+            )
+        # The slot read needs the fp32 LM head; an explicit head_dtype wins.
+        if getattr(hf_config, "head_dtype", None) is None:
+            hf_config.head_dtype = "float32"
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        prefix_lm_schedulers = tuple(
+            f"vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM{kind}Scheduler"
+            for kind in ("", "Async")
+        )
+        if cache_config.enable_prefix_caching:
+            from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+                _resolve_gdn_prefill_backend,
+            )
+
+            # Only FlashInfer's GDN prefill saves the Mamba states a prompt's
+            # prefix-cache hit resumes from, as the prompt is prefilled whole.
+            _, gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+            if gdn_prefill_backend != "flashinfer":
+                logger.info(
+                    "Disabling prefix caching for %s: the %s GDN prefill "
+                    "backend saves no Mamba prefix-cache states",
+                    model_config.architecture,
+                    gdn_prefill_backend,
+                )
+                cache_config.enable_prefix_caching = False
+        unsupported = {
+            "KV transfer connectors": vllm_config.kv_transfer_config,
+            "--kv-offloading-size": cache_config.kv_offloading_size is not None,
+            "speculative decoding": vllm_config.speculative_config,
+            "context parallelism": (
+                parallel_config.prefill_context_parallel_size > 1
+                or parallel_config.decode_context_parallel_size > 1
+            ),
+            "micro-batching": parallel_config.use_ubatching,
+            "--prefix-match-unit": (
+                cache_config.enable_prefix_caching and cache_config.prefix_match_unit
+            ),
+            # Prefix caching needs PrefixLMScheduler.
+            "--scheduler-cls": (
+                cache_config.enable_prefix_caching
+                and scheduler_config.scheduler_cls not in (None, *prefix_lm_schedulers)
+            ),
+        }
+        if features := [name for name, enabled in unsupported.items() if enabled]:
+            raise ValueError(
+                f"{model_config.architecture} does not support {', '.join(features)}"
+            )
+
+        # Triton attention applies the PrefixLM ranges to every request.
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        elif attention_config.backend != AttentionBackendEnum.TRITON_ATTN:
+            raise ValueError(
+                f"{model_config.architecture} needs the TRITON_ATTN attention "
+                f"backend, not {attention_config.backend.name}"
+            )
+        per_kind = attention_config.backend_per_kind.get("full_attention")
+        if per_kind is not None and per_kind != AttentionBackendEnum.TRITON_ATTN:
+            raise ValueError(
+                f"{model_config.architecture} needs the TRITON_ATTN attention "
+                f"backend for full attention, not {per_kind.name}"
+            )
+
+        # The rest of each prompt after its prefix-cache hit is prefilled in one
+        # step, so a step never ends inside a PrefixLM block. Without prefix
+        # caching that is the scheduler's rule when chunked prefill is off. With
+        # it, PrefixLMScheduler applies the rule to PrefixLM requests, and the
+        # Mamba prefix cache needs chunked prefill.
+        scheduler_config.enable_chunked_prefill = cache_config.enable_prefix_caching
+        if cache_config.enable_prefix_caching:
+            scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
+        scheduler_config.long_prefill_token_threshold = 0
+        # A prompt that does not fit beside the running requests' decode tokens
+        # waits for them to finish, and holds the requests queued behind it.
+        # Unless the user set the budget, leave room for both. The scheduler
+        # takes this budget unless --max-num-scheduled-tokens is set.
+        headroom = model_config.max_model_len + scheduler_config.max_num_seqs
+        if not scheduler_config.user_specified_max_num_batched_tokens:
+            scheduler_config.max_num_batched_tokens = max(
+                scheduler_config.max_num_batched_tokens, headroom
+            )
+        budgets = {
+            "--max-num-batched-tokens": scheduler_config.max_num_batched_tokens,
+            "--max-num-scheduled-tokens": scheduler_config.max_num_scheduled_tokens,
+        }
+        for flag, budget in budgets.items():
+            if budget is not None and budget < model_config.max_model_len:
+                raise ValueError(
+                    f"{model_config.architecture} prefills each prompt in one "
+                    f"step, so {flag} ({budget}) must be at least --max-model-len "
+                    f"({model_config.max_model_len})"
+                )
+        step_budget = min(b for b in budgets.values() if b is not None)
+        if step_budget < headroom:
+            logger.warning(
+                "%s prefills each prompt in one step. With a step budget of %d "
+                "tokens, below --max-model-len plus --max-num-seqs (%d), a long "
+                "prompt can wait for running requests to finish.",
+                model_config.architecture,
+                step_budget,
+                headroom,
+            )
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1258,6 +1391,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,

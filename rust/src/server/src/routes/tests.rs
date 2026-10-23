@@ -3389,7 +3389,7 @@ async fn selected_logprobs_invalid_requests_return_client_errors() {
         };
         for invalid in [
             json!({"logprob_token_ids": [-1]}),
-            json!({"logprob_token_ids": vec![1; 129]}),
+            json!({"logprob_token_ids": vec![1; 257]}),
             if chat_route {
                 json!({"logprob_token_ids": [1], "logprobs": false})
             } else {
