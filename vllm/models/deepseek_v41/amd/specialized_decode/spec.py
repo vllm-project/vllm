@@ -164,7 +164,13 @@ def _refuse_model(model) -> list[str]:
 
 def _refuse_caches(vllm_config, decode: "LayerLaunches", caches) -> list[str]:
     """Every reason the kernels cannot read these caches: they index each as
-    [blocks, block, RECORD] bytes."""
+    [blocks, block, RECORD] bytes, so a block's stride has to span every record
+    the block holds, or the next block starts inside it.
+
+    ``LayerLaunches.block_records`` holds those counts as the KV cache spec
+    asks for them, which the runner can only scale up, so this is the floor;
+    ``_record_view`` settles each step against the block size it is given.
+    """
     reasons = []
     for name, cache in caches.items():
         if not isinstance(cache, torch.Tensor):
@@ -174,8 +180,10 @@ def _refuse_caches(vllm_config, decode: "LayerLaunches", caches) -> list[str]:
             reasons.append(f"{name}: {cache.dtype} records, needs bytes")
         if cache.dim() < 2:
             reasons.append(f"{name}: {cache.dim()} dims, needs [blocks, block, bytes]")
-        elif cache.stride(0) < RECORD:
-            reasons.append(f"{name}: block stride {cache.stride(0)} under {RECORD}")
+            continue
+        need = decode.block_records.get(name, 1) * RECORD
+        if cache.stride(0) < need:
+            reasons.append(f"{name}: block stride {cache.stride(0)} under {need}")
     return reasons
 
 

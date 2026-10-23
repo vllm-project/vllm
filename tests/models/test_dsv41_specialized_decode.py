@@ -22,6 +22,7 @@ SPECS = (sd.DECODE_SPEC,)
 LAYERS = 6
 HIDDEN = 16
 BLOCKS = 256
+BLOCK = 32  # KV records a cache block holds
 
 
 class _StubRunner:
@@ -125,7 +126,9 @@ def _attn(index: int, **overrides) -> Any:
         compress_ratio=1,
         kv_mxfp8=False,
         kv_cache_dtype="fp8_ds_mla",
-        swa_cache_layer=SimpleNamespace(prefix=f"layers.{index}.swa", kv_cache=None),
+        swa_cache_layer=SimpleNamespace(
+            prefix=f"layers.{index}.swa", kv_cache=None, block_size=BLOCK
+        ),
         compressed_cache_prefix=f"layers.{index}.comp",
         topk_indices_buffer=torch.zeros(64, 8, dtype=torch.int32),
         fused_wqa_wkv=_proj(),
@@ -199,13 +202,14 @@ class _Model(torch.nn.Module):
         return hidden
 
 
-def make_cache(blocks: int = 4, block: int = 32) -> torch.Tensor:
+def make_cache(blocks: int = 4, block: int = BLOCK) -> torch.Tensor:
     return _bytes(blocks, block * sd.RECORD)
 
 
 def make_config(**overrides) -> Any:
     config = SimpleNamespace(
         kernel_config=SimpleNamespace(specialized_decode="monokernel"),
+        cache_config=SimpleNamespace(block_size=BLOCK),
         model_config=SimpleNamespace(
             enable_sleep_mode=False,
             hf_config=SimpleNamespace(
@@ -254,7 +258,7 @@ def _swa(**overrides) -> Any:
         decode_swa_lens=torch.zeros(8, dtype=torch.int32),
         token_to_req_indices=torch.zeros(8, dtype=torch.int32),
         slot_mapping=torch.zeros(8, dtype=torch.int64),
-        block_size=32,
+        block_size=BLOCK,
     )
     return SimpleNamespace(**(fields | overrides))
 
@@ -264,7 +268,7 @@ def _metadata(model, **overrides) -> dict:
     for layer in model.layers:
         meta[layer.attn.swa_cache_layer.prefix] = _swa(**overrides)
         meta[layer.attn.compressed_cache_prefix] = SimpleNamespace(
-            block_size=32, block_table=torch.zeros(8, 4, dtype=torch.int32)
+            block_size=BLOCK, block_table=torch.zeros(8, 4, dtype=torch.int32)
         )
     return meta
 
@@ -507,6 +511,46 @@ def test_other_moe_backend_refuses(monkeypatch):
     _gpu(monkeypatch)
     with pytest.raises(DecodeUnsupported, match="AITER_MXFP4_BF16"):
         SpecializedDecode(model, config, select_decode_spec(config, SPECS))
+
+
+def test_cache_whose_blocks_overlap_refuses(monkeypatch):
+    """A cache whose block stride covers one record but not a whole block puts
+    every block after the first inside its predecessor. Checking the stride
+    against RECORD alone passes it and the kernels then read the wrong KV."""
+    decode, _ = _build(monkeypatch)
+    for name in decode.kernel.cache_layers:
+        narrow = _bytes(4, sd.RECORD)
+        reasons = decode.spec.refuse_caches(
+            decode.vllm_config, decode.kernel, {name: narrow}
+        )
+        assert reasons == [
+            f"{name}: block stride {sd.RECORD} under {BLOCK * sd.RECORD}"
+        ]
+
+
+def test_compressed_cache_blocks_hold_a_record_a_ratio_of_tokens(monkeypatch):
+    """A compressed cache keeps one record per ``compress_ratio`` tokens, so
+    its blocks are that much shorter than the SWA cache's."""
+    decode, _ = _build(monkeypatch, compress_ratio=2)
+    plan = _plan(decode, 1)
+    assert decode.kernel.block_records[plan.comp_key] == BLOCK // 2
+    assert decode.kernel.block_records[plan.swa_key] == BLOCK
+    assert not decode.spec.refuse_caches(
+        decode.vllm_config,
+        decode.kernel,
+        {plan.comp_key: make_cache(block=BLOCK // 2)},
+    )
+
+
+def test_record_view_refuses_blocks_wider_than_the_stride():
+    """``refuse_caches`` only has the spec's block size; the step brings its
+    own, so the view settles it there."""
+    from vllm.models.deepseek_v41.amd.specialized_decode.runtime import decode as rt
+
+    kv = make_cache(block=BLOCK)
+    assert rt._record_view(kv, BLOCK).shape == (4, BLOCK, sd.RECORD)
+    with pytest.raises(AssertionError):
+        rt._record_view(kv, BLOCK * 2)
 
 
 def test_off_without_the_flag(monkeypatch):

@@ -36,8 +36,14 @@ logger = init_logger(__name__)
 
 def _record_view(kv: torch.Tensor, block: int) -> torch.Tensor:
     """A layer's fp8_ds_mla cache as [blocks, block, RECORD] bytes (a block's
-    data rows, then its scale words: the kernels index both from it)."""
+    data rows, then its scale words: the kernels index both from it).
+
+    A block's stride has to span every record in it, or the next block starts
+    inside this one. ``_refuse_caches`` screens this at startup from the KV
+    cache spec; here the step's own block size settles it.
+    """
     kv = kv if kv.dtype == torch.uint8 else kv.view(torch.uint8)
+    assert kv.stride(0) >= block * RECORD, (tuple(kv.shape), kv.stride(), block)
     return torch.as_strided(kv, (kv.shape[0], block, RECORD), (kv.stride(0), RECORD, 1))
 
 
@@ -138,8 +144,10 @@ class LayerLaunches:
         self.swa_keys: list[str] = []
         self.comp_keys: list[str] = []
         self.plans: dict[int, LayerPlan] = {}
+        self.block_records: dict[str, int] = {}
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        block_size = vllm_config.cache_config.block_size
         for idx in range(self.embed_layer, self.layer_end):
             layer = model.layers[idx]
             plan = self._plan_layer(layer, tp_size, first=idx == self.embed_layer)
@@ -148,12 +156,15 @@ class LayerLaunches:
             self.plans[layer.attn.layer_id] = plan
             if plan.ffn_only:
                 continue
-            for key, keys in (
-                (plan.swa_key, self.swa_keys),
-                (plan.comp_key, self.comp_keys),
+            for key, keys, records in (
+                (plan.swa_key, self.swa_keys, layer.attn.swa_cache_layer.block_size),
+                (plan.comp_key, self.comp_keys, block_size // (plan.ratio or 1)),
             ):
-                if key is not None and key not in keys:
+                if key is None:
+                    continue
+                if key not in keys:
                     keys.append(key)
+                self.block_records[key] = max(self.block_records.get(key, 0), records)
         self.cache_layers = tuple(sorted(set(self.swa_keys) | set(self.comp_keys)))
 
     def _plan_layer(self, layer, tp_size: int, first: bool) -> LayerPlan | None:
