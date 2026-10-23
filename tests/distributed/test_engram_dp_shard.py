@@ -578,7 +578,11 @@ def _check_dummy_hash_model_forward(
 ):
     """A metadata-less replica joins DP sharding but skips a shared lookup."""
     from vllm.models.deepseek_v41.common.engram import NgramHashState
-    from vllm.models.deepseek_v41.nvidia import model as model_ops
+
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd import model as model_ops
+    else:
+        from vllm.models.deepseek_v41.nvidia import model as model_ops
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     if dp_shared_memory and dp_rank != 1:
@@ -610,13 +614,16 @@ def _check_dummy_hash_model_forward(
                 if dp_rank == 1:
                     assert torch.all(hashes == engram_ops.DEAD_ID)
                 output = engram.embed(hashes[:, 0])
-            # Trailing None is previous_aux; this stub captures no aux states.
-            return output, hidden, hidden, hidden, hidden, None
+            # Trailing None is the NVIDIA layer's previous_aux; this stub
+            # captures no aux states.
+            outputs = (output, hidden, hidden, hidden, hidden, None)
+            return outputs[:5] if current_platform.is_rocm() else outputs
 
     model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
     torch.nn.Module.__init__(model)
     model.parallel_config = vllm_config.parallel_config
     model.use_native_mega_moe = False
+    model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
     model.engram_batch = None
@@ -629,6 +636,7 @@ def _check_dummy_hash_model_forward(
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
     model.aux_hidden_state_layers = ()
+    model.mhc_post = lambda hidden, *args: hidden
     metadata = (
         None
         if dp_rank == 1
@@ -647,7 +655,9 @@ def _check_dummy_hash_model_forward(
                 is_last_rank=False,
             ),
         )
-        patch.setattr(model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden)
+        patch.setattr(
+            model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden, raising=False
+        )
         with set_forward_context(
             metadata,
             vllm_config,

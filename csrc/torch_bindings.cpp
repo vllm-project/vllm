@@ -501,6 +501,27 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float eps) -> (Tensor, Tensor)");
 #endif
 
+#ifndef USE_ROCM
+  ops.def(
+      "fused_qknorm_rope_cache("
+      "Tensor! q_out, Tensor! k_out, Tensor! v_out, Tensor qkv, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos, Tensor sin, "
+      "Tensor positions, Tensor slot_mapping, Tensor! k_cache, "
+      "Tensor! v_cache, int head_dim, int num_q_heads, int num_kv_heads, "
+      "int rotary_pairs, float epsilon, float norm_weight_bias, "
+      "str kv_cache_dtype=\"auto\", Tensor? k_scale=None, Tensor? "
+      "v_scale=None) -> ()");
+#endif
+
+  ops.def(
+      "fused_muse_spark_qknorm_rope_kv_insert("
+      "Tensor! qkv, Tensor positions, int num_heads, int num_kv_heads, "
+      "int head_dim, float eps, Tensor? cos_sin_cache, int rotary_dim, "
+      "Tensor? slot_mapping, Tensor!? kv_cache, int block_size, "
+      "str kv_cache_dtype, Tensor? k_scale=None, Tensor? v_scale=None, "
+      "Tensor!? q_fp8_out=None, Tensor? q_scale=None) "
+      "-> ()");
+
   // Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE + KV-insert.
   ops.def(
       "fused_minimax_m3_qknorm_rope_kv_insert("
@@ -556,6 +577,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_BEAM_KERNELS
+  // Beam's MNNVL all-reduce fused with its norm-residual-norm boundary.
+  ops.def(
+      "beam_allreduce_norm(Tensor input, Tensor residual, "
+      "Tensor? post_weight, Tensor? next_weight, Tensor! hidden, "
+      "Tensor!? normalized, int buffer_ptrs, Tensor! flags, "
+      "int multicast_ptr, int local_ptr, int world, int rank, "
+      "float post_eps, float next_eps, float x_scale, float r_scale, "
+      "bool post_norm, bool next_norm, bool scaled, bool one_shot, "
+      "bool small_batch, Tensor? experts, Tensor? expert_weights, "
+      "Tensor? permutation, float routed_scale) -> ()");
+  ops.def(
+      "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
+      "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -597,6 +634,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+
+  ops.def(
+      "muse_spark_mul_tanh_soft_cap(Tensor! out, Tensor input, "
+      "float multiplier, float soft_cap_temp) -> ()");
 
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
@@ -828,7 +869,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_ds_mla_insert));
 #ifndef USE_ROCM
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
+  ops.impl("fused_qknorm_rope_cache",
+           TORCH_BOX(&vllm::fused_qknorm_rope_cache));
 #endif
+  ops.impl("fused_muse_spark_qknorm_rope_kv_insert",
+           TORCH_BOX(&fused_muse_spark_qknorm_rope_kv_insert));
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
@@ -843,6 +888,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
   ops.impl("fused_kda_prologue", TORCH_BOX(&fused_kda_prologue));
   ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
+#endif
+
+#ifdef VLLM_ENABLE_BEAM_KERNELS
+  ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
+  ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -864,6 +914,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
+  ops.impl("muse_spark_mul_tanh_soft_cap",
+           TORCH_BOX(&muse_spark_mul_tanh_soft_cap));
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));

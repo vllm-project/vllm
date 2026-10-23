@@ -37,6 +37,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 import ctypes
 import mmap
 import os
+import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
@@ -914,6 +915,8 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
 
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+    if sys.platform != "linux":
+        return None
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         mapping.madvise(mmap.MADV_HUGEPAGE)
@@ -1114,7 +1117,8 @@ class ParallelEngramEmbedding(nn.Module):
                 ),
                 torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
             )
-        if self.use_thp:
+        # pin_memory rounds up to a power of two. ROCm pins huge pages either way.
+        if self.use_thp or current_platform.is_rocm():
             weight_bytes = self.part_num_embeddings * self.dim
             packed = _allocate_huge_page_storage(
                 weight_bytes + weight_bytes // self.block_size
@@ -1475,6 +1479,9 @@ class EngramBatch(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        # Same allocator as the send buffer: NCCL hangs this all-to-all when its
+        # buffers mix the cumem pool and the caching allocator.
+        self.exchanged_rows = torch.empty_like(self.packed_rows)
         width = table.n_hash_cols * table.dim
         self.fp8_values = torch.empty(
             len(layers), max_tokens, width, dtype=torch.uint8, device=device
@@ -1542,7 +1549,7 @@ class EngramBatch(nn.Module):
                 )
             group = get_engram_dp_group()
             assert group is not None
-            sent, rows = rows, torch.empty_like(rows)
+            sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
             torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
