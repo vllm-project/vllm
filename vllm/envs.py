@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
+    VLLM_ROCM_MUSE_ROUTE_NATIVE_MOE: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1274,6 +1275,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
+    # Muse Spark MXFP4 on ROCm: run the AITER experts on the native top-k
+    # routes (one input row per token) instead of on the input repeated top_k
+    # times, for the batch sizes whose AITER kernels support it. Default on;
+    # 0 keeps every batch size on the repeated input.
+    "VLLM_ROCM_MUSE_ROUTE_NATIVE_MOE": lambda: (
+        os.getenv("VLLM_ROCM_MUSE_ROUTE_NATIVE_MOE", "True").lower() in ("true", "1")
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)

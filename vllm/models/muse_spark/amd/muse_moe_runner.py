@@ -56,6 +56,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
+from vllm.models.muse_spark.amd.ops.route_native_moe import (
+    route_native_fused_moe,
+    supports_route_native,
+)
 from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNorm
 from vllm.models.muse_spark.common.moe import (
     MuseSpark1xRouter,
@@ -69,6 +73,9 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
 _TOKEN_SHARDED_MIN_TOKENS = 256
+# Under TP, batches up to this size keep the repeated input: with 256 experts
+# the extra sorting and quantization cost more than the smaller input saves.
+_ROUTE_NATIVE_TP_MIN_TOKENS = 65
 
 
 def _validate_tp_post_norm_deployment(
@@ -412,7 +419,12 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
 
 
 class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
-    """AITER experts that return one unweighted output per selected route."""
+    """AITER experts that return one unweighted output per selected route.
+
+    Batch sizes for which :meth:`uses_route_native` holds take one input row
+    per token and run on the native ``[T, top_k]`` routes; the others take the
+    input repeated ``top_k`` times, with one top-1 route per row.
+    """
 
     def __init__(
         self,
@@ -427,6 +439,49 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
+        self._weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._expert_map: torch.Tensor | None = None
+        self._route_native_cache: dict[int, bool] = {}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        moe = self.moe_config
+        padded = (
+            moe.hidden_dim != moe.hidden_dim_unpadded
+            or moe.intermediate_size_per_partition
+            != moe.intermediate_size_per_partition_unpadded
+            or bool(moe.intermediate_pad)
+        )
+        if (
+            not envs.VLLM_ROCM_MUSE_ROUTE_NATIVE_MOE
+            or padded
+            or moe.activation != MoEActivation.SILU
+            or moe.in_dtype != torch.bfloat16
+        ):
+            return
+        self._weights = (layer.w13_weight, layer.w2_weight)
+        if self.moe_config.moe_parallel_config.use_ep:
+            # The canonical -1/local-slot map; apply() receives AITER's mask.
+            self._expert_map = layer._expert_map
+
+    def uses_route_native(self, num_tokens: int) -> bool:
+        """Whether a batch of ``num_tokens`` runs on the native routes, so the
+        pre-expert norm writes one row per token instead of one per route."""
+        if self._weights is None or num_tokens == 0:
+            return False
+        cached = self._route_native_cache.get(num_tokens)
+        if cached is None:
+            use_ep = self._expert_map is not None
+            cached = (
+                use_ep or num_tokens >= _ROUTE_NATIVE_TP_MIN_TOKENS
+            ) and supports_route_native(
+                num_tokens,
+                self.moe_config.experts_per_token,
+                *self._weights,
+                is_ep=use_ep,
+            )
+            self._route_native_cache[num_tokens] = cached
+        return cached
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
@@ -495,6 +550,26 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
                 f"{tuple(output.shape)}, expected {expected_output_shape}."
             )
 
+        if (
+            a1q_scale is None
+            and expert_tokens_meta is None
+            and self.uses_route_native(num_tokens)
+        ):
+            route_native_fused_moe(
+                hidden_states.contiguous(),
+                w1,
+                w2,
+                topk_ids.to(torch.int32),
+                self._unit_weights(num_tokens, top_k, topk_ids.device),
+                self.quant_config.w1_scale,
+                self.quant_config.w2_scale,
+                output,
+                expert_mask=expert_map,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
+            self._park_route_output(output, self._expert_map)
+            return
+
         expanded_hidden_states = take_expanded(hidden_states, top_k)
         if expanded_hidden_states is None:
             expanded_hidden_states = (
@@ -548,6 +623,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             quant_config.post_expert_norm_fn,
             pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
             take_route_output=self._take_route_output,
+            take_route_expert_map=self._take_route_expert_map,
         )
 
 
@@ -618,6 +694,13 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 f"{self.mxfp4_backend.value}."
             )
         self.experts_cls = MuseSparkAiterExperts
+
+    def uses_route_native(self, num_tokens: int) -> bool:
+        """See :meth:`MuseSparkAiterExperts.uses_route_native`."""
+        experts = getattr(self.moe_kernel, "fused_experts", None)
+        return isinstance(experts, MuseSparkAiterExperts) and (
+            experts.uses_route_native(num_tokens)
+        )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
