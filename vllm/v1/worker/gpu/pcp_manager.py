@@ -25,6 +25,18 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class PCPBatchMetadata:
+    """Per-step metadata of a PCP rank-local batch."""
+
+    global_num_tokens: int
+    # [num_reqs] each row's request's global query len and seq_lens upper bound.
+    global_query_lens: np.ndarray
+    global_seq_lens: np.ndarray
+    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -425,45 +437,6 @@ class PCPManager:
             for rank in range(self.pcp_world_size)
         )
 
-    def get_trailing_rows(
-        self, input_batch: InputBatch, num_kept_tokens: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, int] | None:
-        """Keep each request's last ``num_kept_tokens[req_state]`` query rows.
-
-        Returns this rank's kept rows and first kept position (0 if untrimmed)
-        per local request, and the largest rank's kept rows; None for batches
-        not partitioned here.
-        """
-        if input_batch is not self._local_batch:
-            return None
-        batch = self.global_batch
-        query_lens = batch.num_scheduled_tokens[: batch.num_reqs]
-        idx_mapping = batch.idx_mapping_np[: batch.num_reqs]
-        keep = np.minimum(num_kept_tokens[idx_mapping], query_lens)
-        first_kept = np.zeros_like(num_kept_tokens)
-        first_kept[idx_mapping] = np.where(
-            keep < query_lens,
-            batch.seq_lens_cpu_upper_bound[: batch.num_reqs].numpy() - keep,
-            0,
-        )
-        num_reqs = input_batch.num_reqs
-        local_first_kept = first_kept[input_batch.idx_mapping_np[:num_reqs]]
-        kept_lens = np.clip(
-            input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy() - local_first_kept,
-            0,
-            np.diff(input_batch.query_start_loc_np[: num_reqs + 1]),
-        )
-        num_padded = max(
-            sum(
-                max(0, offset + length - max(offset, int(query_lens[i] - keep[i])))
-                for i, offset, length in self._iter_rank_chunks(
-                    rank, query_lens, batch.is_prefilling_np
-                )
-            )
-            for rank in range(self.pcp_world_size)
-        )
-        return kept_lens, local_first_kept, num_padded
-
     @staticmethod
     def _resolve_num_reqs_after_padding(
         input_batch: InputBatch,
@@ -729,7 +702,16 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
-            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            pcp=PCPBatchMetadata(
+                global_num_tokens=global_batch.num_tokens,
+                global_query_lens=num_scheduled_tokens[
+                    local_to_global_batch_req_idx_np
+                ],
+                global_seq_lens=global_batch.seq_lens_cpu_upper_bound.numpy()[
+                    local_to_global_batch_req_idx_np
+                ],
+                dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            ),
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,

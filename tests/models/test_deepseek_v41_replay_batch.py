@@ -253,7 +253,7 @@ def test_pcp_replay_keeps_global_tail_after_prefix_hit(state, monkeypatch):
                 rank_in_group=rank, all_gather=all_gather
             ),
         )
-        state.pcp_manager = PCPManager(
+        manager = PCPManager(
             pcp_world_size=2,
             pcp_rank=rank,
             device=DEVICE,
@@ -261,14 +261,13 @@ def test_pcp_replay_keeps_global_tail_after_prefix_hit(state, monkeypatch):
             max_num_reqs=16,
             max_num_tokens=1024,
         )
-        batch = state.pcp_manager.partition_batch(
+        batch = manager.partition_batch(
             global_batch, BatchExecutionDescriptor(CUDAGraphMode.NONE, 514, None)
         )
         slots = _slot_mappings(2 * batch.num_tokens_after_padding)
         state.prepare_attn(batch, CUDAGraphMode.NONE, BLOCK_TABLES, slots, [], GROUPS)
         replay = state.decoder_replay_layers.replay_batch
-        # Rank 0 keeps the decode and 126 tail rows, rank 1 the other 2.
-        assert replay is not None and replay.num_padded == 127
+        assert replay is not None and replay.num_padded == 129
         assert replay.rows.tolist() == expected_rows
         indices = batch.idx_mapping_np[: batch.num_reqs].tolist()
         build, first = state.builds[-2:]
@@ -280,7 +279,7 @@ def test_pcp_replay_keeps_global_tail_after_prefix_hit(state, monkeypatch):
             slots[0, rank * batch.num_tokens_after_padding + replay.rows],
         )
         assert (local_slots[:, len(expected_rows) :] == -1).all()
-        assert replay.forward_context.is_padding.sum() == 2 * (127 - len(expected_rows))
+        assert replay.forward_context.is_padding.sum() == 2 * (129 - len(expected_rows))
     # No request trims: every rank keeps the whole batch.
     state._keeps_rows_np[1] = True
     state.prepare_attn(batch, CUDAGraphMode.NONE, BLOCK_TABLES, slots, [], GROUPS)

@@ -436,7 +436,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
-        self.model_state.pcp_manager = self.pcp_manager
 
         self.decode_query_len = (
             self.num_speculative_steps

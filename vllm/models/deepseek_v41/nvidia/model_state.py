@@ -250,6 +250,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._replay_attn_groups: (
                 tuple[list[list[AttentionGroup]], list[list[AttentionGroup]]] | None
             ) = None
+            assert self.decoder_replay_layers.window >= 2 * self.pcp_size
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -514,17 +515,26 @@ class DeepseekV41ModelState(DefaultModelState):
         )
         num_tokens = int(kept_lens.sum())
         num_padded = num_tokens
-        first_kept: np.ndarray | None = None
-        if self.pcp_manager is not None and (
-            trailing := self.pcp_manager.get_trailing_rows(
-                input_batch,
-                np.where(self._keeps_rows_np, np.iinfo(np.int32).max, layers.window),
+        kv_start: np.ndarray | None = None
+        if input_batch.pcp is not None:
+            # Keep this rank's share of each request's global window. A trimmed
+            # request has rows on every rank (window >= 2 * pcp_size), so every
+            # rank pads to the same global kept count.
+            pcp = input_batch.pcp
+            idx_mapping_np = input_batch.idx_mapping_np[:num_reqs]
+            global_dropped_lens = np.where(
+                self._keeps_rows_np[idx_mapping_np],
+                0,
+                np.maximum(pcp.global_query_lens - layers.window, 0),
             )
-        ):
-            # A request's window spans its PCP segments: keep each rank's share,
-            # padded to the largest rank's for the PCP collectives.
-            kept_lens, first_kept, num_padded = trailing
+            kv_start = np.where(
+                global_dropped_lens > 0, pcp.global_seq_lens - layers.window, 0
+            )
+            kept_lens = np.clip(seq_lens - kv_start, 0, query_lens)
             num_tokens = int(kept_lens.sum())
+            num_padded = pcp.global_num_tokens - int(
+                sum(dict(zip(idx_mapping_np, global_dropped_lens)).values())
+            )
             needs_replay_batch = (
                 force_replay_batch or num_padded < input_batch.num_tokens_after_padding
             )
@@ -537,9 +547,9 @@ class DeepseekV41ModelState(DefaultModelState):
             return
 
         kept_replay_start = replay_start
-        if first_kept is not None:
+        if kv_start is not None:
             kept_replay_start = torch.maximum(
-                replay_start, self._pcp_replay_start.copy_to_gpu(first_kept)
+                replay_start, self._pcp_replay_start.copy_to_gpu(kv_start)
             )
 
         cudagraphs, run_graph = self.replay_cudagraphs, None
