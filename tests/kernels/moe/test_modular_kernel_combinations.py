@@ -778,12 +778,20 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
 # --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
 #
 # Only matters when aiter's internal `output_aux` flag is set. aiter sets it
-# unconditionally for the MXFP4 DSV4 a4w4 kernel family, and conditionally
-# for a few other MXFP4 model configs it ships -- DSV4 is just the only one
-# wired to a vLLM flag today (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1,
-# FusedMoEConfig.__post_init__), which is why #58393 deferred this. Despite
-# the "a4w4" name, DSV4 runs through vLLM's W4A16 quant pair: activations
-# aren't pre-quantized here, AITER quantizes them to 4-bit internally.
+# unconditionally for a handful of MXFP4 a4w4 kernel families it ships,
+# including DSV4 and Kimi-K3's SiTU path (the latter is in fact the shape
+# aiter's own adaptive/Opus crossover heuristic is tuned against -- see
+# `_aux_uses_opus()`'s docstring in the installed aiter). DSV4 is just the
+# only one of these this test file can currently drive end-to-end: it's
+# wired to a vLLM flag (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1,
+# FusedMoEConfig.__post_init__) and the modular-kernel harness already
+# converts weights for it. Kimi-K3's SiTU activation is real and
+# default-enabled in production (VLLM_ROCM_USE_AITER_MOE_SITUV2="auto") but
+# is blanket-marked NYI by `is_nyi_config()` below pending harness support
+# for its weight-shuffle conversion -- a separate, tracked follow-up, not
+# this PR's scope. Despite the "a4w4" name, DSV4 runs through vLLM's W4A16
+# quant pair: activations aren't pre-quantized here, AITER quantizes them to
+# 4-bit internally.
 #
 # Shape (E=384, K=5120, N=640, topk=6, M=16) is DeepSeek-V4.1-tuned
 # (dsv41_fp4_tuned_fmoe.csv) and selects block_m=16 -- the only block_m
@@ -871,8 +879,10 @@ def _aiter_mxfp4_sort_backend_worker(
 @pytest.mark.parametrize("backend", MXFP4_SORT_BACKEND_ENV_CASES)
 def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
     """3b follow-up to test_aiter_moe_sorting_backend_dispatch_env_matrix: covers
-    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393 since DSV4 is the
-    only aiter output_aux path vLLM currently drives."""
+    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393. DSV4 is the only
+    aiter output_aux path this harness can currently drive end-to-end (see the
+    module comment above for the other known path, Kimi-K3 SiTU, and why it's
+    out of scope here)."""
     if not _aiter_sort_backend_hooks_available():
         pytest.skip(
             "Installed aiter build predates the sort-backend hooks "
