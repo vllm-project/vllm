@@ -518,21 +518,17 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # (batch, channels, freq, time) -> (batch, time, channels*freq)
         b, c, f, t = padded_embed.size()
-        padded_embed = self.conv_out(
-            padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
-        )
+        padded_embed = padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
 
-        # Add positional embedding
-        positional_embedding = (
-            self.positional_embedding.positional_embedding[: padded_embed.shape[1], :]
-            .unsqueeze(0)
-            .to(padded_embed.dtype)
+        # Tower LoRA mappings contain only valid rows, not chunk padding.
+        hidden_states = self.conv_out(
+            padded_embed.flatten(0, 1).index_select(0, valid_token_indices)
         )
-        padded_embed = padded_embed + positional_embedding
-
-        # Gather the unpadded tokens with host-built indices: a boolean-mask
-        # index would read the output size back from the device.
-        hidden_states = padded_embed.flatten(0, 1).index_select(0, valid_token_indices)
+        valid_position_indices = valid_token_indices.remainder(t)
+        positional_embedding = self.positional_embedding.positional_embedding[
+            valid_position_indices
+        ].to(hidden_states.dtype)
+        hidden_states = hidden_states + positional_embedding
 
         # Compute cumulative sequence lengths for chunked attention
         cu_chunk_lens = [0]
