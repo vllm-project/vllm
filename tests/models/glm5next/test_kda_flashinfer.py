@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA decode through FlashInfer's fused kernels (conv + SiLU,
-the recurrence and the gated RMSNorm in one launch).
+"""GLM-5.3-Flash KDA layers on FlashInfer's kernels: the fused decode (conv +
+SiLU, the recurrence and the gated RMSNorm in one launch) and the CuTe DSL
+chunked prefill.
 
 Each test runs the same layer, weights, caches and step once on the Triton
 path FlashInfer replaces and once on FlashInfer: conv states must match
@@ -21,7 +22,10 @@ from vllm.config import SpeculativeConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+from vllm.models.glm5next.common.kda import (
+    Glm5NextLinearAttention,
+    _is_flashinfer_kda_prefill_supported,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -114,6 +118,11 @@ def _make_layer(
 def _require_flashinfer_decode(layer: Glm5NextLinearAttention) -> None:
     if layer.kda_decode_backend != "flashinfer":
         pytest.skip("FlashInfer fused KDA decode does not support this config")
+
+
+def _require_flashinfer_prefill(state_dtype: torch.dtype) -> None:
+    if not _is_flashinfer_kda_prefill_supported(D, torch.bfloat16, state_dtype, -5.0):
+        pytest.skip("FlashInfer KDA prefill does not support this platform")
 
 
 def _hidden(num_tokens: int, seed: int = 1) -> torch.Tensor:
@@ -266,6 +275,8 @@ def test_backend_selection(model_dir):
     if not current_platform.is_device_capability_family(100):
         with pytest.raises(RuntimeError, match="SM10x"):
             _make_layer(model_dir, 64, decode="flashinfer")
+        with pytest.raises(RuntimeError, match="SM100/SM103/SM107"):
+            _make_layer(model_dir, 64, prefill="flashinfer")
         return
     for num_heads in (16, 64):
         layer, _ = _make_layer(model_dir, num_heads, decode="auto")
@@ -276,6 +287,8 @@ def test_backend_selection(model_dir):
     assert layer.kda_decode_backend == "triton"
     with pytest.raises(RuntimeError, match="SM10x"):
         _make_layer(model_dir, 8, decode="flashinfer", num_spec=2)
+    layer, _ = _make_layer(model_dir, 64, prefill="flashinfer")
+    assert layer.kda_prefill_backend == "flashinfer"
 
 
 @pytest.mark.parametrize("conv_state_layout", ["SD", "DS"], indirect=True)
@@ -308,12 +321,14 @@ def test_decode_step_matches_triton(
         )
 
 
-@pytest.mark.parametrize("prefill", ["triton", "flashkda"])
+@pytest.mark.parametrize("prefill", ["triton", "flashkda", "flashinfer"])
 @torch.inference_mode()
 def test_mixed_step_matches_triton(model_dir, workspace_init, prefill):
     """The decode rows of a mixed step go through the fused decode; the
     prefill rows (fresh and continued) and their states do not change."""
     num_heads = 16
+    if prefill == "flashinfer":
+        _require_flashinfer_prefill(torch.float32)
     # FlashKDA is the ``auto`` prefill backend where it is available.
     requested = "auto" if prefill == "flashkda" else prefill
     flashinfer = _make_layer(model_dir, num_heads, "auto", requested)
@@ -329,10 +344,13 @@ def test_mixed_step_matches_triton(model_dir, workspace_init, prefill):
     out_f, out_t, state_f, state_t = _run_both(
         flashinfer, triton, meta, _hidden(sum(query_lens))
     )
-    torch.testing.assert_close(out_f[n:], out_t[n:], atol=0, rtol=0)
+    # Without the fused decode, FlashInfer's prefill also runs the decode rows
+    # (as one-token sequences), and it is not batch invariant.
+    tol = 1e-2 if prefill == "flashinfer" else 0
+    torch.testing.assert_close(out_f[n:], out_t[n:], atol=tol, rtol=tol)
     prefill_slots = slots[n:]
     torch.testing.assert_close(
-        state_f[prefill_slots], state_t[prefill_slots], atol=0, rtol=0
+        state_f[prefill_slots], state_t[prefill_slots], atol=tol, rtol=tol
     )
     # The Triton path runs a mixed step's decode rows through the chunked
     # kernel, so they differ by chunked-vs-recurrent rounding.
@@ -368,6 +386,100 @@ def test_spec_decode_matches_triton(model_dir, state_dtype, with_prefill):
     live = torch.ones(meta.num_actual_tokens, dtype=torch.bool)
     live[6:9] = False
     torch.testing.assert_close(out_f[live], out_t[live], atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize(
+    "query_lens", [[40, 1, 17, 3, 96], [1]], ids=["chunked", "one-token"]
+)
+@pytest.mark.parametrize(
+    "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
+)
+@torch.inference_mode()
+def test_prefill_step_matches_triton(model_dir, state_dtype, query_lens):
+    """FlashInfer's prefill updates the state pool in place at the slot
+    indices, so it zeroes fresh sequences' slots itself and leaves other slots
+    alone. A step whose only prefill row is one token takes the recurrent
+    kernel (FlashInfer's prefill needs two tokens)."""
+    _require_flashinfer_prefill(state_dtype)
+    num_heads = 64
+    # Fresh and continued sequences across the 16-token chunk boundary.
+    slots = [3, 5, 8, 13, 21][: len(query_lens)]
+    has_state = [False, True, True, False, True][: len(query_lens)]
+    meta = _non_spec_metadata(query_lens, 0, slots, has_state)
+    flashinfer = _make_layer(
+        model_dir, num_heads, prefill="flashinfer", state_dtype=state_dtype
+    )
+    before = flashinfer[0].kv_cache[1].clone()
+    triton = _make_layer(model_dir, num_heads, state_dtype=state_dtype)
+    out_f, out_t, state_f, state_t = _run_both(
+        flashinfer, triton, meta, _hidden(sum(query_lens))
+    )
+    tol = 3e-2 if state_dtype == torch.bfloat16 else 1e-2
+    torch.testing.assert_close(state_f[slots], state_t[slots], atol=tol, rtol=tol)
+    # Different chunked kernels: compare in norm.
+    assert (out_f - out_t).float().norm() < 1e-2 * out_t.float().norm()
+    # Only the sequences' slots (and the null slot 0) may change.
+    untouched = [s for s in range(1, NUM_SLOTS) if s not in slots]
+    torch.testing.assert_close(state_f[untouched], before[untouched], atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_prefill_with_spec_rows(model_dir):
+    """With draft-verify rows in the step, FlashInfer's prefill writes the
+    prefill rows to their own buffer, scattered by `non_spec_token_indx`."""
+    _require_flashinfer_prefill(torch.float32)
+    num_heads, num_spec = 32, 2
+    slots = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [11, 11, 11], [14, 14, 14]]
+    meta = _spec_metadata(num_spec, [1, 2, 3], [25, 9], slots)
+    out_f, out_t, state_f, state_t = _run_both(
+        _make_layer(model_dir, num_heads, "triton", "flashinfer", num_spec),
+        _make_layer(model_dir, num_heads, "triton", "triton", num_spec),
+        meta,
+        _hidden(meta.num_actual_tokens),
+    )
+    assert (out_f - out_t).float().norm() < 1e-2 * out_t.float().norm()
+    torch.testing.assert_close(state_f[1:], state_t[1:], atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_prefill_syncs_once_per_step(model_dir):
+    """FlashInfer's few-sequence prefill reads the int64 offsets to the host,
+    memoized by tensor identity. The KDA layers of a step share one int64 copy
+    of the offsets, so only the first layer blocks the host."""
+    _require_flashinfer_prefill(torch.float32)
+    first, second = (_make_layer(model_dir, 16, prefill="flashinfer") for _ in range(2))
+    meta = _non_spec_metadata([40, 17], 0, [3, 5], [False, True])
+    hidden = _hidden(57)
+    _forward(*first, meta, hidden)
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        _forward(*second, meta, hidden)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+
+@pytest.mark.parametrize("num_decodes", [0, 3], ids=["prefill", "mixed"])
+@torch.inference_mode()
+def test_block_table_column_state_indices(model_dir, num_decodes):
+    """A step without draft rows in an MTP deployment: the builder's slot
+    indices are column 0 of the [N, 1 + num_spec] block table, a strided view.
+    It matches the same step with contiguous indices."""
+    _require_flashinfer_prefill(torch.float32)
+    num_heads, num_spec = 32, 2
+    query_lens = [1] * num_decodes + [40, 17, 96]
+    slots = [2, 4, 6][:num_decodes] + [9, 12, 15]
+    has_state = [True] * num_decodes + [False, True, True]
+    hidden = _hidden(sum(query_lens))
+    out = {}
+    for width in (1, 1 + num_spec):
+        meta = _non_spec_metadata(query_lens, num_decodes, slots, has_state, width)
+        layer = _make_layer(model_dir, num_heads, "triton", "flashinfer", num_spec)
+        out[width] = (_forward(*layer, meta, hidden), layer[0].kv_cache)
+    assert meta.non_spec_state_indices_tensor is not None
+    assert not meta.non_spec_state_indices_tensor.is_contiguous()
+    torch.testing.assert_close(out[3][0], out[1][0], atol=0, rtol=0)
+    for strided, contiguous in zip(out[3][1], out[1][1], strict=True):
+        torch.testing.assert_close(strided, contiguous, atol=0, rtol=0)
 
 
 def _refit(layer: Glm5NextLinearAttention, seed: int) -> None:
