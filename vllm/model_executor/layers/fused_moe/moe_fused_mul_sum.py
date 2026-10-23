@@ -6,6 +6,29 @@ from torch._subclasses.fake_tensor import FakeTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+_TRAP_WITH_PTX = tl.constexpr(current_platform.is_cuda())
+
+
+@triton.jit
+def trap_if(cond):
+    """Abort the kernel where `cond` is true.
+
+    Unlike tl.device_assert this also fires outside Triton debug mode, so a
+    broken invariant fails loudly instead of being skipped. Platforms without
+    a PTX trap fall back to tl.device_assert.
+    """
+    if _TRAP_WITH_PTX:
+        tl.inline_asm_elementwise(
+            "{ .reg .pred p; setp.ne.s32 p, $1, 0; @p trap; mov.u32 $0, $1; }",
+            "=r,r",
+            [cond.to(tl.int32)],
+            dtype=tl.int32,
+            is_pure=False,
+            pack=1,
+        )
+    else:
+        tl.device_assert(cond == 0, "trap_if condition is true")
+
 
 @triton.jit
 def moe_fused_mul_sum_kernel(
@@ -47,9 +70,10 @@ def moe_fused_mul_sum_kernel(
             any_valid += valid.to(tl.int32)
             take = valid
             if has_expert_map:
-                # id_val is data from topk_ids and can be stale/out-of-range on
-                # slots the router did not overwrite; bound it before indexing
-                # expert_map (an unbounded gather here faults the whole context).
+                # -1 marks an unrouted slot; any other id must index expert_map.
+                # A larger one is a producer bug, so fail loudly. The load stays
+                # masked so it never reads past the map.
+                trap_if(id_val >= num_experts)
                 in_map = valid & (id_val < num_experts)
                 local_id = tl.load(
                     expert_map_ptr + tl.where(in_map, id_val, 0),

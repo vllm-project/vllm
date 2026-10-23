@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 import torch
 
+from tests.kernels.utils import assert_kernel_traps
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.platforms import current_platform
 
@@ -149,35 +150,21 @@ def test_compute_expert_num_tokens_from_numel(
     )
 
 
-@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
-def test_count_expert_num_tokens_bounds_expert_map_gather(
-    topk_ids_dtype: torch.dtype,
+@pytest.mark.parametrize(
+    ("topk_ids_dtype", "bad_id"), [(torch.int32, 4), (torch.int64, 0x3F988A43)]
+)
+def test_count_expert_num_tokens_traps_on_expert_id_outside_map(
+    topk_ids_dtype: torch.dtype, bad_id: int
 ):
-    """Out-of-range topk_ids must not index expert_map.
-
-    topk_ids is data, not a loop bound: routers allocate it with torch.empty
-    and do not always overwrite every slot, so a stale slot can hold an
-    arbitrary positive value. Masking the expert_map gather on `>= 0` alone
-    read past the end of the map and faulted the context.
-    """
-    num_experts, num_local = 32, 16
-    expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device="cuda")
-    expert_map[:num_local] = torch.arange(num_local, dtype=torch.int32, device="cuda")
-
-    topk_ids = torch.randint(0, num_local, (16, 2), dtype=topk_ids_dtype, device="cuda")
-    topk_ids[0, 0] = 0x3F988A43
-    topk_ids[1, 1] = 1 << 30
-
-    actual = count_expert_num_tokens(topk_ids, num_local, expert_map)
-
-    in_range = (topk_ids >= 0) & (topk_ids < num_experts)
-    local = expert_map[topk_ids.clamp(0, num_experts - 1).long()]
-    valid = in_range & (local >= 0)
-    expected = torch.zeros(num_local, dtype=actual.dtype, device="cuda")
-    for e in range(num_local):
-        expected[e] = ((local == e) & valid).sum()
-
-    torch.testing.assert_close(actual, expected)
+    """An id at or past expert_map's length (the GLOBAL expert count) traps."""
+    assert_kernel_traps(f"""
+        from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
+        expert_map = torch.full((4,), -1, dtype=torch.int32, device="cuda")
+        expert_map[:2] = torch.arange(2, dtype=torch.int32, device="cuda")
+        ids = torch.zeros((4, 2), dtype={topk_ids_dtype}, device="cuda")
+        ids[1, 1] = {bad_id}
+        count_expert_num_tokens(ids, 2, expert_map)
+    """)
 
 
 @pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
