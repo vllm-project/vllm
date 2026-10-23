@@ -78,6 +78,7 @@ def compute_deepep_ll_staging_slices(
         for stage in range(num_stages)
     ]
 
+
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
 # The goal is to be able to utilize different communication mechanisms with
@@ -315,11 +316,11 @@ class FusedMoEPrepareAndFinalize(ABC):
         return False
 
     def on_commit(self) -> None:
-        """
-        Runs after this prepare/finalize has been committed to the active
+        """Runs after this prepare/finalize has been committed to the active
         MoE kernel.
         """
         return
+
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):

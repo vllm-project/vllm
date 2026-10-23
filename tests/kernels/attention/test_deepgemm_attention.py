@@ -465,7 +465,6 @@ def test_deepgemm_paged_and_contiguous_indexer_logits_exact(context_len: int):
         block_table,
         schedule,
         max_model_len,
-        clean_logits=False,
     )[0, :context_len]
     # The target request must also be invariant to a co-batched request and
     # the resulting scheduler metadata/layout.
@@ -494,7 +493,6 @@ def test_deepgemm_paged_and_contiguous_indexer_logits_exact(context_len: int):
         block_table_batched,
         schedule_batched,
         max_model_len,
-        clean_logits=False,
     )[0, :context_len]
     assert torch.equal(paged, paged_batched), (
         context_len,
@@ -508,7 +506,7 @@ def test_deepgemm_paged_and_contiguous_indexer_logits_exact(context_len: int):
         weights,
         torch.tensor([0], device="cuda", dtype=torch.int32),
         torch.tensor([context_len], device="cuda", dtype=torch.int32),
-        clean_logits=False,
+        context_len,
     )[0, :context_len]
     assert torch.equal(paged, contiguous), (
         context_len,

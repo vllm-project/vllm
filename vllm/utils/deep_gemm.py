@@ -220,7 +220,6 @@ def _import_deep_gemm():
 @functools.cache
 def supports_deep_gemm_batch_invariance() -> bool:
     """Return whether the installed DeepGEMM has invariant masked grouped FP8."""
-
     deep_gemm = _import_deep_gemm()
     if deep_gemm is None:
         return False
