@@ -42,13 +42,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
-    iter_owned,
     local_shape,
-    mesh_coords,
     owned_names,
-    owner_groups,
-    supports_iter_full,
-    supports_iter_local,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -1397,14 +1392,14 @@ class TestModuleSource:
 
     def test_metadata_agrees_with_both_modes(self):
         """Engines declare the round from `metadata()` and send what a mode
-        yields, so both modes must pass the same check."""
+        yields, so both modes must match it."""
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
-        meta = source.metadata()
-        for local in (False, True):
-            batches = list(iter_owned(source, meta, 0, local=local))
-            assert [i for batch in batches for i, _ in batch] == [0, 1]
+        declared = [(m.name, m.dtype, m.shape) for m in source.metadata()]
+        for batches in (source.iter_full(), source.iter_local()):
+            pairs = [pair for batch in batches for pair in batch]
+            assert [(n, t.dtype, tuple(t.shape)) for n, t in pairs] == declared
 
 
 @pytest.fixture
@@ -1461,8 +1456,8 @@ class TestModuleSourceDTensor:
 
         source = ModuleSource(self._dtensor_module({"w": [TS(0), TS(1)]}))
         meta = source.metadata()
-        ((index, local),) = next(iter_owned(source, meta, 1, local=True))
-        assert index == 0
+        (((name, local),),) = list(source.iter_local())
+        assert name == "w"
         assert tuple(local.shape) == local_shape(meta[0], 1) == (3, 2)
 
     def test_partial_placement_is_declared_replicated(self, fake_world):
@@ -1507,17 +1502,6 @@ class TestParamMetaOwnership:
         with pytest.raises(ValueError, match=match):
             ParamMeta("w", torch.float32, (4,), **kwargs)
 
-    def test_mesh_coords_are_row_major_over_owners(self):
-        meta = ParamMeta(
-            "w", torch.float32, (4,), owners=(4, 5, 6, 7), mesh_shape=(2, 2)
-        )
-        assert [mesh_coords(meta, r) for r in (4, 5, 6, 7)] == [
-            (0, 0),
-            (0, 1),
-            (1, 0),
-            (1, 1),
-        ]
-
     def test_local_shape_follows_torch_chunk_outer_axis_first(self):
         """Two axes sharding one uneven dim: 10 -> (5, 5) -> (3, 2), as DTensor
         computes it."""
@@ -1536,7 +1520,7 @@ class TestParamMetaOwnership:
             (2, 6),
         ]
 
-    def test_owned_names_and_owner_groups(self):
+    def test_owned_names(self):
         """A PP=2 x TP=2 layout: each stage owns its own layers."""
         metas = [
             ParamMeta("embed", torch.float32, (4,), owners=(0, 1)),
@@ -1546,87 +1530,6 @@ class TestParamMetaOwnership:
         ]
         assert owned_names(metas, 0) == ["embed", "layers.0.w", "norm"]
         assert owned_names(metas, 3) == ["layers.1.w", "norm"]
-        assert owner_groups(metas, 4) == [(0, 1), (2, 3), (0, 1, 2, 3)]
-        with pytest.raises(ValueError, match="num_ranks"):
-            owner_groups(metas)
-
-
-class _BatchSource(WeightSource):
-    """Yields scripted batches from whichever modes it is given."""
-
-    def __init__(self, meta, full=None, local=None):
-        self._meta = meta
-        self._full = full
-        self._local = local
-
-    def metadata(self):
-        return list(self._meta)
-
-    def iter_full(self):
-        return iter(self._full)
-
-    def iter_local(self):
-        return iter(self._local)
-
-
-class TestIterOwned:
-    """`iter_owned` is the one check between a source's stream and its
-    metadata that every engine relies on."""
-
-    META = [
-        ParamMeta("a", torch.float32, (4,), owners=(0, 1), placements=(Shard(0),)),
-        ParamMeta("b", torch.float32, (2,), owners=(1,)),
-        ParamMeta("c", torch.float32, (3,)),
-    ]
-
-    def test_drops_none_and_keeps_the_sources_batches(self):
-        source = _BatchSource(
-            self.META,
-            full=[
-                [("a", torch.zeros(4)), ("b", None)],
-                [("c", torch.zeros(3))],
-            ],
-        )
-        batches = list(iter_owned(source, self.META, 0, local=False))
-        assert [[i for i, _ in b] for b in batches] == [[0], [2]]
-
-    def test_local_mode_checks_the_local_shape(self):
-        ok = _BatchSource(
-            self.META, local=[[("a", torch.zeros(2))], [("c", torch.zeros(3))]]
-        )
-        assert len(list(iter_owned(ok, self.META, 0, local=True))) == 2
-        bad = _BatchSource(self.META, local=[[("a", torch.zeros(4))]])
-        with pytest.raises(ValueError, match=r"implies torch.float32 \(2,\)"):
-            list(iter_owned(bad, self.META, 0, local=True))
-
-    def test_a_name_this_rank_does_not_own_is_rejected(self):
-        source = _BatchSource(self.META, full=[[("b", torch.zeros(2))]])
-        with pytest.raises(ValueError, match="yielded 'b' where rank 0 owns 'a'"):
-            list(iter_owned(source, self.META, 0, local=False))
-
-    def test_a_truncated_stream_names_the_first_missing(self):
-        source = _BatchSource(self.META, full=[[("a", torch.zeros(4))]])
-        with pytest.raises(ValueError, match="first missing is 'c'"):
-            list(iter_owned(source, self.META, 0, local=False))
-
-    def test_modes_are_detected_from_overrides(self):
-        class _FullOnly(WeightSource):
-            def metadata(self):
-                return []
-
-            def iter_full(self):
-                return iter(())
-
-        class _LocalOnly(WeightSource):
-            def metadata(self):
-                return []
-
-            def iter_local(self):
-                return iter(())
-
-        assert supports_iter_full(_FullOnly()) and not supports_iter_local(_FullOnly())
-        assert supports_iter_local(_LocalOnly())
-        assert not supports_iter_full(_LocalOnly())
 
 
 class TestDeferredProcessingContract:
@@ -2023,7 +1926,7 @@ def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
     reordered = [("b", torch.zeros(2)), ("w", torch.zeros(4))]
     engine = _mock_group_engine(_ScriptedSource(meta, reordered), monkeypatch)
 
-    with pytest.raises(ValueError, match="yielded 'b' where rank 0 owns 'w'"):
+    with pytest.raises(ValueError, match="disagrees with iteration at index 0"):
         engine.send_weights()
 
 
@@ -2036,7 +1939,7 @@ def test_nccl_trainer_send_weights_rejects_dtype_disagreement(monkeypatch):
         monkeypatch,
     )
 
-    with pytest.raises(ValueError, match="metadata implies torch.float32"):
+    with pytest.raises(ValueError, match="disagrees with iteration"):
         engine.send_weights()
 
 
@@ -2050,7 +1953,7 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
         _ScriptedSource(meta, [("w", torch.zeros(4))]), monkeypatch
     )
 
-    with pytest.raises(ValueError, match="yielded 1 of the 2 names"):
+    with pytest.raises(ValueError, match="yielded 1 parameters"):
         engine.send_weights()
 
 

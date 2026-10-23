@@ -1015,9 +1015,9 @@ class TestTrainerSourceContract:
     @pytest.mark.parametrize(
         ("case", "match"),
         [
-            ("missing", "first missing is 'weight'"),
-            ("extra", "'extra' after every name rank 0 owns"),
-            ("reordered", "yielded 'other' where rank 0 owns 'weight'"),
+            ("missing", "first missing: 'weight'"),
+            ("extra", "first extra"),
+            ("reordered", "yielded 'other'.*declared 'weight'"),
         ],
     )
     def test_source_cardinality_and_order(self, monkeypatch, case, match):
@@ -1033,7 +1033,7 @@ class TestTrainerSourceContract:
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(RuntimeError, match=match):
             engine._send()
 
     @pytest.mark.parametrize(
@@ -1046,7 +1046,7 @@ class TestTrainerSourceContract:
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
-        with pytest.raises(ValueError, match="metadata implies"):
+        with pytest.raises(ValueError, match="layout implies"):
             engine._send()
 
         engine._m2n.reshard.assert_not_called()

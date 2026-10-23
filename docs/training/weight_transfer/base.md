@@ -71,14 +71,9 @@ class ParamMeta:
 **Metadata is identical on every rank, ownership included.** That makes
 ownership static knowledge: every rank and every engine derives the same plan
 from it, and no engine needs a runtime exchange to learn who holds what.
-Helpers derive the per-rank views:
-
-| Helper | Gives |
-| ------ | ----- |
-| `owned_names(metas, rank)` | the names `rank` iterates, in metadata order |
-| `owner_groups(metas, num_ranks)` | the distinct owner tuples |
-| `mesh_coords(meta, rank)` | `rank`'s coordinate in the owner mesh |
-| `local_shape(meta, rank)` | the shape `iter_local()` yields on `rank` |
+Two helpers derive the per-rank views: `owned_names(metas, rank)` gives the
+names `rank` iterates, in metadata order, and `local_shape(meta, rank)` the
+shape `iter_local()` yields on `rank`.
 
 For example, under pipeline parallelism 2 x tensor parallelism 2 (stage 0 is
 ranks 0–1, stage 1 is ranks 2–3):
@@ -103,11 +98,10 @@ of its trainer ranks.
 
 Both modes yield **batches chosen by the source**: one tensor, one layer (one
 FSDP all-gather), one export task. Joined together, the batches are exactly
-`owned_names(metadata(), rank)` in metadata order, and engines check this as
-they go, naming the first parameter that disagrees in name, dtype or shape.
+`owned_names(metadata(), rank)` in metadata order, with the dtypes and shapes
+`metadata()` declares. Engines may check this as they go; NCCL and M2N do,
+because their workers plan from `metadata()`.
 
-- **Names the rank does not own are skipped.** A pair whose tensor is `None` is
-  dropped, so a source that walks the whole model needs no filtering.
 - **`iter_full()` may gather, but only among a parameter's owners.** Every owner
   iterates in metadata order so the gathers line up; non-owners never block.
 - **`iter_local()` runs no collectives.** It yields `torch.Tensor`s only, and

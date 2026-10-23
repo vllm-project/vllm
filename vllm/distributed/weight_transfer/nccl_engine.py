@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self
@@ -21,8 +22,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
     WeightTransferEngine,
     WeightTransferUpdateInfo,
-    iter_owned,
-    supports_iter_full,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
@@ -296,7 +295,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     ) -> Self:
         if source is None:
             raise ValueError("NCCL trainer weight transfer requires a WeightSource.")
-        if not supports_iter_full(source):
+        if type(source).iter_full is WeightSource.iter_full:
             raise TypeError(
                 f"NCCL broadcast sends full tensors, but {type(source).__name__} "
                 "does not implement iter_full()."
@@ -400,23 +399,16 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
         """Drive `iter_full()` (gathering among each parameter's owners) and, on
         the sender, broadcast from rank 0, packed or one-by-one. Other owners only
-        join the gathers.
-
-        The worker sizes its receive buffers, and in packed mode cuts its chunk
-        boundaries, from the update info built from `metadata()`, so
-        `iter_owned` checks every yielded tensor against it: a disagreement
-        becomes an error naming the parameter instead of a hang or garbage.
-        """
-        batches = iter_owned(source, meta, self.rank, local=False)
+        join the gathers."""
         if not self.is_sender:
-            for _ in batches:
+            for _ in source.iter_full():
                 pass
             return
 
         assert self.model_update_group is not None, (
             "trainer_init() must be called before _broadcast()."
         )
-        pairs = ((meta[i].name, tensor) for batch in batches for i, tensor in batch)
+        pairs = self._checked_iter(source, meta)
         if self.packed:
             packed_nccl_broadcast_producer(
                 iterator=pairs,
@@ -435,6 +427,50 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 # enqueued. (The packed path linearizes in `pack_tensors`.)
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=0, stream=stream)
+
+    @staticmethod
+    def _checked_iter(
+        source: WeightSource, meta: list[ParamMeta]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield the sender's pairs, checking each against what the worker was
+        told to expect.
+
+        The worker sizes its receive buffers — and in packed mode cuts its chunk
+        boundaries — from the update info, which is built from `metadata()`. If
+        iteration disagrees with it, the two sides split the stream differently
+        and the transfer hangs in NCCL or loads garbage. Checking here costs one
+        comparison per parameter and turns that into an error naming the first
+        divergent parameter. The sender owns every parameter, so it yields all
+        of `meta`.
+        """
+        sent = 0
+        for batch in source.iter_full():
+            for name, tensor in batch:
+                if sent >= len(meta):
+                    raise ValueError(
+                        f"WeightSource yielded more parameters than metadata() "
+                        f"declared ({len(meta)}); first extra is {name!r}."
+                    )
+                expected = meta[sent]
+                if (
+                    name != expected.name
+                    or tensor.dtype != expected.dtype
+                    or tuple(tensor.shape) != expected.shape
+                ):
+                    raise ValueError(
+                        "WeightSource metadata() disagrees with iteration at "
+                        f"index {sent}: declared {expected.name!r} "
+                        f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
+                        f"{tensor.dtype} {tuple(tensor.shape)}. Both channels "
+                        "must enumerate the same parameters in the same order."
+                    )
+                sent += 1
+                yield name, tensor
+        if sent != len(meta):
+            raise ValueError(
+                f"WeightSource yielded {sent} parameters but metadata() "
+                f"declared {len(meta)}; the worker is waiting for the rest."
+            )
 
     def _post_send_sync(self) -> None:
         """Wait for this rank's transfer work to land before returning.

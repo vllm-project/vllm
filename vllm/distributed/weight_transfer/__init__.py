@@ -14,9 +14,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
     WeightTransferEngine,
     local_shape,
-    mesh_coords,
     owned_names,
-    owner_groups,
 )
 from vllm.distributed.weight_transfer.clients import (
     HTTPVLLMWeightSyncClient,
@@ -39,9 +37,7 @@ __all__ = [
     "Replicate",
     "Shard",
     "owned_names",
-    "owner_groups",
     "local_shape",
-    "mesh_coords",
     "WeightSource",
     "ModuleSource",
 ]

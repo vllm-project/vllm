@@ -22,13 +22,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 import torch
 
 from vllm.distributed.weight_transfer.base import (
-    ParamMeta,
     TrainerInitInfo,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
-    iter_owned,
-    supports_iter_local,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
     M2N_WIRE_SCHEMA_VERSION,
@@ -182,7 +179,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
-        self._source_metas: list[ParamMeta] = []
         self._wire_params: list[M2NWireParam] = []
         self._source_digest = ""
         self._dst_mesh: M2NMesh | None = None
@@ -231,7 +227,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
-            if source is None or not supports_iter_local(source):
+            if source is None or type(source).iter_local is WeightSource.iter_local:
                 raise TypeError(
                     "nccl_m2n sends each rank's local shard, but "
                     f"{type(source).__name__} does not implement iter_local()"
@@ -405,9 +401,8 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self, source: WeightSource, num_trainer_ranks: int
     ) -> None:
         """Build and validate this rank's immutable source plan."""
-        self._source_metas = source.metadata()
         self._metas = [
-            m2n_param_meta(meta, num_trainer_ranks) for meta in self._source_metas
+            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata()
         ]
         names: set[str] = set()
         for meta in self._metas:
@@ -533,20 +528,33 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # Optimizer work may have used another CUDA stream. Make prior writes
         # visible before a provider materializes current-stream local shards.
         torch.accelerator.synchronize(device_index)
-        shards = (
-            pair
-            for batch in iter_owned(
-                self.source, self._source_metas, self.rank, local=True
-            )
-            for pair in batch
-        )
-        for index, shard in shards:
-            meta = self._metas[index]
+        shards = (pair for batch in self.source.iter_local() for pair in batch)
+        sent = 0
+        for name, shard in shards:
+            if sent >= len(self._metas):
+                raise RuntimeError(
+                    "weight source yielded more parameters than metadata() "
+                    f"declared (first extra parameter: '{name}')"
+                )
+            meta = self._metas[sent]
+            if name != meta.name:
+                raise RuntimeError(
+                    f"weight source yielded '{name}' at position {sent}, but "
+                    f"its metadata declared '{meta.name}'; the source must "
+                    "iterate in a stable order"
+                )
+            local_shape = expected_local_shape(meta)
+            if shard.dtype != meta.dtype or tuple(shard.shape) != local_shape:
+                raise ValueError(
+                    f"parameter '{name}' source returned {shard.dtype} "
+                    f"{tuple(shard.shape)}, but its layout implies {meta.dtype} "
+                    f"{local_shape}"
+                )
             src_mesh, src_placements = resolve_layout(
                 meta.source_layout.mesh, meta.source_layout.placements
             )
             dst_mesh, dst_placements = resolve_layout(
-                self._dst_mesh, self._dst_placements[index]
+                self._dst_mesh, self._dst_placements[sent]
             )
             m2n.reshard(
                 shard,
@@ -561,6 +569,14 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             )
             # Let the allocator recycle the shard's storage in stream order.
             shard.record_stream(stream)
+            sent += 1
+
+        if sent != len(self._metas):
+            missing = self._metas[sent].name
+            raise RuntimeError(
+                f"weight source yielded {sent} parameters, but metadata() "
+                f"declared {len(self._metas)} (first missing: '{missing}')"
+            )
 
         # As in the other weight-transfer backends, wait before returning
         # rather than relying on same-stream ordering. The caller may then

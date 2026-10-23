@@ -239,7 +239,7 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
         server=server,
         monkeypatch=monkeypatch,
     )
-    with pytest.raises(ValueError, match="where rank 0 owns 'embed.weight'"):
+    with pytest.raises(RuntimeError, match="must yield the owned names"):
         engine.send_weights()
     assert "error" in server.order  # gather error propagated to the server
 

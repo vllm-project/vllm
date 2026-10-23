@@ -21,9 +21,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
-    iter_owned,
-    owns,
-    supports_iter_full,
+    owned_names,
 )
 
 if TYPE_CHECKING:
@@ -295,7 +293,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     ) -> Self:
         if source is None:
             raise ValueError("IPC trainer weight transfer requires a WeightSource.")
-        if not supports_iter_full(source):
+        if type(source).iter_full is WeightSource.iter_full:
             raise TypeError(
                 f"IPC sends full tensors, but {type(source).__name__} does not "
                 "implement iter_full()."
@@ -340,15 +338,13 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         worker, so a partitioned source, where some rank lacks a parameter,
         cannot be sent."""
         meta = source.metadata()
-        for m in meta:
-            if not owns(m, self.rank):
-                raise ValueError(
-                    f"rank {self.rank} does not own parameter {m.name!r}, but "
-                    "IPC needs every trainer rank to own every parameter."
-                )
-        for batch in iter_owned(source, meta, self.rank, local=False):
-            for i, tensor in batch:
-                yield meta[i].name, tensor
+        if len(owned_names(meta, self.rank)) != len(meta):
+            raise ValueError(
+                f"rank {self.rank} does not own every parameter, but IPC needs "
+                "every trainer rank to own every parameter."
+            )
+        for batch in source.iter_full():
+            yield from batch
 
     def _all_gather_and_merge_handles(
         self,

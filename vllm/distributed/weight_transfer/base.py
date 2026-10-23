@@ -208,37 +208,12 @@ class ParamMeta:
         object.__setattr__(self, "placements", placements)
 
 
-def owns(meta: ParamMeta, rank: int) -> bool:
-    """Whether trainer rank `rank` owns `meta`."""
-    return meta.owners is None or rank in meta.owners
-
-
 def owned_names(metas: Sequence[ParamMeta], rank: int) -> list[str]:
     """The names `rank` owns, in metadata order: exactly what it iterates."""
-    return [m.name for m in metas if owns(m, rank)]
+    return [m.name for m in metas if m.owners is None or rank in m.owners]
 
 
-def owner_groups(
-    metas: Sequence[ParamMeta], num_ranks: int | None = None
-) -> list[tuple[int, ...]]:
-    """The distinct owner tuples, in first-appearance order.
-
-    `owners=None` resolves to `range(num_ranks)`, which must then be given.
-    """
-    groups: dict[tuple[int, ...], None] = {}
-    for m in metas:
-        if m.owners is not None:
-            groups.setdefault(m.owners)
-            continue
-        if num_ranks is None:
-            raise ValueError(
-                f"parameter {m.name!r} is owned by every rank; pass num_ranks"
-            )
-        groups.setdefault(tuple(range(num_ranks)))
-    return list(groups)
-
-
-def mesh_coords(meta: ParamMeta, rank: int) -> tuple[int, ...]:
+def _mesh_coords(meta: ParamMeta, rank: int) -> tuple[int, ...]:
     """`rank`'s coordinate in `meta`'s owner mesh."""
     if meta.owners is None or meta.mesh_shape is None:
         raise ValueError(f"parameter {meta.name!r} declares no owner mesh")
@@ -266,7 +241,7 @@ def local_shape(meta: ParamMeta, rank: int) -> tuple[int, ...]:
     if meta.placements is None:
         return meta.shape
     assert meta.mesh_shape is not None
-    coords = mesh_coords(meta, rank)
+    coords = _mesh_coords(meta, rank)
     shape = list(meta.shape)
     for axis, p in enumerate(meta.placements):
         if isinstance(p, Shard):
@@ -274,7 +249,7 @@ def local_shape(meta: ParamMeta, rank: int) -> tuple[int, ...]:
     return tuple(shape)
 
 
-WeightBatch = list[tuple[str, torch.Tensor | None]]
+WeightBatch = list[tuple[str, torch.Tensor]]
 
 
 class WeightSource(ABC):
@@ -288,16 +263,14 @@ class WeightSource(ABC):
       by `ParamMeta.placements`.
 
     A source implements one mode or both, and nothing is derived from one mode
-    to the other. Each engine consumes the mode it needs and raises at init if
-    the source lacks it: broadcast, IPC and RDT consume `iter_full`, NCCL M2N
-    consumes `iter_local`.
+    to the other. Each engine consumes the mode it needs: broadcast, IPC and
+    RDT consume `iter_full`, NCCL M2N consumes `iter_local`.
 
     Both modes yield batches of `(name, tensor)` pairs chosen by the source:
     one tensor, one layer, one export task. Joined together, the batches are
-    exactly `owned_names(metadata(), rank)` in metadata order. A pair whose
-    tensor is `None` is dropped, so a source that walks the whole model need
-    not filter. A batch is resident all at once, so its size is the source's
-    memory trade-off; engines re-chunk the stream for transfer themselves.
+    exactly `owned_names(metadata(), rank)` in metadata order. A batch is
+    resident all at once, so its size is the source's memory trade-off; engines
+    re-chunk the stream for transfer themselves.
 
     `iter_full` may gather, but only among the owners of the parameter being
     gathered, and every owner iterates in metadata order so the gathers line up.
@@ -325,86 +298,6 @@ class WeightSource(ABC):
         """Yield batches of this rank's pieces for the names it owns."""
         raise NotImplementedError(
             f"{type(self).__name__} does not implement iter_local"
-        )
-
-
-def _overrides(source: WeightSource, method: str) -> bool:
-    return getattr(type(source), method, None) is not getattr(WeightSource, method)
-
-
-def supports_iter_full(source: WeightSource) -> bool:
-    """Whether `source` implements `iter_full`."""
-    return _overrides(source, "iter_full")
-
-
-def supports_iter_local(source: WeightSource) -> bool:
-    """Whether `source` implements `iter_local`."""
-    return _overrides(source, "iter_local")
-
-
-def iter_owned(
-    source: WeightSource,
-    metas: Sequence[ParamMeta],
-    rank: int,
-    *,
-    local: bool,
-) -> Iterator[list[tuple[int, torch.Tensor]]]:
-    """Drive one of `source`'s modes, checked against `metas`.
-
-    Yields the source's batches as `(metadata index, tensor)` pairs, with
-    `None` tensors dropped. Raises at the first name that is not the next one
-    `rank` owns, and at the first tensor whose dtype or shape disagrees with
-    its metadata (`local_shape` for `local`).
-
-    Args:
-        source: The weight source.
-        metas: `source.metadata()`, fetched once by the caller.
-        rank: This trainer rank.
-        local: Drive `iter_local` instead of `iter_full`.
-
-    """
-    expected = [i for i, m in enumerate(metas) if owns(m, rank)]
-    mode = "iter_local" if local else "iter_full"
-    batches = source.iter_local() if local else source.iter_full()
-    pos = 0
-    for batch in batches:
-        out: list[tuple[int, torch.Tensor]] = []
-        for name, tensor in batch:
-            if tensor is None:
-                continue
-            if pos >= len(expected):
-                raise ValueError(
-                    f"WeightSource.{mode}() yielded {name!r} after every name "
-                    f"rank {rank} owns ({len(expected)})."
-                )
-            index = expected[pos]
-            meta = metas[index]
-            if name != meta.name:
-                raise ValueError(
-                    f"WeightSource.{mode}() yielded {name!r} where rank {rank} "
-                    f"owns {meta.name!r} next; it must yield exactly "
-                    "owned_names(metadata(), rank), in metadata order."
-                )
-            if not isinstance(tensor, torch.Tensor):
-                raise TypeError(
-                    f"WeightSource.{mode}() yielded {name!r} as "
-                    f"{type(tensor).__name__}; it must yield torch.Tensor."
-                )
-            shape = local_shape(meta, rank) if local else meta.shape
-            if tensor.dtype != meta.dtype or tuple(tensor.shape) != shape:
-                raise ValueError(
-                    f"WeightSource.{mode}() yielded {name!r} as "
-                    f"{tensor.dtype} {tuple(tensor.shape)}, but its metadata "
-                    f"implies {meta.dtype} {shape}."
-                )
-            out.append((index, tensor))
-            pos += 1
-        if out:
-            yield out
-    if pos != len(expected):
-        raise ValueError(
-            f"WeightSource.{mode}() yielded {pos} of the {len(expected)} names "
-            f"rank {rank} owns; first missing is {metas[expected[pos]].name!r}."
         )
 
 

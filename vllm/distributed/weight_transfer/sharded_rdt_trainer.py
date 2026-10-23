@@ -41,10 +41,8 @@ from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
-    iter_owned,
     layerwise_groups,
     owned_names,
-    supports_iter_full,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
@@ -826,7 +824,9 @@ class ShardedRDTTrainerWeightTransferEngine(
         is_sender: bool = True,
         init_info: ShardedRDTTrainerInitInfo,
     ) -> None:
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(
+            client=client, source=source, is_sender=is_sender, rank=init_info.rank
+        )
         self._init_info = init_info
         self._server: Any = None  # the _RDTProducerServer actor handle
         self._server_name: str | None = None
@@ -972,7 +972,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             raise ValueError(
                 "Sharded RDT trainer weight transfer requires a WeightSource."
             )
-        if not supports_iter_full(source):
+        if type(source).iter_full is WeightSource.iter_full:
             raise TypeError(
                 "Sharded RDT serves full tensors, but "
                 f"{type(source).__name__} does not implement iter_full()."
@@ -1050,7 +1050,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         """The trainer world size and this rank. Owners are trainer ranks and
         the producer servers are gathered over the default group, so the two
         rank numberings must agree."""
-        rank = self._init_info.rank
+        rank = self.rank
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             if torch.distributed.get_rank() != rank:
                 raise ValueError(
@@ -1416,8 +1416,6 @@ class ShardedRDTTrainerWeightTransferEngine(
                     # update_weights returned/failed early — surface now instead
                     # of blocking further gathers.
                     update_future.result()
-            # Resume once more so the source's stream is checked for extras.
-            next(groups, None)
             while pending_publish:
                 self._await_publish(pending_publish.pop(0))
             freed = self._rpc("end_sync")
@@ -1441,18 +1439,18 @@ class ShardedRDTTrainerWeightTransferEngine(
         re-chunked here, so how the source batches never changes the transfer.
         """
         assert self.source is not None
-        pairs = (
-            pair
-            for batch in iter_owned(
-                self.source, self._meta, self._init_info.rank, local=False
-            )
-            for pair in batch
-        )
+        pairs = (pair for batch in self.source.iter_full() for pair in batch)
         for gi in self._owned_idx:
-            names = [n for n in self._groups[gi] if n in self._owned_names]
-            yield names, [t for _, t in itertools.islice(pairs, len(names))]
-        for _ in pairs:
-            pass
+            expected = [n for n in self._groups[gi] if n in self._owned_names]
+            got = list(itertools.islice(pairs, len(expected)))
+            names = [name for name, _ in got]
+            if names != expected:
+                raise RuntimeError(
+                    f"WeightSource yielded {names[:2]!r} for group {gi}, but this "
+                    f"rank owns {expected[:2]!r} there; iter_full() must yield "
+                    "the owned names in metadata order."
+                )
+            yield names, [tensor for _, tensor in got]
 
     def _drop_inflight(self, freed_keys: list) -> None:
         """Release a freed group's refs and return its export-ring slot."""
