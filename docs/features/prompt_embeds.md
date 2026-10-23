@@ -61,6 +61,22 @@ Each `prompt_embeds` content part contains a `data` field with a base64-encoded 
 
 Unlike the Completions API, a `prompt_embeds` content part should encode **only** the content, not a templated conversation. The server wraps the chat template around the embedded content at request time, the same way it would for a plain text `content` string. Embedding a full templated conversation here would double-apply the template and produce incorrect inputs to the model.
 
+Assistant messages can also pass a single `prompt_embeds` part as `reasoning` instead of a string:
+
+```json
+{
+  "messages": [
+    {
+      "role": "assistant",
+      "reasoning": {"type": "prompt_embeds", "data": "<base64_encoded_tensor>"},
+      "content": ""
+    }
+  ]
+}
+```
+
+The tensor represents only the reasoning content. Use a chat template that renders `reasoning` (or its legacy alias `reasoning_content`); the server inserts the reasoning delimiters through the template. This uses the existing Hugging Face chat-template rendering path. The same `--enable-prompt-embeds` flag and tensor shape requirements apply.
+
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
