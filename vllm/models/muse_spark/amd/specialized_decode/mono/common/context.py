@@ -283,11 +283,16 @@ def settle(c) -> None:
     use, a poll's, and exposes its round trip there). A stage that publishes
     or polls before it fails at trace (no ``put`` / ``poll``)."""
     a = c["args"]
-    words = [load_epoch(a["epoch"]), load_budget(a["health"])]
+    # this rank's entry (the one load at a traced offset) issued first: last,
+    # LLVM put it behind a first lgkmcnt wait, a second round trip
+    own = []
+    if c["has_peers"]:
+        own = [ld_s32(a["peers"], 2 * c["rank"] + h) for h in range(2)]
+    words = own + [load_epoch(a["epoch"]), load_budget(a["health"])]
     if c["has_peers"]:
         words += peer_words(a["peers"], spec.TP)
-        words += [ld_s32(a["peers"], 2 * c["rank"] + h) for h in range(2)]
     w = pin_s(words)
+    w = w[len(own) :] + w[: len(own)]  # epoch, budget, table, this rank's
     e = step_epoch(w[0])
     mb = Mailbox(
         step_tag(e, c["slot"]) - 1,
