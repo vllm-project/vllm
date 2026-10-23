@@ -1037,20 +1037,19 @@ class MuseSpark1xModel(LlamaModel):
         x: MuseSpark1xResidualStream | torch.Tensor = hidden_states.to(
             self.residual_dtype
         )
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
         shard = None
         if (
             self.token_shard_min_tokens
             and num_tokens >= self.token_shard_min_tokens
             and num_tokens % self.token_shard_divisor == 0
-            and not self.aux_hidden_state_layers
             and not torch.cuda.is_current_stream_capturing()
         ):
             shard = TokenShard(num_tokens)
             x = shard.local(x)
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-        aux_hidden_states: list[torch.Tensor] = []
-        if get_pp_group().is_first_rank:
-            self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
         for idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer], start=self.start_layer
         ):
@@ -1063,6 +1062,8 @@ class MuseSpark1xModel(LlamaModel):
                     if isinstance(x, MuseSpark1xResidualStream)
                     else x
                 )
+                if shard is not None:
+                    state = shard.gather(state)
                 aux_hidden_states.append(state)
 
         if not get_pp_group().is_last_rank:
