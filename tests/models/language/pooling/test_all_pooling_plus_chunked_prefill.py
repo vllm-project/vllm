@@ -6,8 +6,56 @@ from transformers import AutoModel
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import VLLM_PATH
-from vllm import TokensPrompt
+from vllm import PoolingParams, TokensPrompt
 from vllm.config import PoolerConfig
+
+
+@torch.inference_mode
+def test_token_embed_preemption_does_not_duplicate_prompt(vllm_runner, monkeypatch):
+    """Recomputing a preempted prompt must not repeat its pooled token vectors."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    chunk_size = 64
+    token_ids = list(range(1024, 1280))
+    prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+    with vllm_runner(
+        "Qwen/Qwen3-Embedding-0.6B",
+        runner="pooling",
+        pooler_config=PoolerConfig(task="token_embed"),
+        max_model_len=512,
+        max_num_batched_tokens=chunk_size,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.25,
+        enforce_eager=True,
+        kernel_config={"enable_flashinfer_autotune": False},
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+    ) as vllm_model:
+        llm = vllm_model.llm
+        assert not llm.llm_engine.vllm_config.use_v2_model_runner
+        (reference,) = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
+        engine = llm.llm_engine
+        engine.add_request("preempted", prompt, PoolingParams(task="token_embed"))
+        assert engine.step() == []
+        assert llm.reset_prefix_cache(reset_running_requests=True)
+
+        outputs = []
+        for _ in range(len(token_ids) // chunk_size + 1):
+            outputs.extend(engine.step())
+            if not engine.has_unfinished_requests():
+                break
+        assert not engine.has_unfinished_requests()
+        (output,) = outputs
+
+        assert output.outputs.data.shape == reference.outputs.data.shape
+        assert output.outputs.data.shape[0] == len(token_ids)
+        check_embeddings_close(
+            embeddings_0_lst=reference.outputs.data.tolist(),
+            embeddings_1_lst=output.outputs.data.tolist(),
+            name_0="unpreempted",
+            name_1="preempted",
+        )
 
 
 @pytest.mark.parametrize(

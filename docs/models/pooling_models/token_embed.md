@@ -11,6 +11,8 @@
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
+With chunked prefill, preempted requests recompute their prompt without duplicating token embedding vectors. Ordinary scheduling pauses retain the accumulated vectors.
+
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
 !!! note
