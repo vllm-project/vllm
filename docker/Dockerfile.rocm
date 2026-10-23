@@ -387,6 +387,8 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/benchmark_helion_kernels.py /tools/benchmark_helion_kernels.py
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+# tests/tools/test_kernel_symbol_map.py loads the symbol-map producers from here.
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/ci /tools/ci
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
