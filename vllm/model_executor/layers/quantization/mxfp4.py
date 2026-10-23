@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
-    RoutingMethodType,
     mxfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -42,7 +41,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     is_layer_skipped,
-    kFp8Dynamic128Sym,
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
@@ -580,16 +578,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
             )
-        if (
-            self.activation_key is None
-            and self.mxfp4_backend == Mxfp4MoeBackend.HUMMING
-            and moe.routing_method == RoutingMethodType.DeepseekV4
-            and moe.moe_parallel_config.use_ep
-            and current_platform.is_device_capability_family(90)
-        ):
-            # Full-size DeepSeek V4 experts under EP run faster on Hopper with
-            # block FP8 activations than with Humming's default BF16.
-            self.activation_key = kFp8Dynamic128Sym
 
         self.max_capture_size = moe.max_capture_size
 
