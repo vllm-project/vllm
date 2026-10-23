@@ -32,6 +32,7 @@ import torch
 
 from vllm.models.deepseek_v32.common import kernels as K
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -114,6 +115,16 @@ def rope(
         r[..., :half] = x1 * cos - x2 * sin
         r[..., half:] = x2 * cos + x1 * sin
     return out
+
+
+def indexer_scales(scale_bytes: torch.Tensor) -> torch.Tensor:
+    """Per-token fp32 scales from the indexer cache's 4 scale bytes per token."""
+    if not mqa_logits_use_mx_scales():
+        return scale_bytes.view(torch.float32)
+    # MX scales: the power-of-two scale's exponent as 4 equal UE8M0 bytes.
+    ue8m0 = scale_bytes.view(-1, 4)
+    assert (ue8m0 == ue8m0[:, :1]).all(), "MX scale bytes differ within a token"
+    return (ue8m0[:, 0].to(torch.int32) << 23).view(torch.float32)
 
 
 def ue8m0_quant(vals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -243,7 +254,7 @@ def test_fused_norm_rope(
     q_ref, s_ref = ue8m0_quant(ik_ref)
     flat = idx_cache[0].reshape(-1)
     vals = flat[: bs * cfg.index_head_dim].view(FP8).reshape(bs, cfg.index_head_dim)
-    scales = flat[bs * cfg.index_head_dim :].view(torch.float32)
+    scales = indexer_scales(flat[bs * cfg.index_head_dim :])
     assert_fp8(vals[:num_tokens], q_ref, "indexer-K fp8")
     torch.testing.assert_close(scales[:num_tokens], s_ref, rtol=0, atol=0)
 
@@ -318,7 +329,7 @@ def test_fused_norm_rope_packed_indexer_block_stride(cfg: ModelConfig):
         .view(FP8)
         .view(block_size, cfg.index_head_dim)
     )
-    scales = packed[block_size * cfg.index_head_dim :].view(torch.float32)
+    scales = indexer_scales(packed[block_size * cfg.index_head_dim :])
     assert_fp8(values, q_ref, "packed indexer-K fp8")
     torch.testing.assert_close(scales, s_ref, rtol=0, atol=0)
     assert (backing[block_size * idx_row : packed_block_stride] == 0).all()
@@ -625,13 +636,13 @@ def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(100),
-    reason="nvfp4_ds_mla requires SM100 (Blackwell)",
+    not (current_platform.is_device_capability_family(100)),
+    reason="nvfp4_ds_mla requires SM100 family",
 )
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int, cfg: ModelConfig):
-    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
+    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 family).
 
     Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
     = even element) | 64 B unscaled e4m3 RoPE | 32 B byte-permuted e4m3 tile
