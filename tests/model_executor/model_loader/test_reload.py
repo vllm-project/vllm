@@ -3,6 +3,7 @@
 import gc
 import importlib.machinery
 import inspect
+import re
 import sys
 import types
 from importlib import import_module
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -1365,6 +1367,45 @@ def test_reload_weights(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def _reload_with_lora_expert_names(worker) -> None:
+    config = worker.vllm_config
+    weights = get_model_loader(config.load_config).get_all_weights(
+        config.model_config, worker.get_model()
+    )
+    worker.reload_weights(
+        weights_iterator=(
+            (re.sub(r"(\.mlp\.experts\.\d+\.\w+)\.", r"\1.base_layer.", name), weight)
+            for name, weight in weights
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
+        "RedHatAI/Qwen3-30B-A3B-NVFP4",
+    ],
+)
+def test_reload_weights_with_lora_moe(model, vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = ["The capital of France is the city of Paris"]
+    masks = ["The capital of France is"]
+    with vllm_runner(
+        model_name=model,
+        enable_lora=True,
+        lora_target_modules=["experts"],
+        max_lora_rank=8,
+        enable_prefix_caching=False,
+        max_model_len=32,
+        max_num_seqs=1,
+    ) as llm:
+        before = llm.generate_prompt_perplexity(prompts, mask=masks)[0]
+        llm.collective_rpc(_reload_with_lora_expert_names)
+        after = llm.generate_prompt_perplexity(prompts, mask=masks)[0]
+    assert after == before
 
 
 def test_kv_scale_reload(vllm_runner):

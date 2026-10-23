@@ -78,6 +78,24 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ) -> FusedMoEQuantConfig | None:
         return self.moe_quant_config
 
+    def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
+        old_kernel = self.old_quant_method.moe_kernel
+        self.old_quant_method.process_weights_after_loading(layer)
+        new_kernel = self.old_quant_method.moe_kernel
+        if new_kernel is old_kernel:
+            return
+        assert self.moe_kernel is not None and new_kernel is not None
+        for old, new in (
+            (self.moe_kernel.fused_experts, new_kernel.fused_experts),
+            (self.moe_kernel.prepare_finalize, new_kernel.prepare_finalize),
+        ):
+            context = getattr(old, "_lora_context", None)
+            if context is not None and hasattr(new, "set_lora_context"):
+                new.set_lora_context(context)
+        self.moe_kernel.impl = new_kernel.impl
+        self.old_quant_method.moe_kernel = self.moe_kernel
+        self.moe_quant_config = self.old_quant_method.moe_quant_config
+
     def apply(
         self,
         layer: "RoutedExperts",
