@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from functools import partial
 from typing import Any, Protocol, runtime_checkable
 
 import torch
@@ -180,14 +179,38 @@ class RoutedExpertsSink:
         self.capture_fn = capture_fn
 
 
+_CAPTURE_FN_OWNER_ATTR = "_routed_experts_capturer"
+
+
+def _make_capture_fn(
+    capturer: RoutedExpertsCapturer, layer_id: int
+) -> Callable[[torch.Tensor], None]:
+    def capture(topk_ids: torch.Tensor) -> None:
+        capturer.capture(layer_id, topk_ids)
+
+    setattr(capture, _CAPTURE_FN_OWNER_ATTR, capturer)
+    return capture
+
+
+def _reject_second_capturer(target: Any, attr: str) -> None:
+    """Reject a target already owned by an R3 capturer, keeping one owner."""
+    capture_fn = getattr(target, attr, None)
+    if getattr(capture_fn, _CAPTURE_FN_OWNER_ATTR, None) is not None:
+        raise ValueError(
+            "Routed-experts capture is already bound to a capturer on "
+            f"{type(target).__name__}; unbind the existing binding first."
+        )
+
+
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
 ) -> Callable[[], None]:
     """Attach capture callbacks and return an idempotent ownership-aware cleanup.
 
-    Validate all routers and allocate sinks before modifying the model.
-    Cleanup restores previous bindings unless another component replaced them.
+    Other components' callbacks are preserved and restored on cleanup, but a
+    target already bound to a routed-experts capturer is rejected: one capturer
+    owns the model. Sinks are allocated before any model attribute is modified.
     """
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -198,18 +221,19 @@ def bind_routed_experts_capturer(
     bindings: list[tuple[Any, str, Any, Any]] = []
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
+            _reject_second_capturer(module, "capture_fn")
             bindings.append(
                 (
                     module,
                     "capture_fn",
-                    module.capture_fn,
-                    partial(capturer.capture, module.layer_id),
+                    getattr(module, "capture_fn", None),
+                    _make_capture_fn(capturer, module.layer_id),
                 )
             )
             continue
         if not isinstance(module, MoERunner):
             continue
-        capture_fn = partial(capturer.capture, module.layer_id)
+        capture_fn = _make_capture_fn(capturer, module.layer_id)
         quant_method = module._quant_method
         if quant_method.is_monolithic:
             moe_kernel = getattr(quant_method, "moe_kernel", None)
@@ -223,15 +247,20 @@ def bind_routed_experts_capturer(
                     "Routed-experts capture is not supported with monolithic "
                     f"MoE kernel {type(fused_experts).__name__}."
                 )
+            routed_experts = module.routed_experts
+            routing_sink = getattr(routed_experts, "routing_sink", None)
+            if routing_sink is not None:
+                _reject_second_capturer(routing_sink, "capture_fn")
             bindings.append(
                 (
-                    module.routed_experts,
+                    routed_experts,
                     "routing_sink",
-                    module.routed_experts.routing_sink,
+                    routing_sink,
                     RoutedExpertsSink(fused_experts.moe_config, capture_fn),
                 )
             )
         elif isinstance(module.router, BaseRouter):
+            _reject_second_capturer(module.router, "capture_fn")
             bindings.append(
                 (module.router, "capture_fn", module.router.capture_fn, capture_fn)
             )
@@ -244,13 +273,24 @@ def bind_routed_experts_capturer(
     if not bindings:
         raise ValueError("No supported MoE router found for routed-experts capture.")
 
-    def unbind() -> None:
+    def restore_bindings() -> None:
         for target, attr, previous, installed in reversed(bindings):
-            if getattr(target, attr) is installed:
+            try:
+                if getattr(target, attr, None) is not installed:
+                    continue
                 if isinstance(target, BaseRouter):
                     target.set_capture_fn(previous)
                 else:
                     setattr(target, attr, previous)
+            except Exception:
+                # Teardown must not mask the binding error that triggered it.
+                logger.warning(
+                    "Failed to restore %s on %s during routed-experts capture "
+                    "teardown.",
+                    attr,
+                    type(target).__name__,
+                    exc_info=True,
+                )
         bindings.clear()
 
     try:
@@ -260,6 +300,6 @@ def bind_routed_experts_capturer(
             else:
                 setattr(target, attr, installed)
     except BaseException:
-        unbind()
+        restore_bindings()
         raise
-    return unbind
+    return restore_bindings

@@ -2451,24 +2451,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def _release_capture_resources(self) -> None:
+        """Release graphs, connector, and R3 bindings in teardown order.
+
+        Captured graphs reference the R3 callbacks, so they are dropped before
+        the capturer's buffers; the connector stops using the buffers before
+        the bindings are removed.
+        """
+        has_capturer = self.routed_experts_capturer is not None
+        if current_platform.is_rocm() or has_capturer:
+            # R3 callbacks are captured into graphs that must be dropped before
+            # the referenced buffers. On ROCm RCCL's ncclCommAbort also waits
+            # for live graphs that captured the comm:
+            # https://github.com/ROCm/rocm-systems/issues/13018
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+        if has_capturer and self.cudagraph_manager is not None:
+            self.cudagraph_manager.release_graphs()
+            self.cudagraph_manager = None
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
+            self.aux_output_connector = None
+        if self._unbind_routed_experts_capturer is not None:
+            self._unbind_routed_experts_capturer()
+            self._unbind_routed_experts_capturer = None
+        self.routed_experts_capturer = None
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if current_platform.is_rocm() or self.routed_experts_capturer is not None:
-            # R3 callbacks and buffers must outlive graphs that captured them.
-            # RCCL's ncclCommAbort waits for live graphs that captured the comm:
-            # https://github.com/ROCm/rocm-systems/issues/13018
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
-        if self.aux_output_connector is not None:
-            self.aux_output_connector.close()
-            self.aux_output_connector = None
-        if (
-            self.routed_experts_capturer is not None
-            and self.cudagraph_manager is not None
-        ):
-            self.cudagraph_manager.release_graphs()
+        self._release_capture_resources()
         set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None
@@ -2491,10 +2504,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
-        if self._unbind_routed_experts_capturer is not None:
-            self._unbind_routed_experts_capturer()
-            self._unbind_routed_experts_capturer = None
-        self.routed_experts_capturer = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
             del self.model

@@ -107,6 +107,12 @@ class AuxOutputWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
 
+        capacity = routed_experts_capturer.device_buffer.shape[0]
+        assert capacity >= max_num_batched_tokens, (
+            "AuxOutput capturer buffer is smaller than the scheduler's token "
+            f"budget: {capacity} < {max_num_batched_tokens}."
+        )
+
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
