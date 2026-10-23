@@ -267,7 +267,7 @@ variants:
           - "16384"
           - "--gpu-memory-utilization"
           - "0.9"
-          - "--disable-flashinfer-autotune"
+          - "--no-enable-flashinfer-autotune"
           - "--stream-interval"
           - "20"
         extra_env:
@@ -882,7 +882,7 @@ guide: |
 
   Every list ends with `256,512,1024,2048` and uses `{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[...]}`. Sizes 1 and 2 give the drafter's decode steps full CUDA graphs at concurrency 1.
 
-  The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length (2.78 for MiniMax-M3 with three draft tokens, thinking on; [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)) so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler, as in the command below; the lane's accuracy evals ran that way.
+  The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length (2.78 for MiniMax-M3 with three draft tokens, thinking on; [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/inferencex-e2e/infx/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)) so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler, as in the command below; the lane's accuracy evals ran that way.
 
   ### Services and environment
 
@@ -915,10 +915,12 @@ guide: |
     --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}' \
     --max-model-len 1048576 --max-num-batched-tokens 16384 --max-num-seqs <S> \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[<sizes from the table>,256,512,1024,2048]}' \
-    --gpu-memory-utilization 0.9 --disable-flashinfer-autotune --stream-interval 20 --language-model-only \
+    --gpu-memory-utilization 0.9 --no-enable-flashinfer-autotune --stream-interval 20 --language-model-only \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}' \
     --reasoning-parser minimax_m3 --dyn-reasoning-parser minimax_m3 --dyn-tool-call-parser minimax_m3
   ```
+
+  The pinned nightly predates the `--disable-flashinfer-autotune` spelling (added in vLLM #61479), so this command uses `--no-enable-flashinfer-autotune`; newer images accept both. The command builder renders the same flag for GB200.
 
   For TP8, run the same command on both trays with `--tensor-parallel-size 8 --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip>`, adding `--headless` on node rank 1.
 
@@ -1092,7 +1094,7 @@ guide: |
   `2.78` is **not** a tuning knob and **not** a production shortcut. It is the
   committed golden EAGLE3-GQA acceptance length for MiniMax-M3 with thinking
   enabled at 3 speculative tokens, taken from
-  [`golden_al_distribution/minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/golden_al_distribution/minimaxm3_eagle3_gqa.yaml).
+  [`golden_al_distribution/minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/inferencex-e2e/infx/golden_al_distribution/minimaxm3_eagle3_gqa.yaml).
   Synthetic rejection standardizes throughput comparisons; it bypasses real
   verification, so it must never be used for accuracy evaluation or for serving
   users. Use the real-verification form above for everything else.
@@ -1123,7 +1125,7 @@ guide: |
     config entry are byte-identical to the reviewed head
   - Original lane PR: [SemiAnalysisAI/InferenceX#2781](https://github.com/SemiAnalysisAI/InferenceX/pull/2781)
     ([sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/33239952571))
-  - Golden GQA acceptance-length curve: [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)
+  - Golden GQA acceptance-length curve: [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/inferencex-e2e/infx/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)
   - KV-cache layout change the image pin compensates for: [vllm-project/vllm#51718](https://github.com/vllm-project/vllm/pull/51718)
   - AITER indexer scoring and top-k kernels the pinned digest adds: [vllm-project/vllm#52664](https://github.com/vllm-project/vllm/pull/52664)
 
