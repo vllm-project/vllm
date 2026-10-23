@@ -377,35 +377,83 @@ class _PromotingTier(_FakeTier):
         self.promoted.set()
 
 
-def test_off_thread_promotion_keeps_the_engine_stepping_until_the_step_flushes_it():
-    """A promotion queued by the control thread must not be stranded.
+def _multi_tier_manager(primary, tier_cls, second_cls, **kwargs):
+    common = {
+        "offloading_spec": MagicMock(),
+        "primary_kv_view": primary.get_kv_memoryview(),
+    }
+    return TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[
+            tier_cls(tier_type="first", **common),
+            second_cls(tier_type="second", **common),
+        ],
+        **kwargs,
+    )
 
-    poll_tiers() deliberately does not flush promotions; only the next
-    on_schedule_end() does. So has_pending_work() must stay True after the
-    round, or an idle engine would never take the step that submits the load
-    and the pinned primary chunk would be leaked.
+
+def test_multi_tier_manager_keeps_the_engine_stepping_while_idle():
+    """With more than one secondary tier, a polled tier must keep the engine
+    stepping even when idle.
+
+    A tier-poll round can serve a peer whose lookup promotes a chunk out of
+    another secondary tier. poll_tiers() never flushes promotions and only a
+    scheduler step collects their completions, so if the engine parked it would
+    never take that step and the load would strand. has_pending_work() is
+    consulted before the park, so it must stay True here.
     """
     num_chunks = 8
     primary = CPUPrimaryTierOffloadingManager(
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
-    common = {
-        "offloading_spec": MagicMock(),
-        "primary_kv_view": primary.get_kv_memoryview(),
-    }
-    tier = _PromotingTier(tier_type="promoting", **common)
-    hit = _HitTier(tier_type="hit", **common)
-    manager = TieringOffloadingManager(
-        primary_tier=primary, secondary_tiers=[tier, hit]
+    manager = _multi_tier_manager(primary, _FakeTier, _HitTier)
+    try:
+        assert manager._tier_poll_thread is not None
+        assert manager.has_pending_work() is True
+    finally:
+        manager.shutdown()
+
+
+def test_two_polled_tiers_keep_the_engine_stepping_while_idle():
+    """Two polled tiers strand the same way as one polled plus one unpolled.
+
+    A serve on the first can promote out of the second, and poll_tiers() never
+    flushes it, so the keep-alive cannot key on the promoted tier being
+    unpolled.
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
     )
+    manager = _multi_tier_manager(primary, _FakeTier, _FakeTier)
+    try:
+        assert manager._tier_poll_thread is not None
+        assert manager.has_pending_work() is True
+    finally:
+        manager.shutdown()
+
+
+def test_off_thread_promotion_is_flushed_by_the_next_step():
+    """An off-thread serve queues a promotion that only a step submits.
+
+    Shows the queue actually fills from the control thread, which is why a
+    multi-tier manager must keep the engine stepping (see
+    test_multi_tier_manager_keeps_the_engine_stepping_while_idle).
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    manager = _multi_tier_manager(primary, _PromotingTier, _HitTier)
+    tier = manager.secondary_tiers[0]
     try:
         assert tier.promoted.wait(_SETTLE_S), "control thread never served"
 
         with manager.lock:
             assert manager._pending_load_submissions
-            assert manager.has_pending_work() is True
-
             manager.on_schedule_end(_EMPTY_SCHEDULE_END)
             assert not manager._pending_load_submissions
     finally:

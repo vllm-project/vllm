@@ -227,10 +227,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     step: results waiting to be handed off, sessions with transfers in
     flight or a registration pending, parked unbound stores and lookups
     owing a ``parent.on_request_finished``. Idle peer polling is not included
-    -- the tier-poll thread drives it -- so an otherwise quiescent engine can
-    report itself idle and finish a pause or a graceful shutdown. When that
-    thread is disabled (``tier_poll_interval_s <= 0``) the tiering manager
-    keeps the engine ticking on this tier's behalf instead.
+    -- the tier-poll thread drives it -- so a lone p2p tier lets a quiescent
+    engine report itself idle and finish a pause or a graceful shutdown. The
+    tiering manager keeps the engine ticking on this tier's behalf when that
+    thread is disabled (``tier_poll_interval_s <= 0``), and also whenever a
+    second secondary tier exists, since a peer lookup can promote out of it
+    and only a step submits and completes that promotion.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P

@@ -177,7 +177,7 @@ Most tiers only ever see the scheduler thread, which holds the lock for the leng
 Two consequences worth knowing:
 
 - Any tier can be reached from that thread indirectly, because serving a peer looks keys up through the tiering manager, which fans out to the other tiers. Tier state must therefore not assume a particular thread, only that the manager lock is held.
-- Work the thread deliberately leaves alone is batched per step: a promotion it initiates is submitted at the next `on_schedule_end()`, not immediately.
+- Work the thread deliberately leaves alone is batched per step: a promotion it initiates is submitted at the next `on_schedule_end()`, not immediately. Because only an engine step submits that promotion and collects its completion, a multi-tier setup that includes an opted-in tier (for example `p2p` alongside `fs`) keeps the engine stepping even when idle, so pause and graceful shutdown wait there too. A setup whose only secondary tier is the opted-in one still goes idle, since a peer's lookup cannot promote out of it.
 
 Setting `tier_poll_interval_s` to `0` disables the thread; opted-in tiers then get serviced once per engine step, as they were before it existed. With the thread disabled the engine keeps stepping for such a tier's lifetime, so an idle engine does not report itself idle and pause and graceful shutdown do not complete on their own.
 

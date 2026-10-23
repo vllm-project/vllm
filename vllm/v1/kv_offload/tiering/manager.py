@@ -1112,10 +1112,17 @@ class TieringOffloadingManager(OffloadingManager):
         # secondary tiers themselves still have outstanding.
         if (
             self._jobs
-            or self._pending_load_submissions
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         ):
+            return True
+        # A tier-poll round can serve a peer whose lookup promotes a chunk out
+        # of another secondary tier. poll_tiers() never flushes promotions and
+        # only a scheduler step collects their completions, so with more than
+        # one secondary tier the engine must keep stepping for such a load. A
+        # lone p2p tier can only ever hit the primary on a peer lookup, so it
+        # still goes idle.
+        if self._polled_tiers and len(self.secondary_tiers) > 1:
             return True
         # A tier that opts into off-thread polling reports only its own work and
         # leaves idle peer polling to the tier-poll thread. When no live thread

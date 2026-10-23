@@ -176,12 +176,13 @@ is non-empty, so the engine steps and delivers the flush. Make
 
 Fixed in `vllm/v1/kv_offload/tiering/p2p/manager.py` (a real predicate over
 `_finished_jobs`, `_failed_serve_ctxs`, `_unbound_stores` and
-`session.has_pending_work`) plus
-`vllm/v1/kv_offload/tiering/manager.py` (adds `_pending_load_submissions`, and
-keeps the engine stepping for an opted-in tier only while no live tier-poll
-thread services it). Tests: `tests/v1/kv_offload/tiering/p2p/test_manager.py`
-and `tests/v1/kv_offload/tiering/test_tier_poll_thread.py`; the docs note the
-`tier_poll_interval_s=0` behaviour.
+`session.has_pending_work`) plus `vllm/v1/kv_offload/tiering/manager.py`, which
+keeps the engine stepping for an opted-in tier while no live tier-poll thread
+services it and, in a multi-tier setup, while a peer lookup could promote out
+of another tier (only a scheduler step submits and completes that promotion).
+Tests: `tests/v1/kv_offload/tiering/p2p/test_manager.py` and
+`tests/v1/kv_offload/tiering/test_tier_poll_thread.py`; the docs note both
+behaviours.
 
 ### What's wrong
 
@@ -277,15 +278,24 @@ Context:
   that the pause Future resolves off `has_work()`, the check B2 keeps True.
   The RFC does not mention connectors that report work forever.
 
-### Fix direction (untested)
+### Fix (this branch)
 
-Make `has_pending_work()` report real work: sessions with outstanding
-transfers, parked unbound stores, and in-flight jobs. Let the tier-poll thread
-handle idle peer polling. One caveat: when `tier_poll_interval_s <= 0` there is
-no poll thread, and the engine tick is the only driver. A fix must keep that
-configuration working, for example by keeping the always-True behaviour only
-when no poll thread is running and excluding it from the pause and shutdown
-checks.
+`has_pending_work()` reports real work (sessions with outstanding transfers,
+parked unbound stores, finished jobs awaiting hand-off, lookups owing
+`on_request_finished`), leaving idle peer polling to the tier-poll thread. The
+tiering manager keeps the engine stepping when no live poll thread services the
+tier (`tier_poll_interval_s <= 0`, or the thread gave up), and when a second
+secondary tier exists: a peer lookup served off-thread can promote a chunk out
+of that tier, and only an engine step submits and completes that promotion.
+
+### Open
+
+The multi-tier keep-alive restores the pre-fix busyness for a `[fs, p2p]`-style
+setup, so pause and graceful shutdown still do not complete there; the same
+holds for a single-tier setup whose poll thread dies while the engine is parked.
+Both are the same root problem: nothing wakes a parked engine when the tier-poll
+thread changes manager state. Settling them needs an engine wake path (see RFC
+#51476 and the poller PRs it tracks), which is outside B2.
 
 ---
 
