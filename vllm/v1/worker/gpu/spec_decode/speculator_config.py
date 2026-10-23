@@ -120,13 +120,6 @@ class SpeculatorConfig:
         return 0
 
     @property
-    def draft_query_len(self) -> int | None:
-        """The number of query tokens per request in the draft forward pass, if
-        it's fixed regardless of the target's scheduled tokens. Limits
-        max_num_active_seqs to fit in max_num_batched_tokens."""
-        return None
-
-    @property
     def num_prefill_lookahead_tokens(self) -> int:
         """See `VllmConfig.num_prefill_lookahead_tokens`."""
         # Hidden-state drafters read only the immediate next token.
@@ -139,6 +132,12 @@ class SpeculatorConfig:
             # The existing query is reused; only masked queries need new slots.
             return self.num_speculative_tokens - 1
         return 0
+
+    def max_num_draft_seqs(self, max_num_batched_tokens: int) -> int | None:
+        """The most requests the draft forward pass fits in
+        max_num_batched_tokens, which limits max_num_active_seqs, or None if
+        unlimited (e.g. when it's sized by the target's scheduled tokens)."""
+        return None
 
     def hash_factors(self) -> list[Any]:
         """Extra factors of `SpeculativeConfig.compute_hash`."""
