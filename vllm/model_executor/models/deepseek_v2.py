@@ -67,13 +67,13 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
-    PCPOProjRowParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.pcp_o_proj_tp import PCPOProjTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -1104,19 +1104,16 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        o_proj_cls = (
-            PCPOProjRowParallelLinear
-            if vllm_config.parallel_config.enable_pcp_o_proj_tp
-            else RowParallelLinear
-        )
-        self.o_proj = o_proj_cls(
+        self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
             reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            **PCPOProjTP.linear_shard_kwargs(vllm_config),
         )
+        self.o_proj_tp = PCPOProjTP.maybe_create(self.o_proj, vllm_config)
 
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
@@ -1201,7 +1198,7 @@ class DeepseekV2MLAAttention(nn.Module):
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             rotary_emb=self.rotary_emb,
-            o_proj=self.o_proj,
+            o_proj=self.o_proj if self.o_proj_tp is None else self.o_proj_tp,
             fused_qkv_a_proj=self.fused_qkv_a_proj
             if self.q_lora_rank is not None
             else None,

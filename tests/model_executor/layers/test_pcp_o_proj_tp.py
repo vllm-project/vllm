@@ -9,17 +9,15 @@ import torch
 import torch.nn.functional as F
 
 import vllm.model_executor.layers.linear as linear_module
+import vllm.model_executor.layers.pcp_o_proj_tp as pcp_o_proj_module
 import vllm.model_executor.parameter as parameter_module
 from vllm.config.quantization import QuantSpec
 from vllm.model_executor.kernels.linear import (
     CutlassNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
-from vllm.model_executor.layers.linear import (
-    LinearMethodBase,
-    PCPOProjLinearMethod,
-    PCPOProjRowParallelLinear,
-)
+from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
+from vllm.model_executor.layers.pcp_o_proj_tp import PCPOProjPath, PCPOProjTP
 from vllm.model_executor.layers.quantization.modelopt import (
     CkptCtx,
     ModelOptLinearMethod,
@@ -61,38 +59,60 @@ class _UnsupportedLinearMethod(LinearMethodBase):
         raise AssertionError("unsupported method must fail during post-load")
 
 
-def _make_layer(
-    monkeypatch, pcp_rank: int
-) -> tuple[PCPOProjRowParallelLinear, _FakePCPGroup]:
+def _make_layer(monkeypatch, pcp_rank: int) -> tuple[PCPOProjTP, _FakePCPGroup]:
     pcp_group = _FakePCPGroup(pcp_rank)
     config_scope = object()
-    monkeypatch.setattr(linear_module, "get_pcp_group", lambda: pcp_group)
-    monkeypatch.setattr(linear_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(
-        linear_module, "get_tensor_model_parallel_world_size", lambda: 1
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_pcp_o_proj_tp=True)
     )
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    for module in (linear_module, pcp_o_proj_module, parameter_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(pcp_o_proj_module, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(
-        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+        pcp_o_proj_module, "get_current_vllm_config", lambda: config_scope
     )
-    monkeypatch.setattr(linear_module, "get_current_vllm_config", lambda: config_scope)
 
     def _apply(_self, layer, x, bias=None):
         assert layer.input_size_per_partition == x.shape[-1]
         return F.linear(x, layer.weight, bias)
 
     monkeypatch.setattr(linear_module.UnquantizedLinearMethod, "apply", _apply)
-    layer = PCPOProjRowParallelLinear(
+    linear = RowParallelLinear(
         input_size=4,
         output_size=3,
+        bias=False,
         params_dtype=torch.float32,
         reduce_results=False,
+        **PCPOProjTP.linear_shard_kwargs(vllm_config),
     )
-    return layer, pcp_group
+    o_proj = PCPOProjTP.maybe_create(linear, vllm_config)
+    assert o_proj is not None
+    return o_proj, pcp_group
+
+
+def test_disabled_feature_keeps_plain_linear():
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_pcp_o_proj_tp=False)
+    )
+    assert PCPOProjTP.linear_shard_kwargs(vllm_config) == {}
+    assert PCPOProjTP.maybe_create(None, vllm_config) is None
+
+
+@pytest.mark.parametrize(
+    ("has_prefill", "expected"),
+    [
+        (True, PCPOProjPath.WEIGHT_ALL_GATHER),
+        (False, PCPOProjPath.TOKEN_EXCHANGE),
+    ],
+)
+def test_select_path(has_prefill, expected):
+    assert PCPOProjTP.select_path(has_prefill) is expected
 
 
 def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
-    layer, _ = _make_layer(monkeypatch, pcp_rank=1)
+    o_proj, _ = _make_layer(monkeypatch, pcp_rank=1)
+    layer = o_proj.linear
     assert layer.quant_method.supports_pre_processed_weights
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     layer.weight_loader_v2(layer.weight, full_weight)
@@ -103,7 +123,7 @@ def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
     def _all_gather_into_tensor(output, input_, group, async_op):
         torch.testing.assert_close(input_, full_weight[:, 2:].transpose(0, 1))
         output.copy_(full_weight.transpose(0, 1))
-        assert group is layer.pcp_group.device_group
+        assert group is o_proj.pcp_group.device_group
         assert async_op
         return work
 
@@ -112,10 +132,15 @@ def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
     )
 
     input_ = torch.arange(8, dtype=torch.float32).view(2, 4)
-    layer.prefetch_full_weight_if_needed(has_prefill=True)
+    monkeypatch.setattr(
+        pcp_o_proj_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(global_has_prefill=True),
+    )
+    assert o_proj.pre_attention_hook() is PCPOProjPath.WEIGHT_ALL_GATHER
     assert not work.waited
 
-    output, output_bias = layer(input_)
+    output, output_bias = o_proj(input_)
     assert work.waited
     assert output_bias is None
     torch.testing.assert_close(output, F.linear(input_, full_weight))
@@ -123,10 +148,10 @@ def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
 
 
 def test_forward_requires_explicit_attention_prefetch(monkeypatch):
-    layer, _ = _make_layer(monkeypatch, pcp_rank=0)
+    o_proj, _ = _make_layer(monkeypatch, pcp_rank=0)
 
     with pytest.raises(RuntimeError, match="Attention must call"):
-        layer(torch.zeros(1, 4))
+        o_proj(torch.zeros(1, 4))
 
 
 @pytest.mark.parametrize(
@@ -137,33 +162,44 @@ def test_prefetch_decision_uses_global_pcp_batch_type(
     monkeypatch, global_has_prefill, local_num_prefills, expected
 ):
     monkeypatch.setattr(
-        linear_module,
+        pcp_o_proj_module,
         "get_forward_context",
         lambda: SimpleNamespace(global_has_prefill=global_has_prefill),
     )
     metadata = SimpleNamespace(num_prefills=local_num_prefills)
 
-    assert linear_module.get_pcp_o_proj_batch_has_prefill(metadata) is expected
+    assert pcp_o_proj_module.get_pcp_batch_has_prefill(metadata) is expected
 
 
 def test_decode_slices_features_and_reduces_over_pcp(monkeypatch):
-    layer, pcp_group = _make_layer(monkeypatch, pcp_rank=1)
+    o_proj, pcp_group = _make_layer(monkeypatch, pcp_rank=1)
+    layer = o_proj.linear
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     layer.weight_loader_v2(layer.weight, full_weight)
 
     input_ = torch.arange(8, dtype=torch.float32).view(2, 4)
     pcp_group.other_output = F.linear(input_[:, :2], full_weight[:, :2])
 
-    layer.prefetch_full_weight_if_needed(has_prefill=False)
-    output, output_bias = layer(input_)
+    def _no_gather(*args, **kwargs):
+        raise AssertionError("decode must not gather O-Proj weights")
+
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", _no_gather)
+    monkeypatch.setattr(
+        pcp_o_proj_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(global_has_prefill=False),
+    )
+    assert o_proj.pre_attention_hook() is PCPOProjPath.TOKEN_EXCHANGE
+    output, output_bias = o_proj(input_)
 
     assert output_bias is None
     torch.testing.assert_close(output, F.linear(input_, full_weight))
 
 
 def test_quantized_o_proj_method_is_rejected(monkeypatch):
-    layer, _ = _make_layer(monkeypatch, pcp_rank=0)
-    layer.quant_method = PCPOProjLinearMethod(_UnsupportedLinearMethod())
+    o_proj, _ = _make_layer(monkeypatch, pcp_rank=0)
+    layer = o_proj.linear
+    layer.quant_method.quant_method = _UnsupportedLinearMethod()  # type: ignore[attr-defined]
 
     with pytest.raises(RuntimeError, match="does not support the selected O-Proj"):
         layer.quant_method.process_weights_after_loading(layer)
@@ -315,7 +351,8 @@ def test_modelopt_nvfp4_rejects_padded_local_weight():
 
 
 def test_unquantized_method_restores_local_weight_after_kernel_failure(monkeypatch):
-    layer, _ = _make_layer(monkeypatch, pcp_rank=0)
+    o_proj, _ = _make_layer(monkeypatch, pcp_rank=0)
+    layer = o_proj.linear
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     layer.weight_loader_v2(layer.weight, full_weight)
 
@@ -333,10 +370,15 @@ def test_unquantized_method_restores_local_weight_after_kernel_failure(monkeypat
         torch.distributed, "all_gather_into_tensor", _all_gather_into_tensor
     )
 
-    layer.prefetch_full_weight_if_needed(has_prefill=True)
+    monkeypatch.setattr(
+        pcp_o_proj_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(global_has_prefill=True),
+    )
+    o_proj.pre_attention_hook()
     with pytest.raises(RuntimeError, match="fake linear kernel failure"):
-        layer(torch.zeros(1, 4))
+        o_proj(torch.zeros(1, 4))
 
     assert layer.weight.shape == (3, 2)
     assert layer.input_size_per_partition == 2
-    assert layer._use_full_weight is None
+    assert o_proj._path is None

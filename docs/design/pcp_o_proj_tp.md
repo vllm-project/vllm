@@ -1,6 +1,6 @@
 # PCP O-Proj Tensor Parallelism
 
-Implementation baseline: `vllm-project/vllm upstream/main@bfa7e5b7af`.
+Implementation baseline: `vllm-project/vllm upstream/main@544f182d9f`.
 
 ## Background
 
@@ -37,9 +37,8 @@ the name `pcp_o_proj_tp`.
   not supported yet.
 - LoRA is not supported yet.
 - CPU weight offloading is not supported yet.
-- The attention module must explicitly call
-  `o_proj.prefetch_full_weight_if_needed(has_prefill)` before the main attention
-  computation.
+- The attention module must call `PCPOProjTP.pre_attention_hook()` before the
+  main attention computation.
 
 Configuration validation and linear-layer construction checks enforce all of
 these restrictions and fail fast instead of silently ignoring the feature.
@@ -63,18 +62,58 @@ The checkpoint loader uses flattened rank `t*P+p` and world size `T*P`, so no
 checkpoint format change is required. The resident O-Proj weight on each rank
 is reduced to `1/P` of the standard TP layout.
 
+## Module structure
+
+The feature is split into three layers so attention implementations, linear
+layers, and quantization methods each stay unaware of the others' PCP details:
+
+```text
+attention impl  --(o_proj(x), pre_attention_hook)-->  PCPOProjTP
+PCPOProjTP      --(quant_method.apply)-->             RowParallelLinear
+PCPOProjTP      --(gather / switch)-->                TPWeightSwitchMixin
+```
+
+`PCPOProjTP` (`vllm/model_executor/layers/pcp_o_proj_tp.py`) is the
+intermediate layer between the attention implementation and the O-Proj linear
+layer. It owns all O-Proj split and restore logic and exposes:
+
+- `linear_shard_kwargs(vllm_config)` and `maybe_create(linear, vllm_config)`:
+  enable sharding. The first returns the `tp_rank`/`tp_size` overrides that
+  build a plain `RowParallelLinear` over the flattened TP-by-PCP grid; the
+  second wraps that linear and returns `None` when the feature is disabled.
+- `enable_weight_switch()`: builds the local/full weight aliases. It runs
+  automatically after post-load processing through a delegating linear method.
+- `select_path(has_prefill)`: chooses `PCPOProjPath.WEIGHT_ALL_GATHER` for
+  batches with prefill and `PCPOProjPath.TOKEN_EXCHANGE` for decode-only
+  batches.
+- `pre_attention_hook(attn_metadata=None, *, layer_name=None)`: selects the
+  path for the current forward and launches the asynchronous weight gather
+  when needed.
+- `__call__(x)`: a drop-in replacement for `RowParallelLinear.__call__` with
+  the same input and `(output, bias)`/`output` return convention.
+
+Attention implementations therefore keep calling `o_proj(x)`. The MLA wrapper
+receives the `PCPOProjTP` instance through `MLAModules.o_proj`; DeepSeek-V3.2
+attention selects it in place of the linear layer. The linear layer remains
+registered under its original `o_proj` name, so checkpoint loading and
+post-load processing are unchanged.
+
 ## Weight-switch scope
 
 The implementation follows the vllm-ascend `TPWeightSwitchMixin` mechanism.
-Each compatible linear method declares every post-load tensor consumed by its
-kernel and the corresponding input-shard dimension. The mixin owns the reusable
-buffers, asynchronous collective handles, and local/full tensor aliases.
+Each compatible linear method only declares a `TPWeightGatherSpec` descriptor
+for every post-load tensor consumed by its kernel and the corresponding
+input-shard dimension. The mixin owns the reusable buffers, asynchronous
+collective handles, and local/full tensor aliases. Tensors whose post-load
+layout is not directly concatenative attach a reusable `TPWeightGatherLayout`
+to their descriptor instead of overriding mixin internals.
 
 `UnquantizedLinearMethod` declares only `weight`. The ModelOpt W4A4 NVFP4
 adapter is the quantized example: it declares the packed `weight` and per-block
 `weight_scale`. Packed weights concatenate directly on dimension 1. CUTLASS
 block scales do not: every local scale is already stored in a 128x4 swizzled
-layout. The adapter exposes a logical unswizzled view to the collective and,
+layout, so the scale descriptor uses the shared
+`NVFP4_SWIZZLED_BLOCK_SCALE_LAYOUT`. The layout exposes a logical unswizzled view to the collective and,
 after the asynchronous gather completes, assembles the full swizzled scale in a
 shared buffer before switching both layer attributes. Scale payloads use
 `uint8` views so the collective preserves FP8 bits without requiring an FP8
@@ -95,12 +134,14 @@ not exercise the quantized O-Proj adapter.
 
 ## Runtime paths
 
-### Decode-only batches
+### Decode-only batches (`TOKEN_EXCHANGE`)
 
 PCP rank `p` takes the corresponding feature slice from the TP-sharded
 attention output `X_t[..., K/T]` and multiplies it by the local
 `W_local[t,p]`. The partial sums are first all-reduced over the PCP group to
-recover the standard O-Proj partial result for a TP rank. The existing TP
+recover the standard O-Proj partial result for a TP rank. Decode queries are
+replicated on every PCP rank, so exchanging tokens reduces to this feature
+slice and output reduction; the resident weight never moves. The existing TP
 reduction semantics are then preserved.
 
 ```text
@@ -112,7 +153,7 @@ DeepSeek-V3.2 O-Proj uses `reduce_results=False`, so this path performs only the
 PCP reduction. The existing fused TP all-reduce/RMSNorm operation remains
 responsible for the TP reduction.
 
-### Prefill or mixed batches
+### Prefill or mixed batches (`WEIGHT_ALL_GATHER`)
 
 The model runner records whether the logical, pre-partition batch contains any
 prefill requests before PCP splits its tokens. Every PCP rank therefore makes
@@ -156,11 +197,11 @@ shared buffers at the same time.
 ## Explicit triggering and correctness constraints
 
 Both the generic MLA wrapper and the modular DeepSeek-V3.2 attention path
-explicitly trigger the prefetch after their Q/KV normalization and before the
+explicitly call `PCPOProjTP.pre_attention_hook()` after their Q/KV normalization and before the
 remaining query projection and main attention computation. The trigger uses
 the logical pre-partition batch type propagated through `ForwardContext`, so
 all PCP ranks preserve collective ordering.
-`PCPOProjRowParallelLinear.forward()` requires the trigger to have occurred
+`PCPOProjTP.__call__()` requires the hook to have occurred
 before every invocation. A missing trigger raises an error instead of inferring
 the batch type. This guarantees that:
 
