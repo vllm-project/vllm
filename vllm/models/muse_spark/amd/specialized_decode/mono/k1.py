@@ -14,9 +14,10 @@ KV insert; the stock attention core and K2 follow it.
                   row group u % 5) (``front/epilogue.py``): the two GEMV
                   partials -> QK-norm, RoPE (``rope`` builds) -> ``qkvo``, the
                   k / v heads into the cache
-    qkv           CTAs 64 .. 255: 12 (tile, K part) tasks each, every weight in
-                  flight from entry, the ``arow`` rows staged behind ``ardy``
-                  (``front/qkv.py``) -> ``qpart``
+    qkv           CTAs 64 .. 255: 12 (tile, K part) tasks each, the first
+                  weight rounds in flight from entry, the ``arow`` rows
+                  staged behind ``ardy``, the last rounds behind the rows'
+                  loads (``front/qkv.py``) -> ``qpart``
 
 The roles are split by CTA (5.3) so that no CTA polls or publishes with a
 load in flight that is not its own task's (rule 8, DESIGN_BC 10.4): the
@@ -142,10 +143,11 @@ def program(c) -> None:
         boundary.stage_boundary(c, b, pre)
         if b32 < E_UNITS * s:
             epilogue.stage_epilogue(c, b32, epi)
-    # -- the GEMV CTAs: their weights the first loads, then the ardy polls
+    # -- the GEMV CTAs: their early weight rounds the first loads, then the
+    # ardy polls (the late rounds go out behind the arow loads)
     if b >= K1_GEMV0:
         g = b32 - K1_GEMV0
-        wops = qkv.qkv_loads(c, g)
+        wops = qkv.qkv_loads(c, g, range(qkv.EARLY))
         settle(c)
         qkv.stage_qkv(c, g, wops)
 

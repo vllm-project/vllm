@@ -14,11 +14,13 @@ rounds once (``front/epilogue.py``)::
              12 distinct K parts (consecutive mod 16, no wrap inside a tile)
     rounds   r = 0 .. 5: waves 0-3 task 2 r, waves 4-7 task 2 r + 1; wave w
              chunk w % 4 of its task (``gemv.loads``: 4 dwordx4 a lane,
-             nontemporal); every round's weights issued at entry
+             nontemporal); rounds 0 .. EARLY - 1 issued at entry, the rest
+             right after the ``arow`` loads
     B rows   ``arow`` (bf16 [MT, 8192], the boundary's, device scope) of the
              CTA's 12 K parts, S rows each, staged into LDS ``xa`` in one
-             batched pass (every load, then every ds_write, one barrier)
-             behind the ``ardy`` flags of the 48 slices they cover
+             batched pass (every load, the late weight rounds, then every
+             ds_write, one barrier) behind the ``ardy`` flags of the 48
+             slices they cover
     sums     a task's value: its 4 waves' accumulators in wave order
              (``row_sum``); a tile's partial in this CTA: its tasks in K part
              order -> ``qpart`` ((T 2 + c) MT + t) 16 + r, contributor c = g
@@ -31,8 +33,12 @@ order (waves, then K parts, then contributors) is fixed and the same on
 every rank: ``qkvo`` and the cache are rank-bit-identical.
 
 Rule 8 (DESIGN_BC 10.4): a GEMV CTA polls ``ardy`` holding only its own
-weights in flight (``_spin``'s ``vmcnt(0)`` retires them first: 192 KiB a
-CTA, ~8 us, the boundary ~2-3 us); it publishes nothing.
+weights in flight; it publishes nothing. ``vmcnt`` retires in order, so the
+poll's ``vmcnt(0)`` (``_spin``) and the staging pass's ds_writes wait for
+every weight load issued before them: only the EARLY rounds (128 of the
+CTA's 192 KiB) are, the last rounds stream behind the ``arow`` loads, so the
+ds_writes wait on a counted ``vmcnt`` (the late rounds' loads still in
+flight) and the poll and staging round trips hide under the stream's tail.
 
 ``stages/gemv.py`` is K2's (compiled into every K2 build) and is not edited:
 the staging pass and the task sums are here.
@@ -75,8 +81,10 @@ XA_ROW = KPART + gemv.LDS_PAD  # bf16 a padded LDS K part row (520)
 X4 = KPART // 8  # dwordx4 a K part row (64)
 CHUNKS = KPART // gemv.KCH  # 4 chunks a K part: one a wave of a half
 SLICES = KPART // COLS  # boundary slices (``ardy`` flags) a K part covers
+EARLY = 4  # weight rounds issued at entry; the rest after the arow loads
 assert CHUNKS * 2 == WAVES and K1_ROUNDS * 2 == K1_TPC
 assert SLICES * K1_TPC <= THREADS  # a flag a polling thread
+assert 0 < EARLY < K1_ROUNDS
 
 
 def tau_of(g, i):
@@ -120,10 +128,11 @@ def last_of_tile(g, i):
     return (tau_of(g, i) + 1) % KPARTS == 0
 
 
-def qkv_loads(c, g) -> list:
-    """GEMV CTA g's weights: round r's task 2 r + h (h = wave // 4), chunk
-    wave % 4 of its K part, 4 dwordx4 a lane (nontemporal), every round in
-    flight (6: 96 VGPRs). The CTA's first loads. A scheduling barrier after
+def qkv_loads(c, g, rounds) -> list:
+    """GEMV CTA g's weights of ``rounds``: round r's task 2 r + h (h = wave
+    // 4), chunk wave % 4 of its K part, 4 dwordx4 a lane (nontemporal),
+    every round in flight (6: 96 VGPRs). The EARLY rounds are the CTA's first
+    loads, the rest are issued by ``stage_rows``. A scheduling barrier after
     them keeps every load where it is issued (LLVM would sink the late rounds
     to their MFMAs)."""
     lane, wave = c["lane"], c["wave"]
@@ -131,7 +140,7 @@ def qkv_loads(c, g) -> list:
     half = wave // CHUNKS
     w = c["args"]["w_qkv"]
     ops = []
-    for r in range(K1_ROUNDS):
+    for r in rounds:
         tile, kp = task(g, 2 * r + half)
         ops.append(
             gemv.loads(lane, w4, w, tile * ROWS, KPART, ldk=HIDDEN, k0=kp * KPART)[0]
@@ -145,12 +154,15 @@ def _stage_ij(v, s):
     return v // (s * X4), v // X4 % s, v % X4
 
 
-def stage_rows(c, g) -> None:
+def stage_rows(c, g) -> list:
     """The one staging pass: the ``arow`` rows (device scope: the boundary
     CTAs of this launch wrote them) of the CTA's 12 K parts -> LDS ``xa``, 16
     B a thread a round (12 S 64 dwordx4: 12 rounds at S = 8), every round's
     load issued before the first ds_write, then one barrier. The K parts are
-    (12 g + i) % 16, derived from g in-kernel.
+    (12 g + i) % 16, derived from g in-kernel. Between the loads and the
+    ds_writes it issues the late weight rounds (EARLY ..) and returns them:
+    younger than the ``arow`` loads, they stay in flight through the
+    ds_writes and the barrier.
 
     Not ``ops.batched_rounds``: its last round's store is predicated (v <
     n), so LLVM sinks that round's load into the branch, behind the earlier
@@ -169,10 +181,12 @@ def stage_rows(c, g) -> None:
         word = (t * HIDDEN + kp * KPART + 8 * x) // 2
         got.append(fx.Vector(ld_dev(arow, word, 4)))
     rocdl.sched_barrier(0)
+    late = qkv_loads(c, g, range(EARLY, K1_ROUNDS))
     for v, w in zip(vs, got):
         i, t, x = _stage_ij(v, s)
         fx.ptr_store(w, xa + ((i * s + t) * XA_ROW + 8 * x) // 2)
     gpu.barrier()
+    return late
 
 
 @traced
@@ -210,15 +224,16 @@ def _mfmas(c, r, ops):
 
 @traced
 def stage_qkv(c, g, ops) -> None:
-    """GEMV CTA g: the ``ardy`` polls (its own weights in flight) -> the
-    staging pass -> the rounds of MFMAs; thread (t, r) = (tid // 16, tid %
-    16), t < S, adds each task's row r of token t to the tile's partial and
-    puts it to ``qpart`` when the CTA's last task of the tile is in.
+    """GEMV CTA g: the ``ardy`` polls (its EARLY weight rounds ``ops`` in
+    flight) -> the staging pass (which issues the late rounds) -> the rounds
+    of MFMAs; thread (t, r) = (tid // 16, tid % 16), t < S, adds each task's
+    row r of token t to the tile's partial and puts it to ``qpart`` when the
+    CTA's last task of the tile is in.
     Ends with a barrier (``red`` and ``xa`` handed over)."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     qpart = c["scr"]["qpart"]
     _poll_ardy(c, g)
-    stage_rows(c, g)
+    ops = ops + stage_rows(c, g)
     r16 = tid % ROWS
     t = tid // ROWS
     tc = fx.min(t, s - 1)  # threads past S read token S - 1's (in bounds)
