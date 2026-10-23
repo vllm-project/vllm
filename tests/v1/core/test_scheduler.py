@@ -14,6 +14,7 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -30,11 +31,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
@@ -153,7 +156,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {
@@ -181,6 +186,49 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     output = outputs[request.client_index].outputs[0]
     assert output.new_token_ids == [0]
     assert output.routed_experts.shape == (0, 1, 1)
+
+
+def test_routed_experts_hashes_follow_scheduled_tokens():
+    scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
+    )
+    scheduler.add_request(request)
+
+    sent: list[bytes] = []
+    num_sent_per_step = []
+    while not request.is_finished():
+        num_computed = request.num_computed_tokens
+        scheduler_output = scheduler.schedule()
+        num_scheduled = scheduler_output.num_scheduled_tokens[request.request_id]
+        metadata = scheduler_output.aux_output_connector_metadata
+        sent.extend(metadata.block_hashes.get(request.request_id, ()))
+        num_sent_per_step.append(len(sent))
+
+        sampled = num_computed + num_scheduled >= request.num_tokens
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[0]] if sampled else [[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output={
+                    request.request_id: AuxRequestOutput(
+                        0,
+                        np.zeros((num_computed + num_scheduled, 1, 1), np.uint8),
+                    )
+                },
+            ),
+        )
+
+    assert num_sent_per_step == [4, 8, 10] + [10] * 15 + [11] * 4
+    assert sent == request.block_hashes[:11]
 
 
 def test_finish_request():
@@ -362,6 +410,73 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     # scheduled again (multi-step in-flight).
     output = scheduler.schedule()
     assert req.request_id in output.num_scheduled_tokens
+
+
+def test_max_loras_counts_running_request_awaiting_output():
+    """PP: a running request with its prompt fully scheduled is skipped until
+    its output returns, but still holds its LoRA slot, so a request with
+    another adapter must not be admitted in the meantime."""
+    scheduler = create_scheduler(
+        pipeline_parallel_size=2, lora_config=LoRAConfig(max_loras=1)
+    )
+    req_a, req_b = create_requests(num_requests=2, num_tokens=8, req_ids=["a", "b"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+
+    scheduler.add_request(req_a)
+    assert scheduler.schedule().num_scheduled_tokens == {"a": 8}
+
+    scheduler.add_request(req_b)
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert req_b.status == RequestStatus.WAITING
+
+
+def test_max_loras_counts_running_request_skipped_for_encoder_budget():
+    """No PP: a running request skipped because earlier requests used up the
+    step's encoder compute budget still holds its LoRA slot."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    scheduler.max_num_encoder_input_tokens = 100
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+    # a: two 100-token images, one per step; b: image at 50, after a's.
+    req_a, req_b = create_requests(
+        num_requests=2,
+        num_tokens=300,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=100),
+                PlaceholderRange(offset=150, length=100),
+            ],
+            [PlaceholderRange(offset=50, length=100)],
+        ],
+        req_ids=["a", "b"],
+    )
+    (req_c,) = create_requests(num_requests=1, num_tokens=10, req_ids=["c"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+    req_c.lora_request = LoRARequest("lora-c", 3, "/path/c")
+
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150, "b": 50}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["a", "b"],
+            req_id_to_index={"a": 0, "b": 1},
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # a's second image uses the whole encoder budget, so b is skipped; c
+    # (a third adapter) must still wait.
+    scheduler.add_request(req_c)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150}
+    assert req_c.status == RequestStatus.WAITING
 
 
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
@@ -4454,14 +4569,16 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
     manager.backend = Mock()
+    manager.backend_name = "xgrammar"
     manager.backend.compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
 
+    structured_outputs = StructuredOutputsParams(json='{"type": "object"}')
+    structured_outputs._backend = "xgrammar"
     sampling_params = SamplingParams(
-        max_tokens=16,
-        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+        max_tokens=16, structured_outputs=structured_outputs
     )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
@@ -4492,6 +4609,10 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
     assert output.stop_reason is None
+    assert output.error == RequestError(
+        code="validation_error",
+        message="Invalid structured outputs: forced FSM compilation error",
+    )
 
     healthy_request = create_requests(num_requests=1, req_ids=["healthy-request"])[0]
     scheduler.add_request(healthy_request)
@@ -4533,7 +4654,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
@@ -4954,6 +5075,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
     )
     scheduler.need_mamba_block_aligned_split = True
     scheduler.use_eagle = True
+    scheduler.use_eagle_block_drop = True
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
@@ -6913,37 +7035,81 @@ def test_encoder_cache_rejects_mismatched_embed_count_within_request():
     assert output.finish_reason == FinishReason.ERROR
 
 
-def test_free_encoder_inputs_defers_for_eagle_lookahead():
-    """With EAGLE speculative decoding, the encoder input is retained one extra
-    position so the drafter's +1 look-ahead mm-embedding gather (which reads one
-    position past the target's computed range) still finds it cached. This is
-    the primary mechanism that prevents the drafter "Encoder cache miss"; the
-    worker-side token-embedding fallback is only a backstop."""
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    # create_scheduler only builds ngram spec configs; force the eagle path that
-    # _free_encoder_inputs keys off (its read-ahead deferral).
-    scheduler.use_eagle = True
-    scheduler.num_prefill_lookahead = 1
-    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+@pytest.mark.parametrize("prefill_lookahead", [1, 3])
+def test_drafter_lookahead_encoder_cache_cap_makes_progress(prefill_lookahead):
+    """Regression test for #40707: with a drafter look-ahead, two adjacent
+    images that only fit in the encoder cache one at a time must not deadlock.
+    Stopping short of the second image by the look-ahead used to leave the
+    first image unfreed, so the second could never be allocated."""
+    image_len = 600
+    scheduler = create_scheduler(max_num_batched_tokens=900, max_model_len=2048)
+    scheduler.num_prefill_lookahead = prefill_lookahead
+    scheduler.max_num_encoder_input_tokens = 900
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=900)
+
+    num_tokens = 2 * image_len + 20
     request = create_requests(
         num_requests=1,
-        num_tokens=250,
-        mm_positions=mm_positions,
+        num_tokens=num_tokens,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=image_len),
+                PlaceholderRange(offset=10 + image_len, length=image_len),
+            ]
+        ],
+        max_tokens=1,
+        req_ids=["req"],
     )[0]
-    manager = scheduler.encoder_cache_manager
-    manager.allocate(request, 0)
-    mm_end = 150  # offset + length
+    scheduler.add_request(request)
 
-    # Confirmed progress reaches the range end: without spec decode this frees
-    # (see test below), but the drafter's +1 look-ahead still needs it.
-    request.num_computed_tokens = mm_end
-    scheduler._free_encoder_inputs(request)
-    assert manager.get_cached_input_ids(request) == {0}
+    scheduled_inputs = []
+    while request.num_computed_tokens < num_tokens:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens.get("req", 0) > 0
+        scheduled_inputs += output.scheduled_encoder_inputs.get("req", [])
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=["req"],
+                req_id_to_index={"req": 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    assert scheduled_inputs == [0, 1]
 
-    # One position past the range end: the +1 look-ahead has now passed it.
-    request.num_computed_tokens = mm_end + 1
-    scheduler._free_encoder_inputs(request)
-    assert manager.get_cached_input_ids(request) == set()
+
+@pytest.mark.parametrize("prefill_lookahead", [1, 3])
+@pytest.mark.parametrize("past_chunk_end", [0, 1, 2])
+def test_drafter_lookahead_encoder_cache_cap_respects_token_budget(
+    prefill_lookahead, past_chunk_end
+):
+    """An unallocatable input reached only by look-ahead must not grow the chunk."""
+    budget = 100
+    scheduler = create_scheduler(max_num_batched_tokens=budget, max_model_len=2048)
+    scheduler.num_prefill_lookahead = prefill_lookahead
+    scheduler.max_num_encoder_input_tokens = 1000
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=300)
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=budget + past_chunk_end + 320,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=80),
+                PlaceholderRange(offset=budget + past_chunk_end, length=300),
+            ]
+        ],
+        max_tokens=1,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["req"] == budget
+    assert output.scheduled_encoder_inputs["req"] == [0]
 
 
 def test_free_encoder_inputs_unchanged_without_spec_decode():
@@ -6966,6 +7132,71 @@ def test_free_encoder_inputs_unchanged_without_spec_decode():
     request.num_computed_tokens = 150
     scheduler._free_encoder_inputs(request)
     assert manager.get_cached_input_ids(request) == set()
+
+
+def test_waiting_encoder_stall_does_not_starve_later_requests():
+    """A waiting request stalled by the encoder cache must not end the pass.
+
+    Regression test: the zero-token branch used to `break`, letting the first
+    encoder-stalled request starve every request queued behind it.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled, ready = create_requests(
+        num_requests=2,
+        num_tokens=100,
+        mm_positions=[[PlaceholderRange(offset=0, length=50)], []],
+        req_ids=["stalled", "ready"],
+    )
+    scheduler.add_request(stalled)
+    scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    assert "ready" in output.num_scheduled_tokens
+
+
+def test_waiting_encoder_stall_is_counted_as_deferred():
+    """The requeue must go through skip_request's deferred_waiting accounting.
+
+    A hand-rolled pop-and-prepend left the request out of `deferred_waiting`,
+    skewing the DP prefill-capacity signal.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        mm_positions=[[PlaceholderRange(offset=0, length=50)]],
+        req_ids=["stalled"],
+    )[0]
+    scheduler.add_request(stalled)
+
+    scheduler.schedule()
+
+    assert stalled in scheduler.deferred_waiting
+
+
+def test_waiting_encoder_stall_kv_holder_keeps_drain_priority():
+    """A stalled request holding KV blocks must stay on the drain-first queue.
+
+    Async KV-load resumes hold blocks and are drained before plain waiting
+    requests; a hand-rolled requeue sent them to the plain queue.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        mm_positions=[[PlaceholderRange(offset=0, length=50)]],
+        req_ids=["stalled"],
+    )[0]
+    stalled.num_computed_tokens = 10
+    scheduler.add_request(stalled)
+
+    scheduler.schedule()
+
+    assert stalled in scheduler.kv_holding_waiting
 
 
 def test_encoder_cache_retained_across_preemption_and_resume():
@@ -7141,6 +7372,72 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     )
     # No local encoder compute — all loaded externally
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize(
+    "replay_tokens,window_loaded,local_hit",
+    [(128, False, True), (128, False, False), (0, False, False), (128, True, False)],
+)
+def test_ec_connector_waits_for_embeddings_in_prefix_replay(
+    replay_tokens, window_loaded, local_hit
+):
+    """A replayed image must finish loading before its request is admitted."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=None if local_hit else mock_kv(640, is_async=False),
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.prefix_replay_tokens = replay_tokens
+    scheduler.prefix_replay_group_ids = (0,)
+    if not local_hit:
+        scheduler.connector.get_loaded_kv_cache_group_ids = Mock(
+            return_value=(0,) if window_loaded else ()
+        )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=819,
+        mm_positions=[[PlaceholderRange(offset=383, length=184)]],
+    )
+    if local_hit:
+        (seed,) = create_requests(
+            num_requests=1,
+            num_tokens=819,
+            mm_positions=[[PlaceholderRange(offset=383, length=184)]],
+            req_ids=["seed"],
+        )
+        scheduler.kv_cache_manager.allocate_slots(seed, 640)
+        scheduler.kv_cache_manager.cache_blocks(seed, 640)
+        scheduler.kv_cache_manager.free(seed)
+    loaded = set()
+
+    def ensure_cache_available(request, num_computed_tokens):
+        return all(
+            feature.mm_position.offset + feature.mm_position.length
+            <= num_computed_tokens
+            or feature.identifier in loaded
+            for feature in request.mm_features
+        )
+
+    scheduler.ec_connector.ensure_cache_available = ensure_cache_available
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    if replay_tokens and not window_loaded:
+        assert request.request_id not in output.num_scheduled_tokens
+        assert not scheduler.encoder_cache_manager.cached
+        loaded.add(request.mm_features[0].identifier)
+        output = scheduler.schedule()
+
+    (admitted,) = output.scheduled_new_reqs
+    expected_start = 640 - (0 if window_loaded else replay_tokens)
+    assert admitted.num_computed_tokens == expected_start
+    assert output.num_scheduled_tokens[request.request_id] == 819 - expected_start
+    assert not output.scheduled_encoder_inputs
+    if replay_tokens and not window_loaded:
+        _assert_right_ec_connector_metadata(output, request.mm_features)
 
 
 def test_ec_connector_defers_running_request_for_async_reload():
@@ -7895,3 +8192,72 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def _skip_drafts_per_step(
+    num_requests: int, num_tokens: int, max_tokens: int, num_steps: int = 2
+) -> list[bool]:
+    """SchedulerOutput.skip_drafts for each step, with 64-token chunks."""
+    scheduler = create_scheduler(num_speculative_tokens=2, max_num_batched_tokens=64)
+    # As for a drafter on the V2 model runner (the ngram config reserves no
+    # lookahead slots, which disables the check).
+    scheduler.can_skip_drafts = True
+    for request in create_requests(num_requests, num_tokens, max_tokens=max_tokens):
+        scheduler.add_request(request)
+    skip_drafts = []
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        skip_drafts.append(output.skip_drafts)
+        req_ids = list(output.num_scheduled_tokens)
+        requests = [scheduler.requests[req_id] for req_id in req_ids]
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[
+                [] if r.num_computed_tokens < r.num_tokens else [100] for r in requests
+            ],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_runner_output)
+    return skip_drafts
+
+
+def test_skip_drafts_only_when_no_request_can_use_them():
+    # A non-final chunk drafts nothing; a final chunk that samples the last of
+    # max_tokens finishes the request.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=1) == [True, True]
+    # The final chunk's drafts are verified by the next decode step.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=2) == [True, False]
+    # One request finishes its prompt next to the other's non-final chunk.
+    assert _skip_drafts_per_step(2, num_tokens=40, max_tokens=2, num_steps=1) == [False]
+
+
+def test_drafts_unused_with_async_placeholders():
+    """The predicate must assume that all in-flight drafts are rejected."""
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+
+    # Non-final prefill chunk: no sample, drafts unusable.
+    assert scheduler._drafts_unused(request, 0, 8)
+    # Final prefill chunk with max_tokens=3: drafts usable.
+    assert not scheduler._drafts_unused(request, 0, 16)
+
+    # Sync decode: 2 of 3 output tokens verified; this step must finish.
+    request.append_output_token_ids(100)
+    request.append_output_token_ids(101)
+    assert scheduler._drafts_unused(request, 17, 1)
+    # Only 1 verified output: this step may or may not finish.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.append_output_token_ids(100)
+    assert not scheduler._drafts_unused(request, 16, 1)
+
+    # Async decode, 1 verified output and one in-flight step (1 sample +
+    # 1 draft placeholder): worst case still reaches 3 = max_tokens.
+    request.num_output_placeholders = 2
+    assert scheduler._drafts_unused(request, 18, 3)
+    # 0 verified outputs: worst case gives only 2 tokens, not guaranteed.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.num_output_placeholders = 2
+    assert not scheduler._drafts_unused(request, 17, 3)
