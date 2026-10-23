@@ -227,7 +227,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
-            if type(source).iter_local is WeightSource.iter_local:
+            if not source.implements_iter_local():
                 raise TypeError(
                     "nccl_m2n sends each rank's local shard, but "
                     f"{type(source).__name__} does not implement iter_local()"

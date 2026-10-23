@@ -971,7 +971,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             raise ValueError(
                 "Sharded RDT trainer weight transfer requires a WeightSource."
             )
-        if type(source).iter_full is WeightSource.iter_full:
+        if not source.implements_iter_full():
             raise TypeError(
                 "Sharded RDT serves full tensors, but "
                 f"{type(source).__name__} does not implement iter_full()."

@@ -295,7 +295,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     ) -> Self:
         if source is None:
             raise ValueError("NCCL trainer weight transfer requires a WeightSource.")
-        if type(source).iter_full is WeightSource.iter_full:
+        if not source.implements_iter_full():
             raise TypeError(
                 f"NCCL broadcast sends full tensors, but {type(source).__name__} "
                 "does not implement iter_full()."

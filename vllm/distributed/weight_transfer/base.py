@@ -257,6 +257,12 @@ class WeightSource(ABC):
         """The names `rank` owns, in metadata order: exactly what it iterates."""
         return [m.name for m in self.metadata if m.owners is None or rank in m.owners]
 
+    def implements_iter_full(self) -> bool:
+        return type(self).iter_full is not WeightSource.iter_full
+
+    def implements_iter_local(self) -> bool:
+        return type(self).iter_local is not WeightSource.iter_local
+
     def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield the full tensor of each name this rank owns."""
         raise NotImplementedError(f"{type(self).__name__} does not implement iter_full")

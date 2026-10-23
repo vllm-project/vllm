@@ -291,7 +291,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     ) -> Self:
         if source is None:
             raise ValueError("IPC trainer weight transfer requires a WeightSource.")
-        if type(source).iter_full is WeightSource.iter_full:
+        if not source.implements_iter_full():
             raise TypeError(
                 f"IPC sends full tensors, but {type(source).__name__} does not "
                 "implement iter_full()."

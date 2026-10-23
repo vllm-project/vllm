@@ -36,7 +36,7 @@ A source implements `metadata` and one or both iteration modes:
 
 NCCL broadcast, IPC and sharded RDT consume `iter_full()`; NCCL M2N consumes
 `iter_local()`. Each engine checks at `trainer_init` that the source implements
-the mode it needs.
+the mode it needs (`implements_iter_full()` / `implements_iter_local()`).
 
 #### ParamMeta: ownership and layout
 

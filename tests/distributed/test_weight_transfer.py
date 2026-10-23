@@ -1518,6 +1518,20 @@ class TestParamMetaOwnership:
         assert _Declared().owned_names(0) == ["embed", "layers.0.w", "norm"]
         assert _Declared().owned_names(3) == ["layers.1.w", "norm"]
 
+    def test_implements_reports_overridden_modes(self):
+        class _FullOnly(WeightSource):
+            @cached_property
+            def metadata(self):
+                return []
+
+            def iter_full(self):
+                yield from ()
+
+        source = _FullOnly()
+        assert source.implements_iter_full()
+        assert not source.implements_iter_local()
+        assert ModuleSource(torch.nn.Module()).implements_iter_local()
+
     @pytest.mark.parametrize("wrap", [lambda f: f, property])
     def test_metadata_must_be_a_cached_property(self, wrap):
         """A plain method would hand engines a bound method, and a plain
