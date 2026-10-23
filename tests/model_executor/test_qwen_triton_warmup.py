@@ -8,6 +8,8 @@ import pytest
 import torch
 
 import vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp as mtp_ops  # noqa: E501
+from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 from vllm.model_executor.warmup.qwen_triton_warmup import (
     _FLA_POST_CONV_WARMUP_LENGTHS,
     _QwenGDNWarmupConfig,
@@ -17,7 +19,27 @@ from vllm.model_executor.warmup.qwen_triton_warmup import (
     _warm_gated_rms_norm_kernel,
 )
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update_kernel,
+)
 from vllm.utils.platform_utils import num_compute_units
+
+from ..utils import create_new_process_for_each_test
+
+NUM_SPEC = 3
+
+
+def _gdn_update_kernel():
+    # triton.heuristics wraps the JITFunction that holds the compile cache.
+    return fused_sigmoid_gating_delta_rule_update_kernel.fn
+
+
+def _gdn_update_compiled_keys() -> set:
+    return {
+        key
+        for caches in _gdn_update_kernel().device_caches.values()
+        for key in caches[0]
+    }
 
 
 def _cuda_gdn_config() -> _QwenGDNWarmupConfig:
@@ -98,3 +120,48 @@ def test_qwen_gdn_fused_mtp_warmup_covers_reachable_tile_sizes(
         heads = num_reqs * config.hv
         tiles.add(32 if heads < num_cus else 64 if heads <= 4 * num_cus else v)
     assert tiles == ({32} if max_num_reqs == 1 else {32, 64, v})
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA is required")
+@create_new_process_for_each_test("spawn")
+def test_qwen_gdn_mtp_mixed_batch_reuses_warmed_gdn_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec-decode rows batched with prefill chunks must not compile the GDN
+    update kernel after startup.
+
+    The long prompt needs several chunks, so the short request verifies its
+    drafts in the same steps. The engine runs in this process so the test can
+    read the kernel's compile cache.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    max_num_batched_tokens = 2048
+    llm = LLM(
+        "Qwen/Qwen3.5-0.8B",
+        load_format="dummy",
+        max_model_len=8192,
+        max_num_seqs=8,
+        max_num_batched_tokens=max_num_batched_tokens,
+        gpu_memory_utilization=0.3,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        speculative_config={"method": "mtp", "num_speculative_tokens": NUM_SPEC},
+    )
+    warmed = _gdn_update_compiled_keys()
+    spec_launches: list[bool] = []
+    _gdn_update_kernel().add_pre_run_hook(
+        lambda *args, **kwargs: spec_launches.append(kwargs["IS_SPEC_DECODING"])
+    )
+
+    short = TokensPrompt(prompt_token_ids=list(range(1, 33)))
+    long = TokensPrompt(
+        prompt_token_ids=list(range(33, 33 + 3 * max_num_batched_tokens))
+    )
+    llm.generate(
+        [short, long],
+        SamplingParams(temperature=0.0, max_tokens=16, ignore_eos=True),
+    )
+
+    # Spec rows reached this Triton kernel, so the mixed step ran.
+    assert any(spec_launches)
+    compiled = _gdn_update_compiled_keys()
+    assert compiled == warmed, f"compiled after startup: {compiled - warmed}"
