@@ -86,9 +86,9 @@ def chunk_kda_prefill(
         checkpoint_offsets: per-sequence token offset to snapshot at, ``0``
             for none.
         checkpoint_state_indices: optional per-sequence destination row.
-        state_cache: the paged recurrent state. When given, the fused backend
-            reads and writes it in place and neither a gather nor a scatter is
-            needed around this call; the returned final state is ``None``.
+        state_cache: the paged recurrent state. The fused backend reads and
+            writes FP32 or BF16 cache rows directly, accumulating in FP32.
+            The returned final state is ``None``.
         state_indices: per-sequence cache row.
         has_initial_state: per-sequence flag; false starts from a zero state.
 
@@ -231,6 +231,7 @@ def chunk_kda_prefill(
         o = out
     if scatter_to is not None:
         assert state_indices is not None
-        scatter_to[state_indices.long()] = final_state
+        assert final_state is not None
+        scatter_to[state_indices.long()] = final_state.to(scatter_to.dtype)
         return o, None
     return o, final_state
