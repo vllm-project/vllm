@@ -98,6 +98,8 @@ if TYPE_CHECKING:
     VLLM_BI_MXFP8_PREQUANT: bool = False
     VLLM_BI_MHC_OVERLAP: bool = False
     VLLM_BI_REPLAY_STAGE_LAYERS: int = 0
+    VLLM_BI_BF16_SPLITK: int = 0
+    VLLM_BI_TOPK_TRITON: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -659,6 +661,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BI_BF16_GEMM": env_with_choices(
         "VLLM_BI_BF16_GEMM", "fixed", ["fixed", "tensor_core"]
     ),
+    # Under VLLM_BATCH_INVARIANT, run the shared BF16->FP32 projections with
+    # at most 384 output features (MoE router, indexer weights) on the CuTe DSL
+    # cluster split-K kernel with this many K slices for every M (0: off).
+    # Batch invariant; much faster at decode M, slower at prefill M, and
+    # different rounding from the default BF16 path.
+    "VLLM_BI_BF16_SPLITK": lambda: int(os.getenv("VLLM_BI_BF16_SPLITK", "0")),
+    # Under VLLM_BATCH_INVARIANT, run the DSV4 sqrt-softplus top-6 router on
+    # the per-row Triton kernel instead of topk_hash_softplus_sqrt (row
+    # invariant, faster; weights may differ in the last bit).
+    "VLLM_BI_TOPK_TRITON": lambda: bool(int(os.getenv("VLLM_BI_TOPK_TRITON", "0"))),
     # Allow FLASHMLA_MEGA_ATTN_DSV41 under VLLM_BATCH_INVARIANT (batch
     # invariant per full-model gates; rounding differs from FLASHMLA_SPARSE).
     "VLLM_BI_MEGA_ATTN": lambda: bool(int(os.getenv("VLLM_BI_MEGA_ATTN", "0"))),

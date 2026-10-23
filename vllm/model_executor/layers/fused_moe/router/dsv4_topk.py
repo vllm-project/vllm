@@ -149,7 +149,7 @@ def dsv4_topk(
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
-    if envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT and not envs.VLLM_BI_TOPK_TRITON:
         if num_tokens:
             from vllm import _custom_ops as ops
 

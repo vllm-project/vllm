@@ -25,6 +25,37 @@ class FixedBf16Gemm(LLBf16Gemm):
 
 _KERNEL = FixedBf16Gemm()
 
+# Widest projection that takes the split-K path under VLLM_BI_BF16_SPLITK.
+_SPLITK_MAX_N = 384
+
+
+class SplitKBf16Gemm(LLBf16Gemm):
+    """Cluster split-K with a slice count fixed by the environment: each row
+    sums the same K256 tiles in the same order whatever M is."""
+
+    def __init__(self, split_k: int) -> None:
+        super().__init__()
+        self.split_k = split_k
+
+    def dispatch(
+        self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
+    ) -> LLBf16Gemm.CompileKey:
+        return self.CompileKey(
+            backend="splitk",
+            split_k=self.split_k,
+            num_stages=4,
+            output_dtype=output_dtype,
+        )
+
+
+@functools.cache
+def _splitk_kernel(split_k: int) -> SplitKBf16Gemm:
+    return SplitKBf16Gemm(split_k)
+
+
+def _uses_splitk(weight: torch.Tensor) -> bool:
+    return envs.VLLM_BI_BF16_SPLITK > 0 and weight.shape[0] <= _SPLITK_MAX_N
+
 
 @functools.cache
 def _deterministic_deep_gemm():
@@ -66,6 +97,7 @@ def compile_tensor_core_rows(weight: torch.Tensor, rows: int) -> None:
     lm_head) arrive only while serving."""
     if (
         not _uses_tensor_core(weight)
+        or _uses_splitk(weight)
         or rows <= _WARMED_M.get(weight.shape, 0)
         or torch.cuda.is_current_stream_capturing()
     ):
@@ -81,6 +113,10 @@ def _bf16_fixed_mm(a: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     _KERNEL._validate_inputs(a, weight, torch.float32)
     if a.shape[0] == 0:
         return torch.empty((0, weight.shape[0]), device=a.device, dtype=torch.float32)
+    if _uses_splitk(weight):
+        # Every slice owns at least one K256 tile; the count depends on K only.
+        split_k = min(envs.VLLM_BI_BF16_SPLITK, -(-weight.shape[1] // 256))
+        return _splitk_kernel(split_k)(a, weight, torch.float32)
     if _uses_tensor_core(weight):
         out = torch.empty(
             (a.shape[0], weight.shape[0]), device=a.device, dtype=torch.float32

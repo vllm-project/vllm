@@ -76,6 +76,36 @@ def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
     assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
 
 
+@pytest.mark.parametrize("n,k", [(384, 5120), (256, 5120), (32, 5120), (128, 512)])
+@torch.inference_mode()
+def test_splitk_bf16_projection_rows_ignore_batch(monkeypatch, n, k):
+    """VLLM_BI_BF16_SPLITK: the fixed-slice cluster split-K gives every row the
+    same bits at any M, including under CUDA-graph replay."""
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant as bi
+
+    monkeypatch.setattr(envs, "VLLM_BI_BF16_SPLITK", 4)
+    torch.manual_seed(n)
+    a = torch.randn(4096, k, device="cuda").bfloat16()
+    weight = (torch.randn(n, k, device="cuda") * k**-0.5).bfloat16()
+    assert bi._uses_splitk(weight)
+    reference = bi.bf16_fixed_mm(a, weight)
+    torch.testing.assert_close(reference, a.float() @ weight.float().T)
+    for m in (1, 8, 64, 512, 4096):
+        assert torch.equal(bi.bf16_fixed_mm(a[:m], weight), reference[:m]), m
+        assert torch.equal(bi.bf16_fixed_mm(a[-m:], weight), reference[-m:]), m
+    rows = torch.randperm(4096, device="cuda")[:300]
+    assert torch.equal(bi.bf16_fixed_mm(a[rows], weight), reference[rows])
+    static = a[:96].clone()
+    bi.bf16_fixed_mm(static, weight)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = bi.bf16_fixed_mm(static, weight)
+    static.copy_(a[100:196])
+    graph.replay()
+    assert torch.equal(replayed, reference[100:196])
+
+
 @pytest.mark.parametrize(
     "n,k", [(384, 5120), (1024, 5120), (2048, 5120), (129280, 5120)]
 )
