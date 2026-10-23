@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -122,6 +123,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
         engine,
         models,
         online_renderer=online_renderer,
+        online_derenderer=MagicMock(spec=OnlineDerenderer),
         request_logger=None,
         **kwargs,
     )
@@ -139,6 +141,7 @@ def _make_request_output(
     request_id: str,
     token_ids: list[int],
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     finished: bool = False,
     prompt_token_ids: list[int] | None = None,
     logprobs: list[dict[int, Any] | None] | None = None,
@@ -160,6 +163,7 @@ def _make_request_output(
                 cumulative_logprob=None,
                 logprobs=logprobs,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 spec_decode_metrics=spec_decode_metrics,
             )
         ],
@@ -379,6 +383,71 @@ async def test_stream_basic():
 
 
 @pytest.mark.asyncio
+async def test_non_stream_reports_engine_stop_reason():
+    """The matched stop token id from the engine lands on the choice."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10, 42],
+            finish_reason="stop",
+            stop_reason=42,
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+    choice = response.model_dump()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["stop_reason"] == 42
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_engine_stop_reason_on_final_chunk():
+    """A matched stop string is reported with finish_reason and null before."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1",
+            token_ids=[20],
+            finish_reason="stop",
+            stop_reason="done",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if c != "[DONE]"]
+    assert len(data_chunks) == 2
+
+    assert data_chunks[0]["choices"][0]["stop_reason"] is None
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
+    assert data_chunks[1]["choices"][0]["stop_reason"] == "done"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
     engine = _mock_engine()
@@ -456,11 +525,13 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
     data_chunks = [chunk for chunk in _parse_sse_chunks(chunks) if chunk != "[DONE]"]
 
     assert "metrics" not in data_chunks[0]
-    assert len(data_chunks) == 1 + int(include_usage)
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
+    assert "metrics" not in data_chunks[1]
+    assert len(data_chunks) == 2 + int(include_usage)
     if include_usage:
-        assert data_chunks[1]["choices"] == []
+        assert data_chunks[2]["choices"] == []
         assert (
-            data_chunks[1]["metrics"]["speculative_decoding"]["num_draft_tokens"] == 3
+            data_chunks[2]["metrics"]["speculative_decoding"]["num_draft_tokens"] == 3
         )
 
 
@@ -823,28 +894,74 @@ async def test_stream_zero_token_completion_still_delivers_prompt_metadata():
 
 
 @pytest.mark.asyncio
-async def test_stream_zero_token_completion_emits_no_chunk_by_default():
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "abort"])
+async def test_stream_emits_terminal_output_without_new_tokens(finish_reason):
+    """The final output may carry no new tokens (always for an abort); the
+    client must still see why the choice finished."""
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
         yield _make_request_output(
-            "req-1", token_ids=[], finish_reason="stop", finished=True
+            "req-1", token_ids=[], finish_reason=finish_reason, finished=True
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
     serving = _build_serving_tokens(engine)
     request = GenerateRequest(
         token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=1),
+        sampling_params=SamplingParams(max_tokens=10),
         model=MODEL_NAME,
         stream=True,
     )
 
     response = await serving.serve_tokens(request)
     parsed = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [c["choices"][0] for c in parsed[:-1]]
 
-    assert not [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+    assert [c["token_ids"] for c in choices] == [[10], []]
+    assert [c["finish_reason"] for c in choices] == [None, finish_reason]
     assert parsed[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_stream_parallel_sampling_first_output_missing_a_choice():
+    """With n=2 the first output may carry only one choice; the other must
+    still stream, and an abort finishes both."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], index=0)
+        yield _make_request_output("req-1", token_ids=[11], index=1)
+        aborted = _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", finished=True
+        )
+        aborted.outputs += _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", index=1
+        ).outputs
+        yield aborted
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, n=2),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [c["choices"][0] for c in parsed[:-2]]
+
+    assert [(c["index"], c["token_ids"], c["finish_reason"]) for c in choices] == [
+        (0, [10], None),
+        (1, [11], None),
+        (0, [], "abort"),
+        (1, [], "abort"),
+    ]
+    assert parsed[-2]["usage"]["completion_tokens"] == 2
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1192,8 @@ async def test_stream_with_logprobs():
         lp = dc["choices"][0]["logprobs"]
         assert lp is not None
         assert len(lp["content"]) == 1
-        assert lp["content"][0]["token"].startswith("token_id:")
+        assert isinstance(lp["content"][0]["token_id"], int)
+        assert "token" not in lp["content"][0]
 
 
 @pytest.mark.asyncio

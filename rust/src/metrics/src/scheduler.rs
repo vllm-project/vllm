@@ -9,24 +9,8 @@ use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEn
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
-use crate::{F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
-
-const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
-    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
-    120.0, 300.0, 600.0, 1200.0, 1800.0,
-];
-
-fn kv_block_lifetime_histogram() -> Histogram {
-    Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
-}
-
-fn kv_block_idle_before_evict_histogram() -> Histogram {
-    Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
-}
-
-fn kv_block_reuse_gap_histogram() -> Histogram {
-    Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
-}
+use crate::buckets::{BucketConfig, BucketFamily, FamilyHistogram};
+use crate::{BucketHistogramFamily, F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
 
 // Buckets copied verbatim from the Python `MooncakeStorePromMetrics` /
 // `NixlPromMetrics` classes so dashboards built against either frontend are
@@ -84,6 +68,13 @@ fn nixl_num_descriptors_histogram() -> Histogram {
 pub struct EngineLabels {
     pub model_name: String,
     pub engine: u32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CacheHitSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -236,6 +227,7 @@ pub struct SchedulerMetrics {
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_cached_by_source: Family<CacheHitSourceLabels, U64Counter>,
 
     // Speculative decoding counters.
     pub spec_decode_num_drafts: Family<EngineLabels, U64Counter>,
@@ -249,9 +241,9 @@ pub struct SchedulerMetrics {
     pub estimated_write_bytes_per_gpu: Family<EngineLabels, U64Counter>,
 
     // Sampled KV-cache residency histograms.
-    pub kv_block_lifetime_seconds: HistogramFamily,
-    pub kv_block_idle_before_evict_seconds: HistogramFamily,
-    pub kv_block_reuse_gap_seconds: HistogramFamily,
+    pub kv_block_lifetime_seconds: BucketHistogramFamily,
+    pub kv_block_idle_before_evict_seconds: BucketHistogramFamily,
+    pub kv_block_reuse_gap_seconds: BucketHistogramFamily,
 
     // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
     pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
@@ -259,6 +251,14 @@ pub struct SchedulerMetrics {
     pub mooncake_operation_keys_total: MooncakeOperationCounterFamily,
     pub mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
     pub mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
+
+    // Mooncake connector transfer telemetry. Mirrors `MooncakePromMetrics`.
+    pub mooncake_xfer_time_seconds: HistogramFamily,
+    pub mooncake_bytes_transferred: HistogramFamily,
+    pub mooncake_num_descriptors: HistogramFamily,
+    pub mooncake_num_failed_transfers: Family<EngineLabels, U64Counter>,
+    pub mooncake_num_failed_recvs: Family<EngineLabels, U64Counter>,
+    pub mooncake_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
 
     // NIXL connector telemetry. Mirrors `NixlPromMetrics`.
     pub nixl_xfer_time_seconds: HistogramFamily,
@@ -276,7 +276,7 @@ pub struct SchedulerMetrics {
 impl SchedulerMetrics {
     /// Register the scheduler-oriented metric families into the shared
     /// registry.
-    pub(crate) fn register(registry: &mut Registry) -> Self {
+    pub(crate) fn register(registry: &mut Registry, buckets: &Arc<BucketConfig>) -> Self {
         // Scheduler state gauges.
         let scheduler_running = Family::default();
         registry.register(
@@ -339,6 +339,13 @@ impl SchedulerMetrics {
         );
 
         let external_prefix_cache_hits = Family::default();
+
+        let prompt_tokens_cached_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached_by_source",
+            "Prefix-cache hit tokens by the cache tier that supplied them: device (local HBM), host (offloaded to DRAM), disk, p2p (transferred from another vLLM instance) or external_unspecified. Counted at admission; sums to vllm:prefix_cache_hits + vllm:external_prefix_cache_hits.",
+            prompt_tokens_cached_by_source.clone(),
+        );
         registry.register(
             "vllm:external_prefix_cache_hits",
             "External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.",
@@ -397,24 +404,29 @@ impl SchedulerMetrics {
         );
 
         // Sampled KV-cache residency histograms.
-        let kv_block_lifetime_seconds =
-            Family::new_with_constructor(kv_block_lifetime_histogram as fn() -> Histogram);
+        let kv_block_lifetime_seconds = Family::new_with_constructor(FamilyHistogram::new(
+            BucketFamily::KvCacheResidency,
+            buckets,
+        ));
         registry.register(
             "vllm:kv_block_lifetime_seconds",
             "Histogram of KV cache block lifetime from allocation to eviction. Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_lifetime_seconds.clone(),
         );
 
-        let kv_block_idle_before_evict_seconds =
-            Family::new_with_constructor(kv_block_idle_before_evict_histogram as fn() -> Histogram);
+        let kv_block_idle_before_evict_seconds = Family::new_with_constructor(
+            FamilyHistogram::new(BucketFamily::KvCacheResidency, buckets),
+        );
         registry.register(
             "vllm:kv_block_idle_before_evict_seconds",
             "Histogram of idle time before KV cache block eviction. Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_idle_before_evict_seconds.clone(),
         );
 
-        let kv_block_reuse_gap_seconds =
-            Family::new_with_constructor(kv_block_reuse_gap_histogram as fn() -> Histogram);
+        let kv_block_reuse_gap_seconds = Family::new_with_constructor(FamilyHistogram::new(
+            BucketFamily::KvCacheResidency,
+            buckets,
+        ));
         registry.register(
             "vllm:kv_block_reuse_gap_seconds",
             "Histogram of time gaps between consecutive KV cache block accesses. Only the most recent accesses are recorded (ring buffer). Sampled metrics (controlled by --kv-cache-metrics-sample).",
@@ -461,6 +473,54 @@ impl SchedulerMetrics {
             "vllm:mooncake_store_operation_failed_keys",
             "Number of Mooncake store keys that failed in operations.",
             mooncake_operation_failed_keys_total.clone(),
+        );
+
+        // Mooncake connector transfer telemetry. Python's `MooncakePromMetrics`
+        // uses the same bucket edges as `NixlPromMetrics`.
+        let mooncake_xfer_time_seconds =
+            Family::new_with_constructor(nixl_xfer_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:mooncake_xfer_time_seconds",
+            "Histogram of transfer duration for Mooncake KV Cache transfers.",
+            mooncake_xfer_time_seconds.clone(),
+        );
+
+        let mooncake_bytes_transferred =
+            Family::new_with_constructor(nixl_bytes_transferred_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:mooncake_bytes_transferred",
+            "Histogram of bytes transferred per Mooncake KV Cache transfer.",
+            mooncake_bytes_transferred.clone(),
+        );
+
+        let mooncake_num_descriptors =
+            Family::new_with_constructor(nixl_num_descriptors_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:mooncake_num_descriptors",
+            "Histogram of number of descriptors per Mooncake KV Cache transfer.",
+            mooncake_num_descriptors.clone(),
+        );
+
+        let mooncake_num_failed_transfers = Family::default();
+        registry.register(
+            "vllm:mooncake_num_failed_transfers",
+            "Number of failed Mooncake KV Cache transfers.",
+            mooncake_num_failed_transfers.clone(),
+        );
+
+        let mooncake_num_failed_recvs = Family::default();
+        registry.register(
+            "vllm:mooncake_num_failed_recvs",
+            "Number of failed Mooncake KV Cache receives.",
+            mooncake_num_failed_recvs.clone(),
+        );
+
+        let mooncake_num_kv_expired_reqs = Family::default();
+        registry.register(
+            "vllm:mooncake_num_kv_expired_reqs",
+            "Number of requests that had their KV expire. \
+             NOTE: This metric is tracked on the P instance.",
+            mooncake_num_kv_expired_reqs.clone(),
         );
 
         // NIXL connector telemetry.
@@ -528,6 +588,7 @@ impl SchedulerMetrics {
             prefix_cache_hits,
             external_prefix_cache_queries,
             external_prefix_cache_hits,
+            prompt_tokens_cached_by_source,
             spec_decode_num_drafts,
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,
@@ -543,6 +604,12 @@ impl SchedulerMetrics {
             mooncake_operation_keys_total,
             mooncake_operation_bytes_total,
             mooncake_operation_failed_keys_total,
+            mooncake_xfer_time_seconds,
+            mooncake_bytes_transferred,
+            mooncake_num_descriptors,
+            mooncake_num_failed_transfers,
+            mooncake_num_failed_recvs,
+            mooncake_num_kv_expired_reqs,
             nixl_xfer_time_seconds,
             nixl_post_time_seconds,
             nixl_bytes_transferred,

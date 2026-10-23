@@ -6,11 +6,14 @@ use std::collections::HashMap;
 use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_with::DefaultOnNull;
 use validator::Validate;
-use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -19,11 +22,23 @@ use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOpti
 /// higher layers, and the Rust frontend does not implement it). Capturing it
 /// here lets validation reject `n > 1` explicitly instead of silently
 /// dropping the key and returning a single choice.
+///
+/// It also captures Python sampling fields that the route does not support
+/// yet, so validation can reject their non-default values instead of
+/// dropping them.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// Stop strings. Not supported yet: the route does not detokenize.
+    pub stop: Option<StringOrArray>,
+    /// Whether to include the matched stop string in the output. Only
+    /// meaningful with `stop`.
+    pub include_stop_str_in_output: Option<bool>,
+    /// Decode token IDs to replay instead of sampling, gated by
+    /// `--enable-trace-replay` in Python. Not supported.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
@@ -31,6 +46,7 @@ pub struct GenerateSamplingParams {
 
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct GenerateRequest {
     pub request_id: Option<String>,
@@ -38,6 +54,7 @@ pub struct GenerateRequest {
     pub token_ids: Vec<u32>,
     pub sampling_params: GenerateSamplingParams,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
     pub stream_options: Option<StreamOptions>,
     pub cache_salt: Option<String>,
@@ -48,11 +65,29 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    pub output_mode: Option<GenerateOutputMode>,
+    /// Whether reasoning has ended before the first generated token, as
+    /// resolved by `/render`. `true` applies structured outputs from the first
+    /// token; `None` lets the engine check the prompt with its reasoning parser.
+    pub reasoning_ended: Option<bool>,
+    /// Set by `/render` so the engine-side reasoning parser agrees with the
+    /// frontend on flags such as `enable_thinking`.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
 
 impl Normalizable for GenerateRequest {}
+
+/// Response level of the generate API, mirroring Python's `OutputMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerateOutputMode {
+    /// Token IDs only. The default when absent.
+    Tokens,
+    /// Token IDs plus detokenized text and decoded logprobs. Not supported.
+    Text,
+}
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
 ///
@@ -61,10 +96,15 @@ impl Normalizable for GenerateRequest {}
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
@@ -72,10 +112,16 @@ pub(super) struct GenerateResponseChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `GenerateStreamResponse` class.
@@ -197,10 +243,56 @@ pub(super) struct PlaceholderRangeInfo {
     pub length: usize,
 }
 
+/// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
+/// choice, carrying integer token ids rather than the OpenAI string token.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbs {
+    pub content: Option<Vec<GenerateLogProbsContent>>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
+/// at one position plus its top-k candidates, in the engine's order: the
+/// sampled token first, then the remaining candidates in rank order.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbsContent {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
+    pub top_logprobs: Vec<GenerateLogProb>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProb` class: one candidate token.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProb {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
+}
+
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogprob {
     pub logprob: f32,
     pub rank: Option<u32>,
     pub decoded_token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::GenerateRequest;
+
+    /// Python declares `stream` as `bool | None`, so an explicit `null` means
+    /// a non-streaming request.
+    #[test]
+    fn null_stream_means_non_streaming() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {},
+            "stream": null,
+        }))
+        .expect("`stream: null` is accepted");
+        assert!(!request.stream);
+    }
 }
