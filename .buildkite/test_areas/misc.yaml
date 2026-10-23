@@ -312,10 +312,12 @@ steps:
     - vllm/v1/
     - tests/v1
     - tests/watermarking
+    - tests/distributed/aux_output_connector/
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
   device: cpu-small
   commands:
     # split the test to avoid interference
+    - pytest -v -s distributed/aux_output_connector
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py

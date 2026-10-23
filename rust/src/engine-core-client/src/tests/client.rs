@@ -2861,7 +2861,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         vec![vec![2, 12, 16, 17, 18]]
     );
 
-    let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    let decoded_outputs = decode_engine_core_outputs(&[bytes::Bytes::from(outputs_bytes)]).unwrap();
     // Match msgspec's base-schema result for the same extended Python message.
     let extended_frames = [bytes::Bytes::from(
         hex::decode(extended_outputs_hex).unwrap(),
@@ -2943,6 +2943,67 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .map(|frame| bytes::Bytes::from(hex::decode(frame).unwrap()))
             .collect::<Vec<_>>()
     };
+
+    for _ in 0..2 {
+        let frames = decode_frames(lines.next().expect("missing routed experts fixture line"));
+        let outputs = decode_engine_core_outputs(&frames).unwrap();
+        let summaries = outputs
+            .as_request_batch()
+            .unwrap()
+            .outputs
+            .iter()
+            .map(|output| {
+                output
+                    .routed_experts
+                    .clone()
+                    .map(|array| (array.shape, array.data.into_raw_view().unwrap().to_vec()))
+            })
+            .collect::<Vec<_>>();
+        expect_test::expect![[r#"
+            [
+                Some(
+                    (
+                        [
+                            1,
+                            1,
+                            2,
+                        ],
+                        [
+                            0,
+                            1,
+                        ],
+                    ),
+                ),
+                None,
+                Some(
+                    (
+                        [
+                            0,
+                            1,
+                            2,
+                        ],
+                        [],
+                    ),
+                ),
+                Some(
+                    (
+                        [
+                            2,
+                            1,
+                            2,
+                        ],
+                        [
+                            2,
+                            3,
+                            4,
+                            5,
+                        ],
+                    ),
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&summaries);
+    }
 
     let inline_logprobs =
         decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();

@@ -10,6 +10,7 @@ use enum_as_inner::EnumAsInner;
 use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
+use vllm_engine_core_client::protocol::dtype::NumpyDtype;
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, RequestError, RequestSpecDecodeMetrics, StopReason,
@@ -287,6 +288,14 @@ impl GenerateOutput {
     }
 }
 
+/// Routed-expert rows accumulated across engine steps.
+struct RoutedExpertsRows {
+    dtype: NumpyDtype,
+    /// `[num_rows, ...]`, with the row count updated as rows arrive.
+    shape: Vec<usize>,
+    data: Vec<u8>,
+}
+
 /// Stream of per-request generate outputs for one request.
 ///
 /// - A normal termination of the stream represents a clean completion of the
@@ -300,8 +309,8 @@ pub struct GenerateOutputStream {
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
-    /// Routed-expert rows received so far, concatenated on the terminal output.
-    routed_experts_chunks: Vec<WireNdArray>,
+    /// Routed-expert rows received so far, returned on the terminal output.
+    routed_experts: Option<RoutedExpertsRows>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -326,7 +335,7 @@ impl GenerateOutputStream {
             request_metrics,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
-            routed_experts_chunks: Vec::new(),
+            routed_experts: None,
             _request_guard: request_guard,
         }
     }
@@ -370,7 +379,7 @@ impl GenerateOutputStream {
 
         let raw = raw.output;
         if let Some(rows) = raw.routed_experts {
-            self.routed_experts_chunks.push(*rows);
+            self.append_routed_experts(&raw.request_id, &rows)?;
         }
 
         // Populate the one-time prompt info on the first output.
@@ -418,7 +427,8 @@ impl GenerateOutputStream {
             None
         };
         let routed_experts = if finish_reason.is_some() {
-            self.take_routed_experts(&raw.request_id)?
+            (self.routed_experts.take())
+                .map(|rows| Box::new(WireNdArray::from_raw(rows.dtype, rows.shape, rows.data)))
         } else {
             None
         };
@@ -442,32 +452,30 @@ impl GenerateOutputStream {
         Ok(output)
     }
 
-    /// Concatenate the routed-expert rows received so far along the token
-    /// axis, like Python's `np.concatenate`.
-    fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
-        let chunks = std::mem::take(&mut self.routed_experts_chunks);
-        let Some(first) = chunks.first() else {
-            return Ok(None);
+    /// Copy one step's routed-expert rows into the request's own buffer,
+    /// concatenating along the token axis like Python's `np.concatenate`.
+    ///
+    /// The rows are a view into an engine message frame shared by every output
+    /// in that message; retaining the view would keep the whole frame alive
+    /// until this request finishes.
+    fn append_routed_experts(&mut self, request_id: &str, rows: &WireNdArray) -> Result<()> {
+        let data = rows.data.as_raw_view().expect("resolved on decode");
+        let Some(accumulated) = &mut self.routed_experts else {
+            self.routed_experts = Some(RoutedExpertsRows {
+                dtype: rows.dtype,
+                shape: rows.shape.clone(),
+                data: data.to_vec(),
+            });
+            return Ok(());
         };
-        let row_shape = first.shape.get(1..);
-        let mut num_rows = 0;
-        let mut data = Vec::new();
-        for chunk in &chunks {
-            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
-                return Err(crate::Error::RoutedExpertsShapeMismatch {
-                    request_id: request_id.to_string(),
-                });
-            }
-            num_rows += chunk.shape[0];
-            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
+        if rows.dtype != accumulated.dtype || rows.shape.get(1..) != accumulated.shape.get(1..) {
+            return Err(crate::Error::RoutedExpertsShapeMismatch {
+                request_id: request_id.to_string(),
+            });
         }
-        let mut shape = first.shape.clone();
-        shape[0] = num_rows;
-        Ok(Some(Box::new(WireNdArray::from_raw(
-            first.dtype,
-            shape,
-            data,
-        ))))
+        accumulated.shape[0] += rows.shape[0];
+        accumulated.data.extend_from_slice(data);
+        Ok(())
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.

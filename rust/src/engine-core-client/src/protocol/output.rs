@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
@@ -18,7 +18,7 @@ use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
-use crate::protocol::tensor::WireNdArray;
+use crate::protocol::tensor::{ShapeExt, WireNdArray};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -271,6 +271,80 @@ struct WireEngineCoreOutputs {
     /// `set_weight_version` utility; `"default"` until set.
     #[serde(default)]
     weight_version: Option<String>,
+    /// One ndarray and per-output row counts; -1 preserves a missing payload.
+    #[serde(default)]
+    routed_experts: Option<(WireNdArray, Vec<i64>)>,
+}
+
+impl WireEngineCoreOutputs {
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
+    fn resolve(&mut self, frames: &[Bytes]) -> Result<()> {
+        for output in &mut self.outputs {
+            output.resolve_in_place(frames)?;
+        }
+        self.resolve_routed_experts(frames)
+    }
+
+    /// Split the batched routed-expert rows back onto their outputs. Each
+    /// output's rows are a view into the shared batch frame, so consumers that
+    /// keep rows across engine steps copy them out.
+    fn resolve_routed_experts(&mut self, frames: &[Bytes]) -> Result<()> {
+        let Some((mut rows, lengths)) = self.routed_experts.take() else {
+            return Ok(());
+        };
+        if lengths.len() != self.outputs.len() {
+            return Err(ext_value_decode!("routed_experts: output count mismatch"));
+        }
+        rows.resolve_aux_frame(frames)
+            .map_err(|message| ext_value_decode!("routed_experts: {message}"))?;
+        let data = rows
+            .data
+            .into_raw_view()
+            .map_err(|_| ext_value_decode!("routed_experts: unresolved frame"))?;
+        let (&num_rows, shape_per_row) = rows
+            .shape
+            .split_first()
+            .ok_or_else(|| ext_value_decode!("routed_experts: missing row dimension"))?;
+        let row_bytes = shape_per_row
+            .checked_numel()
+            .and_then(|size| size.checked_mul(rows.dtype.scalar.element_size()))
+            .ok_or_else(|| ext_value_decode!("routed_experts: row size overflow"))?;
+        if num_rows.checked_mul(row_bytes) != Some(data.len()) {
+            return Err(ext_value_decode!(
+                "routed_experts: array byte length mismatch"
+            ));
+        }
+        let mut cursor = 0usize;
+        for (output, length) in self.outputs.iter_mut().zip(lengths) {
+            if length == -1 {
+                continue;
+            }
+            let length = usize::try_from(length)
+                .map_err(|_| ext_value_decode!("routed_experts: invalid row count"))?;
+            let end = cursor
+                .checked_add(length)
+                .filter(|&end| end <= num_rows)
+                .ok_or_else(|| ext_value_decode!("routed_experts: rows out of range"))?;
+            if output.routed_experts.is_some() {
+                return Err(ext_value_decode!(
+                    "routed_experts: both batch and request payloads"
+                ));
+            }
+            let mut shape = rows.shape.clone();
+            shape[0] = length;
+            output.routed_experts = Some(Box::new(WireNdArray::from_raw_bytes(
+                rows.dtype,
+                shape,
+                data.slice(cursor * row_bytes..end * row_bytes),
+            )));
+            cursor = end;
+        }
+        if cursor != num_rows {
+            return Err(ext_value_decode!("routed_experts: unused rows"));
+        }
+        Ok(())
+    }
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -333,19 +407,6 @@ impl From<UtilityCallOutput> for EngineCoreOutputs {
 impl From<DpControlOutput> for EngineCoreOutputs {
     fn from(output: DpControlOutput) -> Self {
         Self::DpControl(output)
-    }
-}
-
-impl EngineCoreOutputs {
-    /// Resolve all wire-format fields in-place by looking up aux frames and
-    /// decoding raw-view payloads as needed.
-    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
-        if let Self::RequestBatch(batch) = self {
-            for output in &mut batch.outputs {
-                output.resolve_in_place(frames)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -444,25 +505,14 @@ impl Serialize for EngineCoreOutputs {
     }
 }
 
-impl<'de> Deserialize<'de> for EngineCoreOutputs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        WireEngineCoreOutputs::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Decode one ordinary or multipart engine-core output message into the strong
 /// typed public protocol shape.
 pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
-    outputs.resolve_in_place(frames)?;
-    Ok(outputs)
+    let mut wire: WireEngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
+    wire.resolve(frames)?;
+    wire.try_into()
 }
 
 #[cfg(test)]

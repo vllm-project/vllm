@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -39,6 +39,27 @@ class AuxOutputConnectorMetadata:
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+
+
+@dataclass(eq=False)
+class AuxStepOutput(Mapping[str, AuxRequestOutput]):
+    """Request outputs sharing captured rows for worker-to-engine IPC.
+
+    Each span is ``(token_start, lo, hi)`` in the shared rows array.
+    """
+
+    rows: np.ndarray
+    spans: dict[str, tuple[int, int, int]]
+
+    def __getitem__(self, request_id: str) -> AuxRequestOutput:
+        token_start, lo, hi = self.spans[request_id]
+        return AuxRequestOutput(token_start, self.rows[lo:hi])
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self.spans
+
+    def __len__(self) -> int:
+        return len(self.spans)
 
 
 class AuxOutputSchedulerConnector:
@@ -105,14 +126,14 @@ class AuxOutputSchedulerConnector:
     def take_output(
         self,
         request: Request,
-        output: dict[str, AuxRequestOutput] | None,
+        output: Mapping[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
-        assert output is not None and request_id in output, (
+        request_output = output.get(request_id) if output is not None else None
+        assert request_output is not None, (
             f"auxiliary output worker output is missing {request_id}"
         )
-        request_output = output[request_id]
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
