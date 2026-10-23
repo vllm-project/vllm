@@ -282,9 +282,8 @@ def kernel_paged_attention_2d(
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
-    # The row base stays a 64-bit scalar and the per-head offsets 32-bit: with
-    # 64-bit vector offsets, Triton's AMD buffer_store drops the head stride
-    # for the dot-result layout and leaves most heads of the row unwritten.
+    # Keep the per-head offsets 32-bit: on gfx942 the i64 form is miscompiled
+    # (head stride replaced by an unrelated spilled SGPR) in high-spill variants.
     output_ptr += cur_batch_in_all_start_index * output_stride_0
     output_offset = query_head_idx * output_stride_1
 
