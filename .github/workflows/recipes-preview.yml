@@ -1,0 +1,113 @@
+name: Recipes Preview
+
+# Tells vllm-project/recipes when recipes/ changes, instead of waiting for its
+# scheduled polling, which GitHub runs hours late:
+#   - a recipe PR is pushed or labeled ready: rebuild its preview branch
+#     `preview/vllm-pr-<N>`, which Vercel deploys at the URL below;
+#   - a recipe PR is closed: delete that branch;
+#   - recipe changes reach main: sync recipes.vllm.ai (`recipes-updated`).
+#
+# Runs on pull_request_target so fork PRs can reach the dispatch token. This
+# is safe only because no step checks out or runs PR code, and only the PR
+# number leaves this workflow. Keep it that way. The token comes from a GitHub
+# App installed only on vllm-project/recipes with contents: write; its key
+# lives in the `recipes-preview` environment, which only main may use.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, closed]
+    paths:
+      - 'recipes/**'
+  push:
+    branches: [main]
+    paths:
+      - 'recipes/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recipes-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  decide:
+    if: github.repository == 'vllm-project/vllm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      event_type: ${{ steps.decide.outputs.event_type }}
+      pr: ${{ steps.decide.outputs.pr }}
+      url: ${{ steps.decide.outputs.url }}
+    steps:
+      - name: Decide what to dispatch
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          NEW_LABEL: ${{ github.event.label.name }}
+          TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            echo "event_type=recipes-updated" >> "$GITHUB_OUTPUT"
+            echo "url=https://recipes.vllm.ai" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "Invalid PR number: $PR"; exit 1; }
+          if [ "$ACTION" != closed ]; then
+            if [ "$ACTION" = labeled ] && [ "$NEW_LABEL" != ready ] && [ "$NEW_LABEL" != ready-run-all-tests ]; then
+              echo "Label ${NEW_LABEL} doesn't change trust; nothing to do."
+              exit 0
+            fi
+            # Same trust as CI (run_ci_command.py): write access, a configured
+            # trusted contributor, or a `ready` label from a maintainer.
+            trusted=false
+            case "$ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) trusted=true ;; esac
+            author=$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')
+            for user in $(printf '%s' "$TRUSTED_USERS" | tr ',[:upper:]' ' [:lower:]'); do
+              [ "$user" = "$author" ] && trusted=true
+            done
+            for label in $LABELS; do
+              case "$label" in ready|ready-run-all-tests) trusted=true ;; esac
+            done
+            if [ "$trusted" != true ]; then
+              echo "Untrusted author ($ASSOCIATION); the preview waits for the ready label."
+              exit 0
+            fi
+            echo "url=https://vllm-recipes-git-preview-vllm-pr-${PR}-inferact-inc.vercel.app" >> "$GITHUB_OUTPUT"
+          fi
+          echo "event_type=preview-pr" >> "$GITHUB_OUTPUT"
+          echo "pr=${PR}" >> "$GITHUB_OUTPUT"
+
+  dispatch:
+    needs: decide
+    if: needs.decide.outputs.event_type != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: recipes-preview
+      url: ${{ needs.decide.outputs.url }}
+    steps:
+      - name: Create a token for vllm-project/recipes
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RECIPES_APP_ID }}
+          private-key: ${{ secrets.RECIPES_APP_PRIVATE_KEY }}
+          owner: vllm-project
+          repositories: recipes
+          permission-contents: write
+
+      - name: Dispatch to vllm-project/recipes
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT_TYPE: ${{ needs.decide.outputs.event_type }}
+          PR: ${{ needs.decide.outputs.pr }}
+        run: |
+          args=(-f "event_type=${EVENT_TYPE}")
+          [ -n "$PR" ] && args+=(-F "client_payload[pr]=${PR}")
+          gh api repos/vllm-project/recipes/dispatches "${args[@]}"
