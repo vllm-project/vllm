@@ -399,6 +399,7 @@ def test_gpt_oss_priority_triton_vs_marlin(
     assert triton_first is not marlin_first
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only constraints")
 @pytest.mark.parametrize("family", [110, 120])
 def test_swizzle_mxfp4_pins_epilogue_subtile(
     monkeypatch: pytest.MonkeyPatch, family: int
