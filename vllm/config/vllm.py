@@ -2842,11 +2842,16 @@ class VllmConfig:
 
         ec_config = self.ec_transfer_config
         kv_config = self.kv_transfer_config
+        is_ec_consumer = ec_config is not None and ec_config.is_ec_consumer
+        is_kv_consumer = kv_config is not None and kv_config.is_kv_consumer
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        mm_config.allow_missing_mm_embeddings = (
-            ec_config is not None and ec_config.is_ec_consumer
-        ) or (kv_config is not None and kv_config.is_kv_consumer)
+        # A language-model-only KV consumer (text-only P/D) stays text-only
+        # unless the user opts in with --enable-mm-embeds.
+        mm_config.allow_missing_mm_embeddings = is_ec_consumer or (
+            is_kv_consumer
+            and (not mm_config.language_model_only or mm_config.enable_mm_embeds)
+        )
         if not mm_config.allow_missing_mm_embeddings:
             return
 
