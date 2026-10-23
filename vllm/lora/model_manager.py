@@ -177,12 +177,10 @@ class LoRAModelManager:
                 for module_name, module in self.modules.items()
                 if isinstance(module, BaseClassificationHeadWithLoRA)
             ]
-            head_names = {
-                name.partition(".")[0] for name, _ in self._classification_heads
-            }
-            assert len(head_names) <= 1, (
-                f"Expected 1 classification head, but found {sorted(head_names)}."
-            )
+            head_names = sorted(name for name, _ in self._classification_heads)
+            assert len(head_names) <= 1 or head_names == sorted(
+                self.model.lora_classifier_modules
+            ), f"Expected 1 classification head, but found {head_names}."
             if len(self._classification_heads) == 1:
                 _, classification_head = self._classification_heads[0]
                 if isinstance(classification_head, TokenClassificationHeadWithLoRA):
