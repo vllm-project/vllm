@@ -274,7 +274,7 @@ def test_a_spec_that_pads_runs_a_short_step_at_the_next_width(config, model):
     spec = replace(reference.REFERENCE, pad_steps=True)
     decode = SpecializedDecode(model, config, spec)
     decode.bind_caches()
-    assert decode.widths == (1, 2, 4, 8)
+    assert decode.widths == reference.widths(config)
 
     with forward(config, CUDAGraphMode.FULL, {"prefill": False}):
         step = decode.plan(positions(3))

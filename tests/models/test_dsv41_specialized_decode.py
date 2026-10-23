@@ -47,8 +47,8 @@ class _StubRunner:
     def forward(self, *args, **kwargs):
         return ("whole", args, kwargs)
 
-    def ffn(self, *args):
-        return ("ffn", args)
+    def ffn(self, *args, **kwargs):
+        return ("ffn", args, kwargs)
 
 
 _MONO = "vllm.models.deepseek_v41.amd.mono"
