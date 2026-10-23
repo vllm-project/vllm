@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,9 +15,14 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
     ECReadResult,
     ECWriteResult,
 )
+from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
+    get_ec_entry_path,
+    get_ec_temporary_path,
+)
 
 _NAMESPACE_DIGEST = "a" * 64
 _CACHE_KEY = "b" * 64
+_CAPACITY_BYTES = 1 << 20
 
 
 class _FakeExecutor:
@@ -49,6 +55,14 @@ class _FakeExecutor:
         self.submissions[-1].temporary_path = temporary_path
         self.submissions[-1].fsync = fsync
         return job_id
+
+    def submit_delete(
+        self,
+        cache_key: str,
+        entry_path: Path,
+        file_size_bytes: int,
+    ) -> int:
+        return self._submit("delete", cache_key, entry_path, file_size_bytes)
 
     def _submit(
         self,
@@ -160,6 +174,7 @@ def test_manager_publishes_only_completed_writes_and_routes_completions(
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
         n_read_threads=1,
         n_write_threads=1,
         fsync=True,
@@ -190,6 +205,7 @@ def test_manager_read_failure_invalidates_indexed_entry(
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
         n_read_threads=1,
         n_write_threads=1,
         executor=executor,
@@ -218,6 +234,7 @@ def test_stale_read_failure_does_not_remove_new_generation(tmp_path: Path) -> No
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
         n_read_threads=1,
         n_write_threads=1,
         executor=executor,
@@ -250,6 +267,7 @@ def test_failed_rewrite_keeps_existing_index_entry(tmp_path: Path) -> None:
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
         n_read_threads=1,
         n_write_threads=1,
         executor=executor,
@@ -277,6 +295,7 @@ def test_manager_skips_new_writes_under_store_pressure(tmp_path: Path) -> None:
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=12 << 20,
         n_read_threads=1,
         n_write_threads=1,
         backpressure=ECFileSystemBackpressureConfig(
@@ -309,6 +328,165 @@ def test_manager_skips_new_writes_under_store_pressure(tmp_path: Path) -> None:
     assert executor.submissions[-1].operation == "read"
 
 
+def test_manager_evicts_least_recently_used_entry_in_background(
+    tmp_path: Path,
+) -> None:
+    executor = _FakeExecutor()
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=8,
+        n_read_threads=1,
+        n_write_threads=1,
+        executor=executor,
+    )
+    first_key = f"{1:064x}"
+    second_key = f"{2:064x}"
+    third_key = f"{3:064x}"
+
+    for job_id, cache_key in enumerate((first_key, second_key)):
+        assert manager.submit_write(cache_key, [memoryview(b"data")], 4)
+        executor.finish(job_id, success=True)
+        assert len(manager.poll_completed_writes()) == 1
+
+    assert manager.used_bytes == 8
+    assert manager.contains(first_key)
+    assert manager.submit_write(third_key, [memoryview(b"data")], 4)
+    executor.finish(2, success=True)
+    assert len(manager.poll_completed_writes()) == 1
+
+    assert manager.used_bytes == 8
+    assert manager.contains(first_key)
+    assert not manager.contains(second_key)
+    assert manager.contains(third_key)
+    deletion = executor.submissions[3]
+    assert deletion.operation == "delete"
+    assert deletion.cache_key == second_key
+    assert not manager.submit_write(second_key, [memoryview(b"data")], 4)
+
+    executor.finish(deletion.job_id, success=True)
+    assert manager.poll_completed_reads() == []
+    assert manager.submit_write(second_key, [memoryview(b"data")], 4)
+
+
+def test_manager_does_not_evict_an_entry_with_an_active_read(
+    tmp_path: Path,
+) -> None:
+    executor = _FakeExecutor()
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=4,
+        n_read_threads=1,
+        n_write_threads=1,
+        executor=executor,
+    )
+    first_key = f"{1:064x}"
+    second_key = f"{2:064x}"
+
+    assert manager.submit_write(first_key, [memoryview(b"data")], 4)
+    executor.finish(0, success=True)
+    manager.poll_completed_writes()
+    assert manager.submit_read(first_key, [memoryview(bytearray(4))])
+
+    assert manager.submit_write(second_key, [memoryview(b"data")], 4)
+    executor.finish(2, success=True)
+    manager.poll_completed_writes()
+
+    assert manager.contains(first_key)
+    assert not manager.contains(second_key)
+    assert executor.submissions[3].operation == "delete"
+    assert executor.submissions[3].cache_key == second_key
+
+    executor.finish(1, success=True)
+    executor.finish(3, success=True)
+    assert len(manager.poll_completed_reads()) == 1
+
+
+def test_manager_rejects_entry_larger_than_capacity(tmp_path: Path) -> None:
+    executor = _FakeExecutor()
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=3,
+        n_read_threads=1,
+        n_write_threads=1,
+        executor=executor,
+    )
+
+    assert not manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
+    assert executor.submissions == []
+    assert manager.used_bytes == 0
+
+
+def test_manager_recovers_published_entries_from_current_namespace(
+    tmp_path: Path,
+) -> None:
+    cache_key = f"{1:064x}"
+    entry_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, cache_key)
+    entry_path.parent.mkdir(parents=True)
+    entry_path.write_bytes(b"data")
+
+    malformed_path = entry_path.parent / "not-a-cache-key.ec"
+    malformed_path.write_bytes(b"ignored")
+    temporary_path = get_ec_temporary_path(entry_path, "unfinished")
+    temporary_path.write_bytes(b"ignored")
+    symlink_key = f"{2:064x}"
+    symlink_path = get_ec_entry_path(
+        tmp_path,
+        _NAMESPACE_DIGEST,
+        symlink_key,
+    )
+    symlink_path.parent.mkdir(parents=True, exist_ok=True)
+    outside_path = tmp_path / "outside.ec"
+    outside_path.write_bytes(b"outside")
+    symlink_path.symlink_to(outside_path)
+
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
+        n_read_threads=1,
+        n_write_threads=1,
+        executor=_FakeExecutor(),
+    )
+
+    assert manager.contains(cache_key)
+    assert not manager.contains(symlink_key)
+    assert manager.used_bytes == 4
+
+
+def test_manager_evicts_oldest_recovered_entry_over_capacity(
+    tmp_path: Path,
+) -> None:
+    old_key = f"{1:064x}"
+    new_key = f"{2:064x}"
+    old_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, old_key)
+    new_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, new_key)
+    for entry_path in (old_path, new_path):
+        entry_path.parent.mkdir(parents=True, exist_ok=True)
+        entry_path.write_bytes(b"data")
+    os.utime(old_path, ns=(1, 1))
+    os.utime(new_path, ns=(2, 2))
+    executor = _FakeExecutor()
+
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=4,
+        n_read_threads=1,
+        n_write_threads=1,
+        executor=executor,
+    )
+
+    assert not manager.contains(old_key)
+    assert manager.contains(new_key)
+    assert manager.used_bytes == 4
+    assert len(executor.submissions) == 1
+    assert executor.submissions[0].operation == "delete"
+    assert executor.submissions[0].cache_key == old_key
+
+
 def test_manager_shutdown_drains_completions_and_rejects_submission(
     tmp_path: Path,
 ) -> None:
@@ -316,6 +494,7 @@ def test_manager_shutdown_drains_completions_and_rejects_submission(
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
         n_read_threads=1,
         n_write_threads=1,
         executor=executor,

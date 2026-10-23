@@ -173,3 +173,14 @@ def test_store_entry_requires_temporary_file_beside_final_file(
             [memoryview(b"data")],
             file_size_bytes=4,
         )
+
+
+def test_remove_entry_is_idempotent(tmp_path: Path) -> None:
+    entry_path, _ = _paths(tmp_path)
+    entry_path.parent.mkdir(parents=True)
+    entry_path.write_bytes(b"data")
+
+    io.remove_entry(entry_path)
+    io.remove_entry(entry_path)
+
+    assert not entry_path.exists()

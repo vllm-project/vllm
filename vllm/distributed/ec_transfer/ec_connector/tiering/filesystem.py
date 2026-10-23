@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -16,9 +17,12 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
     ECFileSystemBackpressureConfig,
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
+    EC_FILE_SUFFIX,
     get_ec_entry_path,
+    get_ec_namespace_path,
     get_ec_temporary_path,
 )
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
     EMABackpressureDetector,
@@ -28,6 +32,8 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
         ECFileIOCompletion,
     )
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,13 @@ class _ECFileIOExecutor(Protocol):
         fsync: bool = False,
     ) -> int | None: ...
 
+    def submit_delete(
+        self,
+        cache_key: str,
+        entry_path: Path,
+        file_size_bytes: int,
+    ) -> int | None: ...
+
     def poll_completed(self) -> list[ECFileIOCompletion]: ...
 
     def drain(self) -> None: ...
@@ -93,12 +106,13 @@ class _IndexedEntry:
 
 
 class ECFileSystemTierManager:
-    """Minimal in-memory index and lifecycle around filesystem entry I/O."""
+    """Capacity-bounded LRU index and lifecycle around entry I/O."""
 
     def __init__(
         self,
         root_dir: Path,
         namespace_digest: str,
+        capacity_bytes: int,
         n_read_threads: int,
         n_write_threads: int,
         *,
@@ -106,6 +120,8 @@ class ECFileSystemTierManager:
         backpressure: ECFileSystemBackpressureConfig | None = None,
         executor: _ECFileIOExecutor | None = None,
     ) -> None:
+        if capacity_bytes <= 0:
+            raise ValueError("filesystem capacity_bytes must be positive")
         if executor is None:
             from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
                 ECFileIOExecutor,
@@ -115,6 +131,8 @@ class ECFileSystemTierManager:
 
         self._root_dir = root_dir
         self._namespace_digest = namespace_digest
+        self._capacity_bytes = capacity_bytes
+        self._used_bytes = 0
         self._fsync = fsync
         self._executor = executor
         self._backpressure_detector: BackpressureDetector | None = None
@@ -126,15 +144,29 @@ class ECFileSystemTierManager:
         self._accepting = True
         self._shutdown = False
         self._next_generation = 0
-        self._entries: dict[str, _IndexedEntry] = {}
+        self._entries: OrderedDict[str, _IndexedEntry] = OrderedDict()
         self._pending_reads: dict[int, _IndexedEntry] = {}
         self._pending_writes: dict[int, ECFileEntry] = {}
+        self._pending_write_keys: set[str] = set()
+        self._pending_deletes: dict[int, _IndexedEntry] = {}
+        self._deleting_keys: set[str] = set()
+        self._read_pins: Counter[str] = Counter()
         self._completed_reads: deque[ECReadResult] = deque()
         self._completed_writes: deque[ECWriteResult] = deque()
+        self._recover_index()
+        self._evict_to_capacity()
+
+    @property
+    def used_bytes(self) -> int:
+        """Return bytes owned by entries in the in-memory index."""
+        return self._used_bytes
 
     def contains(self, cache_key: str) -> bool:
         """Return an in-memory membership decision without filesystem I/O."""
-        return cache_key in self._entries
+        if cache_key not in self._entries:
+            return False
+        self._entries.move_to_end(cache_key)
+        return True
 
     def submit_read(
         self,
@@ -159,6 +191,8 @@ class ECFileSystemTierManager:
         if job_id is None:
             return False
         self._pending_reads[job_id] = indexed_entry
+        self._read_pins[cache_key] += 1
+        self._entries.move_to_end(cache_key)
         return True
 
     def submit_write(
@@ -169,6 +203,15 @@ class ECFileSystemTierManager:
     ) -> bool:
         """Submit a write; publish it in memory only after completion."""
         if not self._accepting:
+            return False
+        if file_size_bytes <= 0:
+            raise ValueError("file_size_bytes must be positive")
+        if file_size_bytes > self._capacity_bytes:
+            return False
+        if (
+            cache_key in self._pending_write_keys
+            or cache_key in self._deleting_keys
+        ):
             return False
         if self._backpressure_detector is not None:
             if not self._backpressure_detector.should_store(len(sources)):
@@ -192,6 +235,7 @@ class ECFileSystemTierManager:
         if job_id is None:
             return False
         self._pending_writes[job_id] = entry
+        self._pending_write_keys.add(cache_key)
         return True
 
     def poll_completed_reads(self) -> list[ECReadResult]:
@@ -212,12 +256,16 @@ class ECFileSystemTierManager:
         """Wait for accepted I/O and retain its results for later polling."""
         self._executor.drain()
         self._collect_executor_completions()
+        # Write/read completions can enqueue internal eviction deletes.
+        self._executor.drain()
+        self._collect_executor_completions()
 
     def shutdown(self) -> None:
         """Stop submission, drain accepted I/O, and stop the executor."""
         if self._shutdown:
             return
         self._accepting = False
+        self.drain()
         self._executor.shutdown()
         self._collect_executor_completions()
         self._shutdown = True
@@ -228,6 +276,8 @@ class ECFileSystemTierManager:
                 self._complete_read(completion)
             elif completion.operation == "write":
                 self._complete_write(completion)
+            elif completion.operation == "delete":
+                self._complete_delete(completion)
             else:
                 raise RuntimeError(
                     f"unknown filesystem I/O operation: {completion.operation}"
@@ -235,10 +285,14 @@ class ECFileSystemTierManager:
 
     def _complete_read(self, completion: ECFileIOCompletion) -> None:
         indexed_entry = self._pending_reads.pop(completion.job_id)
+        self._read_pins[completion.cache_key] -= 1
+        if self._read_pins[completion.cache_key] == 0:
+            del self._read_pins[completion.cache_key]
         if not completion.success:
             current_entry = self._entries.get(completion.cache_key)
             if current_entry == indexed_entry:
                 del self._entries[completion.cache_key]
+                self._used_bytes -= indexed_entry.entry.file_size_bytes
         self._completed_reads.append(
             ECReadResult(
                 cache_key=completion.cache_key,
@@ -247,19 +301,25 @@ class ECFileSystemTierManager:
                 error=completion.error,
             )
         )
+        self._evict_to_capacity()
 
     def _complete_write(self, completion: ECFileIOCompletion) -> None:
         entry = self._pending_writes.pop(completion.job_id)
+        self._pending_write_keys.remove(completion.cache_key)
         if completion.success:
             if self._backpressure_detector is not None:
                 self._backpressure_detector.on_store_completed(
                     completion.queue_time + completion.transfer_time,
                     completion.file_size_bytes,
                 )
+            previous = self._entries.pop(completion.cache_key, None)
+            if previous is not None:
+                self._used_bytes -= previous.entry.file_size_bytes
             self._entries[completion.cache_key] = _IndexedEntry(
                 entry=entry,
                 generation=self._next_generation,
             )
+            self._used_bytes += entry.file_size_bytes
             self._next_generation += 1
         self._completed_writes.append(
             ECWriteResult(
@@ -269,6 +329,85 @@ class ECFileSystemTierManager:
                 error=completion.error,
             )
         )
+        self._evict_to_capacity()
+
+    def _complete_delete(self, completion: ECFileIOCompletion) -> None:
+        indexed_entry = self._pending_deletes.pop(completion.job_id)
+        self._deleting_keys.remove(indexed_entry.entry.cache_key)
+        if not completion.success:
+            logger.warning(
+                "Failed to delete evicted encoder-cache entry %s: %s",
+                indexed_entry.entry.path,
+                completion.error,
+            )
+
+    def _recover_index(self) -> None:
+        namespace_path = get_ec_namespace_path(
+            self._root_dir,
+            self._namespace_digest,
+        )
+        recovered: list[tuple[int, str, ECFileEntry]] = []
+        for path in namespace_path.rglob(f"*{EC_FILE_SUFFIX}"):
+            if path.is_symlink():
+                continue
+            cache_key = path.name.removesuffix(EC_FILE_SUFFIX)
+            try:
+                expected_path = get_ec_entry_path(
+                    self._root_dir,
+                    self._namespace_digest,
+                    cache_key,
+                )
+                stat_result = path.stat()
+            except (OSError, ValueError):
+                continue
+            if path != expected_path or not S_ISREG(stat_result.st_mode):
+                continue
+            if stat_result.st_size <= 0:
+                continue
+            recovered.append(
+                (
+                    stat_result.st_mtime_ns,
+                    cache_key,
+                    ECFileEntry(cache_key, path, stat_result.st_size),
+                )
+            )
+
+        for _, cache_key, entry in sorted(recovered):
+            self._entries[cache_key] = _IndexedEntry(
+                entry=entry,
+                generation=self._next_generation,
+            )
+            self._used_bytes += entry.file_size_bytes
+            self._next_generation += 1
+
+    def _evict_to_capacity(self) -> None:
+        while self._used_bytes > self._capacity_bytes:
+            victim: tuple[str, _IndexedEntry] | None = None
+            for cache_key, indexed_entry in self._entries.items():
+                if (
+                    self._read_pins[cache_key] == 0
+                    and cache_key not in self._pending_write_keys
+                ):
+                    victim = (cache_key, indexed_entry)
+                    break
+            if victim is None:
+                return
+
+            cache_key, indexed_entry = victim
+            del self._entries[cache_key]
+            self._used_bytes -= indexed_entry.entry.file_size_bytes
+            job_id = self._executor.submit_delete(
+                cache_key,
+                indexed_entry.entry.path,
+                indexed_entry.entry.file_size_bytes,
+            )
+            if job_id is None:
+                self._entries[cache_key] = indexed_entry
+                self._entries.move_to_end(cache_key, last=False)
+                self._used_bytes += indexed_entry.entry.file_size_bytes
+                return
+            self._pending_deletes[job_id] = indexed_entry
+            self._deleting_keys.add(cache_key)
 
 
 @runtime_checkable
@@ -311,7 +450,8 @@ class ECFileSystemTier(Protocol):
         padding in the final block. On acceptance, exactly one completion must
         eventually be returned by :meth:`poll_completed_writes`. Return
         ``False`` when the tier is no longer accepting work or store pressure
-        policy skips this cache opportunity.
+        policy, capacity, or same-key lifecycle state skips this cache
+        opportunity.
         """
         ...
 

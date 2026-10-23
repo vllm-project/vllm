@@ -20,6 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     ECCacheNamespace,
     build_ec_cache_key,
     get_ec_entry_path,
+    get_ec_namespace_path,
     get_ec_temporary_path,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "ECWriteResult",
     "build_ec_cache_key",
     "get_ec_entry_path",
+    "get_ec_namespace_path",
     "get_ec_temporary_path",
 ]

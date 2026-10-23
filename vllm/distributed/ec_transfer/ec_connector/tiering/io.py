@@ -141,3 +141,8 @@ def load_entry(
         _transfer_all(fd, buffers, os.readv, "read")
     finally:
         os.close(fd)
+
+
+def remove_entry(entry_path: Path) -> None:
+    """Remove an entry file, treating an already absent file as success."""
+    entry_path.unlink(missing_ok=True)

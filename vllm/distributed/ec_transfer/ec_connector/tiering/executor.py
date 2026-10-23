@@ -15,11 +15,12 @@ from typing import Literal
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.io import (
     load_entry,
+    remove_entry,
     store_entry,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
-ECFileIOOperation = Literal["read", "write"]
+ECFileIOOperation = Literal["read", "write", "delete"]
 
 
 @dataclass(frozen=True)
@@ -45,8 +46,11 @@ class ECFileIOStats:
     pending_read_bytes: int
     pending_write_jobs: int
     pending_write_bytes: int
+    pending_delete_jobs: int
+    pending_delete_bytes: int
     oldest_read_queue_age: float
     oldest_write_queue_age: float
+    oldest_delete_queue_age: float
 
 
 @dataclass
@@ -81,6 +85,8 @@ class ECFileIOExecutor:
         self._pending_read_bytes = 0
         self._pending_write_jobs = 0
         self._pending_write_bytes = 0
+        self._pending_delete_jobs = 0
+        self._pending_delete_bytes = 0
 
     def submit_read(
         self,
@@ -125,6 +131,20 @@ class ECFileIOExecutor:
                 file_size_bytes,
                 fsync=fsync,
             ),
+        )
+
+    def submit_delete(
+        self,
+        cache_key: str,
+        entry_path: Path,
+        file_size_bytes: int,
+    ) -> int | None:
+        """Submit one entry removal, or return ``None`` after shutdown."""
+        return self._submit(
+            operation="delete",
+            cache_key=cache_key,
+            file_size_bytes=file_size_bytes,
+            task_factory=lambda: remove_entry(entry_path),
         )
 
     def _submit(
@@ -187,8 +207,11 @@ class ECFileIOExecutor:
                 pending_read_bytes=self._pending_read_bytes,
                 pending_write_jobs=self._pending_write_jobs,
                 pending_write_bytes=self._pending_write_bytes,
+                pending_delete_jobs=self._pending_delete_jobs,
+                pending_delete_bytes=self._pending_delete_bytes,
                 oldest_read_queue_age=self._oldest_queue_age("read", now),
                 oldest_write_queue_age=self._oldest_queue_age("write", now),
+                oldest_delete_queue_age=self._oldest_queue_age("delete", now),
             )
 
     def drain(self) -> None:
@@ -233,9 +256,12 @@ class ECFileIOExecutor:
         if operation == "read":
             self._pending_read_jobs += 1
             self._pending_read_bytes += file_size_bytes
-        else:
+        elif operation == "write":
             self._pending_write_jobs += 1
             self._pending_write_bytes += file_size_bytes
+        else:
+            self._pending_delete_jobs += 1
+            self._pending_delete_bytes += file_size_bytes
 
     def _decrement_pending(
         self, operation: ECFileIOOperation, file_size_bytes: int
@@ -243,9 +269,12 @@ class ECFileIOExecutor:
         if operation == "read":
             self._pending_read_jobs -= 1
             self._pending_read_bytes -= file_size_bytes
-        else:
+        elif operation == "write":
             self._pending_write_jobs -= 1
             self._pending_write_bytes -= file_size_bytes
+        else:
+            self._pending_delete_jobs -= 1
+            self._pending_delete_bytes -= file_size_bytes
 
     def _oldest_queue_age(
         self, operation: ECFileIOOperation, now: float

@@ -51,6 +51,7 @@ class ECCacheNamespace:
     model_id: str
     dtype: str
     hidden_dim: int
+    encoder_output_widths: tuple[tuple[str, int], ...]
     element_size: int
     tensor_parallel_size: int
     prefill_context_parallel_size: int
@@ -63,6 +64,20 @@ class ECCacheNamespace:
                 raise ValueError(f"{field_name} must not be empty")
         if self.model_revision is not None and not self.model_revision:
             raise ValueError("model_revision must not be empty when provided")
+        if not self.encoder_output_widths:
+            raise ValueError("encoder_output_widths must not be empty")
+        if tuple(sorted(self.encoder_output_widths)) != self.encoder_output_widths:
+            raise ValueError("encoder_output_widths must be sorted by modality")
+        modalities = [modality for modality, _ in self.encoder_output_widths]
+        if len(set(modalities)) != len(modalities):
+            raise ValueError("encoder_output_widths modalities must be unique")
+        if any(
+            not modality or width <= 0
+            for modality, width in self.encoder_output_widths
+        ):
+            raise ValueError(
+                "encoder_output_widths entries must be non-empty and positive"
+            )
         for field_name in (
             "hidden_dim",
             "element_size",
@@ -115,13 +130,17 @@ def get_ec_entry_path(
     _validate_digest(namespace_digest, "namespace_digest")
     _validate_digest(cache_key, "cache_key")
     return (
-        root_dir
-        / f"v{EC_FILE_FORMAT_VERSION}"
-        / namespace_digest
+        get_ec_namespace_path(root_dir, namespace_digest)
         / cache_key[:3]
         / cache_key[3:5]
         / f"{cache_key}{EC_FILE_SUFFIX}"
     )
+
+
+def get_ec_namespace_path(root_dir: Path, namespace_digest: str) -> Path:
+    """Return the versioned directory containing one cache namespace."""
+    _validate_digest(namespace_digest, "namespace_digest")
+    return root_dir / f"v{EC_FILE_FORMAT_VERSION}" / namespace_digest
 
 
 def get_ec_temporary_path(entry_path: Path, operation_token: str) -> Path:
