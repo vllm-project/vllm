@@ -2635,7 +2635,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_store_job_preserves_prepare_store_key_order(
+def test_store_job_preserves_order_and_deduplicates_keys(
     request_runner, async_scheduling: bool
 ):
     tokens_per_block = 4
@@ -2648,9 +2648,16 @@ def test_store_job_preserves_prepare_store_key_order(
         async_scheduling=async_scheduling,
     )
     runner.new_request(token_ids=[0] * (tokens_per_chunk * 2))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
+    returned_keys = []
+
+    def prepare_store(keys, req_context):
+        keys = list(keys)
+        returned_keys.extend(keys)
+        output = generate_store_output(keys)
+        output.keys_to_store.append(keys[0])
+        return output
+
+    runner.manager.prepare_store.side_effect = prepare_store
     job_keys = {}
 
     def capture_job_keys():
@@ -2664,7 +2671,7 @@ def test_store_job_preserves_prepare_store_key_order(
 
     assert len(job_keys) == 1
     keys = next(iter(job_keys.values())).keys
-    assert keys == tuple(runner.manager.prepare_store.call_args.args[0])
+    assert keys == tuple(returned_keys)
     assert runner.manager.complete_store.call_args.args[0] == keys
 
 

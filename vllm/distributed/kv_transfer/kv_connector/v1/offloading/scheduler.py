@@ -1357,7 +1357,7 @@ class OffloadingConnectorScheduler:
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
-            keys=tuple(keys_to_load),
+            keys=tuple(dict.fromkeys(keys_to_load)),
             is_store=False,
         )
 
@@ -1585,7 +1585,7 @@ class OffloadingConnectorScheduler:
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
-                keys=tuple(store_output.keys_to_store),
+                keys=tuple(dict.fromkeys(store_output.keys_to_store)),
                 is_store=True,
                 fenced_block_ids=source_blocks,
             )
@@ -1830,7 +1830,7 @@ class OffloadingConnectorScheduler:
                 req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
 
-            ordered_keys_to_store = tuple(store_output.keys_to_store)
+            ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))
             keys_to_store = set(ordered_keys_to_store)
 
             group_sizes: list[int] = []
