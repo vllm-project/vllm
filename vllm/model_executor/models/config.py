@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -786,6 +787,28 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
+class MiniMaxM3SparseForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    INDEX_CACHE_KEYS = ("use_index_cache", "index_topk_freq", "index_skip_topk_offset")
+
+    @classmethod
+    def verify_and_update_model_config(cls, model_config: "ModelConfig") -> None:
+        """Reject IndexCache overrides set on the outer VL config, where the
+        ROCm text model never reads them."""
+        from vllm.platforms import current_platform
+
+        overrides = model_config.hf_overrides
+        if not current_platform.is_rocm() or not isinstance(overrides, dict):
+            return
+        misplaced = [key for key in cls.INDEX_CACHE_KEYS if key in overrides]
+        if misplaced:
+            suggested = {"text_config": {key: overrides[key] for key in misplaced}}
+            raise ValueError(
+                "MiniMax-M3 reads IndexCache settings from text_config, so "
+                f"top-level {', '.join(misplaced)} would be ignored. Pass them as "
+                f"--hf-overrides '{json.dumps(suggested)}'."
+            )
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
@@ -1222,6 +1245,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MiniMaxM3SparseForConditionalGeneration": (
+        MiniMaxM3SparseForConditionalGenerationConfig
+    ),
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
