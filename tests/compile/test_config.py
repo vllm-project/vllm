@@ -719,6 +719,26 @@ def test_capture_sizes_above_their_cap_raise(monkeypatch, kwargs):
         _resolve_capture_sizes(monkeypatch, sm100=True, **kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {
+            "prefill_cudagraph_capture_token_sizes": [],
+            "decode_cudagraph_capture_request_sizes": [],
+        },
+        {
+            "max_prefill_cudagraph_capture_tokens": 0,
+            "max_decode_cudagraph_capture_requests": 0,
+        },
+    ],
+)
+def test_no_capture_sizes_disable_cudagraphs(monkeypatch, kwargs):
+    """With no graph left to capture, cudagraph_mode becomes NONE, so resolving
+    the config again, as the engine core does, passes."""
+    compilation_config = _resolve_capture_sizes(monkeypatch, sm100=False, **kwargs)
+    assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
 @pytest.mark.usefixtures("off_sm100")
 @pytest.mark.parametrize(
     ("method", "kwargs", "widest_draft_decode", "max_capture_size"),
