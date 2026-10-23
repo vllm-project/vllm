@@ -171,6 +171,12 @@ def _convert_awq_to_standard_format(
     replace_parameter(layer, w_zp_name, new_zp_param)
 
 
+def _use_rocm_aiter_w4a16() -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return bool(rocm_aiter_ops.is_linear_w4a16_enabled())
+
+
 class AutoAWQConfig(QuantizationConfig):
     """Config class for AutoAWQ quantization.
 
@@ -307,6 +313,11 @@ class AutoAWQConfig(QuantizationConfig):
             if current_platform.is_cpu() or current_platform.is_xpu():
                 return AutoAWQMarlinLinearMethod(self)
 
+            # On ROCm gfx942 with AITER, AiterW4A16LinearKernel serves AWQ
+            # (uint4 with zero points) through the same MPLinearKernel path.
+            if current_platform.is_rocm() and _use_rocm_aiter_w4a16():
+                return AutoAWQMarlinLinearMethod(self)
+
             # Check if Marlin is supported and not using batch invariant mode
             # (Marlin kernels are not batch invariant)
             use_marlin = (
@@ -408,7 +419,11 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
         # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
         # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
-        if not (current_platform.is_cpu() or current_platform.is_xpu()):
+        if not (
+            current_platform.is_cpu()
+            or current_platform.is_xpu()
+            or (current_platform.is_rocm() and _use_rocm_aiter_w4a16())
+        ):
             verify_marlin_supported(
                 quant_type=self.quant_config.quant_type,
                 group_size=self.quant_config.group_size,
