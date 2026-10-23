@@ -55,7 +55,7 @@ th:not(:first-child) {
 | [prompt-embeds](prompt_embeds.md) | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ✅ | ❔ | ❔ | ✅ |
 
 \* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
-<sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.  
+<sup>^</sup> LoRA supports the language backbone of multimodal models, with experimental [tower and connector support](lora.md#lora-support-for-tower-and-connector-of-multi-modal-model) for selected models.  
 
 ### Feature x Hardware
 
