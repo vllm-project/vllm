@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import mmap
+import subprocess
+import sys
+import uuid
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -25,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -223,7 +226,7 @@ def _hisparse_parallel_config(**overrides):
 
 def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        hisparse_runtime_module.current_platform, "is_cuda", lambda: True
     )
     config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
 
@@ -241,142 +244,6 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
     for overrides in unsupported:
         config.parallel_config = _hisparse_parallel_config(**overrides)
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
-
-
-@pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
-    page = mmap.PAGESIZE
-    tp_group = MagicMock(rank_in_group=1, world_size=2)
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
-
-    class FakeSharedOffloadRegion:
-        BLOCK_SIZE_ALIGNMENT = page
-
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.total_size_bytes = kwargs["num_chunks"] * kwargs["kv_bytes_per_chunk"]
-            self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
-            self.is_pinned = False
-            self.pinned_addresses = []
-            self.view_sizes = []
-            self.offset = 0
-            kwargs["barrier"]()
-
-        def create_next_canonical_view(self, size):
-            self.view_sizes.append(size)
-            view = torch.as_strided(
-                self.base_tensor,
-                size=(self.kwargs["num_chunks"], size),
-                stride=(self.kwargs["kv_bytes_per_chunk"], 1),
-                storage_offset=self.offset,
-            )
-            self.offset += size
-            return view
-
-        def cleanup(self):
-            pass
-
-    monkeypatch.setattr(
-        hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
-    )
-    registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
-    monkeypatch.setattr(
-        hisparse_runtime_module,
-        "_hisparse_registration_ranges",
-        registration_ranges,
-    )
-    pinned: list[torch.Tensor] = []
-
-    def pin_tensor(tensor):
-        tp_group.barrier.assert_called_once_with()
-        pinned.append(tensor)
-
-    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
-    config = SimpleNamespace(
-        instance_id="instance",
-        parallel_config=_hisparse_parallel_config(),
-    )
-
-    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
-        config,
-        [24, 40],
-        num_blocks=4,
-        host_block_stride=page,
-        use_shared_host_pool=True,
-    )
-
-    assert region is not None
-    assert isinstance(region, FakeSharedOffloadRegion)
-    assert private_pools == []
-    assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
-        "num_chunks": 1,
-        "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
-        "cpu_page_size": 64,
-        "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
-    }
-    assert region.view_sizes == [24, 40]
-    assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with([24, 40], 4, page)
-    assert [
-        (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
-        for tensor in pinned
-    ] == [(0, page), (page, 3 * page)]
-    assert region.is_pinned
-
-
-@pytest.mark.parametrize("fail_registration", [None, 1, 2])
-def test_shared_host_pool_tracks_successful_registrations(
-    monkeypatch, fail_registration
-):
-    """Only successful registrations may be unregistered on allocation failure."""
-    page = mmap.PAGESIZE
-    tp_group = MagicMock(rank_in_group=0, world_size=2)
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
-    backing = torch.empty(3 * page, dtype=torch.uint8)
-    region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
-    monkeypatch.setattr(
-        hisparse_runtime_module, "SharedOffloadRegion", lambda **kw: region
-    )
-    monkeypatch.setattr(
-        hisparse_runtime_module,
-        "_hisparse_registration_ranges",
-        lambda *args: ((0, page), (page, 3 * page)),
-    )
-    cudart = MagicMock()
-    cudart.cudaHostRegister.side_effect = [
-        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
-    ]
-    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
-    config = SimpleNamespace(
-        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
-    )
-    context = (
-        pytest.raises(RuntimeError, match="cudaHostRegister failed")
-        if fail_registration
-        else nullcontext()
-    )
-    with context:
-        hisparse_runtime_module.allocate_hisparse_host_pools(
-            config, [3 * page], 3, page, use_shared_host_pool=True
-        )
-    successful = 2 if fail_registration is None else fail_registration - 1
-    assert region.pinned_addresses == [
-        backing.data_ptr() + i * page for i in range(successful)
-    ]
-    assert region.is_pinned == bool(successful)
-    assert region.cleanup.call_count == int(fail_registration is not None)
-    attempts = 2 if fail_registration is None else fail_registration
-    assert (
-        cudart.cudaHostRegister.call_args_list
-        == [
-            call(backing.data_ptr(), page, 0),
-            call(backing.data_ptr() + page, 2 * page, 0),
-        ][:attempts]
-    )
 
 
 def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
@@ -414,22 +281,92 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     assert pool.registered is region.base_tensor
 
 
-def test_hisparse_registration_chunks_end_between_host_blocks():
-    """Registration seams must not bisect a DMA-addressable host block."""
-    page = mmap.PAGESIZE
-    ranges = hisparse_runtime_module._hisparse_registration_ranges(
-        tensor_sizes=[4 * 3 * page, 4 * 5 * page],
-        num_blocks=4,
-        host_block_stride=8 * page,
-        max_chunk_bytes=10 * page,
+def _shared_host_pool_rank(rank: int, init_file: str, name: str, results) -> None:
+    import torch.distributed as dist
+
+    from vllm.v1.hisparse.shared_host_pool import HiSparseSharedHostPool
+
+    torch.accelerator.set_device_index(0)
+    dist.init_process_group(
+        "gloo", init_method=f"file://{init_file}", rank=rank, world_size=2
     )
 
-    assert ranges == (
-        (0, 9 * page),
-        (9 * page, 17 * page),
-        (17 * page, 27 * page),
-        (27 * page, 32 * page),
+    probed = False
+
+    def barrier() -> None:
+        nonlocal probed
+        dist.barrier()
+        if rank == 1 and not probed:
+            probed = True
+            # Connect from a process outside the TP group before rank 1 does.
+            stranger = subprocess.run(
+                [sys.executable, "-c", _STRANGER_SCRIPT, name],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            results.put(("stranger_fds", stranger.stdout.strip()))
+
+    group = SimpleNamespace(
+        rank_in_group=rank, world_size=2, cpu_group=dist.group.WORLD, barrier=barrier
     )
+    size = 1 << 21
+    pool = HiSparseSharedHostPool(name, size, group, lambda _: None)
+    written, read = pool.views([size // 2, size // 2])[:: 1 if rank == 0 else -1]
+    if rank == 0:
+        written.fill_(7)
+    else:
+        written.copy_(torch.full_like(written, 5, device="cuda"))
+    torch.accelerator.synchronize()
+    dist.barrier()
+    seen = read.to("cuda") if rank == 1 else read
+    results.put((rank, seen.unique().tolist()))
+    dist.barrier()
+    pool.cleanup()
+    dist.destroy_process_group()
+
+
+_STRANGER_SCRIPT = """
+import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+    conn.connect(f"\\0vllm_{sys.argv[1]}".encode())
+    print(len(socket.recv_fds(conn, 4096, 4)[1]))
+"""
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only host pool")
+def test_hisparse_shared_host_pool_is_shared_only_with_tp_ranks(tmp_path):
+    """Writes from one TP rank are visible to the other, and a process outside
+    the TP group that connects first gets no host pool fds."""
+    from vllm.v1.hisparse import shared_host_pool
+
+    try:
+        shared_host_pool._check_device_support(0)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    ctx = torch.multiprocessing.get_context("spawn")
+    results = ctx.Queue()
+    name = f"test_hisparse_{uuid.uuid4().hex}"
+    procs = [
+        ctx.Process(
+            target=_shared_host_pool_rank,
+            args=(rank, str(tmp_path / "init"), name, results),
+        )
+        for rank in range(2)
+    ]
+    for proc in procs:
+        proc.start()
+    try:
+        outputs = dict(results.get(timeout=300) for _ in range(3))
+        for proc in procs:
+            proc.join(timeout=60)
+            assert proc.exitcode == 0
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.kill()
+
+    assert outputs == {"stranger_fds": "0", 0: [5], 1: [7]}
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
