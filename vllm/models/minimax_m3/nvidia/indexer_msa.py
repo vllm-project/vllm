@@ -127,6 +127,7 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
     local_chunks: list[MiniMaxM3IndexerMSAPrefillChunk] | None = None
     local_scores: torch.Tensor | None = None
     candidate_buffers: torch.Tensor | None = None
+    unified: bool = False
 
 
 @dataclass
@@ -179,7 +180,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         self.index_k_tp = 1 if content is None else full // content
         self.prefill_local_score = (
             self.index_k_tp > 1
-            and vllm_config.attention_config.indexer_prefill_cp == "local_score"
+            and vllm_config.attention_config.indexer_prefill_cp
+            in ("local_score", "local_score_unified")
+        )
+        self.prefill_unified = (
+            self.prefill_local_score
+            and vllm_config.attention_config.indexer_prefill_cp == "local_score_unified"
         )
         self.index_k_rank = 0
         self.index_k_slots: torch.Tensor | None = None
@@ -346,7 +352,9 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         prefill: MiniMaxM3IndexerMSAPrefillMetadata | None = None
         if num_prefills > 0:
-            lo, hi = num_decodes, num_reqs
+            lo = 0 if self.prefill_unified else num_decodes
+            hi = num_reqs
+            side_tokens = num_tokens if self.prefill_unified else num_prefill_tokens
             qsl_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
             qo_lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
             side_qo = qo_lens_cpu[lo:hi]
@@ -417,10 +425,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                         ),
                     )
                 assert self.prefill_window_metadata is not None
-                for window, start in enumerate(
-                    range(0, num_prefill_tokens, chunk_size)
-                ):
-                    end = min(start + chunk_size, num_prefill_tokens)
+                for window, start in enumerate(range(0, side_tokens, chunk_size)):
+                    end = min(start + chunk_size, side_tokens)
                     window_metadata = self.prefill_window_metadata[window]
                     prepare_prefill_window(
                         query_start_loc[lo : hi + 1],
@@ -466,16 +472,16 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     )
                 assert self.prefill_scores_buffer is not None
                 assert self.prefill_candidates_buffer is not None
-                score_rows = min(chunk_size, num_prefill_tokens)
+                score_rows = min(chunk_size, side_tokens)
                 score_elements = score_rows * heads * score_cols
                 assert score_elements <= self.prefill_scores_buffer.numel()
                 local_scores = self.prefill_scores_buffer[:score_elements].view(
                     score_rows, heads, score_cols
                 )
-                candidate_elements = heads * num_prefill_tokens * (2 * TOPK + 1)
+                candidate_elements = heads * side_tokens * (2 * TOPK + 1)
                 candidate_buffers = self.prefill_candidates_buffer[
                     :, :candidate_elements
-                ].view(2, heads, num_prefill_tokens, 2 * TOPK + 1)
+                ].view(2, heads, side_tokens, 2 * TOPK + 1)
             prefill = MiniMaxM3IndexerMSAPrefillMetadata(
                 plan=plan,
                 cu_seqlens_q=(query_start_loc[lo : hi + 1] - query_start_loc[lo]).to(
@@ -488,6 +494,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 local_chunks=local_chunks,
                 local_scores=local_scores,
                 candidate_buffers=candidate_buffers,
+                unified=self.prefill_unified,
             )
 
         return MiniMaxM3IndexerMSAMetadata(
@@ -565,7 +572,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         assert num_valid_pages is not None
         from vllm.third_party.fmha_sm100.api import sparse_topk_select
 
-        if md.decode is not None:
+        unified_prefill = md.prefill_msa is not None and md.prefill_msa.unified
+        if md.decode is not None and not unified_prefill:
             d = md.decode
             # max_decode_query_len avoids recompiles across runtime decode sizes.
             # Fall back when the flattened Q tile gets too wide for this kernel.
@@ -655,13 +663,14 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         )
         if local_prefill:
             assert md.prefill_msa is not None and self.index_k_comm is not None
+            start = 0 if unified_prefill else nd
             prefill_local_score(
-                index_q[nd:],
+                index_q[start:],
                 kv,
                 md.prefill_msa,
                 self.index_k_comm,
-                num_valid_pages[nd:],
-                buf[nd:num_tokens],
+                num_valid_pages[start:],
+                buf[start:num_tokens],
                 self.init_blocks,
                 self.local_blocks,
             )

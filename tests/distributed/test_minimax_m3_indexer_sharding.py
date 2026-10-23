@@ -156,6 +156,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         (layers[0], "gather"),
         (layers[1], "gather"),
         (layers[1], "local_score"),
+        (layers[1], "local_score_unified"),
     ):
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(config.attention_config, "indexer_prefill_cp", prefill_mode)
@@ -168,11 +169,14 @@ def _check_indexer_forwards(config, device, rank, comm):
                 )
             )
     assert all(builder.unified_scores_buffer is not None for builder in builders[:2])
-    assert builders[2].unified_scores_buffer is None
-    prefill_storage = (
-        builders[2].prefill_scores_buffer.data_ptr(),
-        builders[2].prefill_candidates_buffer.data_ptr(),
-    )
+    assert all(builder.unified_scores_buffer is None for builder in builders[2:])
+    prefill_storage = [
+        (
+            builder.prefill_scores_buffer.data_ptr(),
+            builder.prefill_candidates_buffer.data_ptr(),
+        )
+        for builder in builders[2:]
+    ]
 
     active_layers = 5
 
@@ -302,14 +306,15 @@ def _check_indexer_forwards(config, device, rank, comm):
             query[msa.PREFILL_CHUNK_SIZE :] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
-        assert metadata[2].unified_scores is None
-        if metadata[2].prefill_msa is not None:
-            prefill = metadata[2].prefill_msa
-            assert (
-                prefill.local_scores.untyped_storage().data_ptr(),
-                prefill.candidate_buffers.untyped_storage().data_ptr(),
-            ) == prefill_storage
-            assert all(arm.is_contiguous() for arm in prefill.candidate_buffers)
+        for md, storage in zip(metadata[2:], prefill_storage, strict=True):
+            assert md.unified_scores is None
+            if md.prefill_msa is not None:
+                prefill = md.prefill_msa
+                assert (
+                    prefill.local_scores.untyped_storage().data_ptr(),
+                    prefill.candidate_buffers.untyped_storage().data_ptr(),
+                ) == storage
+                assert all(arm.is_contiguous() for arm in prefill.candidate_buffers)
         expected_decode = {
             (4, 4, 1027, 127): (2, 8),
             (1, 2, 3, 4): (1, 1),
@@ -328,7 +333,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         check(metadata, queries, num_tokens)
 
         if metadata[1].prefill_msa is None:
-            for decode_metadata in (metadata[1], metadata[2]):
+            for decode_metadata in metadata[1:]:
                 metadata[1] = decode_metadata
                 run(True, metadata, queries)
                 graph = torch.cuda.CUDAGraph()
@@ -344,23 +349,34 @@ def _check_indexer_forwards(config, device, rank, comm):
                     graph.replay()
                 check(metadata, queries, num_tokens)
         else:
-            metadata[1] = metadata[2]
-            scratch = metadata[1].prefill_msa.local_scores
-            assert scratch.shape[0] <= msa.PREFILL_CHUNK_SIZE
-            assert scratch.numel() * scratch.element_size() <= msa.PREFILL_SCORE_BYTES
-            chunks = metadata[1].prefill_msa.local_chunks
-            assert len(chunks) > 1
-            assert all((chunk.plan is not None) == (world == 2) for chunk in chunks)
-            # Reuse scratch across layers and steps.
-            exchanges.clear()
-            with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(torch.distributed, "all_to_all_single", exchange)
-                for _ in range(3):
-                    run(True, metadata, queries)
-            assert exchanges == [
-                (world, local_heads, metadata[1].num_prefill_tokens, 33)
-            ] * (3 * active_layers)
-            check(metadata, queries, num_tokens)
+            for local_metadata in metadata[2:]:
+                metadata[1] = local_metadata
+                prefill = local_metadata.prefill_msa
+                scratch = prefill.local_scores
+                assert scratch.shape[0] <= msa.PREFILL_CHUNK_SIZE
+                assert (
+                    scratch.numel() * scratch.element_size() <= msa.PREFILL_SCORE_BYTES
+                )
+                chunks = prefill.local_chunks
+                assert chunks[0].start == 0
+                assert chunks[-1].end == prefill.candidate_buffers.shape[2]
+                if chunks[-1].end > msa.PREFILL_CHUNK_SIZE:
+                    assert len(chunks) > 1
+                assert all((chunk.plan is not None) == (world == 2) for chunk in chunks)
+                # Both dispatches reuse scratch across layers and steps; unified
+                # mixed scoring exchanges decode and prefill candidates together.
+                exchanges.clear()
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(torch.distributed, "all_to_all_single", exchange)
+                    for _ in range(3):
+                        run(True, metadata, queries)
+                exchanged_tokens = (
+                    num_tokens if prefill.unified else local_metadata.num_prefill_tokens
+                )
+                assert exchanges == [(world, local_heads, exchanged_tokens, 33)] * (
+                    3 * active_layers
+                )
+                check(metadata, queries, num_tokens)
             pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
             gathered = [
                 msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)
