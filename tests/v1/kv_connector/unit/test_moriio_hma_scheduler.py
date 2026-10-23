@@ -712,6 +712,51 @@ def test_request_finished_all_groups_pure_attention_stays_grouped():
     assert "remote_mamba_block_ids" not in params
 
 
+@pytest.mark.parametrize(
+    "has_mamba,block_ids,expected",
+    [
+        # Hybrid: attention blocks plus the per-request KDA slot.
+        (True, ([7, 8], [40, 41]), [[], []]),
+        (True, ([], []), [[], []]),
+        # Pure attention, two KV cache groups.
+        (False, ([7, 8], [9]), [[], []]),
+    ],
+)
+def test_read_abort_before_alloc_never_reads_into_local_blocks(
+    has_mamba, block_ids, expected
+):
+    # request_finished returns delay_free_blocks=False here, so the scheduler
+    # frees these blocks immediately. The worker must only release the
+    # producer, never post RDMA reads into blocks another request may own.
+    sched = _FakeScheduler(
+        _has_mamba=has_mamba,
+        _attn_group_ids=[0],
+        _mamba_group_ids=[1] if has_mamba else [],
+        is_producer=False,
+        blocks_per_sw=[0, 0],
+        request_id_to_transfer_id={},
+        transfer_id_to_request_id={},
+        _reqs_need_recv={},
+    )
+    req = SimpleNamespace(
+        request_id="req-aborted",
+        status=None,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "transfer_id": "tx",
+            "remote_block_ids": [[10, 11], [90]],
+        },
+    )
+
+    delay_free, params = _FakeConnector(sched).request_finished_all_groups(
+        req, block_ids
+    )
+
+    assert (delay_free, params) == (False, None)
+    assert req.kv_transfer_params["do_remote_prefill"] is False
+    assert sched._reqs_need_recv["req-aborted"] == (req, expected)
+
+
 def test_connector_supports_divergent_local_hybrid_hits():
     connector = _FakeConnector(None)
     connector._transfers_mamba_state = True

@@ -1548,24 +1548,18 @@ class MoRIIOConnectorScheduler:
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
             else:
-                # Carry the actually-allocated blocks (incl. the per-request KDA
-                # mamba slot) instead of []: a do_remote_prefill request finishing
-                # before update_state_after_alloc still has blocks, and dropping the
-                # mamba slot here would re-trip the KDA guard in _read_blocks.
-                if mamba_block_groups:
-                    recv_blocks: BlockIds = [
-                        list(cast(list[int], block_ids)),
-                        *[list(group) for group in mamba_block_groups],
-                    ]
-                elif block_ids and isinstance(block_ids[0], int):
-                    recv_blocks = [list(cast(list[int], block_ids))]
+                # Empty groups, never the allocated blocks: this returns
+                # delay_free_blocks=False, so the scheduler frees any local
+                # blocks right away and they may be reused before the worker
+                # runs. All-empty groups take _read_blocks' release-only path
+                # (no sessions, no RDMA, no KDA guard).
+                if mamba_block_groups is not None:
+                    num_groups = 1 + len(mamba_block_groups)
+                elif self._has_mamba:
+                    num_groups = len(block_ids)
                 else:
-                    grouped_block_ids = cast(BlockIds, block_ids)
-                    recv_blocks = (
-                        [list(group) for group in grouped_block_ids]
-                        if self._has_mamba
-                        else [[] for _ in self.blocks_per_sw]
-                    )
+                    num_groups = len(self.blocks_per_sw)
+                recv_blocks: BlockIds = [[] for _ in range(num_groups)]
                 self._reqs_need_recv[request.request_id] = (request, recv_blocks)
             params["do_remote_prefill"] = False
             return False, None
