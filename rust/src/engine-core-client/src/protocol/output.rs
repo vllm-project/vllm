@@ -16,6 +16,7 @@ use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::lora::LoraLoadEvent;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::tensor::WireNdArray;
@@ -271,6 +272,9 @@ struct WireEngineCoreOutputs {
     /// `set_weight_version` utility; `"default"` until set.
     #[serde(default)]
     weight_version: Option<String>,
+    /// The engine's LoRA adapter caches changed.
+    #[serde(default)]
+    lora_load_event: Option<LoraLoadEvent>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -290,6 +294,8 @@ pub struct RequestBatchOutputs {
     /// Label of the weights used for this step. It changes only while
     /// generation is paused, so it applies to every output in the batch.
     pub weight_version: Option<Arc<str>>,
+    /// The engine's LoRA adapter caches changed.
+    pub lora_load_event: Option<LoraLoadEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -356,7 +362,8 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
     fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
-            || value.finished_requests.is_some();
+            || value.finished_requests.is_some()
+            || value.lora_load_event.is_some();
 
         match (
             has_request_payload,
@@ -371,6 +378,7 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
                 timestamp: value.timestamp,
                 finished_requests: value.finished_requests,
                 weight_version: value.weight_version.map(Arc::from),
+                lora_load_event: value.lora_load_event,
             }
             .into()),
             (false, Some(_), None, None) => Ok(UtilityCallOutput {
@@ -410,6 +418,7 @@ impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
                 timestamp: batch.timestamp,
                 finished_requests: batch.finished_requests,
                 weight_version: batch.weight_version.map(|version| version.to_string()),
+                lora_load_event: batch.lora_load_event,
                 ..Default::default()
             },
             EngineCoreOutputs::Utility(utility) => Self {
@@ -605,6 +614,7 @@ mod tests {
                         },
                     ),
                     weight_version: None,
+                    lora_load_event: None,
                 },
             )
         "#]]
@@ -680,5 +690,28 @@ mod tests {
             r#"messagepack decode failed for EngineCoreOutputs: invalid wire shape"#
         ]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn engine_core_outputs_classify_lora_load_event_only_as_request_batch() {
+        let outputs = WireEngineCoreOutputs {
+            lora_load_event: Some(LoraLoadEvent {
+                gpu_adapters: vec!["alpha".to_string()],
+                cpu_adapters: vec!["alpha".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let bytes = encode_msgpack(&outputs).unwrap();
+        let decoded: WireEngineCoreOutputs = decode_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, outputs);
+
+        let EngineCoreOutputs::RequestBatch(batch) = EngineCoreOutputs::try_from(decoded).unwrap()
+        else {
+            panic!("an event-only message must classify as a request batch");
+        };
+        assert!(batch.outputs.is_empty());
+        assert_eq!(batch.lora_load_event, outputs.lora_load_event);
     }
 }

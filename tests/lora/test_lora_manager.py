@@ -3,6 +3,7 @@
 
 import os
 
+import msgspec
 import pytest
 import torch
 from safetensors.torch import load_file
@@ -18,6 +19,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.model_manager import (
@@ -29,10 +31,15 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+from vllm.lora.worker_manager import (
+    MAX_PENDING_LOAD_TIMINGS,
+    LRUCacheWorkerLoRAManager,
+    WorkerLoRAManager,
+)
 from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import create_peft_lora
 
@@ -1260,3 +1267,243 @@ def test_target_modules_match_packed_runtime_modules(
         ],
         vllm_config=default_vllm_config,
     )
+
+
+def _without_timings(event: LoRALoadEvent | None) -> LoRALoadEvent | None:
+    return None if event is None else msgspec.structs.replace(event, loads=[])
+
+
+def _lora_runner(dummy_model, device, tmp_path) -> tuple[LoRAModelRunnerMixin, str]:
+    manager, lora_files = _lru_lora_manager(dummy_model, device, tmp_path)
+    runner = LoRAModelRunnerMixin.__new__(LoRAModelRunnerMixin)
+    runner.lora_config = manager.lora_config
+    runner.lora_manager = manager
+    return runner, lora_files
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_load_events(
+    dist_init, dummy_model, device, tmp_path
+):
+    """take_load_event reports both cache tiers, pinning and ranks, returns
+    None while nothing changed, and forgets names once an adapter is evicted."""
+    manager, lora_files = _lru_lora_manager(dummy_model, device, tmp_path)
+
+    def request(i: int) -> LoRARequest:
+        return LoRARequest(f"adapter-{i}", i, lora_files)
+
+    def take() -> LoRALoadEvent | None:
+        return _without_timings(manager.take_load_event())
+
+    assert take() == LoRALoadEvent()
+    assert take() is None
+
+    manager.add_adapter(request(1))
+    manager.add_adapter(request(2))
+    assert take() == LoRALoadEvent(
+        gpu_adapters=["adapter-1", "adapter-2"],
+        cpu_adapters=["adapter-1", "adapter-2"],
+        ranks={"adapter-1": 8, "adapter-2": 8},
+    )
+
+    # GPU slots are full, so adapter-1 drops to the CPU tier.
+    manager.add_adapter(request(3))
+    assert take() == LoRALoadEvent(
+        gpu_adapters=["adapter-2", "adapter-3"],
+        cpu_adapters=["adapter-1", "adapter-2", "adapter-3"],
+        ranks={"adapter-1": 8, "adapter-2": 8, "adapter-3": 8},
+    )
+
+    manager.pin_adapter(1)
+    event = take()
+    assert event is not None
+    assert "adapter-1" in event.gpu_adapters
+    assert event.pinned_adapters == ["adapter-1"]
+
+    # CPU capacity is 3, so the oldest unpinned adapter is evicted.
+    manager.add_adapter(request(4))
+    event = take()
+    assert event is not None
+    assert "adapter-4" in event.gpu_adapters
+    assert len(event.cpu_adapters) == 3
+    assert {"adapter-1", "adapter-4"} <= set(event.cpu_adapters)
+    assert set(manager._adapter_names) == set(manager.list_adapters())
+
+    manager.remove_all_adapters()
+    assert take() == LoRALoadEvent()
+    assert manager._adapter_names == {}
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_model_runner_mixin_does_not_report_warmup_loras(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Dummy LoRAs activated by warmup and dummy runs are not reported."""
+    runner, lora_files = _lora_runner(dummy_model, device, tmp_path)
+    assert runner.take_lora_load_event() == LoRALoadEvent()
+
+    with runner.maybe_setup_dummy_loras(runner.lora_config):
+        runner._set_active_loras(
+            (1, 2),
+            (1, 2),
+            {LoRARequest(f"warmup_{i}", i, "/not/a/real/path") for i in (1, 2)},
+        )
+    assert runner.take_lora_load_event() is None
+
+    assert runner.add_lora(LoRARequest("adapter-7", 7, lora_files))
+    event = runner.take_lora_load_event()
+    assert event is not None
+    assert [(t.adapter_name, t.transition) for t in event.loads] == [
+        ("adapter-7", "load"),
+        ("adapter-7", "activate"),
+    ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_model_runner_mixin_takes_lora_load_events(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Adapter RPCs and step-time activation each produce an event. Changes
+    between two takes collapse into the latest snapshot with every timing."""
+    runner, lora_files = _lora_runner(dummy_model, device, tmp_path)
+    assert runner.take_lora_load_event() == LoRALoadEvent()
+
+    def take() -> LoRALoadEvent | None:
+        return _without_timings(runner.take_lora_load_event())
+
+    assert runner.add_lora(LoRARequest("adapter-1", 1, lora_files))
+    assert take() == LoRALoadEvent(
+        gpu_adapters=["adapter-1"],
+        cpu_adapters=["adapter-1"],
+        ranks={"adapter-1": 8},
+    )
+
+    assert runner.add_lora(LoRARequest("adapter-1", 1, lora_files))
+    assert take() is None
+
+    assert runner.pin_lora(1)
+    assert take() == LoRALoadEvent(
+        gpu_adapters=["adapter-1"],
+        cpu_adapters=["adapter-1"],
+        pinned_adapters=["adapter-1"],
+        ranks={"adapter-1": 8},
+    )
+
+    assert runner.remove_lora(1)
+    assert take() == LoRALoadEvent()
+
+    runner._set_active_loras((2,), (2,), {LoRARequest("adapter-2", 2, lora_files)})
+    assert take() == LoRALoadEvent(
+        gpu_adapters=["adapter-2"],
+        cpu_adapters=["adapter-2"],
+        ranks={"adapter-2": 8},
+    )
+
+    runner.maybe_remove_all_loras(runner.lora_config)
+    assert take() == LoRALoadEvent()
+
+    assert runner.add_lora(LoRARequest("adapter-3", 3, lora_files))
+    assert runner.pin_lora(3)
+    event = runner.take_lora_load_event()
+    assert _without_timings(event) == LoRALoadEvent(
+        gpu_adapters=["adapter-3"],
+        cpu_adapters=["adapter-3"],
+        pinned_adapters=["adapter-3"],
+        ranks={"adapter-3": 8},
+    )
+    assert event is not None
+    assert [(t.adapter_name, t.transition) for t in event.loads] == [
+        ("adapter-3", "load"),
+        ("adapter-3", "activate"),
+    ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_load_timings_are_bounded(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Between drains the timing buffer keeps the newest
+    MAX_PENDING_LOAD_TIMINGS transitions."""
+    manager, lora_files = _lru_lora_manager(
+        dummy_model, device, tmp_path, max_cpu_loras=2, max_loras=1
+    )
+
+    # Each add evicts the previous adapter from the single GPU slot and the
+    # two-entry CPU cache, so it is timed as a load and an activation.
+    num_adds = MAX_PENDING_LOAD_TIMINGS // 2 + 10
+    for i in range(1, num_adds + 1):
+        manager.add_adapter(LoRARequest(f"adapter-{i}", i, lora_files))
+
+    timings = manager.drain_load_timings()
+    assert len(timings) == MAX_PENDING_LOAD_TIMINGS
+    assert (timings[-1].adapter_name, timings[-1].transition) == (
+        f"adapter-{num_adds}",
+        "activate",
+    )
+    assert manager.drain_load_timings() == []
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_load_event_keeps_lru_order(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Taking a load event does not refresh LRU recency."""
+    manager, lora_files = _lru_lora_manager(dummy_model, device, tmp_path)
+
+    for i in (3, 1, 2):
+        manager.add_adapter(LoRARequest(f"adapter-{i}", i, lora_files))
+    registered = manager._adapter_manager._registered_adapters
+    active = manager._adapter_manager._active_adapters
+    registered_order = list(registered.order)
+    active_order = list(active.order)
+    assert registered_order == [3, 1, 2]
+
+    event = manager.take_load_event()
+    assert event is not None
+    assert event.ranks == {"adapter-1": 8, "adapter-2": 8, "adapter-3": 8}
+
+    assert list(registered.order) == registered_order
+    assert list(active.order) == active_order
+
+    # adapter-3 is still the least recently used, so it is evicted next.
+    manager.add_adapter(LoRARequest("adapter-4", 4, lora_files))
+    assert set(manager.list_adapters()) == {1, 2, 4}
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_load_timings(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Every disk load and every CPU-to-GPU activation is timed once, a warm
+    re-add is not, and draining empties the buffer."""
+    manager, lora_files = _lru_lora_manager(dummy_model, device, tmp_path)
+
+    def request(i: int) -> LoRARequest:
+        return LoRARequest(f"adapter-{i}", i, lora_files)
+
+    def transitions() -> list[tuple[str, str]]:
+        timings = manager.drain_load_timings()
+        assert all(t.seconds >= 0 for t in timings)
+        return [(t.adapter_name, t.transition) for t in timings]
+
+    assert transitions() == []
+
+    manager.add_adapter(request(1))
+    assert transitions() == [("adapter-1", "load"), ("adapter-1", "activate")]
+
+    manager.add_adapter(request(1))
+    assert transitions() == []
+
+    manager.add_adapter(request(2))
+    manager.add_adapter(request(3))  # evicts adapter-1 from its GPU slot
+    assert transitions() == [
+        ("adapter-2", "load"),
+        ("adapter-2", "activate"),
+        ("adapter-3", "load"),
+        ("adapter-3", "activate"),
+    ]
+
+    # adapter-1 is still in the CPU cache: activation only.
+    manager.add_adapter(request(1))
+    assert transitions() == [("adapter-1", "activate")]
+    assert manager.drain_load_timings() == []

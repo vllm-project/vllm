@@ -2939,6 +2939,28 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                 weight_version: Some(
                     "v7",
                 ),
+                lora_load_event: Some(
+                    LoraLoadEvent {
+                        gpu_adapters: [
+                            "alpha",
+                        ],
+                        cpu_adapters: [
+                            "alpha",
+                            "beta",
+                        ],
+                        pinned_adapters: [],
+                        ranks: {
+                            "alpha": 64,
+                        },
+                        loads: [
+                            LoraLoadTiming {
+                                adapter_name: "alpha",
+                                transition: "load",
+                                seconds: 0.25,
+                            },
+                        ],
+                    },
+                ),
             },
         )
     "#]]

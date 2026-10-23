@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 
 import torch
 import torch.nn as nn
@@ -11,6 +11,7 @@ import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
@@ -34,6 +35,8 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
+
+LoRARPC = Literal["add_lora", "remove_lora", "pin_lora"]
 
 
 class CompilationTimes(NamedTuple):
@@ -205,6 +208,15 @@ class WorkerBase:
 
     def list_loras(self) -> set[int]:
         raise NotImplementedError
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        return None
+
+    def run_lora_rpc(
+        self, method: LoRARPC, arg: LoRARequest | int
+    ) -> tuple[bool, LoRALoadEvent | None]:
+        """Run a LoRA adapter RPC and take the load event it produced."""
+        return getattr(self, method)(arg), self.take_lora_load_event()
 
     @property
     def vocab_size(self) -> int:

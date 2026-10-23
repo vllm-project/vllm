@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -23,7 +24,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, LoRARPC, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -59,6 +60,7 @@ class Executor(ABC):
 
     uses_ray: bool = False  # whether the executor uses Ray for orchestration.
     supports_pp: bool = False  # whether the executor supports PP
+    output_rank: int = 0  # rank whose ModelRunnerOutput the engine reads
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
@@ -121,6 +123,7 @@ class Executor(ABC):
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
+        self._lora_load_event: LoRALoadEvent | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -362,21 +365,33 @@ class Executor(ABC):
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("add_lora", args=(lora_request,)))
+        return self._run_lora_rpc("add_lora", lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("remove_lora", args=(lora_id,)))
+        return self._run_lora_rpc("remove_lora", lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("pin_lora", args=(lora_id,)))
+        return self._run_lora_rpc("pin_lora", lora_id)
+
+    def _run_lora_rpc(self, method: LoRARPC, arg: LoRARequest | int) -> bool:
+        replies: list[tuple[bool, LoRALoadEvent | None]] = self.collective_rpc(
+            "run_lora_rpc", args=(method, arg)
+        )
+        self._lora_load_event = replies[self.output_rank][1]
+        return all(ok for ok, _ in replies)
 
     def list_loras(self) -> set[int]:
         sets: list[set[int]] = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        """The output rank's load event from the last add/remove/pin_lora."""
+        event, self._lora_load_event = self._lora_load_event, None
+        return event
 
     def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache in each worker."""

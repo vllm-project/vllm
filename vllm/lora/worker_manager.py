@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+from collections import deque
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -10,8 +12,10 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent, LoRALoadTiming, LoRATransition
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
+    LoRALoadedState,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
     create_lora_manager,
@@ -22,6 +26,8 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
+
+MAX_PENDING_LOAD_TIMINGS = 1024
 
 
 class WorkerLoRAManager:
@@ -68,6 +74,11 @@ class WorkerLoRAManager:
                 text_config, "max_position_embeddings", None
             )
         self.device = device
+        self._load_timings: deque[LoRALoadTiming] = deque(
+            maxlen=MAX_PENDING_LOAD_TIMINGS
+        )
+        self._adapter_names: dict[int, str] = {}
+        self._last_loaded_state: LoRALoadedState | None = None
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
 
@@ -170,6 +181,7 @@ class WorkerLoRAManager:
         except Exception as e:
             raise e
 
+        self._adapter_names[lora_request.lora_int_id] = lora_request.lora_name
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
@@ -226,10 +238,38 @@ class WorkerLoRAManager:
             return False
         # One-time per adapter
         with gpu_sync_allowed():
-            loaded_adapter = self._load_adapter(adapter_request)
+            loaded_adapter = self._timed_load_adapter(adapter_request)
             loaded = self._adapter_manager.add_adapter(loaded_adapter)
-            self._adapter_manager.activate_adapter(loaded_adapter.id)
+            self._timed_activate_adapter(adapter_request)
         return loaded
+
+    def _timed_load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+        start = time.perf_counter()
+        lora = self._load_adapter(lora_request)
+        self._record_load_timing(lora_request, "load", start)
+        return lora
+
+    def _timed_activate_adapter(self, lora_request: LoRARequest) -> None:
+        start = time.perf_counter()
+        if self._adapter_manager.activate_adapter(lora_request.lora_int_id):
+            self._record_load_timing(lora_request, "activate", start)
+
+    def _record_load_timing(
+        self, lora_request: LoRARequest, transition: LoRATransition, start: float
+    ) -> None:
+        self._load_timings.append(
+            LoRALoadTiming(
+                adapter_name=lora_request.lora_name,
+                transition=transition,
+                seconds=time.perf_counter() - start,
+            )
+        )
+
+    def drain_load_timings(self) -> list[LoRALoadTiming]:
+        """Adapter transitions measured since the last drain, oldest first."""
+        timings = list(self._load_timings)
+        self._load_timings.clear()
+        return timings
 
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
@@ -239,6 +279,34 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+
+    def take_load_event(self) -> LoRALoadEvent | None:
+        """Snapshot the adapter caches if they changed or a transition was
+        timed since the last take. Adapters added without a name (dummy
+        LoRAs) are named by their int id."""
+        state = self._adapter_manager.get_loaded_state()
+        loads = self.drain_load_timings()
+        if state == self._last_loaded_state and not loads:
+            return None
+        self._last_loaded_state = state
+        self._adapter_names = {
+            i: n for i, n in self._adapter_names.items() if i in state.registered_ids
+        }
+
+        def name(lora_id: int) -> str:
+            return self._adapter_names.get(lora_id, str(lora_id))
+
+        def names(ids: set[int]) -> list[str]:
+            return sorted({name(i) for i in ids})
+
+        adapters = self._adapter_manager.list_adapters()
+        return LoRALoadEvent(
+            gpu_adapters=names(state.active_ids),
+            cpu_adapters=names(state.registered_ids),
+            pinned_adapters=names(state.pinned_ids),
+            ranks={name(i): adapters[i].rank for i in state.registered_ids},
+            loads=loads,
+        )
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
@@ -300,7 +368,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 # evicting any existing adapters.
                 # This may cause the # of loaded lora adapters to very temporarily
                 # exceed `--max-cpu-loras`.
-                lora = self._load_adapter(lora_request)
+                lora = self._timed_load_adapter(lora_request)
 
                 # Remove the existing adapter if it exists
                 # Use case for LoRA inplace
@@ -320,5 +388,5 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                     self._adapter_manager.get_adapter(lora_request.lora_int_id)
                     is not None
                 )
-            self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+            self._timed_activate_adapter(lora_request)
         return loaded

@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -291,6 +292,9 @@ class EngineCoreOutputs(
 
     # Weight version used for this step.
     weight_version: str | None = None
+
+    # LoRA adapter caches changed; sent to every frontend.
+    lora_load_event: LoRALoadEvent | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
