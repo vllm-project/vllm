@@ -13,6 +13,7 @@ from utils import (
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda,
+    skip_if_not_cuda_alike,
     skip_unsupported,
 )
 
@@ -950,10 +951,13 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"{'=' * 80}\n")
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(89),
-    reason="Online FP8 requires compute capability 8.9+",
+    # gfx90a (MI250) reports 9.0 but has no FP8; MI300+ is 9.4+.
+    not current_platform.has_device_capability(
+        94 if current_platform.is_rocm() else 89
+    ),
+    reason="Online FP8 requires SM 8.9+ on CUDA or MI300+ on ROCm",
 )
 @pytest.mark.timeout(600)
 def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
