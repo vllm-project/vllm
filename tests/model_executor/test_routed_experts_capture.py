@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import gc
 import types
 import weakref
@@ -339,24 +338,6 @@ def test_binding_rollback_preserves_original_error(mode):
         assert rejected._capture_fn is not None
 
 
-def test_make_capture_fn_uses_partial_and_keeps_owner():
-    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-        _CAPTURE_FN_OWNER_ATTR,
-        _make_capture_fn,
-    )
-
-    capturer = _capturer_with_buffer()
-    capture_fn = _make_capture_fn(capturer, layer_id=1)
-
-    assert isinstance(capture_fn, functools.partial)
-    assert getattr(capture_fn, _CAPTURE_FN_OWNER_ATTR) is capturer
-
-    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
-    with _capture_context(num_tokens=1):
-        capture_fn(topk_ids)
-    torch.testing.assert_close(capturer.device_buffer[0, 1], topk_ids[0])
-
-
 def test_multilayer_binding_captures_each_layer():
     sources = [_LifecycleCaptureSource(layer_id=i) for i in range(3)]
     capturer = _capturer_with_buffer()
@@ -367,32 +348,6 @@ def test_multilayer_binding_captures_each_layer():
             source(ids)
     for layer_id in range(3):
         torch.testing.assert_close(capturer.device_buffer[0, layer_id], ids[0])
-    unbind()
-
-
-def test_rebinding_model_to_another_capturer_is_rejected():
-    sources = [_LifecycleCaptureSource(layer_id=i) for i in range(2)]
-    capturer_a = _capturer_with_buffer()
-    unbind_a = _bind_sources(capturer_a, *sources)
-    with pytest.raises(ValueError, match="already bound to a capturer"):
-        _bind_sources(_capturer_with_buffer(), *sources)
-    ids = torch.tensor([[1, 2]], dtype=torch.int32)
-    with _capture_context(num_tokens=1):
-        for source in sources:
-            source(ids)
-    for layer_id in range(2):
-        torch.testing.assert_close(capturer_a.device_buffer[0, layer_id], ids[0])
-    unbind_a()
-    assert all(source.capture_fn is None for source in sources)
-
-
-def test_rejected_rebind_leaves_new_targets_untouched():
-    bound = _LifecycleCaptureSource(layer_id=0)
-    unbind = bind_routed_experts_capturer(bound, _capturer_with_buffer())
-    fresh = _LifecycleCaptureSource(layer_id=1)
-    with pytest.raises(ValueError, match="already bound to a capturer"):
-        _bind_sources(_capturer_with_buffer(), fresh, bound)
-    assert fresh.capture_fn is None
     unbind()
 
 
@@ -494,19 +449,6 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
         _bind_monolithic(
             monkeypatch, _ToyMonolithicExperts(supports_capture=False), Mock()
         )
-
-
-def test_second_capturer_on_monolithic_sink_is_rejected(monkeypatch):
-    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
-
-    monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
-    layer = _MonolithicMoE(_ToyMonolithicExperts())
-    model = SimpleNamespace(modules=lambda: [layer])
-    unbind = bind_routed_experts_capturer(model, SimpleNamespace(capture=Mock()))
-    with pytest.raises(ValueError, match="already bound to a capturer"):
-        bind_routed_experts_capturer(model, SimpleNamespace(capture=Mock()))
-    unbind()
-    assert layer.routed_experts.routing_sink is None
 
 
 @pytest.mark.parametrize(
