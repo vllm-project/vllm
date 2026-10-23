@@ -276,12 +276,11 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         x2d = x.reshape(-1, x.shape[-1])
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
-            # The op quantizes the activation itself: at tiny M (the decode /
-            # DSpark shapes) the quant is fused into the packed GEMM kernel --
-            # one launch, bit-exact with mxfp8_e4m3_quantize, kill switch
-            # VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 -- while larger M keeps
-            # the separate launches. The branch lives inside the opaque op so
-            # a compiled caller cannot freeze the token-count decision.
+            # The op quantizes the activation itself: at tiny M the quant is
+            # fused into the packed GEMM kernel -- bit-exact with
+            # mxfp8_e4m3_quantize, kill switch
+            # VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 -- while larger M
+            # keeps the separate launches.
             out = rocm_mxfp8_block32_gemm_quant(
                 x2d, layer.weight, layer.weight_scale, x.dtype
             )
