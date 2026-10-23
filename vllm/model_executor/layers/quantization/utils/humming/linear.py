@@ -24,10 +24,14 @@ from vllm.model_executor.utils import (
 if TYPE_CHECKING:
     from vllm.utils.humming import BaseInputSchema, LayerConfig
 
-# A param the conversion leaves unused keeps its loaded data when it is at most
-# this fraction of the largest converted tensor (scalars, per-tensor and
-# per-channel scales); a larger one is emptied (its data is in the new tensors).
+# A param the conversion leaves unused keeps its loaded data, retired, when it is
+# at most this fraction of the largest converted tensor (scalars, per-tensor and
+# per-channel scales); a larger one backs a new tensor (its data is in them).
 _KEEP_UNUSED_FRACTION = 1 / 256
+
+
+def _nbytes(t: torch.Tensor) -> int:
+    return t.numel() * t.element_size()
 
 
 def replace_layer_parameters(
@@ -36,24 +40,49 @@ def replace_layer_parameters(
     """Write ``tensors`` into ``layer``, keeping existing parameter objects.
 
     A param in ``names`` that gets no new tensor stays registered: an alias of a
-    replaced param follows it, a small one keeps its data (retired), and a large
-    one is emptied."""
-    replaced = {
-        id(param)
-        for name in tensors
-        if (param := layer._parameters.get(name)) is not None
+    replaced param follows it; one whose storage a new tensor is in, or a large
+    one, is also registered under a new name (see `move_parameter`); any other
+    keeps its data, retired."""
+    params = layer._parameters
+    replaced = {id(p) for name in tensors if (p := params.get(name)) is not None}
+    leftovers = {
+        name: p
+        for name in names
+        if name not in tensors
+        and (p := params.get(name)) is not None
+        and id(p) not in replaced
     }
-    limit = _KEEP_UNUSED_FRACTION * max(
-        (t.numel() * t.element_size() for t in tensors.values()), default=0
+
+    def adopt(src: str, dst: str) -> None:
+        move_parameter(layer, src, dst)
+        for name in [n for n, p in leftovers.items() if p is params[src]]:
+            del leftovers[name]
+
+    new = [name for name in tensors if name not in params]
+    for name in new:
+        ptr = tensors[name].untyped_storage().data_ptr()
+        src = next(
+            (n for n, p in leftovers.items() if p.untyped_storage().data_ptr() == ptr),
+            None,
+        )
+        if ptr and src is not None:
+            adopt(src, name)
+    limit = _KEEP_UNUSED_FRACTION * max(map(_nbytes, tensors.values()), default=0)
+    large = sorted(
+        (n for n, p in leftovers.items() if _nbytes(p) > limit),
+        key=lambda n: _nbytes(leftovers[n]),
+        reverse=True,
     )
-    for name in names:
-        param = layer._parameters.get(name)
-        if name in tensors or param is None or id(param) in replaced:
-            continue
-        if param.numel() * param.element_size() <= limit:
-            retire_parameter(layer, name)
-        else:
-            replace_parameter(layer, name, param.data.new_empty(0))
+    free = sorted(
+        (n for n in new if n not in params),
+        key=lambda n: _nbytes(tensors[n]),
+        reverse=True,
+    )
+    for src, dst in zip(large, free):
+        if src in leftovers:
+            adopt(src, dst)
+    for name in leftovers:
+        retire_parameter(layer, name)
     for name, tensor in tensors.items():
         set_kernel_parameter(layer, name, tensor)
 

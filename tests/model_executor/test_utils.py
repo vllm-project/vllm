@@ -132,6 +132,31 @@ def test_replace_parameter_online_quantization_frees_source() -> None:
     assert layer.weight.untyped_storage().nbytes() == 4 * 4 * 2
 
 
+def test_humming_replace_keeps_loaded_params(single_rank_tp: None) -> None:
+    """A new tensor in a leftover's storage, or taking a large leftover's place,
+    is written to that leftover param, registered under both names."""
+    from vllm.model_executor.layers.quantization.utils.humming.linear import (
+        replace_layer_parameters,
+    )
+
+    layer = torch.nn.Module()
+    packed = torch.nn.Parameter(torch.ones(64, 8), requires_grad=False)
+    scale_inv = torch.nn.Parameter(torch.ones(4), requires_grad=False)
+    layer.register_parameter("weight_packed", packed)
+    layer.register_parameter("weight_scale_inv", scale_inv)
+    tensors = {
+        "weight": torch.full((32, 8), 2.0),
+        "weight_scale": scale_inv.data.view(2, 2),
+    }
+
+    replace_layer_parameters(layer, tensors, list(layer._parameters))
+
+    assert layer.weight is packed and layer.weight_scale is scale_inv
+    assert torch.equal(layer.weight, torch.full((32, 8), 2.0))
+    assert packed.untyped_storage().nbytes() == 64 * 8 * 4
+    assert list(kernel_parameters(layer)) == ["weight", "weight_scale"]
+
+
 def test_replace_parameter_preserves_weight_loader() -> None:
     """The reload path must survive replacement: the old parameter's
     `weight_loader` is carried over as-is, so it is still invoked as
