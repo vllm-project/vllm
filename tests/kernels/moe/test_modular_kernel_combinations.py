@@ -997,13 +997,12 @@ def _aiter_padding_matrix_worker(
         return
 
     if is_mxfp4:
-        # Cosine similarity catches a sign-flipped (same-magnitude) mk_out
-        # that a magnitude-only guard can't: gfx950 measures 0.79-0.99
-        # correct vs. <=0.01 corrupted. It's scale-invariant though, so the
-        # magnitude guard below still runs too -- atol=1e-1 dwarfs the
-        # ~1e-2 reference signal, making check_accuracy alone too loose to
-        # catch a uniform magnitude error (e.g. rank_worker's documented
-        # ~5x-small AITER_MXFP4_BF16 bug, hypothetically recurring here).
+        # Cosine similarity catches a sign-flipped mk_out that a magnitude
+        # guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but
+        # it's scale-invariant and check_accuracy's atol=1e-1 dwarfs the
+        # ~1e-2 reference signal -- so the magnitude guard below still runs
+        # too, to catch a uniform-scale error like rank_worker's documented
+        # ~5x-small AITER_MXFP4_BF16 bug.
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out.flatten().float(), ref_out.flatten().float(), dim=0
         )
@@ -1311,13 +1310,12 @@ def _aiter_token_padding_worker(
         return
 
     if config.weight_dtype == "mxfp4":
-        # Cosine similarity catches a sign-flipped (same-magnitude) mk_out
-        # that a magnitude-only guard can't: gfx950 measures 0.79-0.99
-        # correct vs. <=0.01 corrupted. It's scale-invariant though, so the
-        # magnitude guard below still runs too -- atol=1e-1 dwarfs the
-        # ~1e-2 reference signal, making check_accuracy alone too loose to
-        # catch a uniform magnitude error (e.g. rank_worker's documented
-        # ~5x-small AITER_MXFP4_BF16 bug, hypothetically recurring here).
+        # Cosine similarity catches a sign-flipped mk_out that a magnitude
+        # guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but
+        # it's scale-invariant and check_accuracy's atol=1e-1 dwarfs the
+        # ~1e-2 reference signal -- so the magnitude guard below still runs
+        # too, to catch a uniform-scale error like rank_worker's documented
+        # ~5x-small AITER_MXFP4_BF16 bug.
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out[real_rows].flatten().float(),
             ref_out[real_rows].flatten().float(),
