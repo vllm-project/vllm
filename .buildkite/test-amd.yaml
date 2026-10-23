@@ -4477,8 +4477,10 @@ steps:
       --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py
       --ignore=kernels/moe/test_deepep_moe.py
       --ignore=kernels/moe/test_moe_layer.py
+      --ignore=kernels/moe/test_modular_kernel_combinations.py
       --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) FusedMoE Layer Kernels" # TBD
   timeout_in_minutes: 35

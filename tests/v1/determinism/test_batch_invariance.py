@@ -953,10 +953,19 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"{'=' * 80}\n")
 
 
-@skip_if_not_cuda
+def _supports_online_fp8() -> bool:
+    if current_platform.is_rocm():
+        # Imported lazily: this module resolves the GPU arch at import time.
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
+    return current_platform.has_device_capability(89)
+
+
+@skip_if_not_cuda_alike
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(89),
-    reason="Online FP8 requires compute capability 8.9+",
+    not _supports_online_fp8(),
+    reason="Online FP8 requires compute capability 8.9+ or MI300/MI355",
 )
 @pytest.mark.timeout(600)
 def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
