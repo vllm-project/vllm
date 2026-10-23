@@ -332,7 +332,7 @@ class RustFrontendProcessManager:
             inherited_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
+        from vllm.entrypoints.common.startup import jsonify_non_default_args
 
         args_dict = jsonify_non_default_args(
             args,
@@ -367,7 +367,7 @@ class RustFrontendProcessManager:
 
         # The subprocess needs the real values, but the log must not carry
         # credentials such as api_key or hf_token.
-        from vllm.entrypoints.serve.utils.api_utils import redact_sensitive_args
+        from vllm.entrypoints.common.startup import redact_sensitive_args
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))

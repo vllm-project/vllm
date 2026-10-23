@@ -13,7 +13,13 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
     get_dp_group,
@@ -117,6 +123,9 @@ class IpcModelLoader(BaseModelLoader):
                 f"Unexpected extra config keys for load format "
                 f"{load_config.load_format}: {sorted(extra_config)}"
             )
+        # Fingerprint computed by load_model, reused by standalone
+        # load_weights so a reload keys on the same configuration.
+        self._cache_key: WeightCacheKey | None = None
 
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         # Copy mode clones the weights into this process; nothing external.
@@ -175,7 +184,17 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries = self._fetch_entries(model_config).entries
+        cache_key = self._cache_key
+        if cache_key is None:
+            vllm_config = get_current_vllm_config()
+            entries = self._fetch_entries(
+                model_config,
+                vllm_config.cache_config,
+                vllm_config.parallel_config,
+                is_reload=True,
+            ).entries
+        else:
+            entries = self._state_for_key(cache_key, is_reload=True).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -210,7 +229,9 @@ class IpcModelLoader(BaseModelLoader):
                     f"was configured for the "
                     f"{'draft' if self.is_draft else 'target'} group"
                 )
-            state = self._fetch_entries(model_config)
+            state = self._fetch_entries(
+                model_config, vllm_config.cache_config, vllm_config.parallel_config
+            )
             state_fetched = True
             return self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
@@ -344,12 +365,19 @@ class IpcModelLoader(BaseModelLoader):
                 continue
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
-    def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+    def _fetch_entries(
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        *,
+        is_reload: bool = False,
+    ) -> WeightCacheState:
         dp_group = get_dp_group()
         pp_group = get_pp_group()
-        parallel_config = get_current_vllm_config().parallel_config
-        cache_config = WeightCacheKey.from_model_config(
+        cache_key = WeightCacheKey.from_model_config(
             model_config,
+            cache_config=cache_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
             pp_size=pp_group.world_size,
@@ -360,14 +388,26 @@ class IpcModelLoader(BaseModelLoader):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
+        # Recorded before model construction so that a later standalone
+        # load_weights reload keys on the same pre-construction values the
+        # daemon fingerprinted, unaffected by any cache_config mutation
+        # during model construction.
+        self._cache_key = cache_key
+        return self._state_for_key(cache_key, is_reload=is_reload)
+
+    def _state_for_key(
+        self, cache_key: WeightCacheKey, *, is_reload: bool = False
+    ) -> WeightCacheState:
         if not self.fallback:
-            return self._request_state_with_startup_wait(cache_config)
-        return self._request_state(cache_config)
+            return self._request_state_with_startup_wait(cache_key, is_reload=is_reload)
+        return self._request_state(cache_key, is_reload=is_reload)
 
     def _request_state_with_startup_wait(
-        self, cache_config: WeightCacheKey
+        self, cache_key: WeightCacheKey, *, is_reload: bool = False
     ) -> WeightCacheState:
-        return self._with_startup_wait(lambda: self._request_state(cache_config))
+        return self._with_startup_wait(
+            lambda: self._request_state(cache_key, is_reload=is_reload)
+        )
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;
@@ -393,9 +433,18 @@ class IpcModelLoader(BaseModelLoader):
                     )
                 )
 
-    def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
+    def _request_state(
+        self, cache_key: WeightCacheKey, *, is_reload: bool = False
+    ) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
-            send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
+            send_msg(
+                conn,
+                {
+                    "cmd": "get_state",
+                    "cache_key": cache_key,
+                    "is_reload": is_reload,
+                },
+            )
             response = recv_msg(conn)
         status = response.get("status")
         if status == "mismatch":

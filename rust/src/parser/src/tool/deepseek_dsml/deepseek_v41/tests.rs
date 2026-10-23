@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
+
 use expect_test::expect;
 use serde_json::json;
 use xgrammar_structural_tag::builders::StructuralTagOptions;
@@ -8,8 +10,8 @@ use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
 };
 
+use super::super::test_utils::{collect_stream, tokenizer};
 use super::DeepSeekV41ToolParser;
-use crate::tool::test_utils::collect_stream;
 use crate::tool::{Tool, ToolParser};
 
 fn tools() -> Vec<Tool> {
@@ -55,7 +57,7 @@ fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
         json!({"query":"second"}),
     ];
     for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
-        let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+        let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
         let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
         // Protocol framing follows the current shared DSML behavior.
         assert_eq!(output.normal_text(), "summary", "split {split}");
@@ -82,7 +84,7 @@ fn spaced_dsml_keeps_parameter_without_string_attr() {
         "</｜DSML｜ invoke>\n",
         "</｜DSML｜ calls>",
     );
-    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
 
     let output = collect_stream(parser.as_mut(), &[wire]);
 
@@ -96,7 +98,7 @@ fn spaced_dsml_keeps_parameter_without_string_attr() {
 
 #[test]
 fn v4_tags_remain_text_in_v41_dialect() {
-    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
     let output = collect_stream(parser.as_mut(), &["before<｜DSML｜tool_calls>after"]);
     expect!["before<｜DSML｜tool_calls>after"].assert_eq(&output.normal_text());
     assert!(output.calls().is_empty());
@@ -104,7 +106,7 @@ fn v4_tags_remain_text_in_v41_dialect() {
 
 #[test]
 fn structural_tag_respects_parameter_schemas_and_strict() {
-    let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
     let builder = parser.structural_tag_builder().unwrap();
     let options = StructuralTagOptions::default().with_reasoning(false);
     for choice in [
