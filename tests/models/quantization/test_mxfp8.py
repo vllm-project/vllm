@@ -24,8 +24,10 @@ from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
 
-# A small MoE model that fits on a single GPU and has both linear + MoE layers.
-MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
+# Small MoE models that fit on a single GPU and exercise both linear + MoE,
+# one per modeling backend.
+MOE_MODEL = "ibm-granite/granite-3.1-3b-a800m-instruct"
+TRANSFORMERS_MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
 # A small dense model (no MoE) to validate the linear-only path.
 DENSE_MODEL = "Qwen/Qwen3-0.6B"
 
@@ -39,7 +41,11 @@ NUM_LOG_PROBS = 8
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize(
+    "model",
+    [DENSE_MODEL, MOE_MODEL, TRANSFORMERS_MOE_MODEL],
+    ids=["dense", "moe", "moe_transformers"],
+)
 def test_mxfp8_logprobs(
     vllm_runner,
     quant_baseline_logprobs,
@@ -241,7 +247,11 @@ def test_mxfp8_aiter_accepts_swigluoai_params(
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize(
+    "model",
+    [DENSE_MODEL, MOE_MODEL, TRANSFORMERS_MOE_MODEL],
+    ids=["dense", "moe", "moe_transformers"],
+)
 def test_mxfp8_generation(vllm_runner, model: str) -> None:
     """Smoke test: verify online MXFP8 model generates coherent text."""
     prompt = "1 2 3 4 5"

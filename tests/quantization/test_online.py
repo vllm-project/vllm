@@ -2619,13 +2619,29 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.parametrize(
+    "model_name, expected_model_memory_gib",
+    [
+        # MoE models covering both linear and MoE paths, one per modeling backend
+        ("ibm-granite/granite-3.1-3b-a800m-instruct", 3.3),
+        ("allenai/OLMoE-1B-7B-0125-Instruct", 6.7),
+    ],
+    ids=["moe", "moe_transformers"],
+)
 def test_online_quant_peak_mem(
     vllm_runner,
     caplog_mp_spawn,
     monkeypatch,
+    model_name,
+    expected_model_memory_gib,
 ) -> None:
     _test_online_quant_peak_mem_impl(
-        "fp8_per_tensor", vllm_runner, caplog_mp_spawn, monkeypatch
+        "fp8_per_tensor",
+        model_name,
+        expected_model_memory_gib,
+        vllm_runner,
+        caplog_mp_spawn,
+        monkeypatch,
     )
 
 

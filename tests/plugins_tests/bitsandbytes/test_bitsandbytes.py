@@ -35,7 +35,8 @@ models_4bit_to_embedding_test = [
 ]
 
 models_4bit_to_moe_test = [
-    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight"),
+    ("ibm-granite/granite-3.1-3b-a800m-instruct", "quantize moe model inflight"),
+    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize transformers moe model inflight"),
 ]
 
 models_pre_quant_4bit_to_test = [
