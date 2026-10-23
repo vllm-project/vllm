@@ -951,6 +951,40 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"count": 5}', "f")
         assert json.loads(result) == {"count": 5}
 
+    @pytest.mark.parametrize(
+        "type_name",
+        ["str", "text", "varchar", "char", "STRING"],
+        ids=["str", "text", "varchar", "char", "uppercase"],
+    )
+    def test_aliased_string_type_reverts_int(self, type_name):
+        """Alias and non-canonical type names get the same string repair as
+        the canonical ``"string"``.
+        """
+        tool = _make_tool("f", {"zipcode": {"type": type_name}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"zipcode": 12345}', "f")
+        assert json.loads(result) == {"zipcode": "12345"}
+
+    def test_const_string_param_reverts_int(self):
+        """``const`` pins the type the same way ``enum`` does."""
+        tool = _make_tool("f", {"zip": {"const": "5"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"zip": 5}', "f")
+        assert json.loads(result) == {"zip": "5"}
+
+    def test_const_integer_param_coerces_string(self):
+        """A numeric ``const`` must not turn an emitted string into text."""
+        tool = _make_tool("f", {"n": {"const": 5}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"n": "5"}', "f")
+        assert json.loads(result) == {"n": 5}
+
+    def test_non_list_allof_does_not_crash(self):
+        """A malformed ``allOf`` must not raise out of argument parsing."""
+        tool = _make_tool("f", {"a": {"allOf": True}})
+        engine = _make_engine(tools=[tool])
+        assert engine._fix_arg_types('{"a": 5}', "f") == '{"a": 5}'
+
     def test_untyped_param_nonfinite_float_becomes_string(self):
         """Non-finite floats cannot be serialized as valid JSON, so they
         keep the historical string form even for untyped properties.
@@ -2161,6 +2195,19 @@ class TestCoercionInstabilityRegression:
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         args = _stream_tool_args(engine, "f", ['{"x": NaN'])
         assert args == '{"x": "NaN"'
+
+    def test_aliased_string_type_streams_coerced_value(self):
+        """An aliased string type gets the same in-place repair while
+        streaming as the canonical spelling."""
+        tool = _make_tool("f", {"zip": {"type": "str"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"zip": 12345}'])
+        assert args == '{"zip": "12345"}'
+
+    def test_aliased_string_key_streams_incrementally(self):
+        """An aliased string property still holds a string, so its value may
+        stream before it closes."""
+        assert ParserEngine._streamable_string_keys({"zip": {"type": "str"}}) == {"zip"}
 
 
 _DROP_VOCAB: dict[str, int] = {

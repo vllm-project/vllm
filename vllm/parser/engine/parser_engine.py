@@ -32,6 +32,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
+    canonical_schema_types,
     coerce_to_schema_type,
     coerce_typed_value,
     extract_types_from_schema,
@@ -314,7 +315,8 @@ class _ArgsRewriter:
                 coerced = coerce_to_schema_type(literal, types)
                 dumped = json.dumps(coerced, ensure_ascii=False)
                 if dumped != literal and not (
-                    isinstance(coerced, str) and "string" not in types
+                    isinstance(coerced, str)
+                    and "string" not in canonical_schema_types(types)
                 ):
                     out.append(dumped)
                     return j
@@ -589,7 +591,7 @@ class ParserEngine(Parser):
 
         streamable: set[str] = set()
         for key, schema in properties.items():
-            if set(extract_types_from_schema(schema)) == {"string"}:
+            if canonical_schema_types(extract_types_from_schema(schema)) == {"string"}:
                 streamable.add(key)
         return streamable
 

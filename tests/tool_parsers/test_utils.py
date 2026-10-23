@@ -295,8 +295,14 @@ class TestSchemaAdmitsAnyValue:
     def test_typed_schemas_are_constrained(self):
         assert not schema_admits_any_value({"type": "string"})
         assert not schema_admits_any_value({"enum": [1, 2]})
+        assert not schema_admits_any_value({"const": "5"})
         assert not schema_admits_any_value({"$ref": "#/$defs/X"})
         assert not schema_admits_any_value(None)
+
+    def test_non_list_allof_is_ignored(self):
+        # Malformed keyword values must not crash argument parsing.
+        assert schema_admits_any_value({"allOf": True})
+        assert schema_admits_any_value({"allOf": 5})
 
     def test_untyped_union_branch_admits_any(self):
         assert schema_admits_any_value({"anyOf": [{"type": "null"}, {}]})
@@ -374,6 +380,22 @@ class TestExtractTypesFromSchema:
         schema = {"enum": [1, "a", None]}
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "string", "null"}
+
+    @pytest.mark.parametrize(
+        ("const", "expected"),
+        [
+            ("5", "string"),
+            (5, "integer"),
+            (1.5, "number"),
+            (True, "boolean"),
+            (None, "null"),
+            ([1], "array"),
+            ({"a": 1}, "object"),
+        ],
+        ids=["string", "int", "float", "bool", "null", "array", "object"],
+    )
+    def test_const_infers_type(self, const, expected):
+        assert extract_types_from_schema({"const": const}, fallback=[]) == [expected]
 
     def test_enum_with_bool(self):
         schema = {"enum": [True, False]}

@@ -6,7 +6,7 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -1085,15 +1085,15 @@ def schema_admits_any_value(schema: Any) -> bool:
     every ``anyOf``/``oneOf`` present must admit any value, and each of those
     admits any value only when one of its branches does.  An untyped
     ``allOf`` branch constrains nothing, so every ``allOf`` branch must be
-    untyped.  A ``type``/``enum`` sibling narrows the schema, and an
-    unresolved ``$ref`` is unknown rather than untyped, so both make it
-    constrained.
+    untyped.  A ``type``/``enum``/``const`` sibling narrows the schema, and
+    an unresolved ``$ref`` is unknown rather than untyped, so each of those
+    makes it constrained.
     """
     if schema is True:
         return True
     if not isinstance(schema, dict):
         return False
-    if any(key in schema for key in ("type", "enum", "$ref", "$dynamicRef")):
+    if any(key in schema for key in ("type", "enum", "const", "$ref", "$dynamicRef")):
         return False
 
     for choice_field in ("anyOf", "oneOf"):
@@ -1103,7 +1103,29 @@ def schema_admits_any_value(schema: Any) -> bool:
         ):
             return False
 
-    return all(schema_admits_any_value(choice) for choice in schema.get("allOf") or [])
+    all_of = schema.get("allOf")
+    if not isinstance(all_of, list):
+        return True
+    return all(schema_admits_any_value(choice) for choice in all_of)
+
+
+def _json_type_name(value: Any) -> str | None:
+    """JSON Schema type name of *value*, or ``None`` for a non-JSON type."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
 
 
 def extract_types_from_schema(
@@ -1140,22 +1162,16 @@ def extract_types_from_schema(
                 if isinstance(t, str):
                     types.add(t)
 
-    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+    if "enum" in schema and isinstance(schema["enum"], list):
         for value in schema["enum"]:
-            if value is None:
-                types.add("null")
-            elif isinstance(value, bool):
-                types.add("boolean")
-            elif isinstance(value, int):
-                types.add("integer")
-            elif isinstance(value, float):
-                types.add("number")
-            elif isinstance(value, str):
-                types.add("string")
-            elif isinstance(value, list):
-                types.add("array")
-            elif isinstance(value, dict):
-                types.add("object")
+            type_name = _json_type_name(value)
+            if type_name is not None:
+                types.add(type_name)
+
+    if "const" in schema:
+        type_name = _json_type_name(schema["const"])
+        if type_name is not None:
+            types.add(type_name)
 
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
@@ -1198,6 +1214,11 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+def canonical_schema_types(types: Iterable[str]) -> set[str]:
+    """Normalize schema type strings to the JSON Schema names vLLM coerces to."""
+    return {_TYPE_ALIASES.get(t.strip().lower(), t.strip().lower()) for t in types}
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1214,9 +1235,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if isinstance(schema_type, str):
         schema_type = [schema_type]
 
-    normalized_types = {
-        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
-    }
+    normalized_types = canonical_schema_types(schema_type)
 
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
