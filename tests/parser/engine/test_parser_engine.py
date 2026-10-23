@@ -938,14 +938,14 @@ class TestFixArgTypes:
         original = '{"value": "5"}'
         assert engine._fix_arg_types(original, "f") == original
 
-    def test_ref_param_keeps_string_repair(self):
-        """An unresolved ``$ref`` is unknown, not untyped, so non-string
-        values keep the historical repair toward string.
+    def test_ref_param_keeps_emitted_type(self):
+        """An unresolved ``$ref`` is unknown, not untyped, so the emitted
+        type is kept: an int under an int-enum reference is not stringified.
         """
-        tool = _make_tool("f", {"zipcode": {"$ref": "#/$defs/Zip"}})
+        tool = _make_tool("f", {"level": {"$ref": "#/$defs/Level"}})
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"zipcode": 12345}', "f")
-        assert json.loads(result) == {"zipcode": "12345"}
+        result = engine._fix_arg_types('{"level": 3}', "f")
+        assert json.loads(result) == {"level": 3}
 
     def test_ref_with_type_sibling_keeps_declared_type(self):
         """An explicit ``type`` sibling of a ``$ref`` applies (JSON Schema

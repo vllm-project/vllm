@@ -457,7 +457,7 @@ class TestExtractTypesFromSchema:
     def test_ref_sibling_suppresses_untyped_union(self):
         # A $ref constrains the value elsewhere, so the type is unknown.
         schema = {"anyOf": [{}], "$ref": "#/$defs/X"}
-        assert extract_types_from_schema(schema, fallback=[]) == ["string"]
+        assert extract_types_from_schema(schema, fallback=[]) == []
 
     def test_true_boolean_schema_honors_fallback(self):
         assert extract_types_from_schema(True, fallback=[]) == []
@@ -466,12 +466,13 @@ class TestExtractTypesFromSchema:
     def test_false_boolean_schema_is_unknown(self):
         assert extract_types_from_schema(False) == ["string"]
 
-    def test_ref_schema_is_unknown_not_untyped(self):
+    def test_ref_schema_honors_fallback(self):
         # A $ref constrains the value elsewhere; without resolving it the
-        # type is unknown, so the string default applies even with
-        # fallback=[].
+        # type is unknown, so the caller's fallback decides how
+        # conservative to be.
         schema = {"$ref": "#/$defs/Zip"}
-        assert extract_types_from_schema(schema, fallback=[]) == ["string"]
+        assert extract_types_from_schema(schema, fallback=[]) == []
+        assert extract_types_from_schema(schema) == ["string"]
 
     def test_ref_with_type_sibling(self):
         # $ref siblings apply (JSON Schema 2020-12), so an explicit type

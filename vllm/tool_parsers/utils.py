@@ -1135,11 +1135,14 @@ def extract_types_from_schema(
 
     Handles ``type`` (string or list), ``enum``/``const`` value inference,
     and recursive ``anyOf``/``oneOf``/``allOf``.  A schema with no declared
-    type returns *fallback* (default ``["string"]``), except that a non-dict
-    schema and one whose only constraint is an unresolved
-    ``$ref``/``$dynamicRef`` are unknown rather than untyped and return
-    ``["string"]``; explicit ``type``/``enum`` siblings of a ``$ref`` still
-    apply.
+    type returns *fallback* (default ``["string"]``); absent, ``false``, and
+    other non-dict schemas return ``["string"]`` instead.  The fallback rule
+    includes a schema whose only constraint is an unresolved
+    ``$ref``/``$dynamicRef``: its type is unknown rather than untyped, so
+    the caller's fallback decides how conservative to be — coercion callers
+    pass ``[]`` to leave such values verbatim, while callers needing a
+    concrete type keep the string default.  Explicit ``type``/``enum``
+    siblings of a ``$ref`` still apply.
     """
     if fallback is None:
         fallback = ["string"]
@@ -1177,10 +1180,6 @@ def extract_types_from_schema(
 
     if types:
         return list(types)
-    if "$ref" in schema or "$dynamicRef" in schema:
-        # The only constraint lives behind an unresolved reference; the
-        # type is unknown rather than untyped, so keep the string default.
-        return ["string"]
     return list(fallback)
 
 
