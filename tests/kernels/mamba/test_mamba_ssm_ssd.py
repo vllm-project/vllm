@@ -278,7 +278,9 @@ def test_direct_final_states_preserve_padded_cache_pages():
     cu_chunks, last_chunks, seq_idx = compute_varlen_chunk_metadata(
         cu_seqlens, chunk_size
     )
-    initial_states = torch.randn(2, heads, head_dim, head_dim, device=DEVICE)
+    initial_states = torch.randn(
+        2, heads, head_dim, head_dim, dtype=torch.float16, device=DEVICE
+    )
     common = dict(
         cu_seqlens=cu_seqlens,
         cu_chunk_seqlens=cu_chunks,
