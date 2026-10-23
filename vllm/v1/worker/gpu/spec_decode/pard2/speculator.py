@@ -423,7 +423,7 @@ class Pard2Speculator(DraftModelSpeculator):
                 temperature,
                 seeds,
                 self.block_tables.input_block_tables[gid],
-                self.block_tables.kernel_block_sizes[gid],
+                self.block_tables.block_sizes[gid],
                 self.block_tables.cp_rank,
                 self.block_tables.cp_size,
                 self.block_tables.cp_interleave,
