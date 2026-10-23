@@ -729,7 +729,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         conv_buf=torch.empty(0),
         ssm_state=torch.empty(0),
         width=CONV_KERNEL,
-        state_len=0,
+        state_len=6,
     )
 
     expected = (
