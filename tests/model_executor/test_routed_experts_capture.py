@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
@@ -200,37 +200,10 @@ def test_public_binding_supports_direct_capture_source():
     assert calls == [(3, topk_ids)]
 
 
-@pytest.fixture
-def lifecycle_config(tmp_path):
-    from transformers import Qwen3MoeConfig
-
-    Qwen3MoeConfig(
-        architectures=["Qwen3MoeForCausalLM"],
-        num_hidden_layers=2,
-        num_experts=4,
-        num_experts_per_tok=2,
-        hidden_size=16,
-        intermediate_size=16,
-        moe_intermediate_size=16,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-    ).save_pretrained(tmp_path)
-    config = VllmConfig(
-        model_config=ModelConfig(
-            model=str(tmp_path),
-            skip_tokenizer_init=True,
-            enforce_eager=True,
-            max_model_len=16,
-            dtype="float32",
-        ),
-    )
-    return config
-
-
 class _LifecycleCaptureSource(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, layer_id: int = 0):
         super().__init__()
-        self.layer_id = 0
+        self.layer_id = layer_id
         self.capture_fn = None
 
     def forward(self, topk_ids):
@@ -238,19 +211,28 @@ class _LifecycleCaptureSource(torch.nn.Module):
             self.capture_fn(topk_ids)
 
 
-def test_unbind_releases_capture_after_forward_without_attention(lifecycle_config):
+def _capture_context(num_tokens: int):
+    return patch(
+        f"{_REC_MODULE}.get_forward_context",
+        return_value=_forward_context(
+            batch_descriptor=BatchDescriptor(num_tokens=num_tokens)
+        ),
+    )
+
+
+def _bind_sources(capturer: RoutedExpertsCapturer, *sources: torch.nn.Module):
+    return bind_routed_experts_capturer(torch.nn.ModuleList(sources), capturer)
+
+
+def test_unbind_releases_capture_after_forward_without_attention():
     source = _LifecycleCaptureSource()
-    capturer = RoutedExpertsCapturer(8, lifecycle_config)
+    capturer = _capturer_with_buffer()
     buffer_ref = weakref.ref(capturer.device_buffer)
     unbind = bind_routed_experts_capturer(source, capturer)
-    topk_ids = torch.tensor([[1, 2], [2, 3]], device=capturer.device_buffer.device)
-    with set_forward_context(
-        None,
-        lifecycle_config,
-        batch_descriptor=BatchDescriptor(num_tokens=2),
-    ):
+    topk_ids = torch.tensor([[1, 2], [2, 3]], dtype=torch.int32)
+    with _capture_context(num_tokens=2):
         source(topk_ids)
-    torch.testing.assert_close(capturer.device_buffer[:2, 0], topk_ids.int())
+    torch.testing.assert_close(capturer.device_buffer[:2, 0], topk_ids)
 
     unbind()
     unbind()
@@ -260,9 +242,9 @@ def test_unbind_releases_capture_after_forward_without_attention(lifecycle_confi
     assert buffer_ref() is None
 
 
-def test_unbind_preserves_replacement_callback(lifecycle_config):
+def test_unbind_preserves_replacement_callback():
     source = _LifecycleCaptureSource()
-    capturer = RoutedExpertsCapturer(8, lifecycle_config)
+    capturer = _capturer_with_buffer()
     unbind = bind_routed_experts_capturer(source, capturer)
     captured: list[torch.Tensor] = []
     source.capture_fn = captured.append
@@ -272,7 +254,17 @@ def test_unbind_preserves_replacement_callback(lifecycle_config):
     torch.testing.assert_close(captured[0], torch.tensor([[1, 2]]))
 
 
-def test_binding_failure_restores_previous_callback(lifecycle_config):
+def test_unbind_restores_preexisting_callback():
+    source = _LifecycleCaptureSource()
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    unbind = bind_routed_experts_capturer(source, _capturer_with_buffer())
+    unbind()
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+
+
+def test_binding_failure_restores_previous_callback():
     class RejectCaptureSource(torch.nn.Module):
         layer_id = 1
 
@@ -287,13 +279,120 @@ def test_binding_failure_restores_previous_callback(lifecycle_config):
     source = _LifecycleCaptureSource()
     captured: list[torch.Tensor] = []
     source.capture_fn = captured.append
-    model = torch.nn.ModuleList([source, RejectCaptureSource()])
-    capturer = RoutedExpertsCapturer(8, lifecycle_config)
     with pytest.raises(ValueError, match="capture binding rejected"):
-        bind_routed_experts_capturer(model, capturer)
+        _bind_sources(_capturer_with_buffer(), source, RejectCaptureSource())
     source(torch.tensor([[1, 2]]))
     assert len(captured) == 1
     torch.testing.assert_close(captured[0], torch.tensor([[1, 2]]))
+
+
+def test_binding_rollback_restores_setter_that_mutated_before_raising():
+    class MutateThenReject(torch.nn.Module):
+        layer_id = 1
+
+        def __init__(self):
+            super().__init__()
+            self._capture_fn = None
+
+        @property
+        def capture_fn(self):
+            return self._capture_fn
+
+        @capture_fn.setter
+        def capture_fn(self, value):
+            self._capture_fn = value
+            raise ValueError("capture binding rejected")
+
+    source = _LifecycleCaptureSource()
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    rejected = MutateThenReject()
+    with pytest.raises(ValueError, match="capture binding rejected"):
+        _bind_sources(_capturer_with_buffer(), source, rejected)
+    assert rejected._capture_fn is None
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+
+
+def test_binding_rollback_does_not_mask_the_original_error():
+    class RestoreFails(torch.nn.Module):
+        layer_id = 1
+
+        def __init__(self):
+            super().__init__()
+            self._capture_fn = None
+
+        @property
+        def capture_fn(self):
+            return self._capture_fn
+
+        @capture_fn.setter
+        def capture_fn(self, value):
+            if value is None:
+                raise RuntimeError("restore failed")
+            self._capture_fn = value
+            raise ValueError("capture binding rejected")
+
+    source = _LifecycleCaptureSource()
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    with pytest.raises(ValueError, match="capture binding rejected"):
+        _bind_sources(_capturer_with_buffer(), source, RestoreFails())
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+
+
+def test_multilayer_binding_captures_each_layer():
+    sources = [_LifecycleCaptureSource(layer_id=i) for i in range(3)]
+    capturer = _capturer_with_buffer()
+    unbind = _bind_sources(capturer, *sources)
+    ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        for source in sources:
+            source(ids)
+    for layer_id in range(3):
+        torch.testing.assert_close(capturer.device_buffer[0, layer_id], ids[0])
+    unbind()
+
+
+def test_rebinding_model_to_another_capturer_is_rejected():
+    sources = [_LifecycleCaptureSource(layer_id=i) for i in range(2)]
+    capturer_a = _capturer_with_buffer()
+    unbind_a = _bind_sources(capturer_a, *sources)
+    with pytest.raises(ValueError, match="already bound to a capturer"):
+        _bind_sources(_capturer_with_buffer(), *sources)
+    ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        for source in sources:
+            source(ids)
+    for layer_id in range(2):
+        torch.testing.assert_close(capturer_a.device_buffer[0, layer_id], ids[0])
+    unbind_a()
+    assert all(source.capture_fn is None for source in sources)
+
+
+def test_rejected_rebind_leaves_new_targets_untouched():
+    bound = _LifecycleCaptureSource(layer_id=0)
+    unbind = bind_routed_experts_capturer(bound, _capturer_with_buffer())
+    fresh = _LifecycleCaptureSource(layer_id=1)
+    with pytest.raises(ValueError, match="already bound to a capturer"):
+        _bind_sources(_capturer_with_buffer(), fresh, bound)
+    assert fresh.capture_fn is None
+    unbind()
+
+
+def test_rebind_after_unbind_uses_the_new_capturer():
+    source = _LifecycleCaptureSource()
+    capturer_a = _capturer_with_buffer()
+    bind_routed_experts_capturer(source, capturer_a)()
+    capturer_b = _capturer_with_buffer()
+    unbind_b = bind_routed_experts_capturer(source, capturer_b)
+    ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        source(ids)
+    torch.testing.assert_close(capturer_b.device_buffer[0, 0], ids[0])
+    assert (capturer_a.device_buffer == -1).all()
+    unbind_b()
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -380,6 +479,19 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
         _bind_monolithic(
             monkeypatch, _ToyMonolithicExperts(supports_capture=False), Mock()
         )
+
+
+def test_second_capturer_on_monolithic_sink_is_rejected(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
+    layer = _MonolithicMoE(_ToyMonolithicExperts())
+    model = SimpleNamespace(modules=lambda: [layer])
+    unbind = bind_routed_experts_capturer(model, SimpleNamespace(capture=Mock()))
+    with pytest.raises(ValueError, match="already bound to a capturer"):
+        bind_routed_experts_capturer(model, SimpleNamespace(capture=Mock()))
+    unbind()
+    assert layer.routed_experts.routing_sink is None
 
 
 @pytest.mark.parametrize(
@@ -816,7 +928,11 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
     store_constructor = Mock()
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
-    capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
+    capturer = SimpleNamespace(
+        shape_per_token=(2,),
+        output_dtype_name="int32",
+        device_buffer=torch.empty(32, 2, dtype=torch.int32),
+    )
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
         aux_output_worker,
@@ -851,6 +967,39 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
+def test_aux_output_connector_rejects_undersized_capturer(monkeypatch):
+    """Silently truncated snapshots would blame the wrong tokens on experts."""
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
+    )
+    capturer = SimpleNamespace(
+        shape_per_token=(2,),
+        output_dtype_name="int32",
+        device_buffer=torch.empty(16, 2, dtype=torch.int32),
+    )
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=None),
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+
+    with pytest.raises(AssertionError, match="smaller than the scheduler"):
+        aux_output_worker.AuxOutputWorkerConnector(
+            vllm_config=config,
+            routed_experts_capturer=capturer,
+            kv_cache_config=SimpleNamespace(
+                num_blocks=10,
+                kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
+            ),
+        )
+
+
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     monkeypatch.setattr("importlib.metadata.entry_points", lambda **_: ())
     config = SimpleNamespace(
@@ -881,3 +1030,188 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+def _runner_stub(monkeypatch, *, enabled: bool = True):
+    import vllm.v1.worker.gpu.model_runner as mrv2
+
+    events: list[tuple[str, object]] = []
+
+    class FakeCapturer:
+        def __init__(self, max_num_batched_tokens, vllm_config):
+            events.append(("allocate", max_num_batched_tokens))
+
+    def fake_bind(model, capturer):
+        events.append(("bind", capturer))
+        return lambda: events.append(("unbind", None))
+
+    monkeypatch.setattr(mrv2, "RoutedExpertsCapturer", FakeCapturer)
+    monkeypatch.setattr(mrv2, "bind_routed_experts_capturer", fake_bind)
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            aux_output_config=SimpleNamespace(enable_return_routed_experts=enabled)
+        ),
+        routed_experts_capturer=None,
+        _unbind_routed_experts_capturer=None,
+        max_num_tokens=32,
+        model=object(),
+    )
+    return mrv2, runner, events
+
+
+def test_initialize_routed_experts_capturer_skips_when_disabled(monkeypatch):
+    mrv2, runner, events = _runner_stub(monkeypatch, enabled=False)
+
+    mrv2.GPUModelRunner.initialize_routed_experts_capturer(runner)
+
+    assert events == []
+    assert runner.routed_experts_capturer is None
+
+
+def test_initialize_routed_experts_capturer_allocates_then_binds(monkeypatch):
+    mrv2, runner, events = _runner_stub(monkeypatch)
+
+    mrv2.GPUModelRunner.initialize_routed_experts_capturer(runner)
+
+    capturer = runner.routed_experts_capturer
+    assert [event[0] for event in events] == ["allocate", "bind"]
+    assert events[0][1] == 32
+    assert events[1][1] is capturer
+    assert runner._unbind_routed_experts_capturer is not None
+
+
+def test_initialize_routed_experts_capturer_allocates_once(monkeypatch):
+    mrv2, runner, events = _runner_stub(monkeypatch)
+
+    mrv2.GPUModelRunner.initialize_routed_experts_capturer(runner)
+    capturer = runner.routed_experts_capturer
+    mrv2.GPUModelRunner.initialize_routed_experts_capturer(runner)
+
+    assert [event[0] for event in events] == ["allocate", "bind"]
+    assert runner.routed_experts_capturer is capturer
+
+
+def test_initialize_routed_experts_capturer_leaves_no_reference_on_failure(
+    monkeypatch,
+):
+    mrv2, runner, _ = _runner_stub(monkeypatch)
+    monkeypatch.setattr(
+        mrv2,
+        "bind_routed_experts_capturer",
+        Mock(side_effect=ValueError("no router")),
+    )
+
+    with pytest.raises(ValueError, match="no router"):
+        mrv2.GPUModelRunner.initialize_routed_experts_capturer(runner)
+
+    assert runner.routed_experts_capturer is None
+    assert runner._unbind_routed_experts_capturer is None
+
+
+def test_release_capture_resources_orders_graphs_before_buffers(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as mrv2
+
+    events: list[str] = []
+
+    def recorder(name: str):
+        return lambda *args, **kwargs: events.append(name)
+
+    monkeypatch.setattr(
+        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: False)
+    )
+    monkeypatch.setattr(
+        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "BreakableCUDAGraphWrapper",
+        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
+    )
+    runner = SimpleNamespace(
+        routed_experts_capturer=object(),
+        cudagraph_manager=SimpleNamespace(release_graphs=recorder("release_graphs")),
+        aux_output_connector=SimpleNamespace(close=recorder("connector_close")),
+        _unbind_routed_experts_capturer=recorder("unbind"),
+    )
+
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+
+    # Graphs captured the R3 callbacks and are dropped before the connector
+    # and bindings, so no graph can replay against a freed buffer.
+    assert events == [
+        "clear",
+        "clear_breakable",
+        "release_graphs",
+        "connector_close",
+        "unbind",
+    ]
+    assert runner.aux_output_connector is None
+    assert runner.routed_experts_capturer is None
+    assert runner._unbind_routed_experts_capturer is None
+    assert runner.cudagraph_manager is None
+
+    events.clear()
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+    assert events == []
+
+
+def test_release_capture_resources_keeps_graphs_without_capturer(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as mrv2
+
+    events: list[str] = []
+
+    def recorder(name: str):
+        return lambda *args, **kwargs: events.append(name)
+
+    monkeypatch.setattr(
+        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: False)
+    )
+    monkeypatch.setattr(
+        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "BreakableCUDAGraphWrapper",
+        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
+    )
+    runner = SimpleNamespace(
+        routed_experts_capturer=None,
+        cudagraph_manager=SimpleNamespace(release_graphs=recorder("release_graphs")),
+        aux_output_connector=SimpleNamespace(close=recorder("connector_close")),
+        _unbind_routed_experts_capturer=None,
+    )
+
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+
+    # Without R3 the teardown keeps dropping the manager as before.
+    assert events == ["connector_close"]
+    assert runner.aux_output_connector is None
+
+
+def test_release_capture_resources_clears_rocm_graphs_without_capturer(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as mrv2
+
+    events: list[str] = []
+
+    def recorder(name: str):
+        return lambda *args, **kwargs: events.append(name)
+
+    monkeypatch.setattr(mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(
+        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "BreakableCUDAGraphWrapper",
+        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
+    )
+    runner = SimpleNamespace(
+        routed_experts_capturer=None,
+        cudagraph_manager=None,
+        aux_output_connector=None,
+        _unbind_routed_experts_capturer=None,
+    )
+
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+
+    assert events == ["clear", "clear_breakable"]

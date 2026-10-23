@@ -123,6 +123,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     loading_threads = []
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(weight_transfer_config=None),
+        use_v2_model_runner=False,
         model_runner=SimpleNamespace(
             load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
         ),
@@ -516,3 +517,44 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [True, False])
+def test_load_model_initializes_r3_capturer_after_weights_pool(
+    monkeypatch: pytest.MonkeyPatch, use_v2_model_runner: bool
+):
+    """R3 buffers must be allocated before determine_available_memory() runs so
+    that memory profiling charges them to non-KV memory."""
+    events: list[str] = []
+
+    class WeightsPool:
+        def __enter__(self):
+            events.append("weights_pool_enter")
+
+        def __exit__(self, *exc):
+            events.append("weights_pool_exit")
+
+    runner = SimpleNamespace(
+        load_model=lambda **kwargs: events.append("load_model"),
+        initialize_routed_experts_capturer=lambda: events.append("init_capturer"),
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(weight_transfer_config=None),
+        use_v2_model_runner=use_v2_model_runner,
+        model_runner=runner,
+        _maybe_get_memory_pool_context=lambda tag: WeightsPool(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
+    monkeypatch.setattr(gpu_worker, "set_torch_threads_for_runtime", lambda: None)
+
+    gpu_worker.Worker.load_model(worker)
+
+    expected = ["weights_pool_enter", "load_model", "weights_pool_exit"]
+    if use_v2_model_runner:
+        # Must be outside the pool and still before KV profiling.
+        expected.append("init_capturer")
+    assert events == expected
