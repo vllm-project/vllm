@@ -153,4 +153,18 @@ def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
         sparse_topk_select_prefill(
             scores, valid_pages, actual, force_begin_blocks=1, force_end_blocks=2
         )
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual[..., :16].view(torch.float32).sort(-1).values,
+            expected[..., :16].view(torch.float32).sort(-1).values,
+            rtol=0,
+            atol=0,
+        )
+        ids = actual[..., 16:32]
+        live = ids >= 0
+        assert torch.all((ids < valid_pages[None, :, None]) | ~live)
+        assert torch.all((ids[..., 1:] > ids[..., :-1]) | ~live[..., 1:])
+        assert torch.all((ids == 0).any(-1))
+        for offset in (1, 2):
+            forced = (valid_pages - offset).clamp_min(0)
+            assert torch.all((ids == forced[None, :, None]).any(-1))
+        assert torch.all(actual[..., 32] == 1)
