@@ -183,24 +183,11 @@ variants:
   fp8:
     # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
     # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
-    # MXFP8 estimate above is used as an upper bound.
+    # MXFP8 estimate above is used as an upper bound. Hopper only: on MI355X
+    # and Blackwell the brand overrides replace its FP8 caches with NVFP4.
     precision: fp8
-    vram_minimum_gb: 533
-    tp: 8
-    description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
-    extra_args:
-      - "--kv-cache-dtype"
-      - "fp8"
-      - "--attention-config"
-      - '{"indexer_kv_dtype": "fp8"}'
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
-
-  fp8:
-    # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
-    # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
-    # MXFP8 estimate above is used as an upper bound.
-    precision: fp8
+    supported_hardware:
+      - "arch:sm90"
     vram_minimum_gb: 533
     tp: 8
     description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
