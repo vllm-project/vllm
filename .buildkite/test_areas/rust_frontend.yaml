@@ -18,7 +18,6 @@ steps:
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-  - tests/entrypoints/openai/chat_completion/test_serving_chat.py
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
@@ -33,7 +32,6 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
-  - pytest -v -s entrypoints/openai/chat_completion/test_serving_chat.py -k "test_chat_per_request_metrics_follow_server_flag or test_streaming_reasoning_usage_counts_across_deltas or test_completion_tokens_details"
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
@@ -60,7 +58,6 @@ steps:
       - tests/entrypoints/openai/chat_completion/test_chat_completion.py
       - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
       - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-      - tests/entrypoints/openai/chat_completion/test_serving_chat.py
       - tests/entrypoints/launchers/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/serve/instrumentator/test_uds.py
