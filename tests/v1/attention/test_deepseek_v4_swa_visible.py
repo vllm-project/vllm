@@ -148,7 +148,7 @@ def run_swa_kernel(
     width = window + (max_image_tokens if with_image else 0)
     swa_indices = torch.zeros(num_tokens, 1, width, dtype=torch.int32, device=device)
     swa_lens = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    is_valid = slot_mapping >= 0
+    is_valid = torch.empty(num_tokens, dtype=torch.bool, device=device)
     replay_start_t = torch.zeros(len(seq_lens), dtype=torch.int32, device=device)
 
     if with_image:
@@ -171,15 +171,18 @@ def run_swa_kernel(
         query_start_loc,
         seq_lens_t,
         token_to_req,
+        slot_mapping,
         is_valid,
         block_table,
         block_table.stride(0),
         BLOCK_SIZE,
         replay_start_t,
         token_offset=0,
+        num_valid_tokens=num_tokens,
         HAS_IMAGE=with_image,
         TRITON_BLOCK_SIZE=1024,
     )
+    assert torch.equal(is_valid, slot_mapping >= 0)
     return swa_indices[:, 0], swa_lens
 
 
