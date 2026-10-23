@@ -29,8 +29,8 @@ ROPE_CASES = [
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="fused_qk_rmsnorm_rope_gate Triton kernel requires CUDA/ROCm",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="fused_qk_rmsnorm_rope_gate Triton kernel requires CUDA/ROCm/XPU",
 )
 @pytest.mark.parametrize("num_q_heads,num_kv_heads,mrope_section", ROPE_CASES)
 @pytest.mark.parametrize("num_tokens", [1, 4, 37])
@@ -44,7 +44,9 @@ def test_fused_qk_norm_rope_gate_matches_reference(
     mrope_section: tuple[int, int, int] | None,
     preallocate_outputs: bool,
 ) -> None:
-    device = torch.device("cuda", torch.accelerator.current_device_index())
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
     torch.set_default_device(device)
     set_random_seed(SEED)
 
