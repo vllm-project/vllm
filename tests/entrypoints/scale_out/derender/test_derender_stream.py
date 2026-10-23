@@ -326,6 +326,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
         [FunctionCall(name="tool", arguments="{}")],
     )
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
     generated_ids = tokenizer.encode("answer", add_special_tokens=False)
     response = GenerateTokensResponse(
         request_id="test",
@@ -341,6 +342,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "question"}],
+        tools=_WEATHER_TOOLS,
     )
 
     choices = derenderer._derender_chat(response, request)
@@ -454,6 +456,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
         ],
     )
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
     parse_context = ParseContext.model_validate(
         {
             "tools": _WEATHER_TOOLS,
@@ -475,6 +478,33 @@ def test_derender_text_choices_builds_request_from_parse_context(
     assert len(message.tool_calls) == 1
     # A forced named tool reports "stop", like coupled chat.
     assert finish_reason == ("stop" if isinstance(tool_choice, dict) else "tool_calls")
+
+
+@pytest.mark.parametrize("tool_choice", ["none", None])
+def test_derender_text_choices_drops_tool_calls_without_tool_choice(
+    derenderer, monkeypatch, tool_choice
+):
+    """Generate output_mode="derender" drops tool calls a parser returned
+    for tool_choice "none" (Harmony ignores it) or null, like coupled chat."""
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [FunctionCall(name="get_weather", arguments="{}")],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
+    parse_context = ParseContext.model_validate(
+        {"tools": _WEATHER_TOOLS, "tool_choice": tool_choice}
+    )
+    output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
+
+    ((message, finish_reason),) = derenderer._derender_text_choices(
+        [output], parse_context.to_chat_request(), 0, None
+    )
+
+    assert not message.tool_calls
+    assert finish_reason == "stop"
 
 
 class TestDetokenizeDelta:
