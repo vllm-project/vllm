@@ -253,6 +253,10 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    session_hash_cache_mb: int = Field(default=0, ge=0)
+    """Per-engine CPU session prompt/hash history budget in MiB.
+    Zero disables it. This does not reserve or retain physical KV blocks.
+    """
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -400,6 +404,7 @@ class CacheConfig:
         the final hidden states.
         """
         ignored_factors = {
+            "session_hash_cache_mb",
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
             "kv_cache_memory_bytes",

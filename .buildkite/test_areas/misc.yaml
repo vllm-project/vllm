@@ -733,6 +733,51 @@ steps:
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
 
+- label: ":computer: (CPU) Session Prefix Reuse"
+  key: cpu-session-prefix
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 20
+  device: cpu-small
+  working_dir: "/vllm-workspace"
+  source_file_dependencies: &session-prefix-deps
+  - csrc/session_prefix.cpp
+  - CMakeLists.txt
+  - setup.py
+  - vllm/utils/session_prefix.py
+  - vllm/renderers/
+  - vllm/v1/core/session_prefix.py
+  - vllm/v1/request.py
+  - vllm/v1/engine/core.py
+  - vllm/config/
+  - vllm/engine/arg_utils.py
+  - vllm/entrypoints/openai/chat_completion/serving.py
+  - tests/utils_/test_session_prefix.py
+  - tests/renderers/test_session_prefix.py
+  - tests/v1/test_request.py
+  - tests/config/test_config_utils.py
+  - tests/entrypoints/openai/chat_completion/test_serving_chat.py
+  commands:
+  - uv venv --system-site-packages .venv-session-prefix
+  - uv pip install --python .venv-session-prefix/bin/python transformers==5.19.0 tokenizers==0.23.3
+  - .venv-session-prefix/bin/python -m pytest -v tests/utils_/test_session_prefix.py tests/renderers/test_session_prefix.py tests/v1/test_request.py tests/config/test_config_utils.py
+
+- label: ":nvidia: (H200 MIG 18GB) Session Prefix Serving"
+  key: session-prefix-serving
+  device: h200_18gb
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace"
+  source_file_dependencies: *session-prefix-deps
+  commands:
+  - uv venv --system-site-packages .venv-session-prefix-gpu
+  - uv pip install --python .venv-session-prefix-gpu/bin/python transformers==5.19.0 tokenizers==0.23.3
+  # RemoteOpenAIServer launches the CLI; keep it in the pinned Python environment.
+  - |
+    printf '#!/bin/sh\nexec "%s" -m vllm.entrypoints.cli.main "$@"\n' "$PWD/.venv-session-prefix-gpu/bin/python" > .venv-session-prefix-gpu/bin/vllm
+    chmod +x .venv-session-prefix-gpu/bin/vllm
+  - export PATH="$PWD/.venv-session-prefix-gpu/bin:$PATH"
+  - .venv-session-prefix-gpu/bin/python -m pytest -v tests/entrypoints/openai/chat_completion/test_serving_chat.py -k test_session_prefix_text_requests_preserve_native_ids_and_outputs
+
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
   depends_on:

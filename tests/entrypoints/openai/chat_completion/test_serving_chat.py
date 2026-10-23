@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import importlib.metadata
 import json
+import os
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -10,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+import regex as re
 from openai import OpenAI
 from starlette.requests import Request
 
@@ -2028,8 +2031,8 @@ async def test_serving_chat_did_set_correct_cache_salt(
     orig_render_chat_request = serving_chat.render_chat_request
     captured_inputs = []
 
-    async def render_chat_request(request):
-        result = await orig_render_chat_request(request)
+    async def render_chat_request(request, *, session_id=None):
+        result = await orig_render_chat_request(request, session_id=session_id)
 
         assert isinstance(result, tuple)
         conversation, engine_inputs = result
@@ -3439,3 +3442,100 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
         "finish_reason must reflect whether tool calls were emitted"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("token_mb", "hash_mb"), [(0, 0), (8, 0), (0, 8), (8, 8)])
+async def test_session_prefix_text_requests_preserve_native_ids_and_outputs(
+    token_mb, hash_mb, capfd, tmp_path
+):
+    """Exercise HTTP, renderer, IPC and native core with real model weights."""
+    from tests.models.utils import check_logprobs_close
+
+    model = os.environ.get("VLLM_TEST_QWEN3_MODEL", "Qwen/Qwen3-0.6B")
+    args = [
+        "--tokenizer-revision",
+        "c1899de289a04d12100db370d81485cdf75e47ca",
+        "--session-token-cache-mb",
+        str(token_mb),
+        "--session-hash-cache-mb",
+        str(hash_mb),
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "1024",
+        "--gpu-memory-utilization",
+        "0.3",
+        "--max-num-seqs",
+        "2",
+        "--shutdown-timeout",
+        "10",
+    ]
+
+    def output(response):
+        choice = response.choices[0]
+        probabilities = [
+            {
+                int(item.token.split(":", 1)[1]): item.logprob
+                for item in token.top_logprobs
+            }
+            for token in choice.logprobs.content
+        ]
+        return choice.token_ids, choice.message.content or "", probabilities
+
+    with RemoteOpenAIServer(
+        model, args, env_dict={"VLLM_LOGGING_LEVEL": "DEBUG"}
+    ) as server:
+        async with server.get_async_client() as client:
+            messages = [{"role": "user", "content": "中文 e\u0301 👩🏽‍💻: say hello."}]
+            for turn in range(3):
+                responses = []
+                for hinted in (False, True, True):
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0,
+                        max_tokens=2,
+                        logprobs=True,
+                        top_logprobs=2,
+                        extra_body={
+                            "session_id": "session" if hinted else None,
+                            "return_token_ids": True,
+                            "return_tokens_as_token_ids": True,
+                            "chat_template_kwargs": {"enable_thinking": False},
+                        },
+                    )
+                    responses.append(response)
+                native = responses[0]
+                assert native.prompt_token_ids
+                for response in responses[1:]:
+                    assert response.prompt_token_ids == native.prompt_token_ids
+                    assert response.usage.prompt_tokens == native.usage.prompt_tokens
+                    assert len(response.choices[0].token_ids) == len(
+                        native.choices[0].token_ids
+                    )
+                    check_logprobs_close(
+                        outputs_0_lst=[output(native)],
+                        outputs_1_lst=[output(response)],
+                        name_0="native computation without session",
+                        name_1="session prefix reuse",
+                        always_check_logprobs=True,
+                    )
+                messages = messages + [
+                    {"role": "assistant", "content": "Hello."},
+                    {"role": "user", "content": f"Continue {turn}."},
+                ]
+    captured = capfd.readouterr()
+    server_log = captured.out + captured.err
+    (tmp_path / "server.log").write_text(server_log)
+    pinned = (
+        importlib.metadata.version("transformers") == "5.19.0"
+        and importlib.metadata.version("tokenizers") == "0.23.3"
+    )
+    if token_mb and pinned:
+        assert "Session token reuse: route=exact" in server_log, server_log[-12000:]
+        assert "Session token reuse: route=partial" in server_log, server_log[-12000:]
+    if hash_mb:
+        assert re.search(r"Session hash reuse: reused_blocks=[1-9]", server_log), (
+            server_log[-12000:]
+        )
