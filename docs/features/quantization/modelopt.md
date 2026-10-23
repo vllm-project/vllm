@@ -23,6 +23,9 @@ following `quantization.quant_algo` values:
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`).
 
+For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
+when required by the GPU, for example on AMD MI300.
+
 For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
 use the exported checkpoint's module names. vLLM maps these names to the draft's
 module prefix and decoder layer indices before constructing quantized layers.

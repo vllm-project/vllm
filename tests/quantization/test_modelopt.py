@@ -674,10 +674,16 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
         mlp = loaded.model.layers[0].mlp
         quantized = mlp.down_proj
         assert isinstance(quantized.quant_method, ModelOptLinearMethod)
-        assert quantized.weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+        assert quantized.weight.dtype == current_platform.fp8_dtype()
         assert torch.isfinite(quantized.weight.float()).all()
         assert torch.isfinite(quantized.weight_scale).all()
-        assert torch.isfinite(quantized.input_scale).all()
+        scale = (2 if current_platform.is_fp8_fnuz() else 1) / 448
+        torch.testing.assert_close(
+            quantized.input_scale,
+            torch.full_like(quantized.input_scale, scale),
+            rtol=0,
+            atol=0,
+        )
         assert isinstance(mlp.gate_up_proj.quant_method, UnquantizedLinearMethod)
         assert mlp.gate_up_proj.weight.dtype == torch.bfloat16
 
@@ -786,10 +792,18 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
             assert isinstance(layer.quant_method, ModelOptLinearMethod)
             assert layer.quant_method.spec.weight == weight_key
             assert layer.quant_method.spec.activation == activation_key
-            assert layer.weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            assert layer.weight.dtype == current_platform.fp8_dtype()
             assert torch.isfinite(layer.weight.float()).all()
             assert torch.isfinite(layer.weight_scale).all()
             assert layer.weight_scale.numel() == (128 if layer is model.fc else 1)
+            if activation_key == kFp8StaticTensorSym:
+                scale = (2 if current_platform.is_fp8_fnuz() else 1) / 448
+                torch.testing.assert_close(
+                    layer.input_scale,
+                    torch.full_like(layer.input_scale, scale),
+                    rtol=0,
+                    atol=0,
+                )
         assert model.markov_head.markov_w1.weight.dtype == torch.bfloat16
         assert isinstance(
             model.layers[0].self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
