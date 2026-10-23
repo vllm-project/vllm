@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -37,6 +38,8 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -162,7 +165,14 @@ class AuxOutputWorkerConnector:
                 self.vllm_config.max_concurrent_batches,
             )
         except BaseException:
-            store.close()
+            try:
+                store.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close the auxiliary-output store after storage "
+                    "initialization failed",
+                    exc_info=True,
+                )
             raise
         self._store = store
         self._buffer = buffer

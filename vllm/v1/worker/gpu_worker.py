@@ -593,6 +593,17 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        if (
+            self.use_v2_model_runner
+            and self.vllm_config.aux_output_config.enabled
+            and getattr(self.model_runner, "aux_output_connector", None) is not None
+        ):
+            raise RuntimeError(
+                "The auxiliary-output connector is already initialized for this "
+                "model runner; reloading the model would invalidate its capture "
+                "bindings"
+            )
+
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
@@ -609,7 +620,14 @@ class Worker(WorkerBase):
             try:
                 connector.initialize_routed_experts_capturer(model_runner.get_model())
             except BaseException:
-                connector.close()
+                try:
+                    connector.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close the auxiliary-output connector after "
+                        "capture initialization failed",
+                        exc_info=True,
+                    )
                 raise
             model_runner.aux_output_connector = connector
 
