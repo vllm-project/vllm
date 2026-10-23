@@ -60,6 +60,7 @@ from .mxfp8 import (
 from .sparse_mla import SparseIndexTables, SparseMlaDecode
 
 if TYPE_CHECKING:
+    from ...ops.cute_dsl import LamportAllGather
     from ..boundary.publishing_gemm import PublishingMxfp8Linear
     from ..runtime.decode import DecodeStep
 
@@ -94,10 +95,13 @@ class AttentionStep:
         mxfp8_input: bool,
         source: CandidateOverlap | None,
         consumer: CandidateOverlap | None,
+        all_gather: "LamportAllGather | None",
     ) -> None:
         self.attn = attn
         self.tables = tables
         self.mla = mla
+        # Gathers the row-sharded indexer's slices.
+        self.all_gather = all_gather
         self.publisher = (
             publisher
             if publisher is not None and publisher.supports(attn.wo_b, 1)
@@ -372,7 +376,7 @@ class AttentionStep:
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         op = indexer.indexer_op
         if isinstance(op, SparseAttnIndexer):
-            finish_decode_rows(op, x, q_quant, index_weights, plan)
+            finish_decode_rows(op, x, q_quant, index_weights, plan, self.all_gather)
         else:
             # The side-stream table builds read the top-k indices this
             # overwrites.

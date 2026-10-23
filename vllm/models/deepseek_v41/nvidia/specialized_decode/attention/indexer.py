@@ -9,8 +9,9 @@ varlen decode branch of ``sparse_attn_indexer``, with two additions:
   decode step of at least ``ROW_SHARD_MIN_ROWS`` rows, each rank scores,
   selects candidates for and top-k's only its contiguous slice of the rows
   (an even number of them, so the last ranks' slices may be short or empty);
-  TP all-gathers of the int32 rows (see ``_all_gather_rows``) rebuild
-  ``topk_indices_buffer`` and, in the candidate source, the candidate blocks.
+  TP all-gathers of the int32 rows (see ``_all_gather_rows``; the executor's
+  ``LamportAllGather``) rebuild ``topk_indices_buffer`` and, in the candidate
+  source, the candidate blocks.
   A slice may split a request: varlen rows are independent.
 - Selection from the BF16 logits. For up to 64 rows per rank, ``decode_topk``
   (``decode_topk_cute``) selects the token top-k, and in the candidate source
@@ -36,6 +37,7 @@ that every TP rank shares: the step's row and request counts.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -80,6 +82,9 @@ from .candidate_topk import (
     supports_cooperative_candidates,
 )
 from .decode_topk_cute import decode_topk, supports_decode_topk
+
+if TYPE_CHECKING:
+    from ...ops.cute_dsl import LamportAllGather
 
 # Fewest rows of a row-sharded decode step (two requests of six rows): a
 # single request's slices save less than the all-gathers cost.
@@ -146,17 +151,28 @@ def rope_quant_q(
     return q_quant, None, weights
 
 
-def _all_gather_rows(buffer: torch.Tensor, rows: int, num_rows: int) -> None:
+def _all_gather_rows(
+    buffer: torch.Tensor,
+    rows: int,
+    num_rows: int,
+    all_gather: "LamportAllGather | None",
+) -> None:
     """Gather every rank's ``rows``-row slice of ``buffer`` into its first
     ``num_rows`` rows; rows past ``num_rows`` (a short or empty last slice)
-    are dropped."""
+    are dropped. The slices go through ``all_gather`` when it takes them,
+    else NCCL."""
     group = get_tp_group()
     local = buffer[group.rank_in_group * rows : (group.rank_in_group + 1) * rows]
-    # NCCL, not the custom all-gather: its MNNVL Lamport kernel never waits for
-    # a rank's own multicast copy, so a late copy can be read as a peer's slot
+    # Not the custom all-gather: its MNNVL Lamport kernel never waits for a
+    # rank's own multicast copy, so a late copy can be read as a peer's slot
     # by a later gather of another size, and a step's gathers differ in size
-    # (the top-k rows, then the candidate blocks).
-    gathered = group.all_gather(local, 0)
+    # (the top-k rows, then the candidate blocks). The executor's
+    # LamportAllGather waits for every slot. The int32 rows hold no
+    # INT32_MIN, which it would turn into 0.
+    if all_gather is not None and all_gather.accepts(local):
+        gathered = all_gather(local)
+    else:
+        gathered = group.all_gather(local, 0)
     buffer[:num_rows].copy_(gathered[:num_rows])
 
 
@@ -181,11 +197,13 @@ def decode_rows(
     hidden_states: torch.Tensor,
     q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     weights: torch.Tensor,
+    all_gather: "LamportAllGather | None" = None,
 ) -> torch.Tensor:
     """``op(hidden_states, q_quant, None, weights)`` for a pure-decode step,
-    row-sharded and with cooperative candidates where they apply."""
+    row-sharded and with cooperative candidates where they apply; the row
+    slices are gathered with ``all_gather`` where it takes them."""
     plan = plan_decode_rows(op, hidden_states.shape[0])
-    return finish_decode_rows(op, hidden_states, q_quant, weights, plan)
+    return finish_decode_rows(op, hidden_states, q_quant, weights, plan, all_gather)
 
 
 def plan_decode_rows(op: SparseAttnIndexer, num_tokens: int) -> DecodeRowsPlan | None:
@@ -270,9 +288,11 @@ def finish_decode_rows(
     q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     weights: torch.Tensor,
     plan: DecodeRowsPlan | None,
+    all_gather: "LamportAllGather | None" = None,
 ) -> torch.Tensor:
     """The rest of ``decode_rows`` once the index query and keys are ready:
-    score and select the planned rows and gather the slices."""
+    score and select the planned rows and gather the slices (with
+    ``all_gather`` where it takes them)."""
     if plan is None:
         return op(hidden_states, q_quant, None, weights)
     q_values, q_scale = q_quant if isinstance(q_quant, tuple) else (q_quant, None)
@@ -280,11 +300,14 @@ def finish_decode_rows(
         _decode_rows(op, q_values, q_scale, weights, plan)
     if plan.shard is not None:
         _all_gather_rows(
-            op.topk_indices_buffer[:, : op.topk_tokens], plan.shard, plan.num_rows
+            op.topk_indices_buffer[:, : op.topk_tokens],
+            plan.shard,
+            plan.num_rows,
+            all_gather,
         )
         if op.candidate_write:
             assert op.candidate_blocks is not None
-            _all_gather_rows(op.candidate_blocks, plan.shard, plan.num_rows)
+            _all_gather_rows(op.candidate_blocks, plan.shard, plan.num_rows, all_gather)
     return op.topk_indices_buffer
 
 

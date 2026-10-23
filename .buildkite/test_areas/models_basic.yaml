@@ -382,6 +382,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_decode_topk.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_sparse_mla_cute.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
   commands:
@@ -392,6 +393,7 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_decode_topk.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_sparse_mla_cute.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
 

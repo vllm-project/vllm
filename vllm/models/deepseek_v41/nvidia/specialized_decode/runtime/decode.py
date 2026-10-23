@@ -62,6 +62,11 @@ if TYPE_CHECKING:
 
 DecodeOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]
 
+# The executor's all-gather takes up to this much a rank, the custom
+# all-gather's limit at TP4, so the logits gather keeps its sizes: up to 32
+# FP32 (64 BF16) rows of a 129,280-token vocabulary. Larger ones take NCCL.
+ALL_GATHER_RANK_BYTES = 4 << 20
+
 
 class DecodeStep(NamedTuple):
     """The host-side gates of one captured decode step, by its rows."""
@@ -161,6 +166,7 @@ class SpecializedDecode:
             )
 
         # The CuTe DSL kernels, imported only when the executor is built.
+        from ...ops.cute_dsl import LamportAllGather
         from ..boundary.all_reduce import BoundaryAllReduce
         from ..boundary.publishing_gemm import PublishingMxfp8Linear
 
@@ -168,6 +174,13 @@ class SpecializedDecode:
         self.all_reduce = BoundaryAllReduce(
             backbone.config,
             uses_checked_flashinfer("the fused kernel's MXFP8 layer input"),
+        )
+        # The row-sharded indexers' gathers, and the logits gather of the
+        # model's specialized logits processor; NVLink multicast is there,
+        # since the fused all-reduce needs it too.
+        self.all_gather = LamportAllGather(
+            rank_capacity_bytes=ALL_GATHER_RANK_BYTES,
+            device=torch.device("cuda", torch.accelerator.current_device_index()),
         )
         self.boundaries = Boundaries(self.all_reduce)
         self.publisher = (
@@ -229,6 +242,7 @@ class SpecializedDecode:
                     mxfp8_input=quantize and can_fuse_query_quant([attn.fused_wqa_wkv]),
                     source=self.candidates if attn is source else None,
                     consumer=self.candidates if attn in consumers else None,
+                    all_gather=self.all_gather,
                 ),
                 moe=MoEStep(layer.ffn, gemm, FUSED_MHC_MAX_ROWS),
                 engram=layer.engram,

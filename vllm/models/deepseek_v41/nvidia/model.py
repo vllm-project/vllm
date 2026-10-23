@@ -1704,7 +1704,9 @@ class DeepseekV41LLMForCausalLM(
         self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config, self.lm_head
         )
-        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(
+            self.config.vocab_size, self.specialized_decode.all_gather
+        )
         return self.specialized_decode
 
     def get_model_state_cls(self):
