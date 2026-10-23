@@ -69,6 +69,9 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    # Can forward() run with key/value omitted after a fused op wrote the cache?
+    supports_kv_cache_update_bypass: bool = False
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
@@ -1084,6 +1087,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """MQA-style decode forward pass."""
         raise NotImplementedError
+
+    def reserve_workspace(self) -> None:
+        """Called in the memory profiling run to claim persistent workspace
+        that is otherwise reserved after profiling."""
+        return
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.

@@ -2774,6 +2774,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let mooncake_transfer_stats_hex =
+        lines.next().expect("missing Mooncake transfer stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
@@ -2885,7 +2887,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(
-                            Length,
+                            Error,
                         ),
                         stop_reason: None,
                         events: None,
@@ -2893,12 +2895,34 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        error: Some(
+                            RequestError {
+                                code: "engine_paused",
+                                message: "Generation is paused.",
+                                retryable: true,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,
@@ -2969,12 +2993,20 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
     ));
 
+    let mooncake_transfer_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_transfer_stats,
+        KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
     assert!(matches!(
         multi_connector_stats,
         KvConnectorStats::Multi(stats)
             if stats.nixl.is_some()
+                && stats.mooncake_transfer.is_some()
                 && stats.mooncake.is_some()
                 && stats.other.contains_key("UnsupportedConnector")
     ));
