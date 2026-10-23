@@ -1441,7 +1441,7 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
-                if self.method in ("eagle", "eagle3"):
+                if self.draft_shares_target_positions():
                     # EAGLE drafts share the target's positional space; a
                     # draft checkpoint with a smaller max_position_embeddings
                     # than the target under-sizes its rotary cache (#48894).
@@ -2080,6 +2080,11 @@ class SpeculativeConfig:
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""
         return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
+
+    def draft_shares_target_positions(self) -> bool:
+        """Whether the draft's max_position_embeddings is raised to the
+        target's max_model_len, so its length doesn't limit the target's."""
+        return self.method in ("eagle", "eagle3")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
