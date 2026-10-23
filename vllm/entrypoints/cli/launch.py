@@ -64,7 +64,6 @@ class RenderSubcommand(LaunchSubcommandBase):
     def cmd(args: argparse.Namespace) -> None:
         num_api_servers = getattr(args, "api_server_count", 1)
         if num_api_servers is None or num_api_servers <= 1:
-            # Single-process path: reuse the existing GPU-less entrypoint.
             uvloop.run(run_launch_fastapi(args))
         else:
             run_multi_launch(args)
