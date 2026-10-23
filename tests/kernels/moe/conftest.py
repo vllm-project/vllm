@@ -61,3 +61,58 @@ def pytest_runtest_setup(item):
     if item.path.name in NEEDS_CLEAN_ENTRY or "dist_init" in item.fixturenames:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def trtllm_workspace_check(monkeypatch, workspace_init):
+    """Opt into workspaces and compare real buffered/unbuffered kernel calls."""
+    import flashinfer.fused_moe as fused_moe
+    import torch
+
+    from vllm.model_executor.layers.fused_moe.experts import trtllm_moe_base
+
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_USE_WORKSPACE", "1")
+    monkeypatch.setattr(trtllm_moe_base, "fi_moe_largest_bucket", lambda config: 32)
+    buffers = []
+
+    def install(
+        kernel_name,
+        quant_mode,
+        *,
+        hidden_size=1024,
+        intermediate_size=1024,
+        num_experts=16,
+        **size_kwargs,
+    ):
+        kernel = getattr(fused_moe, kernel_name)
+
+        def compare(**kwargs):
+            buffer = kwargs.get("workspace_buffer")
+            assert buffer is not None
+            required = fused_moe.trtllm_fused_moe_workspace_size(
+                32,
+                hidden_size,
+                intermediate_size,
+                num_experts,
+                kwargs["top_k"],
+                quant_mode=quant_mode,
+                **size_kwargs,
+            )
+            assert buffer.nbytes >= required
+            buffers.append(buffer)
+            result = kernel(**kwargs)
+            outputs = (result,) if isinstance(result, torch.Tensor) else result
+            snapshots = [tensor.clone() for tensor in outputs]
+            reference = kernel(**{**kwargs, "workspace_buffer": None})
+            references = (
+                (reference,) if isinstance(reference, torch.Tensor) else reference
+            )
+            for actual, expected in zip(snapshots, references, strict=True):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            return result
+
+        monkeypatch.setattr(fused_moe, kernel_name, compare)
+
+    yield install
+    assert len(buffers) == 3
+    assert all(buffer is buffers[0] for buffer in buffers)

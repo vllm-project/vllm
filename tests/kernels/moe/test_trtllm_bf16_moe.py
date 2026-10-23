@@ -170,10 +170,13 @@ def test_trtllm_bf16_moe_modular_no_graph(
 )
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 @torch.inference_mode()
-def test_trtllm_bf16_moe_reuses_workspace(activation, workspace_init, monkeypatch):
+def test_trtllm_bf16_moe_reuses_workspace(activation, trtllm_workspace_check):
     """A small-first warmup must cover a larger batch and be reused per layer."""
-    import flashinfer
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        activation_to_flashinfer_int,
+    )
 
+    set_random_seed(7)
     max_rows, hidden_dim, inter_dim, num_experts, topk = 32, 256, 256, 8, 2
     config = FusedMoEConfig(
         num_experts=num_experts,
@@ -215,37 +218,13 @@ def test_trtllm_bf16_moe_reuses_workspace(activation, workspace_init, monkeypatc
         .contiguous()
     )
     weights = torch.full((max_rows, topk), 0.5, device="cuda")
-    buffers = []
-    kernel = flashinfer.fused_moe.trtllm_bf16_routed_moe
-
-    def compare_with_unbuffered(**kwargs):
-        # Assert the new path really ran, then check it matches the per-call
-        # allocation for the same inputs.
-        workspace_buffer = kwargs.get("workspace_buffer")
-        assert workspace_buffer is not None
-        expected_size = flashinfer.fused_moe.trtllm_fused_moe_workspace_size(
-            max_rows,
-            hidden_dim,
-            inter_dim,
-            num_experts,
-            topk,
-            quant_mode="bf16",
-            local_num_experts=num_experts,
-            activation_type=kwargs["activation_type"],
-            use_shuffled_weight=kwargs["use_shuffled_weight"],
-            weight_layout=int(kwargs["weight_layout"]),
-            device=x.device,
-        )
-        assert workspace_buffer.nbytes >= expected_size
-        buffers.append(workspace_buffer)
-        result = kernel(**kwargs)
-        reference = kernel(**{**kwargs, "workspace_buffer": None})
-        for actual, expected in zip(result, reference):
-            torch.testing.assert_close(actual, expected)
-        return result
-
-    monkeypatch.setattr(
-        flashinfer.fused_moe, "trtllm_bf16_routed_moe", compare_with_unbuffered
+    trtllm_workspace_check(
+        "trtllm_bf16_routed_moe",
+        "bf16",
+        hidden_size=hidden_dim,
+        intermediate_size=inter_dim,
+        num_experts=num_experts,
+        activation_type=activation_to_flashinfer_int(activation),
     )
     for layer, rows in [(layers[0], 1), (layers[1], max_rows), (layers[0], 16)]:
         layer.apply(
@@ -266,8 +245,6 @@ def test_trtllm_bf16_moe_reuses_workspace(activation, workspace_init, monkeypatc
             apply_router_weight_on_input=False,
         )
         current_workspace_manager().lock()
-    assert buffers[0] is not None
-    assert all(buffer is buffers[0] for buffer in buffers)
 
 
 @pytest.mark.parametrize("has_lora_delta", [False, True])
