@@ -186,11 +186,14 @@ class TritonWarmupTensor:
     ``strides=None`` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
 
-    On platforms where triton specializes on buffer sizes (ROCm):
-        ``storage_bytes`` should be set via ``triton_ptr_range`` whenever the runtime
-        tensor's storage can exceed 2 GiB. The ROCm backend specializes pointers on
-        it (``tt.pointer_range``) to enable lowering to buffer load/store intrinsics.
-        Otherwise warmup may compile a variant that the live launch never uses.
+    ``ptr_range_bytes`` is the byte size of the storage behind the runtime
+    tensor (its ``untyped_storage()``, not the view), most easily derived with
+    ``triton_ptr_range``. With buffer ops enabled, Triton's ROCm backend gives
+    pointers into storage of at most 2 GB a ``tt.pointer_range = 32``
+    specialization (32-bit buffer offsets), which is part of the compile key.
+    The default 0 assumes such a small storage; set it above 2 GB for tensors
+    that view a larger pool, such as a KV cache layer, or warmup compiles a
+    variant the runtime never uses. CUDA ignores it.
     """
 
     dtype: Any
@@ -198,13 +201,14 @@ class TritonWarmupTensor:
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
     init: Any = 0
-    storage_bytes: int = 0
+    ptr_range_bytes: int = 0
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
     def ptr_range(self) -> int:
-        return self.storage_bytes
+        # Read by Triton's ROCm backend in place of untyped_storage().size().
+        return self.ptr_range_bytes
 
     @property
     def device(self) -> Any:
@@ -515,7 +519,7 @@ def _triton_metadata_arg(value: Any) -> Any:
         aligned=getattr(value, "_vllm_warmup_aligned", True),
         shape=tuple(value.shape),
         strides=tuple(value.stride()),
-        storage_bytes=getattr(value, "_vllm_warmup_storage_bytes", 0),
+        ptr_range_bytes=getattr(value, "_vllm_warmup_ptr_range_bytes", 0),
     )
 
 
@@ -555,7 +559,7 @@ def _materialize_warmup_case(
                 tensor.fill_(value.init)
         else:
             tensor._vllm_warmup_aligned = value.aligned
-            tensor._vllm_warmup_storage_bytes = value.storage_bytes
+            tensor._vllm_warmup_ptr_range_bytes = value.ptr_range_bytes
             with suppress(TypeError):
                 cache[value] = tensor
         return tensor

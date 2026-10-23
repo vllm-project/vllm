@@ -495,7 +495,7 @@ def test_warmup_pointer_specializes_like_the_live_tensor(
         # if it ever changes in the future
         assert not hasattr(backend, "get_tensor_specialization"), (
             "Triton still specializes tensor arguments but dropped "
-            "is_within_2gb; re-derive TritonWarmupTensor.storage_bytes "
+            "is_within_2gb; re-derive TritonWarmupTensor.ptr_range_bytes "
             "against whatever now decides tt.pointer_range"
         )
         pytest.skip("Triton no longer specializes tensor arguments")
@@ -505,7 +505,7 @@ def test_warmup_pointer_specializes_like_the_live_tensor(
     if live_ptr_range is not None:
         live.ptr_range = lambda: live_ptr_range
 
-    stub = TritonWarmupTensor(torch.bfloat16, storage_bytes=triton_ptr_range(live))
+    stub = TritonWarmupTensor(torch.bfloat16, ptr_range_bytes=triton_ptr_range(live))
 
     assert is_within_2gb(stub) == is_within_2gb(live)
     assert is_within_2gb(stub) is (live_ptr_range is None)

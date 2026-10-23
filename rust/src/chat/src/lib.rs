@@ -82,6 +82,9 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    exclude_tools_when_tool_choice_none: bool,
 }
 
 impl ChatRequestProcessor {
@@ -95,6 +98,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -107,6 +111,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -125,6 +130,13 @@ impl ChatRequestProcessor {
     /// `None` for the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Configure whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -179,9 +191,12 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
+        if self.exclude_tools_when_tool_choice_none {
+            request.tool_context.exclude_initial_tools_if_none();
+        }
         let renderer = self.backend.chat_renderer();
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))
@@ -301,6 +316,13 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.processor.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
