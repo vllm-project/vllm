@@ -54,7 +54,6 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
-    rocm_flydsl_indexer_uses_fp4,
     tp_prefill_row_sharding_supported,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
@@ -596,25 +595,6 @@ def sparse_attn_indexer(
                 # unnecessary work.
                 return topk_indices_buffer
 
-    if use_fp4_cache and current_platform.is_rocm():
-        assert skip_k_cache_insert and not use_pcp and dcp_world_size == 1
-        assert q_scale is not None
-        from vllm.models.deepseek_v4.amd.ops.sparse_attn_indexer import (
-            _rocm_fp4_sparse_attn_indexer,
-        )
-
-        return _rocm_fp4_sparse_attn_indexer(
-            kv_cache,
-            q_quant,
-            q_scale,
-            weights,
-            head_dim,
-            max_model_len,
-            topk_tokens,
-            topk_indices_buffer,
-            attn_metadata_narrowed,
-        )
-
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
@@ -1078,16 +1058,6 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
-        # DeepSeek-V4.1's RocmSparseAttnIndexer has its own ROCm MXFP4 checks.
-        if (
-            use_fp4_cache
-            and current_platform.is_rocm()
-            and rocm_flydsl_indexer_uses_fp4(vllm_config)
-        ):
-            if head_dim != 128 or compress_ratio != 4 or not skip_k_cache_insert:
-                raise ValueError("ROCm MXFP4 indexer requires fused C4 K, D=128")
-            if candidate_blocks is not None:
-                raise ValueError("ROCm MXFP4 indexer does not support candidate blocks")
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1212,8 +1182,7 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
-        if self.use_fp4_cache:
-            return self.forward_cuda(hidden_states, q_quant, k, weights)
+        assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )

@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_FLYDSL_MXFP4_INDEXER: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1354,6 +1355,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # V4 / V4.1. gfx950 only. By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
+    # Whether DeepSeek V4's MXFP4 indexer (indexer_kv_dtype="mxfp4") runs on
+    # aiter's FlyDSL paged scorers, with the K cache written by vLLM's fused
+    # compress kernel, instead of aiter's Triton paged MXFP4 path. gfx950
+    # only. By default is disabled.
+    "VLLM_ROCM_USE_AITER_FLYDSL_MXFP4_INDEXER": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_MXFP4_INDEXER", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter rope.

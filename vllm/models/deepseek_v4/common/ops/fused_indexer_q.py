@@ -301,11 +301,17 @@ class FusedIndexerQRopeQuantTritonKernel(
 
 
 def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
-    """Weights dtypes requested by sparse indexer implementations."""
-    uses_rocm_mxfp4 = current_platform.is_rocm() and (
-        vllm_config.attention_config.resolve_indexer_kv_dtype("fp8") == "mxfp4"
+    """Weights dtypes the model's indexer layers ask for: fp32 for the dense
+    scoring kernels, plus bf16 for the ROCm FlyDSL MXFP4 scorers or the
+    DeepSeek V4.1 sparse-logits indexer (`SparseMQAIndexer`)."""
+    from vllm.v1.attention.backends.mla.rocm_flydsl_mxfp4_indexer import (
+        rocm_flydsl_mxfp4_indexer_enabled,
     )
-    if uses_rocm_mxfp4 or vllm_config.attention_config.indexer_sparse_logits:
+
+    if (
+        vllm_config.attention_config.indexer_sparse_logits
+        or rocm_flydsl_mxfp4_indexer_enabled(vllm_config)
+    ):
         return (torch.float32, torch.bfloat16)
     return (torch.float32,)
 
