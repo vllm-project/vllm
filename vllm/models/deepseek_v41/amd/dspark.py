@@ -227,10 +227,10 @@ class DSparkDeepseekV4Model(nn.Module):
 
 
 def _draft_ctxkv_dummyq_disabled() -> bool:
-    """VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ=1 restores the stock dummy-Q insert
-    (read per call, so eager in-process A/B works; under CUDA graphs the
-    choice is baked at capture)."""
-    return os.environ.get("VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ", "0") == "1"
+    """VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1 restores the stock dummy-Q
+    insert (read per call, so eager in-process A/B works; under CUDA graphs
+    the choice is baked at capture)."""
+    return os.environ.get("VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ", "0") == "1"
 
 
 def _insert_context_kv(
@@ -241,41 +241,37 @@ def _insert_context_kv(
 ) -> None:
     """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
 
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
-
-    On the fp8_ds_mla/uint8 cache path the op supports
-    ``q_head_padded=0`` -- a KV-only launch that writes no query at all -- so
+    Uses the shared ``fused_deepseek_v4_kv_rope_insert`` with zero query
+    heads (context tokens have no query) -- the same call
+    ``nvidia/dspark.py`` makes here. With zero query heads the op schedules
+    only the KV branch, preserving its RoPE rounding and quantization, so
     the dummy-Q allocation, its zero-fill and the quantized dummy-Q write
-    disappear; the cache contents are identical by construction (verified
-    in tests/kernels/test_dspark_ctxkv_dummyq_removal.py).
+    disappear with the cache contents identical by construction. The stock
+    dummy-Q dispatch below stays reachable through
+    ``VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1`` for A/B measurement.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
     n_ctx = kv.shape[0]
-    if cache_dtype == torch.uint8 and not _draft_ctxkv_dummyq_disabled():
-        # fp8_ds_mla UE8M0 paged layout, KV-only fused insert (no dummy Q).
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        empty_q = kv.new_empty((n_ctx, 0, attn.head_dim), dtype=kv.dtype)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            empty_q,
+    if not _draft_ctxkv_dummyq_disabled():
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
             kv,
-            swa_2d,
+            swa_cache,
             slot_mapping,
             positions,
             cos_sin_cache,
-            0,  # q_head_padded: KV-only launch, Q untouched
-            attn.eps,
             block_size,
-            True,  # apply_q_norm (no Q is processed at all)
+            attn._flashinfer_fp8_kv_scale
+            if cache_dtype == torch.float8_e4m3fn
+            else None,
             attn.kv_mxfp8,
         )
         logger.warning_once(
-            "draft context-KV dummy-Q removal engaged (KV-only fused insert, "
-            "q_head_padded=0; disable var VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ)"
+            "draft context-KV dummy-Q removal engaged (KV-only "
+            "fused_deepseek_v4_kv_rope_insert; disable var "
+            "VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ)"
         )
         return
     dummy_q = torch.zeros(

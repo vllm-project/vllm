@@ -11,6 +11,7 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -36,6 +37,13 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+# Draft-prepare fastpaths (shared-output dedup + parallel pad-tail fix),
+# validated on ROCm only (MI355X, DSV4.1-Flash serving): every other
+# platform keeps the stock prepare paths, silently.
+def _draft_prepare_fastpaths_supported() -> bool:
+    return current_platform.is_rocm()
+
+
 # Draft-prepare dedup: with multiple draft KV cache groups,
 # prepare_dflash_inputs runs once per group, but only the per-group outputs
 # (the query/context slot mappings against that group's block table, and the
@@ -44,9 +52,12 @@ logger = init_logger(__name__)
 # each call. The dedup computes the shared outputs on the first call only
 # and skips them on calls 2..N: bit-exact by construction (the skipped
 # stores would rewrite identical values into the same shared buffers).
-# VLLM_DISABLE_DRAFT_PREPARE_DEDUP=1 restores stock behavior.
-def _draft_prepare_dedup_disabled() -> bool:
-    return os.environ.get("VLLM_DISABLE_DRAFT_PREPARE_DEDUP", "0") == "1"
+# VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP=1 restores stock behavior.
+def _draft_prepare_dedup_armed() -> bool:
+    return (
+        _draft_prepare_fastpaths_supported()
+        and os.environ.get("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", "0") != "1"
+    )
 
 
 # dflash prepare pad-tail fix. The stock _prepare_dflash_inputs_kernel pads
@@ -68,9 +79,12 @@ def _draft_prepare_dedup_disabled() -> bool:
 # construction for every read-visible cell. The launch is eager (in
 # propose(), before graph replay), so no CUDA-graph capture constraints
 # apply to its grid or args.
-# VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX=1 restores the stock serial tail.
-def _dflash_prepare_pad_fix_disabled() -> bool:
-    return os.environ.get("VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX", "0") == "1"
+# VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1 restores the stock serial tail.
+def _dflash_prepare_pad_fix_armed() -> bool:
+    return (
+        _draft_prepare_fastpaths_supported()
+        and os.environ.get("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "0") != "1"
+    )
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -552,8 +566,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         # calls 2..N skip the shared outputs computed by call 1 (bit-exact
         # by construction).
         n_groups = len(self.draft_kv_cache_group_ids)
-        dedup = n_groups > 1 and not _draft_prepare_dedup_disabled()
-        if n_groups > 1:
+        fastpaths = _draft_prepare_fastpaths_supported()
+        dedup = n_groups > 1 and _draft_prepare_dedup_armed()
+        if n_groups > 1 and fastpaths:
             if dedup:
                 logger.warning_once(
                     "draft prepare dedup engaged: shared prepare_dflash_inputs "
@@ -565,33 +580,36 @@ class DFlashSpeculator(DraftModelSpeculator):
             else:
                 logger.warning_once(
                     "draft prepare dedup is DISABLED (env override "
-                    "VLLM_DISABLE_DRAFT_PREPARE_DEDUP=1); recomputing shared "
-                    "prepare_dflash_inputs outputs for every draft KV group"
+                    "VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP=1); recomputing "
+                    "shared prepare_dflash_inputs outputs for every draft KV "
+                    "group"
                 )
         # Hoist the serial per-group query-slot PAD tail out of
         # prepare_dflash_inputs into one parallel launch bounded by the
         # draft replay read range (the module-level comment has the
         # read-bound proof).
-        pad_fix = not _dflash_prepare_pad_fix_disabled()
-        if pad_fix:
-            logger.warning_once(
-                "dflash prepare pad fix engaged: per-group query-slot PAD "
-                "tail hoisted out of prepare_dflash_inputs into one "
-                "parallel kernel bounded by the draft replay read range "
-                "(set VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX=1 to disable)",
-                # scope="process": print once on every TP rank (the
-                # default "local" scope gates warning_once to the local
-                # first rank only).
-                scope="process",
-            )
-        else:
-            logger.warning_once(
-                "dflash prepare pad fix is DISABLED (env override "
-                "VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX=1); keeping the "
-                "stock per-group serial query-slot PAD tail in "
-                "prepare_dflash_inputs",
-                scope="process",
-            )
+        pad_fix = _dflash_prepare_pad_fix_armed()
+        if fastpaths:
+            if pad_fix:
+                logger.warning_once(
+                    "dflash prepare pad fix engaged: per-group query-slot PAD "
+                    "tail hoisted out of prepare_dflash_inputs into one "
+                    "parallel kernel bounded by the draft replay read range "
+                    "(set VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1 to "
+                    "disable)",
+                    # scope="process": print once on every TP rank (the
+                    # default "local" scope gates warning_once to the local
+                    # first rank only).
+                    scope="process",
+                )
+            else:
+                logger.warning_once(
+                    "dflash prepare pad fix is DISABLED (env override "
+                    "VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1); keeping "
+                    "the stock per-group serial query-slot PAD tail in "
+                    "prepare_dflash_inputs",
+                    scope="process",
+                )
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
             prepare_dflash_inputs(
                 self.input_buffers,
@@ -755,7 +773,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         return self.draft_tokens[:num_reqs]
 
 
-@triton.jit
+# do_not_specialize: q_pad_start varies with the live batch size, and
+# Triton's default int specialization (divisible-by-16) would JIT-compile
+# a new kernel variant mid-serving the first time the batch hits a
+# multiple of 16.
+@triton.jit(do_not_specialize=["q_pad_start"])
 def _pad_draft_query_slot_mappings_kernel(
     # [max_num_tokens] shared buffers: input ids, positions and the
     # padding mask get the same PAD values the in-kernel tail wrote.
