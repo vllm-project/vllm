@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
+    _weights_host_resident,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
@@ -382,6 +383,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 block_shape=self.block_shape,
                 ignore_invalid_experts=skip_invalid,
+                weights_host_resident=_weights_host_resident(w1, w2),
             )
         )
 

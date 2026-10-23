@@ -1101,6 +1101,14 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
             return None
+        return self._apply_output_transform(logits)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(self.lm_head.weight.dtype)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        return self._apply_output_transform(logits)
+
+    def _apply_output_transform(self, logits: torch.Tensor) -> torch.Tensor:
         if logits.dtype != torch.float32:
             logits = logits.to(torch.float32)
         if self.mul_tanh_soft_cap is not None:
