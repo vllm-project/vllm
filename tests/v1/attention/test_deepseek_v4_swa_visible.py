@@ -25,6 +25,7 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWAIndexBatch,
     DeepseekSparseSWAMetadataBuilder,
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
@@ -886,3 +887,166 @@ def test_dspark_noncausal_draft_decode_update_matches_build():
     assert md.decode_swa_width == builder.noncausal_index_width
     torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
     torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)
+
+
+def run_step_builds(
+    builders: list[DeepseekSparseSWAMetadataBuilder],
+    seq_lens: list[int],
+    query_lens: list[int],
+):
+    """Build every group's metadata for one step.
+
+    Mirrors ``build_attn_metadata``: the query and seq-len tensors are shared
+    across groups, the token-to-request cache threads from group to group,
+    and each group has its own slot mapping and block table. The first token
+    is padded (slot -1) so the invalid-token path of the decode kernel runs.
+    """
+    device = torch.device("cuda")
+    query_start_loc, seq_lens_t, _, _, _ = make_batch(seq_lens, query_lens, device)
+    t2r_cache = None
+    for g, builder in enumerate(builders):
+        _, _, _, slot_mapping, block_table = make_batch(seq_lens, query_lens, device)
+        slot_mapping = slot_mapping.clone()
+        slot_mapping[0] = -1
+        cm = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.cpu(),
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t.cpu(),
+            num_reqs=len(seq_lens),
+            num_actual_tokens=int(query_start_loc[-1]),
+            max_query_len=max(query_lens),
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table + 1000 * g,
+            slot_mapping=slot_mapping,
+            causal=True,
+            _token_to_req_indices_cache=t2r_cache,
+        )
+        builder.build(0, cm)
+        t2r_cache = cm._token_to_req_indices_cache
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("mix_prefill", [False, True])
+def test_batched_decode_indices_match_per_group_builds(mix_prefill):
+    """One staged launch fills each group's decode buffers exactly as the
+    per-group launches do."""
+    seq_lens = [30, 12, 45]
+    query_lens = [1, 1, 20] if mix_prefill else [1, 1, 1]
+    num_tokens = sum(query_lens)
+    builders = [make_builder(vision=False) for _ in range(3)]
+
+    run_step_builds(builders, seq_lens, query_lens)
+    expected = [
+        (
+            b.decode_swa_indices[:num_tokens].clone(),
+            b.decode_swa_lens[:num_tokens].clone(),
+            b.is_valid_token[:num_tokens].clone(),
+            b.prefill_swa_indices[:num_tokens].clone(),
+            b.prefill_swa_lens[:num_tokens].clone(),
+        )
+        for b in builders
+    ]
+
+    for b in builders:
+        b.decode_swa_indices[:num_tokens].fill_(-12345)
+        b.decode_swa_lens[:num_tokens].fill_(-7)
+        b.is_valid_token[:num_tokens].fill_(True)
+
+    batch = DeepseekSparseSWAIndexBatch(torch.device("cuda"))
+    for b in builders:
+        b.arm_index_batch(batch)
+    batch.begin()
+    run_step_builds(builders, seq_lens, query_lens)
+    batch.flush()
+
+    assert not batch.open
+    for b, (indices, lens, valid, prefill_indices, prefill_lens) in zip(
+        builders, expected
+    ):
+        assert torch.equal(b.decode_swa_indices[:num_tokens], indices)
+        assert torch.equal(b.decode_swa_lens[:num_tokens], lens)
+        assert torch.equal(b.is_valid_token[:num_tokens], valid)
+        assert torch.equal(b.prefill_swa_indices[:num_tokens], prefill_indices)
+        assert torch.equal(b.prefill_swa_lens[:num_tokens], prefill_lens)
+
+
+def make_stage_args(
+    device: torch.device, seq_lens: list[int], query_lens: list[int]
+) -> dict:
+    """Direct ``DeepseekSparseSWAIndexBatch.stage`` arguments for one group."""
+    query_start_loc, seq_lens_t, token_to_req, slot_mapping, block_table = make_batch(
+        seq_lens, query_lens, device
+    )
+    num_tokens = int(query_start_loc[-1])
+    return dict(
+        swa_indices=torch.zeros(
+            num_tokens, 1, WINDOW, dtype=torch.int32, device=device
+        ),
+        swa_lens=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        is_valid_token=torch.empty(num_tokens, dtype=torch.bool, device=device),
+        slot_mapping=slot_mapping,
+        block_table=block_table,
+        replay_start=torch.zeros(len(seq_lens), dtype=torch.int32, device=device),
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens_t,
+        token_to_req_indices=token_to_req,
+        window_size=WINDOW,
+        block_size=BLOCK_SIZE,
+        num_tokens=num_tokens,
+        num_valid_tokens=num_tokens,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_index_batch_flush_launches_and_refuses_divergent_shared_args():
+    """A staged group's flush matches the reference rows, and a group whose
+    shared arguments diverge refuses to stage."""
+    device = torch.device("cuda")
+    seq_lens = [30, 12]
+    query_lens = [1, 1]
+    batch = DeepseekSparseSWAIndexBatch(device)
+    batch.begin()
+    first = make_stage_args(device, seq_lens, query_lens)
+    batch.stage(**first)
+
+    with pytest.raises(ValueError, match="disagree on window_size"):
+        batch.stage(**{**first, "window_size": WINDOW + 1})
+
+    second = make_stage_args(device, seq_lens, query_lens)
+    second["query_start_loc"] = first["query_start_loc"]
+    second["token_to_req_indices"] = first["token_to_req_indices"]
+    with pytest.raises(ValueError, match="disagree on seq_lens"):
+        batch.stage(**second)
+
+    batch.flush()
+    assert not batch.open
+
+    rows, lens = ref_swa_slot_rows(
+        seq_lens,
+        query_lens,
+        [[], []],
+        first["block_table"],
+        WINDOW,
+        MAX_IMG,
+        WINDOW,
+    )
+    assert first["swa_lens"].cpu().tolist() == lens
+    assert first["swa_indices"][:, 0].cpu().tolist() == rows
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_armed_builder_launches_directly_outside_open_batch():
+    """An armed builder whose batch is closed keeps launching its own kernel."""
+    seq_lens = [30, 12]
+    query_lens = [1, 1]
+    armed = make_builder(vision=False)
+    reference = make_builder(vision=False)
+    armed.arm_index_batch(DeepseekSparseSWAIndexBatch(torch.device("cuda")))
+
+    md = build_metadata(armed, seq_lens, query_lens, None)
+    ref_md = build_metadata(reference, seq_lens, query_lens, None)
+
+    assert torch.equal(md.decode_swa_indices, ref_md.decode_swa_indices)
+    assert torch.equal(md.decode_swa_lens, ref_md.decode_swa_lens)
+    assert torch.equal(armed.is_valid_token, reference.is_valid_token)
