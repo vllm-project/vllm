@@ -69,7 +69,6 @@ from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
-from . import portion as _portion
 from .dev import (
     BLOCKS,
     CM_DEV,
@@ -264,9 +263,6 @@ class Build:
     eplb: int = 0  # M7: replica expert slots a rank (0 = plain EP); see mk/eplb.py
     xrs: bool = False  # TP8: o_proj and EP all-reduces as reduce-scatter to the block owner + all-gather (tp8 probe)
     unr: int = -1  # MoE task-loop ring (unroll 3, fixed slots; PF 2): 1 on, 0 off, -1 auto (on at W = 8, S = 8)
-    only: str = (
-        ""  # ablation: stage mask (mk/portion.py; "" = every stage, the shipped kernel)
-    )
     # #12 (W = 8, XRS, ONEPASS): the AB block owners compute the 4 norm partials of their block and send them with the
     # all-gather (peer region ssa4p); the per-CTA put4 hop goes away (bit-identical to the plain build)
     p12: bool = False
@@ -541,7 +537,6 @@ def build(key: Build):
         + ("_xrs" if key.xrs else "")
         + ("_u" if RING else "")
         + ("_p12" if key.p12 else "")
-        + _portion.name_tag(key.only)
         + (f"_q8x{key.s3q}" if key.s3q else "")
         + (f"_o8x{key.s3o}" if key.s3o else "")
         + (f"_fa{key.attn}{int(key.attn_olate)}" if key.attn else "")
@@ -563,11 +558,6 @@ def build(key: Build):
     # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
     assert not key.attn or VQK == VKV, key
     XRS = key.xrs
-    ONLY = _portion.stage_set(key.only, _portion.K3_STAGES, _portion.K3_DEPS)
-
-    def on(stage):  # stage active in this build (const at trace time)
-        return ONLY is None or stage in ONLY
-
     CPRX = BLOCKS // W  # xrs: CTA blocks a rank owns (owner of block b = b // CPRX)
 
     def peers_of(pl):
@@ -3393,94 +3383,87 @@ def build(key: Build):
         stamp(TL, tls, tid, 0)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        if const_expr(on("O")):
-            if const_expr(FA is not None and not key.attn_olate):
-                o_ops = o_loads(
-                    w_o, bid, lane, wave
-                )  # #10: the o_proj weights land during the attention
-            if const_expr(
-                FA is not None
-            ):  # S4 #8: attn_o is the fragment's descriptor; the real pointer comes back
-                attn_o = FA.run(
-                    attn_o,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    wave,
-                    sl.fa_.peek(),
-                    True,
-                    layer,
-                )
-                if const_expr(
-                    FA.AOT
-                ):  # stage O polls the tagged rows (no all-rows wait)
-                    attn_o, ao_t = attn_o
-            if const_expr(FA is None or key.attn_olate):
-                o_ops = o_loads(w_o, bid, lane, wave)
-            stage_o(
-                o_ops,
+        if const_expr(FA is not None and not key.attn_olate):
+            o_ops = o_loads(
+                w_o, bid, lane, wave
+            )  # #10: the o_proj weights land during the attention
+        if const_expr(
+            FA is not None
+        ):  # S4 #8: attn_o is the fragment's descriptor; the real pointer comes back
+            attn_o = FA.run(
                 attn_o,
-                attn_g,
-                g_stride,
-                pl,
                 tag,
+                health,
                 tid,
                 bid,
                 lane,
                 wave,
-                rank,
-                so.y.ptr,
-                so.red.ptr,
-                (ao_t, health) if (FA is not None and FA.AOT) else None,
+                sl.fa_.peek(),
+                True,
+                layer,
             )
+            if const_expr(
+                FA.AOT
+            ):  # stage O polls the tagged rows (no all-rows wait)
+                attn_o, ao_t = attn_o
+        if const_expr(FA is None or key.attn_olate):
+            o_ops = o_loads(w_o, bid, lane, wave)
+        stage_o(
+            o_ops,
+            attn_o,
+            attn_g,
+            g_stride,
+            pl,
+            tag,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            so.y.ptr,
+            so.red.ptr,
+            (ao_t, health) if (FA is not None and FA.AOT) else None,
+        )
         stamp(TL, tls, tid, 12)
-        if const_expr(on("AB")):
-            stage_ab(
-                own_peer,
-                scratch,
-                stream_pre,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                rl.rs.ptr,
-                tls,
-                pl,
-                rank,
-            )
+        stage_ab(
+            own_peer,
+            scratch,
+            stream_pre,
+            alpha_a,
+            beta_a,
+            w_pffn,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            rl.rs.ptr,
+            tls,
+            pl,
+            rank,
+        )
         stamp(TL, tls, tid, 13)
-        if const_expr(on("A")):
-            bias_v = stage_a(
-                0,
-                w_r,
-                bias,
-                w_pre,
-                scratch,
-                own_peer,
-                pl,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                rank,
-                sa.x.ptr,
-                sa.red.ptr,
-                sa.own.ptr,
-                tok,
-                tls,
-            )
-        else:
-            bias_v = [
-                ld_f32(bias, lane + 64 * i) for i in range(4)
-            ]  # stage A's bias read (route needs it)
+        bias_v = stage_a(
+            0,
+            w_r,
+            bias,
+            w_pre,
+            scratch,
+            own_peer,
+            pl,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            sa.x.ptr,
+            sa.red.ptr,
+            sa.own.ptr,
+            tok,
+            tls,
+        )
         q, hv, wv, t0, t1, last = front2(
             own_peer,
             bias_v,
@@ -3498,65 +3481,15 @@ def build(key: Build):
             bid,
             tls,
         )
-        if const_expr(on("h")):
-            load_h_norm(hv, wv, tid, lane, wave, sc_.h.ptr, tok)
+        load_h_norm(hv, wv, tid, lane, wave, sc_.h.ptr, tok)
         stamp(TL, tls, tid, 4)
-        if const_expr(on("gate_up")):
-            task = t0
-            it = fx.Int32(0)
-            if const_expr(UNR):
-                # ring: three tasks an iteration in fixed slots (q[0], q[1], qc): two tasks' loads stay in
-                # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
-                while task + 2 < t1:
-                    qc = gu_loads(w13, w13s, rt, task + 2, lane, wave, (task + 2) < t1)
-                    gu_compute(
-                        q[0],
-                        task,
-                        it,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sc_.h.ptr,
-                        sc_.red.ptr,
-                    )
-                    qa = gu_loads(w13, w13s, rt, task + 3, lane, wave, (task + 3) < t1)
-                    gu_compute(
-                        q[1],
-                        task + 1,
-                        it + 1,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sc_.h.ptr,
-                        sc_.red.ptr,
-                    )
-                    qb = gu_loads(w13, w13s, rt, task + 4, lane, wave, (task + 4) < t1)
-                    gu_compute(
-                        qc,
-                        task + 2,
-                        it + 2,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sc_.h.ptr,
-                        sc_.red.ptr,
-                    )
-                    q = [qa, qb]
-                    task = task + 3
-                    it = it + 3
-            while task < t1:
-                nxt = gu_loads(
-                    w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-                )
+        task = t0
+        it = fx.Int32(0)
+        if const_expr(UNR):
+            # ring: three tasks an iteration in fixed slots (q[0], q[1], qc): two tasks' loads stay in
+            # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
+            while task + 2 < t1:
+                qc = gu_loads(w13, w13s, rt, task + 2, lane, wave, (task + 2) < t1)
                 gu_compute(
                     q[0],
                     task,
@@ -3570,87 +3503,79 @@ def build(key: Build):
                     sc_.h.ptr,
                     sc_.red.ptr,
                 )
-                q = q[1:] + [nxt]
-                task = task + 1
-                it = it + 1
+                qa = gu_loads(w13, w13s, rt, task + 3, lane, wave, (task + 3) < t1)
+                gu_compute(
+                    q[1],
+                    task + 1,
+                    it + 1,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sc_.h.ptr,
+                    sc_.red.ptr,
+                )
+                qb = gu_loads(w13, w13s, rt, task + 4, lane, wave, (task + 4) < t1)
+                gu_compute(
+                    qc,
+                    task + 2,
+                    it + 2,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sc_.h.ptr,
+                    sc_.red.ptr,
+                )
+                q = [qa, qb]
+                task = task + 3
+                it = it + 3
+        while task < t1:
+            nxt = gu_loads(
+                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
+            )
+            gu_compute(
+                q[0],
+                task,
+                it,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                sc_.h.ptr,
+                sc_.red.ptr,
+            )
+            q = q[1:] + [nxt]
+            task = task + 1
+            it = it + 1
         stamp(TL, tls, tid, 5)
-        if const_expr(on("down")):
-            dq = [dn_loads(w2, w2s, w_post, rt, t0, lane, wave, t0 < t1)]
-            gpu.barrier()
-            u0 = t0 >> 8
-            u1 = last >> 8
-            dn_build_picks(rt, u0, u1, tid)
-            load_ac(scratch, tag, health, rt, False, sd.a.ptr, tid)
-            dq = dq + [
-                dn_loads(w2, w2s, w_post, rt, t0 + d, lane, wave, (t0 + d) < t1)
-                for d in range(1, PF_DN)
-            ]
-            if tid < 2 * S:
-                fx.ptr_store(fx.Float32(0.0), rt["ssacc"] + tid)
-            gpu.barrier()
-            stamp(TL, tls, tid, 6)
-            task = t0
-            it = fx.Int32(0)
-            tsplit = fx.min(t1, (u0 + 1) << 8)
-            if const_expr(UNRD):
-                while task + 2 < tsplit:
-                    dc = dn_loads(
-                        w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                    )
-                    dn_compute_c(
-                        dq[0],
-                        task,
-                        it,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    da = dn_loads(
-                        w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                    )
-                    dn_compute_c(
-                        dq[1],
-                        task + 1,
-                        it + 1,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    db = dn_loads(
-                        w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                    )
-                    dn_compute_c(
-                        dc,
-                        task + 2,
-                        it + 2,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    dq = [da, db]
-                    task = task + 3
-                    it = it + 3
-            while task < tsplit:
-                nxt = dn_loads(
-                    w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+        dq = [dn_loads(w2, w2s, w_post, rt, t0, lane, wave, t0 < t1)]
+        gpu.barrier()
+        u0 = t0 >> 8
+        u1 = last >> 8
+        dn_build_picks(rt, u0, u1, tid)
+        load_ac(scratch, tag, health, rt, False, sd.a.ptr, tid)
+        dq = dq + [
+            dn_loads(w2, w2s, w_post, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            for d in range(1, PF_DN)
+        ]
+        if tid < 2 * S:
+            fx.ptr_store(fx.Float32(0.0), rt["ssacc"] + tid)
+        gpu.barrier()
+        stamp(TL, tls, tid, 6)
+        task = t0
+        it = fx.Int32(0)
+        tsplit = fx.min(t1, (u0 + 1) << 8)
+        if const_expr(UNRD):
+            while task + 2 < tsplit:
+                dc = dn_loads(
+                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
                 )
                 dn_compute_c(
                     dq[0],
@@ -3666,69 +3591,69 @@ def build(key: Build):
                     sd.a.ptr,
                     sd.red.ptr,
                 )
-                dq = dq[1:] + [nxt]
-                task = task + 1
-                it = it + 1
-            dn_switch(scratch, tag, health, rt, tsplit, u0, u1, sd.a.ptr, tid)
-            if const_expr(UNRD):
-                while task + 2 < t1:
-                    dc = dn_loads(
-                        w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                    )
-                    dn_compute_c(
-                        dq[0],
-                        task,
-                        it,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    da = dn_loads(
-                        w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                    )
-                    dn_compute_c(
-                        dq[1],
-                        task + 1,
-                        it + 1,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    db = dn_loads(
-                        w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                    )
-                    dn_compute_c(
-                        dc,
-                        task + 2,
-                        it + 2,
-                        u0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        sd.a.ptr,
-                        sd.red.ptr,
-                    )
-                    dq = [da, db]
-                    task = task + 3
-                    it = it + 3
-            while task < t1:
-                nxt = dn_loads(
-                    w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+                da = dn_loads(
+                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
+                )
+                dn_compute_c(
+                    dq[1],
+                    task + 1,
+                    it + 1,
+                    u0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sd.a.ptr,
+                    sd.red.ptr,
+                )
+                db = dn_loads(
+                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
+                )
+                dn_compute_c(
+                    dc,
+                    task + 2,
+                    it + 2,
+                    u0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sd.a.ptr,
+                    sd.red.ptr,
+                )
+                dq = [da, db]
+                task = task + 3
+                it = it + 3
+        while task < tsplit:
+            nxt = dn_loads(
+                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+            )
+            dn_compute_c(
+                dq[0],
+                task,
+                it,
+                u0,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                sd.a.ptr,
+                sd.red.ptr,
+            )
+            dq = dq[1:] + [nxt]
+            task = task + 1
+            it = it + 1
+        dn_switch(scratch, tag, health, rt, tsplit, u0, u1, sd.a.ptr, tid)
+        if const_expr(UNRD):
+            while task + 2 < t1:
+                dc = dn_loads(
+                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
                 )
                 dn_compute_c(
                     dq[0],
@@ -3744,81 +3669,131 @@ def build(key: Build):
                     sd.a.ptr,
                     sd.red.ptr,
                 )
-                dq = dq[1:] + [nxt]
-                task = task + 1
-                it = it + 1
-            gpu.barrier()
-            if tid < 2 * S:
-                h2 = tid // S
-                tt = tid % S
-                u = u0 + h2
-                k = fx.ptr_load(rt["kof"] + (fx.min(u, NU - 1) * S + tt))
-                if ((h2 == 0) | (u1 != u0)) & (k >= 0):
-                    cf = (u * 256) // (t1 - t0)
-                    mb_put(
-                        tag,
-                        scratch + fx.Int64(lay["ss2"][0]),
-                        (tt * TOPK + k) * 256 + (bid - cf),
-                        fx.ptr_load(rt["ssacc"] + tid),
-                    )
+                da = dn_loads(
+                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
+                )
+                dn_compute_c(
+                    dq[1],
+                    task + 1,
+                    it + 1,
+                    u0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sd.a.ptr,
+                    sd.red.ptr,
+                )
+                db = dn_loads(
+                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
+                )
+                dn_compute_c(
+                    dc,
+                    task + 2,
+                    it + 2,
+                    u0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    sd.a.ptr,
+                    sd.red.ptr,
+                )
+                dq = [da, db]
+                task = task + 3
+                it = it + 3
+        while task < t1:
+            nxt = dn_loads(
+                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+            )
+            dn_compute_c(
+                dq[0],
+                task,
+                it,
+                u0,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                sd.a.ptr,
+                sd.red.ptr,
+            )
+            dq = dq[1:] + [nxt]
+            task = task + 1
+            it = it + 1
+        gpu.barrier()
+        if tid < 2 * S:
+            h2 = tid // S
+            tt = tid % S
+            u = u0 + h2
+            k = fx.ptr_load(rt["kof"] + (fx.min(u, NU - 1) * S + tt))
+            if ((h2 == 0) | (u1 != u0)) & (k >= 0):
+                cf = (u * 256) // (t1 - t0)
+                mb_put(
+                    tag,
+                    scratch + fx.Int64(lay["ss2"][0]),
+                    (tt * TOPK + k) * 256 + (bid - cf),
+                    fx.ptr_load(rt["ssacc"] + tid),
+                )
         stamp(TL, tls, tid, 7)
         # post_expert_proj weights in flight before the all-reduce wait (pp_early: before
         # the final stage's polls too)
-        if const_expr(key.pp_early and on("post")):
+        if const_expr(key.pp_early):
             ppo = pp_loads(w_pp, bid, lane, wave)
         gpu.barrier()
-        if const_expr(on("final")):
-            stage_final(scratch, part_out, tag, health, rt, tid, bid, lane, se.z.ptr)
-            final_push(scratch, part_out, pl, tag, rt, tid, bid, lane, se.z.ptr, rank)
-        if const_expr((not key.pp_early) and on("post")):
+        stage_final(scratch, part_out, tag, health, rt, tid, bid, lane, se.z.ptr)
+        final_push(scratch, part_out, pl, tag, rt, tid, bid, lane, se.z.ptr, rank)
+        if const_expr(not key.pp_early):
             ppo = pp_loads(w_pp, bid, lane, wave)
         stamp(TL, tls, tid, 8)
-        if const_expr(on("ar")):
-            ar_reduce(scratch, own_peer, tag, health, tid, bid, pl, rank)
+        ar_reduce(scratch, own_peer, tag, health, tid, bid, pl, rank)
         stamp(TL, tls, tid, 9)
-        if const_expr(on("post")):
-            post_proj(
-                ppo,
-                scratch,
-                own_peer,
-                pl,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                rank,
-                sf.mm.ptr,
-                sf.red.ptr,
-            )
+        post_proj(
+            ppo,
+            scratch,
+            own_peer,
+            pl,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            sf.mm.ptr,
+            sf.red.ptr,
+        )
         stamp(TL, tls, tid, 10)
-        if const_expr(on("QKV")):
-            if const_expr(S3Q):
-                qo = q8_loads(w_qkvg, bid, lane, wave, 0, QPF)
-            else:
-                qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
-        if const_expr(on("G")):
-            stage_g(
-                own_peer,
-                scratch,
-                0,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                stream_out,
-                xn_out,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                rl.rs.ptr,
-                tls,
-            )
+        if const_expr(S3Q):
+            qo = q8_loads(w_qkvg, bid, lane, wave, 0, QPF)
+        else:
+            qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
+        stage_g(
+            own_peer,
+            scratch,
+            0,
+            w_pff,
+            alpha,
+            beta,
+            w_in,
+            stream_out,
+            xn_out,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            rl.rs.ptr,
+            tls,
+        )
         stamp(TL, tls, tid, 11)
-        if const_expr(on("QKV") and S3Q):
+        if const_expr(S3Q):
             qo = qo + q8_loads(w_qkvg, bid, lane, wave, QPF, NQT)
             stage_qkv8(
                 qo,
@@ -3840,7 +3815,7 @@ def build(key: Build):
                 sq.red.ptr,
                 sq.own.ptr,
             )
-        elif const_expr(on("QKV")):
+        else:
             qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
             stage_qkv(
                 qo,
@@ -3857,7 +3832,7 @@ def build(key: Build):
                 sq.own.ptr,
             )
         stamp(TL, tls, tid, 14)
-        if const_expr(on("finish") and not S3_FUSE):
+        if const_expr(not S3_FUSE):
             head_finish(
                 scratch,
                 q_out,
@@ -3873,18 +3848,17 @@ def build(key: Build):
                 lane,
             )
         stamp(TL, tls, tid, 15)
-        if const_expr(on("route")):
-            if (bid == 0) & (tid < P):
-                bo.buffer_store(
-                    fx.ptr_load(rt["rid"] + tid),
-                    rsrc(scratch + fx.Int64(lay["route"][0])),
-                    tid,
-                )
-                bo.buffer_store(
-                    fx.ptr_load(rt["rw"] + tid),
-                    rsrc(scratch + fx.Int64(lay["route"][0])),
-                    P + tid,
-                )
+        if (bid == 0) & (tid < P):
+            bo.buffer_store(
+                fx.ptr_load(rt["rid"] + tid),
+                rsrc(scratch + fx.Int64(lay["route"][0])),
+                tid,
+            )
+            bo.buffer_store(
+                fx.ptr_load(rt["rw"] + tid),
+                rsrc(scratch + fx.Int64(lay["route"][0])),
+                P + tid,
+            )
         stamp_flush(TL, tls, tl, tid, bid, TL_POINTS)
 
     @traced
@@ -3906,28 +3880,24 @@ def build(key: Build):
         tls,
     ):
         ept = None
-        if const_expr(RB > 0 and on("route")):
+        if const_expr(RB > 0):
             ept = [ld_i32(rt["eptab"], lane + 64 * hh) for hh in range(E // 64)]
-        if const_expr(on("route")):
-            lgs_r = route_poll(own_peer, tag, health, lane, wave)
-            stage_route(
-                scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt, ept=ept
-            )
+        lgs_r = route_poll(own_peer, tag, health, lane, wave)
+        stage_route(
+            scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt, ept=ept
+        )
         stamp(TL, tls, tid, 3)
         nu = uniform(fx.ptr_load(rt["nu"] + 0))
         t0 = bid * nu
         t1 = t0 + nu
         last = t1 - 1
         q, hv, wv = [], None, None
-        if const_expr(on("gate_up")):
-            q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1)]
-        if const_expr(on("h")):
-            hv, wv = h_wait_issue(own_peer, w_pren, tag, health, tid, rank)
-        if const_expr(on("gate_up")):
-            q = q + [
-                gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
-                for d in range(1, PF_GU)
-            ]
+        q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1)]
+        hv, wv = h_wait_issue(own_peer, w_pren, tag, health, tid, rank)
+        q = q + [
+            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            for d in range(1, PF_GU)
+        ]
         return q, hv, wv, t0, t1, last
 
     # the kernel and its launcher: peer0 .. peer3 at W <= 4 (the TP4 signature, unchanged), peer0 .. peer7 at W = 8
@@ -4384,7 +4354,6 @@ def build_from_env(S=8, W=4, **over):
         eplb=_eplb_for(S),
         xrs=os.environ.get("MK_XRS", "0") == "1",
         unr=int(os.environ.get("MK_UNR", "-1")),
-        only=os.environ.get("MK_ONLY", ""),
         p12=os.environ.get("MK_P12", "1") == "1"
         and W == 8
         and os.environ.get("MK_XRS", "0") == "1"
@@ -4442,7 +4411,6 @@ def build_vllm(S=8, W=8, next_rope=True, **over):
         eplb=0,
         xrs=True,
         unr=-1,
-        only="",
         p12=True,
         s3q=19,
         s3o=1,
