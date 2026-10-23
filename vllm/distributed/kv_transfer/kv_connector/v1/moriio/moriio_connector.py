@@ -109,6 +109,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     is_full_attention_spec,
 )
@@ -620,6 +621,7 @@ class MoRIIOConnectorScheduler:
                 )
             if self.mode == MoRIIOMode.WRITE and any(
                 isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                and not isinstance(g.kv_cache_spec, SlidingWindowMLASpec)
                 for g in kv_cache_config.transfer_groups
             ):
                 raise NotImplementedError(
