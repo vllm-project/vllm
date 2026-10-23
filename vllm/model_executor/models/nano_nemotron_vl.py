@@ -1677,7 +1677,7 @@ class NemotronH_Nano_VL_V2(
             ):
                 image_sizes = [tuple(sizes_data)]
             else:
-                image_sizes = list(sizes_data)
+                image_sizes = list(sizes_data)  # type: ignore[arg-type]
 
             patch_counts = [
                 (height // patch_size) * (width // patch_size)

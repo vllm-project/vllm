@@ -12,7 +12,7 @@ from vllm.model_executor.models.parakeet import ProjectedParakeet
 
 
 def _make_lora_count_model() -> NemotronH_Nano_VL_V2:
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
     object.__setattr__(model, "downsample_ratio", 0.5)
     object.__setattr__(model, "num_image_token", 256)
     object.__setattr__(model, "patch_size", 16)
@@ -104,8 +104,14 @@ def test_parakeet_replaces_only_same_length_encoder_linears():
         model._replace_encoder_linears(prefix="sound_encoder.encoder")
 
     assert isinstance(model.encoder.subsampling.linear, _FakeReplicatedLinear)
-    assert isinstance(model.encoder.layer.q_proj, _FakeReplicatedLinear)
-    assert type(model.encoder.layer.relative_k_proj) is torch.nn.Linear
+    assert isinstance(
+        model.encoder.layer.q_proj,  # type: ignore[union-attr]
+        _FakeReplicatedLinear,
+    )
+    assert (
+        type(model.encoder.layer.relative_k_proj)  # type: ignore[union-attr]
+        is torch.nn.Linear
+    )
 
 
 def test_nano_nemotron_vl_fixed_image_lora_token_counts():
