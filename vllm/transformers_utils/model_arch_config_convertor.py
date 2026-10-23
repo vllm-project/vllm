@@ -845,3 +845,46 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
 }
+
+
+def register_model_arch_config_convertor(model_type: str):
+    """Register a model arch config convertor for an HF `model_type`.
+
+    vLLM derives architecture facts that are not plain HF config fields, such
+    as whether a model uses MLA (`is_deepseek_mla`), from built-in model type
+    lists. Out-of-tree models with their own `model_type` can register a
+    convertor to report these facts instead of reusing a built-in model type.
+
+    Args:
+        model_type: The HF config `model_type` the convertor handles.
+
+    Examples:
+
+        >>> from vllm.transformers_utils.model_arch_config_convertor import (
+        ...     ModelArchConfigConvertorBase,
+        ...     register_model_arch_config_convertor,
+        ... )
+        >>>
+        >>> @register_model_arch_config_convertor("my_mla_model")
+        ... class MyMLAModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        ...     def is_deepseek_mla(self) -> bool:
+        ...         return True
+    """
+
+    def _wrapper(convertor_cls):
+        if not issubclass(convertor_cls, ModelArchConfigConvertorBase):
+            raise ValueError(
+                "The model arch config convertor must be a subclass of "
+                "`ModelArchConfigConvertorBase`."
+            )
+        if model_type in MODEL_ARCH_CONFIG_CONVERTORS:
+            logger.warning(
+                "Model type `%s` already has a model arch config convertor, "
+                "which will be overwritten by `%s`.",
+                model_type,
+                convertor_cls,
+            )
+        MODEL_ARCH_CONFIG_CONVERTORS[model_type] = convertor_cls
+        return convertor_cls
+
+    return _wrapper

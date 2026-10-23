@@ -17,8 +17,10 @@ from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
     ModelArchConfigConvertorBase,
+    register_model_arch_config_convertor,
 )
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
@@ -496,3 +498,41 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
         conv = DeepseekV4ModelArchConfigConvertor(draft_cfg, draft_cfg)
         assert conv.get_architectures() == [draft_arch]
         assert draft_cfg.architectures == [draft_arch]
+
+
+def test_register_model_arch_config_convertor(monkeypatch: pytest.MonkeyPatch):
+    model_type = "custom_mla_model"
+    monkeypatch.delitem(MODEL_ARCH_CONFIG_CONVERTORS, model_type, raising=False)
+    hf_config = PretrainedConfig.from_dict(
+        {
+            "model_type": model_type,
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "kv_lora_rank": 512,
+            "qk_nope_head_dim": 128,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+        }
+    )
+    assert not ModelArchConfigConvertorBase(hf_config, hf_config).is_deepseek_mla()
+
+    @register_model_arch_config_convertor(model_type)
+    class CustomMLAModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        def is_deepseek_mla(self) -> bool:
+            return True
+
+    convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS[model_type]
+    assert convertor_cls is CustomMLAModelArchConfigConvertor
+    model_arch_config = convertor_cls(hf_config, hf_config).convert()
+
+    assert model_arch_config.is_deepseek_mla
+    assert model_arch_config.head_size == 512 + 64
+
+
+def test_invalid_model_arch_config_convertor():
+    with pytest.raises(ValueError):
+
+        @register_model_arch_config_convertor("invalid_model_type")
+        class InvalidModelArchConfigConvertor:
+            pass
