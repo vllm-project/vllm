@@ -8,13 +8,14 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -69,6 +70,13 @@ def map_w4a8_int8_backend(runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
     )
 
 
+class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
+    """W4A8 INT8 MoE backend selection for one deployment configuration."""
+
+    name = "W4A8 Int8"
+    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+
 def select_w4a8_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -95,60 +103,23 @@ def select_w4a8_int8_moe_backend(
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
-
-    def _make_log_backend(backend: W4A8Int8MoeBackend) -> str:
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using {backend.value} W4A8 Int8 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: W4A8Int8MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"W4A8 Int8 MoE backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"W4A8 Int8 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
-        backend: W4A8Int8MoeBackend,
-    ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
-        reason = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    oracle = W4A8Int8MoEKernelOracle(
+        config, weight_key, activation_key, activation_format
+    )
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_w4a8_int8_backend(runner_backend)
-        return _return_or_raise(requested_backend)
+        return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
+        kernel_cls, reason = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            return backend, kernel_cls
+        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No W4A8 Int8 MoE backend supports the deployment configuration."
@@ -325,18 +296,6 @@ def make_w4a8_int8_moe_kernel(
         Configured FusedMoEKernel instance
 
     """
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
     # Create Experts.
     # W4A8 Int8 currently only supports monolithic interface
     if not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic):
@@ -345,14 +304,4 @@ def make_w4a8_int8_moe_kernel(
             f"but got {experts_cls.__name__}"
         )
 
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-    )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
+    return make_moe_kernel(moe_quant_config, moe_config, experts_cls, routing_tables)

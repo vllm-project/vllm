@@ -129,7 +129,9 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
             return True, None
 
     monkeypatch.setattr(
-        nvfp4_oracle, "backend_to_kernel_cls", lambda backend: [SupportedExperts]
+        nvfp4_oracle.NvFp4MoEKernelOracle,
+        "backend_to_kernel_cls",
+        staticmethod(lambda backend: [SupportedExperts]),
     )
     moe_config = make_dummy_moe_config()
     moe_config.moe_backend = backend

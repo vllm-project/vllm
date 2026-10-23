@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -20,9 +20,6 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
@@ -31,6 +28,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
@@ -522,10 +523,6 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
     return quant_key_to_input_schema(activation_key)
 
 
-def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
-    return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-
 def _warn_on_bf16_fallback(
     backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
 ) -> None:
@@ -547,12 +544,11 @@ def _warn_on_bf16_fallback(
         )
 
 
-def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-    base = (
-        f"Mxfp4 MoE backend '{backend.value}' does not support the "
-        f"deployment configuration"
-    )
-    return f"{base} since {reason}." if reason else f"{base}."
+class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
+    """MXFP4 MoE backend selection for one deployment configuration."""
+
+    name = "Mxfp4"
+    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
 
 
 def _requested_kernel_cls(
@@ -561,12 +557,12 @@ def _requested_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Kernel classes for an explicitly requested backend. The LoRA-aware
     TRT-LLM experts are opt-in: "auto" keeps its current LoRA selection."""
-    candidates = backend_to_kernel_cls(backend)
+    candidates = Mxfp4MoEKernelOracle.backend_to_kernel_cls(backend)
     if not config.is_lora_enabled or backend not in TRTLLM_BACKENDS:
         return candidates
     if backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
         raise ValueError(
-            _make_log_unsupported(
+            Mxfp4MoEKernelOracle(config, kMxfp4Static).make_log_unsupported(
                 backend,
                 "expert LoRA is not supported with MXFP8 activations; use "
                 "moe_backend='flashinfer_trtllm'",
@@ -577,25 +573,6 @@ def _requested_kernel_cls(
     )
 
     return [TrtLlmMxfp4LoRAExperts, *candidates]
-
-
-def _return_or_raise(
-    backend: Mxfp4MoeBackend,
-    config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
-    activation_format: mk.FusedMoEActivationFormat,
-    scope: Literal["process", "global", "local"] = "local",
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-    reason: str | None = None
-    for k_cls in _requested_kernel_cls(backend, config):
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope=scope)
-            return backend, k_cls
-    raise ValueError(_make_log_unsupported(backend, reason))
 
 
 def _filter_by_activation(
@@ -673,6 +650,9 @@ def select_mxfp4_moe_backend(
                 f"moe_backend={runner_backend!r} does not support "
                 f"activation={requested_activation_key}"
             )
+        oracle = Mxfp4MoEKernelOracle(
+            config, kMxfp4Static, requested_activation_key, activation_format
+        )
         last_error: Exception | None = None
         for requested_backend in requested_backends:
             act_key = (
@@ -681,12 +661,10 @@ def select_mxfp4_moe_backend(
                 else _backend_activation_key(requested_backend)
             )
             try:
-                selected = _return_or_raise(
+                selected = oracle.return_or_raise(
                     requested_backend,
-                    config,
-                    kMxfp4Static,
-                    act_key,
-                    activation_format,
+                    kernel_classes=_requested_kernel_cls(requested_backend, config),
+                    activation_key=act_key,
                 )
             except ValueError as e:
                 last_error = e
@@ -702,6 +680,9 @@ def select_mxfp4_moe_backend(
     )
 
     unsupported_reasons = []
+    oracle = Mxfp4MoEKernelOracle(
+        config, kMxfp4Static, requested_activation_key, activation_format
+    )
     for backend in AVAILABLE_BACKENDS:
         # EMULATION takes the requested key, other backends use their own
         act_key = (
@@ -709,27 +690,19 @@ def select_mxfp4_moe_backend(
             if backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(backend)
         )
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, act_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                _warn_on_bf16_fallback(backend, requested_activation_key)
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
-                unsupported_reasons.append((backend, reason))
+        kernel_cls, reason = oracle.try_backend(backend, activation_key=act_key)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            _warn_on_bf16_fallback(backend, requested_activation_key)
+            return backend, kernel_cls
+        logger.debug_once(oracle.make_log_unsupported(backend, reason))
+        unsupported_reasons.append((backend, reason))
 
     if current_platform.is_xpu():
-        backend = Mxfp4MoeBackend.XPU
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
+        return oracle.return_or_raise(
             Mxfp4MoeBackend.XPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
+            kernel_classes=_requested_kernel_cls(Mxfp4MoeBackend.XPU, config),
+            activation_key=None,
         )
 
     unsupported_log = "; ".join(
@@ -776,14 +749,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
                 for b in requested_backends
             ]
         last_error: Exception | None = None
+        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None, activation_format)
         for requested_backend in requested_backends:
             try:
-                return _return_or_raise(
+                return oracle.return_or_raise(
                     requested_backend,
-                    config,
-                    kMxfp4Static,
-                    _backend_activation_key(requested_backend),
-                    activation_format,
+                    kernel_classes=_requested_kernel_cls(requested_backend, config),
+                    activation_key=_backend_activation_key(requested_backend),
                 )
             except ValueError as e:
                 last_error = e
@@ -804,17 +776,15 @@ def select_deepseek_v4_mxfp4_moe_backend(
         priority_backends = _get_priority_backends()
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
+    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None, activation_format)
     for backend in priority_backends:
-        activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        kernel_cls, reason = oracle.try_backend(
+            backend, activation_key=_backend_activation_key(backend)
+        )
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            return backend, kernel_cls
+        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No MXFP4 MoE backend supports the deployment configuration."
@@ -2274,39 +2244,10 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
-    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s",
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-    logger.info_once("Using %s", experts_cls.__name__)
-
-    # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
