@@ -30,9 +30,12 @@ def test_cross_layer_runtime_reuses_matching_sources():
     assert runtime.reuse_decode_topk(decode_key, is_index_source=True) is None
     runtime.cache_decode_topk(decode_key, decode_value)
     assert runtime.reuse_decode_topk(decode_key, is_index_source=False) is decode_value
+    ragged_value = (*decode_value, torch.zeros(4))
+    runtime.cache_decode_topk(("rocm", 1), ragged_value)
+    assert runtime.reuse_decode_topk(("rocm", 1), is_index_source=False) is ragged_value
     assert runtime.reuse_decode_topk((3, 1), is_index_source=False) is None
     assert runtime.reuse_decode_topk(decode_key, is_index_source=True) is None
-    assert runtime.decode_topk is None
+    assert not runtime.decode_topk
 
     prefill_key = (2, 2)
     prefill_value = (torch.zeros(8, 640), torch.ones(8))
@@ -45,7 +48,7 @@ def test_cross_layer_runtime_reuses_matching_sources():
     )
     assert runtime.reuse_prefill_indices((3, 2), is_index_source=False) is None
     assert runtime.reuse_prefill_indices(prefill_key, is_index_source=True) is None
-    assert runtime.prefill_indices is None
+    assert not runtime.prefill_indices
 
 
 def test_cross_layer_runtime_is_scoped_to_forward_context():

@@ -373,7 +373,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         top_k: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Combined top-k/SWA indices shared by one index-source group."""
-        key = (self.index_source_layer_id, self.compress_ratio)
+        key = self._cross_layer_prefill_key()
         runtime = get_cross_layer_runtime()
         cached = runtime.reuse_prefill_indices(key, self.is_index_source)
         if cached is not None:

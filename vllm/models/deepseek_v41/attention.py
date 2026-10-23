@@ -1230,6 +1230,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
 
+    def _cross_layer_decode_key(self) -> tuple[int, int]:
+        assert self.index_source_layer_id is not None
+        return (self.index_source_layer_id, self.compress_ratio)
+
+    def _cross_layer_prefill_key(self) -> tuple[int, int, str]:
+        assert self.index_source_layer_id is not None
+        assert self.compressed_cache_prefix is not None
+        return (
+            self.index_source_layer_id,
+            self.compress_ratio,
+            self.compressed_cache_prefix,
+        )
+
     def _decode_global_topk(
         self,
         swa_metadata: "DeepseekSparseSWAMetadata",
@@ -1242,10 +1255,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert swa_metadata.token_to_req_indices is not None
 
         runtime = get_cross_layer_runtime()
-        key = (self.index_source_layer_id, self.compress_ratio)
+        key = self._cross_layer_decode_key()
         cached = runtime.reuse_decode_topk(key, self.is_index_source)
         if cached is not None:
-            return cached
+            assert len(cached) == 2
+            return cast(tuple[torch.Tensor, torch.Tensor], cached)
 
         num_decode_tokens = swa_metadata.num_decode_tokens
         result = compute_global_topk_indices_and_lens(
