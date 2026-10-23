@@ -161,27 +161,34 @@ def test_commit_eplb_maps_for_layer():
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
 
 
-def test_load_window_keeps_logical_load_across_map_change(monkeypatch):
-    """Load recorded before a map change stays with the expert that received it."""
-    monkeypatch.setattr(eplb_state_module, "get_ep_group", MagicMock())
+def test_log_balancedness_from_logical_load(monkeypatch):
+    """Per-rank load is the logical load split evenly over each expert's replicas."""
+    ep_group = MagicMock()
+    ep_group.device_group.size.return_value = 2
+    ep_group.device_group.rank.return_value = 0
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: ep_group)
+    logger = MagicMock()
+    monkeypatch.setattr(eplb_state_module, "logger", logger)
     state = EplbState.__new__(EplbState)
-    state.expert_load_window_size = state.expert_rearrangement_step_interval = 3
+    state.parallel_config = MagicMock()
+    state.parallel_config.eplb_config.log_balancedness_interval = 1
+    state.expert_load_window_size = 1
+    state.expert_rearrangement_step_interval = 100
     state.expert_load_window_step = state.expert_rearrangement_step = 0
     state.is_async, state.should_record_tensor = False, None
-    phy2log = torch.tensor([[0, 1, 2, 0]])
+    # Rank 0 holds slots [e0, e1], rank 1 holds [e2, e0].
     model_state = _make_model_state(
-        phy2log=phy2log,
+        phy2log=torch.tensor([[0, 1, 2, 0]]),
         log2phy=torch.full((1, 3, 2), -1, dtype=torch.long),
-        logcnt=torch.zeros(1, 3, dtype=torch.long),
+        logcnt=torch.tensor([[2, 1, 1]]),
     )
-    model_state.expert_load_window_index = phy2log.clone()
-    model_state.expert_load_pass = torch.tensor([[1, 2, 3, 4]])
-    model_state.expert_load_window = torch.zeros((3, 1, 4), dtype=torch.long)
+    model_state.expert_load_pass = torch.tensor([[4, 2, 6]])
+    model_state.expert_load_window = torch.zeros((1, 1, 3), dtype=torch.long)
     state.model_states = {"m": model_state}
+    monkeypatch.setattr(state, "_sync_load_pass", lambda: [torch.tensor([[4, 2, 6]])])
 
-    state.step()
-    _commit_eplb_maps(model_state, torch.tensor([[2, 1, 0, -1]]))
-    model_state.expert_load_pass.copy_(torch.tensor([[1, 2, 3, 0]]))
-    state.step()
+    state.step(log_stats=True)
 
-    assert model_state.expert_load_window[..., :-1].sum(dim=0).tolist() == [[8, 4, 4]]
+    avg_tokens, max_tokens, balancedness = logger.info.call_args.args[3:6]
+    assert (avg_tokens, max_tokens, balancedness) == (6.0, 8.0, 0.75)
+    assert model_state.expert_load_window[0].tolist() == [[4, 2, 6]]

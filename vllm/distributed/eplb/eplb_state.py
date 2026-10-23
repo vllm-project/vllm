@@ -78,7 +78,7 @@ class EplbStats:
     global_expert_load_window: torch.Tensor
     """
     Experts load window.
-    Shape: (window_size, num_moe_layers, num_physical_experts)
+    Shape: (window_size, num_moe_layers, num_logical_experts)
     """
     num_replicas: int
     """
@@ -165,20 +165,17 @@ class EplbModelState:
     Expert load during this forward pass. 
     We use the token count each expert processes as the load.
 
-    Shape: (num_moe_layers, num_physical_experts)
+    Shape: (num_moe_layers, num_logical_experts)
     """
-    expert_load_pass_buffer: torch.Tensor
-    """Maximum-capacity buffer backing ``expert_load_pass``."""
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
 
-    Shape: (window_size, num_moe_layers, num_logical_experts + 1)
+    Shape: (window_size, num_moe_layers, num_logical_experts)
 
-    Recorded per logical expert so the history survives map changes. The last
-    column collects load from unused physical slots.
+    Recorded per logical expert so the history stays valid when the map changes.
 
-    NOTE: The expert_load_view now records load for all physical experts
+    NOTE: The expert_load_view now records load for all experts
     rather than just local experts. This ensures consistent load statistics
     across different dispatch methods (naive all-to-all, DeepEP).
     The recorded load will be multiplied by dp_size when using naive all-to-all
@@ -186,11 +183,6 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
-    expert_load_window_index: torch.Tensor
-    """``physical_to_logical_map`` with unused slots pointing at the last window
-    column, kept in sync with the map so recording a step stays cheap."""
-    last_expert_load: torch.Tensor
-    """Global logical-expert totals from the last reshuffle; equal demand initially."""
     model_name: str
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
@@ -446,18 +438,17 @@ class EplbState:
             .contiguous()
         )
 
-        expert_load_pass_buffer = torch.zeros(
-            (model.num_moe_layers, physical_expert_capacity),
+        expert_load_pass = torch.zeros(
+            (model.num_moe_layers, model.num_logical_experts),
             dtype=torch.int32,
             device=self.device,
         )
-        expert_load_pass = expert_load_pass_buffer[:, : model.num_physical_experts]
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
                 self.expert_load_window_size,
                 model.num_moe_layers,
-                model.num_logical_experts + 1,
+                model.num_logical_experts,
             ),
             dtype=torch.int32,
             device=self.device,
@@ -482,7 +473,7 @@ class EplbState:
         ]
 
         model.set_eplb_state(
-            expert_load_pass_buffer,
+            expert_load_pass,
             logical_to_physical_map,
             logical_replica_count,
         )
@@ -505,16 +496,7 @@ class EplbState:
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
             expert_load_pass=expert_load_pass,
-            expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
-            expert_load_window_index=_expert_load_window_index(
-                physical_to_logical_map, model.num_logical_experts
-            ),
-            last_expert_load=torch.ones(
-                (model.num_moe_layers, model.num_logical_experts),
-                dtype=torch.int64,
-                device=self.device,
-            ),
             model_name=model_config.model,
             model=model,
             expert_buffer=expert_buffer,
@@ -601,19 +583,20 @@ class EplbState:
             == 0
         ):
             # Sync the expert load pass for each model (main and drafter).
-            # expert_load_pass: (num_moe_layers, num_physical_experts)
+            # expert_load_pass: (num_moe_layers, num_logical_experts)
             expert_load_pass_list = self._sync_load_pass()
             ep_group = get_ep_group().device_group
             for expert_load_pass, eplb_model_state in zip(
                 expert_load_pass_list, self.model_states.values()
             ):
-                # num_tokens_per_rank: (num_moe_layers, num_ranks)
+                # Spread each expert's load evenly over its replicas.
+                phy2log = eplb_model_state.physical_to_logical_map
                 num_tokens_per_rank = (
-                    expert_load_pass.reshape(
-                        expert_load_pass.shape[0], ep_group.size(), -1
-                    )
+                    (expert_load_pass / eplb_model_state.logical_replica_count)
+                    .gather(-1, phy2log.clamp(min=0))
+                    .masked_fill(phy2log < 0, 0)
+                    .reshape(phy2log.shape[0], ep_group.size(), -1)
                     .sum(dim=-1)
-                    .float()
                 )
 
                 # Compute balancedness ratio:
@@ -652,11 +635,7 @@ class EplbState:
                 if should_record:
                     eplb_model_state.expert_load_window[
                         self.expert_load_window_step
-                    ].zero_().scatter_add_(
-                        -1,
-                        eplb_model_state.expert_load_window_index,
-                        eplb_model_state.expert_load_pass,
-                    )
+                    ].copy_(eplb_model_state.expert_load_pass)
                     eplb_model_state.expert_load_pass.zero_()
 
             if should_record:
@@ -764,7 +743,6 @@ class EplbState:
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
-        use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
         """Rearrange the experts according to the current load.
 
@@ -774,7 +752,6 @@ class EplbState:
                 no memory movement will be performed. Default is False.
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
-            use_last_expert_load: Use the last reshuffle's logical-expert totals.
 
         """
         ep_group = get_ep_group().device_group
@@ -794,19 +771,10 @@ class EplbState:
                 "(profile)" if is_profile else "",
             )
 
-        # Map the physical expert load to global logical experts
-        global_expert_load_windows = []
-        for eplb_model_state in self.model_states.values():
-            if use_last_expert_load:
-                # Distribute rank 0's saved counts through the existing all-reduce.
-                saved_load = eplb_model_state.last_expert_load
-                global_expert_load_windows.append(
-                    saved_load.clone() if is_main_rank else torch.zeros_like(saved_load)
-                )
-                continue
-            expert_load_window = eplb_model_state.expert_load_window
-            global_expert_load_window = expert_load_window[..., :-1].sum(dim=0)
-            global_expert_load_windows.append(global_expert_load_window)
+        global_expert_load_windows = [
+            eplb_model_state.expert_load_window.sum(dim=0)
+            for eplb_model_state in self.model_states.values()
+        ]
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
 
@@ -844,8 +812,6 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
-            if not is_profile:
-                eplb_model_state.last_expert_load = global_expert_load_window
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.
@@ -1046,7 +1012,7 @@ class EplbState:
             "All tensors must have the same shape[1]."
         )
         # Concatenate, all_reduce, then unpack to original shapes.
-        # We assume all tensors are 2D and shape[1] (num_physical_experts)
+        # We assume all tensors are 2D and shape[1] (num_logical_experts)
         # is the same across all models.
         shapes = [t.shape for t in tensor_list]
         concat_tensor = torch.cat(tensor_list, dim=0)
@@ -1104,9 +1070,6 @@ class EplbState:
         )
         eplb_model_state.expert_load_pass.zero_()
         physical_to_logical_map = eplb_model_state.physical_to_logical_map
-        eplb_model_state.expert_load_window_index = _expert_load_window_index(
-            physical_to_logical_map, eplb_model_state.model.num_logical_experts
-        )
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
             physical_to_logical_map.cpu(),
@@ -1133,25 +1096,19 @@ class EplbState:
         model_config: ModelConfig,
         num_physical_experts: int,
     ) -> None:
-        """Replace physical_to_logical_map and expert_load_pass with views
-        covering the new active size.
+        """Replace physical_to_logical_map with a view covering the new active
+        size.
         """
         model_state = self.model_states[model_config.compute_hash()]
         old_num_physical_experts = model_state.model.num_physical_experts
         first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
         physical_to_logical_map_buffer = model_state.physical_to_logical_map_buffer
-        expert_load_pass_buffer = model_state.expert_load_pass_buffer
         assert last_slot <= physical_to_logical_map_buffer.shape[1]
         expert_slots = slice(first_slot, last_slot)
         physical_to_logical_map_buffer[:, expert_slots].fill_(-1)
-        expert_load_pass_buffer[:, expert_slots].zero_()
         model_state.physical_to_logical_map = physical_to_logical_map_buffer[
             :, :num_physical_experts
         ]
-        model_state.expert_load_pass = expert_load_pass_buffer[:, :num_physical_experts]
-        model_state.expert_load_window_index = _expert_load_window_index(
-            model_state.physical_to_logical_map, model_state.model.num_logical_experts
-        )
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
@@ -1335,14 +1292,6 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
         dst.copy_(new_src)
 
 
-def _expert_load_window_index(
-    physical_to_logical_map: torch.Tensor, num_logical_experts: int
-) -> torch.Tensor:
-    return physical_to_logical_map.masked_fill(
-        physical_to_logical_map < 0, num_logical_experts
-    )
-
-
 def _commit_eplb_maps_for_layer(
     model_state: EplbModelState,
     new_physical_to_logical_map: torch.Tensor,
@@ -1366,9 +1315,6 @@ def _commit_eplb_maps_for_layer(
     dst.copy_(src, non_blocking=True)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    model_state.expert_load_window_index = _expert_load_window_index(
-        model_state.physical_to_logical_map, num_logical_experts
-    )
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
     _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
@@ -1405,9 +1351,6 @@ def _commit_eplb_maps(
     dst.copy_(src, non_blocking=True)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    model_state.expert_load_window_index = _expert_load_window_index(
-        model_state.physical_to_logical_map, num_logical_experts
-    )
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
     _pad_out_tensor(
