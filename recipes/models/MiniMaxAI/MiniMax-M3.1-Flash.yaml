@@ -2,7 +2,7 @@ meta:
   title: "MiniMax-M3.1-Flash"
   slug: "minimax-m3.1-flash"
   provider: "MiniMax"
-  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA GB200 or AMD MI355X, single node or prefill/decode disaggregated."
+  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X (single node or prefill/decode disaggregated), and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
   date_updated: 2026-10-23
   tasks:
@@ -24,6 +24,8 @@ model:
   docker_image:
     nvidia: "vllm/vllm-openai:minimax-m31-flash"
     amd: "vllm/vllm-openai-rocm:minimax-m31-flash"
+  install:
+    pip: false
   architecture: moe
   # From the model card (~428B total, 23B activated per token); the
   # safetensors headers count 427.05B (experts 413.1B, vision 0.9B).
@@ -34,8 +36,6 @@ model:
     # MSA's sparse_block_size is 128 — KV cache block size must match.
     - "--block-size"
     - "128"
-    - "--kv-cache-dtype"
-    - "nvfp4"
     - "--disable-hybrid-kv-cache-manager"
   base_env: {}
 
@@ -57,6 +57,9 @@ features:
     # fallback when no hardware_overrides.<gen> matches; both brands are
     # covered here).
     hardware_overrides:
+      # Not enabled on Hopper.
+      hopper:
+        args: []
       nvidia:
         args:
           - "--speculative-config"
@@ -90,24 +93,56 @@ variants:
     # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes +
     # 17.5 GB of other weights ≈ 444 GB, x 1.2 ≈ 533 GB.
     vram_minimum_gb: 533
-    description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. GB200 runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
+    description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. Blackwell runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
     hardware_overrides:
       # GB200 runs the NVFP4 experts natively: 413.1B x 0.53 bytes + 17.5 GB
       # ≈ 237 GB, x 1.2 ≈ 285 GB.
       gb200:
         vram_minimum_gb: 285
 
+  fp8:
+    # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
+    # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
+    # MXFP8 estimate above is used as an upper bound.
+    precision: fp8
+    supported_hardware:
+      - h100
+      - h200
+    vram_minimum_gb: 533
+    tp: 8
+    description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype": "fp8"}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+      - "--moe-backend"
+      - "marlin"
+      - "--max-model-len"
+      - "262144"
+      - "--max-num-seqs"
+      - "80"
+      - "--limit-mm-per-prompt"
+      - '{"video": 0}'
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--no-enable-log-requests"
+
 compatible_strategies:
   - single_node_tp
 
 strategy_overrides:
   single_node_tp:
-    # One GB200 tray, or half of an 8-GPU MI355X node.
+    # One GB200 tray, or half of an 8-GPU node; the fp8 variant sets TP8.
     tp: 4
 
 hardware_overrides:
-  nvidia:
+  blackwell:
     extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
       - "--attention-config"
       - '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}'
       - "--compilation-config"
@@ -116,6 +151,8 @@ hardware_overrides:
       VLLM_FLOAT32_MATMUL_PRECISION: "high"
   amd:
     extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
       - "--attention-config"
       - '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}'
       - "--quantization-config.moe"
@@ -142,8 +179,10 @@ guide: |
   ## Prerequisites
 
   - **AMD:** MI355X (gfx950), ROCm 7.2+, TP4.
-  - **NVIDIA:** GB200 (Blackwell), TP4 on half a node; NVFP4 MoE runs natively
-    on the FP4 tensor cores.
+  - **NVIDIA Blackwell:** GB200, GB300, B200 or B300, TP4; NVFP4 MoE runs
+    natively on the FP4 tensor cores.
+  - **NVIDIA Hopper:** H100 or H200, TP8 on a full node, with the FP8
+    variant: FP8 KV and indexer caches, NVFP4 MoE on Marlin.
   - **`--block-size 128` is mandatory** (MSA sparse/index cache).
 
   ## Launching the Server
@@ -190,6 +229,33 @@ guide: |
     `--quantization-config.moe` override is needed.
   - `use_prefill_query_quantization` quantizes the prefill query on the MSA
     indexer path (Q8KV4).
+
+  ### Single node (TP8, NVIDIA H100 / H200)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --tensor-parallel-size 8 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype fp8 \
+    --attention-config '{"indexer_kv_dtype": "fp8"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --max-model-len 262144 \
+    --max-num-seqs 80 \
+    --limit-mm-per-prompt '{"video": 0}' \
+    --gpu-memory-utilization 0.9 \
+    --no-enable-log-requests \
+    --disable-hybrid-kv-cache-manager \
+    --moe-backend marlin \
+    --enable-auto-tool-choice \
+    --tool-call-parser minimax_m3
+  ```
+
+  - Hopper has no FP4 tensor cores: the KV cache and the indexer K cache use
+    FP8, and the NVFP4 experts run on the Marlin MoE kernel.
+  - `--limit-mm-per-prompt '{"video": 0}'` turns off video inputs; images
+    still work.
+  - DSpark speculative decoding is not enabled on Hopper.
 
   ### Prefill/decode disaggregation (1P1D, TP4 + TP4, AMD MI355X)
 
