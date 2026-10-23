@@ -87,11 +87,24 @@ async def abort_requests(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail=f"JSON decode error: {e}",
         ) from e
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Request body must be a JSON object",
+        )
     request_ids = body.get("request_ids")
     if request_ids is None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'request_ids' in request body",
+        )
+    if not isinstance(request_ids, str) and not (
+        isinstance(request_ids, list)
+        and all(isinstance(req_id, str) for req_id in request_ids)
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="'request_ids' must be a string or a list of strings",
         )
     # Abort requests in background
     asyncio.create_task(engine_client(raw_request).abort(request_ids))
