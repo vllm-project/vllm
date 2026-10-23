@@ -60,6 +60,7 @@ def _host_prop(numa_node: int | None) -> driver.CUmemAllocationProp:
 
 
 def _check_device_support(device: int) -> None:
+    _check(driver.cuInit(0))
     cu_device = _check(driver.cuDeviceGet(device))
     for attribute in _REQUIRED_ATTRIBUTES:
         if not _check(driver.cuDeviceGetAttribute(attribute, cu_device)):

@@ -343,6 +343,8 @@ def test_hisparse_shared_host_pool_is_shared_only_with_tp_ranks(tmp_path):
     try:
         shared_host_pool._check_device_support(0)
     except RuntimeError as e:
+        if "does not support" not in str(e):
+            raise
         pytest.skip(str(e))
     ctx = torch.multiprocessing.get_context("spawn")
     results = ctx.Queue()
