@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 class MTPSpeculatorConfig(EagleSpeculatorConfig):
-    builtin_method = "mtp"
+    base_method = "mtp"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
     supported_options = frozenset({"index_share_for_mtp_iteration"})
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "target_opt_in"

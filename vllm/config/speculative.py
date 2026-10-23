@@ -1264,7 +1264,7 @@ class SpeculativeConfig:
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
         if self.method is None:
-            self.method = config_cls.builtin_method  # type: ignore[assignment]
+            self.method = config_cls.base_method  # type: ignore[assignment]
         # The draft checkpoint may have determined the speculator.
         config_cls = get_speculator_config_class(self)
 
@@ -1298,13 +1298,13 @@ class SpeculativeConfig:
         return get_speculator_config_class(self)(self)
 
     @property
-    def builtin_method(self) -> str | None:
+    def base_method(self) -> str | None:
         """`method`, or for a custom method, the built-in method its config is
         based on. Use this (or the `use_*` methods) to check for a method, so
         that custom speculators based on built-in ones are treated like them.
         """
         custom_cls = get_custom_speculator_config_class(self.method)
-        return self.method if custom_cls is None else custom_cls.builtin_method
+        return self.method if custom_cls is None else custom_cls.base_method
 
     # Shortcuts for commonly used speculator config properties.
 
@@ -1705,7 +1705,7 @@ class SpeculativeConfig:
 
     def use_gemma4_mtp(self) -> bool:
         return (
-            self.builtin_method == "mtp"
+            self.base_method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
@@ -1713,7 +1713,7 @@ class SpeculativeConfig:
 
     def use_step3p5_mtp(self) -> bool:
         return (
-            self.builtin_method == "mtp"
+            self.base_method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "step3p5_mtp"
@@ -1723,7 +1723,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.builtin_method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.base_method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token.
@@ -1748,16 +1748,16 @@ class SpeculativeConfig:
         )
 
     def use_dflash(self) -> bool:
-        return self.builtin_method == "dflash"
+        return self.base_method == "dflash"
 
     def use_dspark(self) -> bool:
-        return self.builtin_method == "dspark"
+        return self.base_method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
-        return self.builtin_method == "draft_model"
+        return self.base_method == "draft_model"
 
     def uses_draft_kv_cache(self) -> bool:
         return (
@@ -1767,16 +1767,16 @@ class SpeculativeConfig:
         )
 
     def uses_extract_hidden_states(self) -> bool:
-        return self.builtin_method == "extract_hidden_states"
+        return self.base_method == "extract_hidden_states"
 
     def use_ngram_gpu(self) -> bool:
-        return self.builtin_method == "ngram_gpu"
+        return self.base_method == "ngram_gpu"
 
     def use_ngram(self) -> bool:
-        return self.builtin_method in ("ngram", "ngram_gpu")
+        return self.base_method in ("ngram", "ngram_gpu")
 
     def use_multi_module_mtp(self) -> bool:
-        if self.builtin_method != "mtp" or self.draft_model_config is None:
+        if self.base_method != "mtp" or self.draft_model_config is None:
             return False
         num_mtp_layers = getattr(
             self.draft_model_config.hf_config, "num_nextn_predict_layers", 1

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ExtractHiddenStatesSpeculatorConfig(SpeculatorConfig):
-    builtin_method = "extract_hidden_states"
+    base_method = "extract_hidden_states"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.extract_hidden_states."
         "ExtractHiddenStatesSpeculator"

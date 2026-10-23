@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class DraftModelSpeculatorConfig(CheckpointSpeculatorConfig):
     """A speculator that drafts autoregressively with its own draft model."""
 
-    builtin_method = "draft_model"
+    base_method = "draft_model"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
     )

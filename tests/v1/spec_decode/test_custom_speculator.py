@@ -98,7 +98,7 @@ def test_custom_speculator(register, lazy: bool):
 
     # The configured name is kept.
     assert spec_config.method == "dummy"
-    assert spec_config.builtin_method is None
+    assert spec_config.base_method is None
     assert type(spec_config.speculator_config) is DummySpeculatorConfig
 
     config = VllmConfig()
@@ -119,7 +119,7 @@ def test_custom_speculator_inherits_builtin_config(register):
 
     # Set up and behaves as the built-in speculator, but builds the custom one.
     assert spec_config.method == "my_ngram"
-    assert spec_config.builtin_method == "ngram_gpu"
+    assert spec_config.base_method == "ngram_gpu"
     assert spec_config.use_ngram_gpu()
     assert spec_config.prompt_lookup_min == spec_config.prompt_lookup_max == 5
     assert spec_config.speculator_config.needs_dense_token_history
@@ -298,7 +298,7 @@ def test_resolve_checkpoint_config_class(method, model, declared, model_type, ex
         spec, configured_cls
     )
 
-    assert resolved_cls.builtin_method == (expected or method)
+    assert resolved_cls.base_method == (expected or method)
 
 
 @pytest.mark.parametrize(
