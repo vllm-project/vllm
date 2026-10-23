@@ -82,6 +82,29 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
+## Prometheus metrics
+
+The following Prometheus metrics are exported when MooncakeConnector is active, each with the standard `model_name` and `engine` labels:
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:mooncake_xfer_time_seconds` | Histogram | Per-transfer copy duration (seconds). |
+| `vllm:mooncake_bytes_transferred` | Histogram | Bytes moved per transfer. |
+| `vllm:mooncake_num_descriptors` | Histogram | Descriptor count per transfer. |
+| `vllm:mooncake_num_failed_transfers` | Counter | Cumulative count of failed KV-block transfers. |
+| `vllm:mooncake_num_failed_recvs` | Counter | Cumulative count of failed KV-block receives. |
+| `vllm:mooncake_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+
+!!! note
+    Mooncake is push-based: the prefiller (P) performs the transfer, so the
+    three histograms are only populated on P instances, while the decoder (D)
+    reports only the failures it observes.
+
+!!! tip
+    High `vllm:mooncake_num_kv_expired_reqs` indicates that the prefiller's
+    lease duration is too short for your network or workload. Increase it via
+    `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:

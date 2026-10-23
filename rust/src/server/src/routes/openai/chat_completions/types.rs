@@ -8,17 +8,18 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_with::SerializeDisplay;
+use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
-    StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage,
-    default_true, deserialize_request_top_k, validate_messages, validate_stop,
+    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
+    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
+    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
     validate_top_p_value,
 };
 
@@ -28,6 +29,7 @@ use crate::routes::openai::utils::types::{
 /// the request type route-owned so we can add vLLM-only fields directly instead
 /// of layering wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
 pub struct ChatCompletionRequest {
@@ -49,6 +51,7 @@ pub struct ChatCompletionRequest {
 
     /// Whether to return log probabilities of the output tokens
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub logprobs: bool,
 
     /// An integer specifying the number of most likely tokens to return
@@ -88,6 +91,7 @@ pub struct ChatCompletionRequest {
 
     /// If set, partial message deltas will be sent
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
 
     /// Options for streaming response
@@ -119,8 +123,8 @@ pub struct ChatCompletionRequest {
 
     // -------- vLLM Sampling Parameters --------
     /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`.
+    pub watermarking: Option<bool>,
 
     /// Use beam search instead of sampling
     #[serde(default)]
@@ -247,6 +251,14 @@ pub struct ChatCompletionRequest {
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
 
+    /// Include the chat-templated prompt string in the response. Not supported
+    /// yet.
+    pub return_prompt_text: Option<bool>,
+
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -299,7 +311,7 @@ impl Default for ChatCompletionRequest {
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,
-            watermarking: true,
+            watermarking: None,
             use_beam_search: false,
             top_k: None,
             min_p: None,
@@ -332,6 +344,8 @@ impl Default for ChatCompletionRequest {
             session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
+            return_prompt_text: None,
+            return_weight_versions: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -365,11 +379,15 @@ pub(super) struct ChatCompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
     pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None` until `return_prompt_text` is supported.
+    pub prompt_text: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
 }
@@ -383,6 +401,11 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
+    /// Always `None`.
+    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Always `None` until `return_weight_versions` is supported.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// A literal type for the "assistant" role, since the API only allows that
@@ -401,6 +424,11 @@ impl fmt::Display for AssistantRole {
 pub(super) struct ChatCompletionMessage {
     pub role: AssistantRole,
     pub content: Option<String>,
+    // OpenAI fields the Rust frontend never produces; always `None`.
+    pub refusal: Option<String>,
+    pub annotations: Option<Value>,
+    pub audio: Option<Value>,
+    pub function_call: Option<FunctionCallResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
@@ -457,15 +485,17 @@ pub(super) struct ChatMessageDelta {
 fn validate_chat_cross_parameters(
     req: &ChatCompletionRequest,
 ) -> Result<(), validator::ValidationError> {
-    // 1. Validate logprobs dependency
-    if req.top_logprobs.is_some() && !req.logprobs {
+    // 1. Validate logprobs dependency. Like Python, `top_logprobs: 0` (the
+    // OpenAI default) does not request any alternatives, so it is allowed
+    // without `logprobs`.
+    if req.top_logprobs.is_some_and(|n| n != 0) && !req.logprobs {
         let mut e = validator::ValidationError::new("top_logprobs_requires_logprobs");
         e.message = Some("top_logprobs is only allowed when logprobs is enabled".into());
         return Err(e);
     }
 
     // 2. Validate stream_options dependency
-    if req.stream_options.is_some() && !req.stream {
+    if req.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !req.stream {
         let mut e = validator::ValidationError::new("stream_options_requires_stream");
         e.message = Some("stream_options can only be used when stream is true".into());
         return Err(e);
@@ -500,4 +530,30 @@ fn validate_chat_cross_parameters(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::ChatCompletionRequest;
+
+    /// Python declares these fields `bool | None`, so an explicit `null` means
+    /// the same as omitting the field.
+    #[test]
+    fn nullable_booleans_treat_null_as_omitted() {
+        let base = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let omitted: ChatCompletionRequest = serde_json::from_value(base.clone()).unwrap();
+        for field in ["logprobs", "stream", "watermarking"] {
+            let mut body = base.clone();
+            body[field] = Value::Null;
+            let request: ChatCompletionRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("`{field}: null` rejected: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::to_value(&omitted).unwrap(),
+                "`{field}: null`"
+            );
+        }
+    }
 }
