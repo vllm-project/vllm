@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from typing import Any, ClassVar, cast
 
 import torch
@@ -42,6 +43,10 @@ class ModelSpecificAttnMetadata:
 class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
+
+    cudagraph_variant: Hashable = None
+    """The forward variant of the current batch (set by `prepare_inputs`), or of
+    the dummy batch being captured (set by the CUDA graph manager)."""
 
     def __init__(
         self,
@@ -142,6 +147,11 @@ class ModelState(ABC):
     ) -> None:
         """Capture the CUDA graphs this state runs inside the model's forward."""
         return None
+
+    def cudagraph_variants(self) -> tuple[Hashable, ...]:
+        """Forward variants that each need their own FULL CUDA graphs, e.g. a
+        model whose depth depends on the batch. Most models have one."""
+        return (None,)
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside

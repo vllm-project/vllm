@@ -609,6 +609,16 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        # FULL graphs per ModelState.cudagraph_variant; one entry for most models.
+        self._variant_graphs: dict[
+            Hashable, dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph]
+        ] = {None: self.graphs}
+        self._model_state: ModelState | None = None
+
+    def release_graphs(self) -> None:
+        for graphs in self._variant_graphs.values():
+            graphs.clear()
+        super().release_graphs()
 
     def capture(
         self,
@@ -785,12 +795,22 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        variants = model_state.cudagraph_variants()
+        if variants == (None,):
+            super().capture(create_forward_fn, progress_bar_desc)
+            return
+        self._model_state = model_state
+        for variant in variants:
+            model_state.cudagraph_variant = variant
+            self.graphs = self._variant_graphs.setdefault(variant, {})
+            super().capture(create_forward_fn, f"{progress_bar_desc} [{variant}]")
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
+        if self._model_state is not None:
+            self.graphs = self._variant_graphs[self._model_state.cudagraph_variant]
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
@@ -1001,7 +1021,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # extrapolated total. FULL and PIECEWISE share one pool here just as
             # they share the global pool at runtime, so the overlap is not
             # double-counted.
-            num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
+            num_full_graphs = len(
+                manager._capture_descs.get(CUDAGraphMode.FULL, [])
+            ) * len(runner.model_state.cudagraph_variants())
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
             return max(measured - sum(mem_samples) + full_estimate, 0)
         finally:

@@ -535,6 +535,18 @@ class InputProcessor:
                     )
                 )
 
+        cache_salt = decoder_input.get("cache_salt")
+        if sampling_params is not None and sampling_params.extra_args:
+            # Models whose computation depends on a per-request setting (e.g. the
+            # number of recurrent loops) validate it here and keep requests with
+            # different settings out of each other's prefix-cache blocks.
+            salt_fn = getattr(self.model_config.hf_config, "request_cache_salt", None)
+            if callable(salt_fn):
+                try:
+                    cache_salt = salt_fn(sampling_params.extra_args, cache_salt)
+                except ValueError as e:
+                    raise VLLMValidationError(str(e), parameter="extra_args") from e
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -545,7 +557,7 @@ class InputProcessor:
             pooling_params=pooling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            cache_salt=decoder_input.get("cache_salt"),
+            cache_salt=cache_salt,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
