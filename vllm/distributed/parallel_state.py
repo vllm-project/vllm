@@ -477,6 +477,13 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import (
+            get_cpu_distributed_timeout_or_none,
+            get_distributed_timeout_or_none,
+        )
+
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
@@ -490,12 +497,6 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import (
-                get_cpu_distributed_timeout_or_none,
-                get_distributed_timeout_or_none,
-            )
-
-            timeout = get_cpu_distributed_timeout_or_none()
             device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
@@ -508,7 +509,7 @@ class GroupCoordinator:
                 # processes through the CPU.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=timeout
+                        ranks, backend="gloo", timeout=self.cpu_timeout
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -1379,7 +1380,7 @@ class GroupCoordinator:
 
     def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
         """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
-        return cpu_all_reduce_(tensor, self.cpu_group)
+        return cpu_all_reduce_(tensor, self.cpu_group, self.cpu_timeout)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""

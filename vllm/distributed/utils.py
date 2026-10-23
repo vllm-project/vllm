@@ -59,12 +59,18 @@ def ensure_divisibility(numerator, denominator):
 _CPU_ALL_REDUCE_TAG_BASE = 27100
 
 
-def cpu_all_reduce_(tensor: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
+def cpu_all_reduce_(
+    tensor: torch.Tensor,
+    group: ProcessGroup,
+    timeout: timedelta | None = None,
+) -> torch.Tensor:
     """Low-latency in-place SUM all-reduce of a small CPU tensor over a gloo group.
 
     Recursive doubling within power-of-two blocks, then one concurrent exchange
     between blocks. Results are bitwise identical across ranks. Works with
     stateless (unregistered) process groups.
+
+    `timeout` bounds each p2p wait; None means no timeout.
     """
     world_size = group.size()
     if world_size == 1:
@@ -74,6 +80,8 @@ def cpu_all_reduce_(tensor: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
     if tensor.device.type != "cpu" or not tensor.is_contiguous():
         torch.distributed.all_reduce(tensor, group=group)
         return tensor
+
+    timeout = timeout or timedelta(0)
 
     rank = group.rank()
     tag = _CPU_ALL_REDUCE_TAG_BASE
@@ -88,8 +96,8 @@ def cpu_all_reduce_(tensor: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
             # Wait for both ops before touching either buffer.
             recv_work = group.recv([scratch], peer, tag)
             send_work = group.send([tensor], peer, tag)
-            recv_work.wait()
-            send_work.wait()
+            recv_work.wait(timeout)
+            send_work.wait(timeout)
             tensor.add_(scratch)
             mask <<= 1
             tag += 1
@@ -110,7 +118,7 @@ def cpu_all_reduce_(tensor: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
             if b != my_block:
                 works.append(group.send([tensor], b * block_size + lane, tag))
         for work in works:
-            work.wait()
+            work.wait(timeout)
         # Sum in block order so every rank computes the identical result.
         total = block_sums[0]
         for buf in block_sums[1:]:
