@@ -25,7 +25,7 @@ pull_request_rules:
       add:
         - recipe
     comment:
-      message: "Recipe preview (rebuilt within ~15 minutes of each push): https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
+      message: "Recipe preview (built for authors CI trusts, or once the PR is labeled `ready`; the page says which commit it shows): https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
 
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
