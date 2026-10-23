@@ -58,11 +58,11 @@ padding: no split, zero output rows, their flags still set), 9 the softmax scale
 fp32 bits. A fragment's descriptor is row `layer` of a table of TABLE_ROWS rows.
 """
 
-import math
 from types import SimpleNamespace
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
@@ -92,7 +92,6 @@ from .dev import (
 HKV, QPK, HD, BS, TILE, NQ = 2, 8, 64, 16, 64, 8
 NH = HKV * QPK
 WIN_SWA = 2048  # vLLM's window (2047, 0) -> keys qpos - key < 2048
-LOG2E = 1.0 / math.log(2.0)
 KP = 72  # LDS row stride of a K / V tile (bf16)
 KPW = KP // 2
 NEG = float("-inf")
@@ -484,7 +483,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                             (seg * 64 + m_row) * 2,
                             cache_modifier=CM_DEV,
                         )
-                rocdl.s_waitcnt(0)
+                rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
                 gpu.barrier()
                 if tid == 0:
                     mb_put(tag, d.part + fx.Int64(P_SF), grp * CPG + jseg, fx.Int32(1))
@@ -612,7 +611,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                     w2[0],
                     w2[1],
                 )
-                rocdl.s_waitcnt(0)
+                rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
                 if tt == 0:
                     mb_put(tag, d.part + fx.Int64(P_IF), item, fx.Int32(1))
 

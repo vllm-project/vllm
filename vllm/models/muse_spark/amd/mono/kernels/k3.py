@@ -52,12 +52,12 @@ Peer regions are double buffered by tag parity; tag = epoch * 64 + layer + 1 wit
 epoch bumped in lockstep by every rank once per forward.
 """
 
-import math
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
@@ -111,7 +111,6 @@ W = 8  # ranks in the TP = EP group
 ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
 POST_EPS = 1e-8
-LOG2E = 1.0 / math.log(2.0)
 XPAD = 8
 HROW = DM + XPAD
 AROW = INTER + XPAD
@@ -608,7 +607,7 @@ def build(key: Build):
                     idx,
                     cache_modifier=CM_SYS,
                 )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             fidx = (par * W + rank) * BLOCKS + bid
@@ -1353,7 +1352,7 @@ def build(key: Build):
                 (tt * DM + bid * 16 + 2 * rp) // 2,
                 cache_modifier=CM_DEV,
             )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["mf"][0]), bid, fx.Int32(1))
@@ -1655,7 +1654,7 @@ def build(key: Build):
                 (tt * HID + c) // 2,
                 cache_modifier=CM_DEV,
             )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["xnf"][0]), bid, fx.Int32(1))
@@ -1938,7 +1937,7 @@ def build(key: Build):
                 (tt * HID + c) // 2,
                 cache_modifier=CM_DEV,
             )
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["xf"][0]), bid, fx.Int32(1))
