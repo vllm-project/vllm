@@ -392,7 +392,7 @@ def test_finished_eager_store_emits_all_storage_events() -> None:
     removed = [
         event for event in sched.take_events() if isinstance(event, BlockRemoved)
     ]
-    assert {event.block_hashes[0] for event in removed} == {
+    assert {h for event in removed for h in event.block_hashes} == {
         primary_event_hashes[0],
         secondary_event_hash,
     }
@@ -494,8 +494,9 @@ def test_block_removed_relabeled_medium_cpu() -> None:
     events = list(sched.take_events())
 
     removed = [e for e in events if isinstance(e, BlockRemoved)]
-    assert len(removed) >= 2, (
-        f"expected >=2 BlockRemoved from eviction, got {len(removed)}"
+    num_removed = sum(len(e.block_hashes) for e in removed)
+    assert num_removed >= 2, (
+        f"expected >=2 hashes in BlockRemoved from eviction, got {num_removed}"
     )
     for ev in removed:
         assert ev.medium == MEDIUM_CPU, (
@@ -703,8 +704,9 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
     events = list(sched.take_events())
 
     removed = [e for e in events if isinstance(e, BlockRemoved)]
-    assert len(removed) >= 2, (
-        f"expected >=2 BlockRemoved from eviction, got {len(removed)}"
+    num_removed = sum(len(e.block_hashes) for e in removed)
+    assert num_removed >= 2, (
+        f"expected >=2 hashes in BlockRemoved from eviction, got {num_removed}"
     )
     for ev in removed:
         assert ev.medium == MEDIUM_STORAGE, (

@@ -21,8 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     generate_block_hash_extra_keys,
     generate_lookahead_block_hash_extra_keys,
-    get_block_hash,
-    get_group_id,
+    group_external_block_hashes,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -652,14 +651,14 @@ class BlockPool:
         self,
         block_hashes: list[BlockHashWithGroupId],
     ) -> None:
-        if not self.enable_kv_cache_events:
+        if not self.enable_kv_cache_events or not block_hashes:
             return
-        for block_hash in block_hashes:
+        # One event per KV cache group, not per block: a single allocation can
+        # evict thousands of cached blocks.
+        for group_idx, hashes in group_external_block_hashes(block_hashes).items():
             self.kv_event_queue.append(
                 BlockRemoved(
-                    block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
-                    medium=self.medium,
-                    group_idx=get_group_id(block_hash),
+                    block_hashes=hashes, medium=self.medium, group_idx=group_idx
                 )
             )
 
@@ -725,12 +724,17 @@ class BlockPool:
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
+            evicted_hashes: list[BlockHashWithGroupId] | None = (
+                [] if self.enable_kv_cache_events else None
+            )
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                self._maybe_evict_cached_block(block, evicted_hashes)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+            if evicted_hashes:
+                self._emit_block_removed_events(evicted_hashes)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
@@ -766,12 +770,18 @@ class BlockPool:
                 released.append(block)
         self.free_block_queue.append_n(released)
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self,
+        block: KVCacheBlock,
+        evicted_hashes: list[BlockHashWithGroupId] | None = None,
+    ) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            evicted_hashes: If given, collects the evicted hashes for the caller
+                to report in one batch instead of emitting their events here.
 
         Returns:
             True if the block is evicted, False otherwise.
@@ -781,12 +791,15 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
-        evicted_hashes = self._remove_cached_block_hashes(block)
-        if not evicted_hashes:
+        removed_hashes = self._remove_cached_block_hashes(block)
+        if not removed_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        self._emit_block_removed_events(evicted_hashes)
+        if evicted_hashes is None:
+            self._emit_block_removed_events(removed_hashes)
+        else:
+            evicted_hashes.extend(removed_hashes)
         return True
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
@@ -859,6 +872,7 @@ class BlockPool:
             block_ids: Set of block IDs to evict from cache.
 
         """
+        evicted_hashes: list[BlockHashWithGroupId] = []
         for block_id in block_ids:
             assert block_id < len(self.blocks), (
                 f"Invalid block_id {block_id} >= {len(self.blocks)}. "
@@ -866,7 +880,8 @@ class BlockPool:
                 f"only report block IDs that were allocated by the scheduler."
             )
             block = self.blocks[block_id]
-            self._maybe_evict_cached_block(block)
+            self._maybe_evict_cached_block(block, evicted_hashes)
+        self._emit_block_removed_events(evicted_hashes)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
