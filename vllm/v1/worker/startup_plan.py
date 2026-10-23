@@ -21,6 +21,8 @@ trusted.
 import hashlib
 import json
 import os
+import tempfile
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import torch
@@ -175,17 +177,30 @@ def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> Non
     )
     path = _plan_path(fingerprint)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        plan_dir = os.path.dirname(path)
+        os.makedirs(plan_dir, exist_ok=True)
         payload = {
             "schema": PLAN_SCHEMA_VERSION,
             "fingerprint": fingerprint,
             "kv_cache_memory_bytes": int(kv_cache_memory_bytes),
             "free_memory_baseline": int(worker.init_snapshot.free_memory),
         }
-        tmp = f"{path}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp, path)
+        # Stage the plan in a uniquely named file in the same directory, then
+        # publish it with one rename. A PID-based staging name is not unique
+        # when several containers share VLLM_CACHE_ROOT (a network volume on
+        # a serverless fleet) and boot the same config at once: two workers
+        # can truncate each other's staging file and the second rename fails.
+        fd, tmp = tempfile.mkstemp(
+            dir=plan_dir, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp)
+            raise
         logger.info("Saved startup plan to %s", path)
     except OSError as e:
         logger.warning("Failed to save startup plan to %s: %s", path, e)
