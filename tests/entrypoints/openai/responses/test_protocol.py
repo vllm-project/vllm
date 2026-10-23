@@ -72,3 +72,14 @@ def test_malformed_tools_rejected_by_field_validation(tools) -> None:
     AttributeError inside the custom-format validator (500)."""
     with pytest.raises(ValidationError):
         ResponsesRequest(input="hi", tools=tools)
+
+
+def test_web_search_include_values_accepted() -> None:
+    request = ResponsesRequest(
+        input="hi",
+        include=["web_search_call.results", "web_search_call.action.sources"],
+    )
+    assert request.include == [
+        "web_search_call.results",
+        "web_search_call.action.sources",
+    ]
