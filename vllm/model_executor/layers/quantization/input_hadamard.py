@@ -13,12 +13,15 @@ import functools
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     LinearMethodBase,
     register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 @functools.cache
@@ -53,11 +56,10 @@ class InputHadamardLinearMethod(LinearMethodBase):
     quantization. Otherwise the checkpoint stores the weight already rotated,
     together with an int8 ``input_rotation`` tensor holding the unnormalized
     (+-1) Sylvester matrix, which is checked and then dropped.
-    """
 
-    # TODO: the rotation runs in PyTorch before the wrapped method; let kernels
-    # that can rotate inside their activation quantization (AITER's MXFP4 HIP
-    # quant, CUDA hadacore) take it over.
+    The activation rotation runs in PyTorch unless the wrapped method takes it
+    over through `LinearMethodBase.fuse_input_hadamard`.
+    """
 
     def __init__(
         self, quant_method: LinearMethodBase, size: int, rotate_weight: bool
@@ -137,7 +139,17 @@ class InputHadamardLinearMethod(LinearMethodBase):
                     )
                 del layer.input_rotation
         self.quant_method.process_weights_after_loading(layer)
-        layer.input_hadamard = hadamard_matrix(self.size, layer.weight.device)
+        layer.input_hadamard_fused = self.quant_method.fuse_input_hadamard(
+            layer, self.size
+        )
+        if layer.input_hadamard_fused:
+            logger.info_once(
+                "%s rotates its input by the %d-wide Hadamard matrix itself.",
+                type(self.quant_method).__name__,
+                self.size,
+            )
+        else:
+            layer.input_hadamard = hadamard_matrix(self.size, layer.weight.device)
 
     def apply(
         self,
@@ -145,6 +157,7 @@ class InputHadamardLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hadamard: torch.Tensor = layer.input_hadamard
-        x = block_hadamard_rotate(x, hadamard)
+        if not layer.input_hadamard_fused:
+            hadamard: torch.Tensor = layer.input_hadamard
+            x = block_hadamard_rotate(x, hadamard)
         return self.quant_method.apply(layer, x, bias)

@@ -139,6 +139,9 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
+    def fuse_input_hadamard(self, layer: Module, size: int) -> bool:
+        return self.kernel.fuse_input_hadamard(size)
+
 
 class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     """MoE method for online MXFP4 (block) quantization."""
