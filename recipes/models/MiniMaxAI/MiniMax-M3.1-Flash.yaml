@@ -72,9 +72,57 @@ features:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache."
     args:
       - "--language-model-only"
+  prefill_dbo_sp:
+    label: "DBO / SP prefill"
+    description: "AMD MI355X single node: faster long prefill steps. DBO (dual-batch overlap) splits a prefill step into two microbatches and runs one microbatch's all-reduce under the other's compute; decode steps are never split. SP (sequence-parallel prefill) keeps the residual stream sharded by tokens on steps of 4096+ tokens, so each layer's two all-reduces become an all-to-all and a reduce-scatter; it keeps a full o_proj copy per GPU (about 3.1 GB less KV cache)."
+    # Tested on the single-node TP4 engine only (not on a PD prefill node).
+    strategies: [single_node_tp]
+    default_mode: sp_dbo
+    modes:
+      sp_dbo:
+        label: "SP + DBO"
+        description: "SP prefill, and DBO on prefill steps of 16384+ tokens: each microbatch then has 8192+ tokens and stays on the SP path."
+        # DBO needs the V2 model runner: without it, --enable-dbo selects the
+        # V1 runner, which refuses the DSpark draft.
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "16384"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      dbo:
+        label: "DBO"
+        description: "DBO on prefill steps of 8192+ tokens, no SP."
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "8192"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      sp:
+        label: "SP"
+        description: "SP prefill on steps of 4096+ tokens, no DBO."
+        args: []
+        env:
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
 
 opt_in_features:
   - text_only
+  - prefill_dbo_sp
 
 variants:
   default:
@@ -149,6 +197,49 @@ hardware_overrides:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
 
+strategy_overrides:
+  # MI355X serves TP4 on half of an 8-GPU node; Hopper keeps the fp8 variant's TP8.
+  single_node_tp:
+    tp:
+      mi355x: 4
+  # MI355X 1P1D as in the guide's AMD PD section: one TP4 engine per role, on
+  # GPUs 0-3 of its node. Exact-GPU role blocks layer after the `amd` baseline
+  # and win the last-wins dedupe: the prefill node drops indexer_decode_cp (it
+  # never decodes) and offloads KV to host memory in 1 GiB HugeTLB pages; both
+  # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
+  # of one per layer.
+  pd_cluster:
+    prefill:
+      hardware_overrides:
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            - "--attention-config"
+            - '{"indexer_kv_dtype": "nvfp4"}'
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"num_threads":4}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":601295421440,"cpu_hugepage_block_size":"1GB","lazy_offload":false}}]}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
+    decode:
+      hardware_overrides:
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            # The validated AMD decode node runs vLLM's default graphs, not the
+            # strategy's FULL_DECODE_ONLY.
+            - "--compilation-config"
+            - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"num_threads":4}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
+
 guide: |
   ## Overview
 
@@ -196,6 +287,44 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+
+  ### DBO and SP prefill (TP4, AMD MI355X)
+
+  Two opt-in switches make long prefill steps faster on the single-node MI355X
+  engine (the **DBO / SP prefill** feature in the command builder):
+
+  - **DBO** (dual-batch overlap): `--enable-dbo` splits a prefill step into two
+    microbatches and runs one microbatch's all-reduce under the other's compute.
+    `--dbo-decode-token-threshold 32768` keeps decode steps whole. DBO needs
+    `VLLM_USE_V2_MODEL_RUNNER=1`: without it, `--enable-dbo` selects the V1
+    runner, which refuses the DSpark draft.
+  - **SP** (sequence-parallel prefill): `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1`
+    keeps the residual stream sharded by tokens on steps of 4096+ tokens, so
+    each layer's two all-reduces become an all-to-all and a reduce-scatter. It
+    keeps a full `o_proj` copy per GPU, about 3.1 GB less KV cache.
+  - **SP + DBO**: set both, with `--dbo-prefill-token-threshold 16384`, so each
+    DBO microbatch has 8192+ tokens and stays on the SP path.
+
+  On the MXFP8 MoE, one 32K-token prefill takes 1035 ms plain, 655 ms with DBO
+  and 484 ms with SP + DBO. The server log confirms SP with
+  `MiniMax-M3 sequence-parallel prefill (from 4096 tokens, DBO microbatches from 8192): on`.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1 \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --enable-dbo \
+    --dbo-prefill-token-threshold 16384 \
+    --dbo-decode-token-threshold 32768 \
+    --disable-hybrid-kv-cache-manager
+  ```
 
   ### Single node (TP4, NVIDIA GB200)
 
