@@ -4,7 +4,7 @@
 
 KV cache format and reference: ``vllm/v1/attention/ops/rocm_octave.py``.
 Kernels: ``csrc/attention/octave_attn.cu`` and the per-architecture tiers in
-``_kernel_tier``; validated on gfx1100 and gfx942 only. See
+``_kernel_tier``; RDNA3 and CDNA3, validated on gfx1100 and gfx942. See
 ``docs/design/rocm_octave.md``.
 
 Decode, MTP verification and short continuation chunks (every request with
@@ -45,17 +45,17 @@ from vllm.v1.worker.workspace import (
 )
 
 
-# Native kernel tier of the validated architectures; any other architecture is
-# rejected at selection (supports_compute_capability) until it is validated.
+# Native kernel tier per architecture family; any other family is rejected at
+# selection (supports_compute_capability) until it is validated.
 def _kernel_tier() -> str:
-    from vllm.platforms.rocm import on_gfx942, on_gfx1100
+    from vllm.platforms.rocm import get_cdna_version, get_rdna_version
 
-    if on_gfx1100():
+    if get_rdna_version() == 3:
         return "wmma"
-    if on_gfx942():
+    if get_cdna_version() == 3:
         return "mfma"
     raise NotImplementedError(
-        "ROCM_OCTAVE is validated on gfx1100 (RDNA3) and gfx942 (MI300) only; "
+        "ROCM_OCTAVE supports RDNA3 and CDNA3 only; "
         "see the architecture contract in docs/design/rocm_octave.md"
     )
 
@@ -118,10 +118,12 @@ class RocmOctaveAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        from vllm.platforms.rocm import on_gfx942, on_gfx1100
+        from vllm.platforms.rocm import get_cdna_version, get_rdna_version
 
         # DeviceCapability is unreliable on ROCm; use the gcnArchName.
-        return current_platform.is_rocm() and (on_gfx1100() or on_gfx942())
+        return current_platform.is_rocm() and (
+            get_rdna_version() == 3 or get_cdna_version() == 3
+        )
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

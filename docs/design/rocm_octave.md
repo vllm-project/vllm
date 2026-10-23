@@ -127,12 +127,14 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 (for example a CDNA prefill) must keep the same signature and semantics, pass
 the same tests, and report a clear error when `flydsl` is not installed.
 
-Octave is enabled only on validated architectures: gfx1100 (RDNA3) and
-gfx942 (MI300). CMake builds the Octave sources and registers the ops only
-when the target list includes one of them, the backend rejects any other
-device at selection (`supports_compute_capability`), and the kernel tests skip
-elsewhere. Other targets in the same build compile the architecture-specific
-kernels as empty stubs.
+Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
+(MI300). The backend rejects any other family at selection
+(`supports_compute_capability`, via `get_rdna_version()` and
+`get_cdna_version()`), and the kernel tests skip elsewhere. CMake builds the
+Octave sources and registers the ops only when the target list includes
+gfx1100 or gfx942; other targets in the same build compile the
+architecture-specific kernels as empty stubs, and the kernel dispatch reports
+any other RDNA3 chip as not validated.
 
 | Piece | gfx1100 (RDNA3) | gfx942 (MI300) |
 | --- | --- | --- |
