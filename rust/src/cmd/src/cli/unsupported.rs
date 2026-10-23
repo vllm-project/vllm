@@ -178,16 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub tokenizer: Option<Unsupported>,
-
-    /// Name or path of the Hugging Face config to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub hf_config_path: Option<Unsupported>,
-
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
     /// only be enabled in trusted environments.
@@ -198,12 +188,6 @@ pub struct EngineUnsupportedArgs {
     /// multi-modal inputs.
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
-
-    /// The specific revision to use for the tokenizer on the Hugging Face Hub.
-    /// It can be a branch name, a tag name, or a commit id. If unspecified,
-    /// will use the default version.
-    #[arg(long)]
-    pub tokenizer_revision: Option<Unsupported>,
 
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -298,6 +282,15 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_fault_tolerance: Option<Unsupported>,
 
+    /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
+    #[arg(
+        long,
+        visible_alias = "no-enable-elastic-ep",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_elastic_ep: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
@@ -307,6 +300,17 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
+
+    /// If `True`, LoRA support for the tower (vision encoder) and connector
+    /// of multimodal models will be enabled. This is an experimental feature
+    /// and currently only supports some MM models such as the Qwen VL series.
+    #[arg(
+        long,
+        visible_alias = "no-enable-tower-connector-lora",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tower_connector_lora: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
@@ -394,17 +398,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// Whether to trust the chat template provided in the request. If False,
-    /// the server will always use the chat template specified by
-    /// `--chat-template` or the ones from tokenizer.
-    #[arg(
-        long,
-        visible_alias = "no-trust-request-chat-template",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub trust_request_chat_template: Option<Unsupported>,
-
     /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
     /// and `media_io_kwargs`). If False, the server rejects non-empty values
     /// because they can change multimodal preprocessing resource usage.
@@ -420,17 +413,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub response_role: Option<Unsupported>,
 
-    /// When `--max-logprobs` is specified, represents single tokens as
-    /// strings of the form 'token_id:{token_id}' so that tokens that are not
-    /// JSON-encodable can be identified.
-    #[arg(
-        long,
-        visible_alias = "no-return-tokens-as-token-ids",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub return_tokens_as_token_ids: Option<Unsupported>,
-
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
     #[arg(
@@ -441,16 +423,6 @@ pub struct ServerUnsupportedArgs {
         hide = true
     )]
     pub enable_auto_tool_choice: Option<Noop>,
-
-    /// If specified, exclude tool definitions in prompts when
-    /// tool_choice='none'.
-    #[arg(
-        long,
-        visible_alias = "no-exclude-tools-when-tool-choice-none",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub exclude_tools_when_tool_choice_none: Option<Unsupported>,
 
     /// Special the tool parser plugin write to parse the model-generated tool
     /// into OpenAI API format, the name register in this plugin can be used in
@@ -493,20 +465,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_force_include_usage: Option<Unsupported>,
-
-    /// Enable the `/tokenizer_info` endpoint. May expose chat
-    /// templates and other tokenizer configuration.
-    ///
-    /// Accepted as a no-op: the Rust frontend serves `/tokenize` and
-    /// `/detokenize`, but does not implement `/tokenizer_info` yet.
-    #[arg(
-        long,
-        visible_alias = "no-enable-tokenizer-info-endpoint",
-        default_missing_value = "true",
-        num_args = 0..=1,
-        hide = true
-    )]
-    pub enable_tokenizer_info_endpoint: Option<Noop>,
 
     /// If set to True, log model outputs (generations).
     /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
@@ -601,13 +559,17 @@ pub struct ServerUnsupportedArgs {
     pub middleware: Option<Unsupported>,
 
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-disable-fastapi-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub disable_fastapi_docs: Option<Unsupported>,
+    pub disable_fastapi_docs: Option<Noop>,
 
     /// Maximum size (bytes) of an incomplete HTTP event (header or body) for
     /// h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB).
