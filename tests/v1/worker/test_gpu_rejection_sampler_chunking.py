@@ -305,4 +305,4 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
 
     assert masks == expected_masks
     assert all(token_id in mask for token_id, mask in zip(emitted, masks))
-    assert torch.equal(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
+    torch.testing.assert_close(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)

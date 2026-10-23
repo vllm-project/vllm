@@ -4,7 +4,6 @@
 import numpy as np
 import torch
 
-from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -105,7 +104,6 @@ def compute_token_logprobs(
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
         TOPK_BLOCK_SIZE=topk_block_size,
-        enable_fp_fusion=not current_platform.is_rocm(),
     )
     return logprobs
 
