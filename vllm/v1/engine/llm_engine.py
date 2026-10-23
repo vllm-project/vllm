@@ -353,6 +353,8 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
+            if self.logger_manager is not None and outputs.lora_load_event:
+                self.logger_manager.record_lora_load_event(outputs.lora_load_event)
             if self.logger_manager is not None and outputs.scheduler_stats is not None:
                 # Record even when this step produced no request outputs.
                 self.logger_manager.record(
