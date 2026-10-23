@@ -3333,10 +3333,14 @@ class VllmConfig:
                 f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
-    def finalize_kv_cache_layout(
+    def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Finalize layout-dependent config once in the engine core before profiling."""
+        """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
+
+        Called once by the engine core before profiling; workers only assign the
+        result via ``set_kv_cache_layout``.
+        """
         if (
             not kv_cache_groups
             or self.kv_transfer_config is None

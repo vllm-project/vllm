@@ -392,7 +392,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
 
     kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     with caplog.at_level(logging.INFO):
-        config.finalize_kv_cache_layout(kv_cache_groups)
+        config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 16
     assert "automatically adjusted from 3 to block_size 16" in caplog.text
@@ -415,12 +415,12 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
     )
 
     kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
-    config.finalize_kv_cache_layout(kv_cache_groups)
+    config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
 
 
-def test_finalizing_empty_kv_cache_layout_preserves_interleave():
+def test_empty_kv_cache_groups_preserve_dcp_interleave_size():
     config = VllmConfig(
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
@@ -433,7 +433,7 @@ def test_finalizing_empty_kv_cache_layout_preserves_interleave():
         ),
     )
 
-    config.finalize_kv_cache_layout([])
+    config.adjust_dcp_kv_cache_interleave_size([])
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
 

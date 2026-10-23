@@ -132,7 +132,7 @@ def can_initialize(
             [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
         )
         global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
-        vllm_config.finalize_kv_cache_layout(global_kv_cache_groups)
+        vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
