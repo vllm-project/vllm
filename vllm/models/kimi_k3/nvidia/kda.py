@@ -590,19 +590,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        if self.recoverssm_backend == "cute":
-            # Compile before CUDA graph capture (shared by all KDA layers).
-            assert self.recoverssm_verify is not None
-            self.recoverssm_verify.compile()
-            compile_state_commit(
-                self.local_num_heads,
-                self.spec_query_len,
-                self.A_log.device,
-                align=self.cache_config.mamba_cache_mode == "align",
-            )
-
     def __init__(
         self,
         config: KimiLinearConfig,
@@ -747,6 +734,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 vllm_config.model_config.dtype,
                 self.conv1d.weight.device,
             )
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            records_bytes = len(kda_config["kda_layers"]) * sum(
+                t.numel() * t.element_size()
+                for t in (
+                    self.recoverssm_records.correction,
+                    self.recoverssm_records.key_gate,
+                )
+            )
+            logger.info_once(
+                "Allocated the KDA RecoverSSM verify records: %.2f GiB in total "
+                "for %d requests (%.2f MiB per request).",
+                records_bytes / 2**30,
+                max_num_seqs,
+                records_bytes / max_num_seqs / 2**20,
+            )
             supported, reason = can_use_cute_recoverssm(
                 head_dim=self.head_dim,
                 window=self.spec_query_len,
@@ -773,6 +775,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     conv_dim_first=is_conv_state_dim_first(),
                     conv_weight_dtype=self.conv1d.weight.dtype,
                     device=self.conv1d.weight.device,
+                )
+                self.recoverssm_verify.compile()
+                compile_state_commit(
+                    self.local_num_heads,
+                    self.spec_query_len,
+                    self.conv1d.weight.device,
+                    align=self.cache_config.mamba_cache_mode == "align",
                 )
         decode_conv1d_weight = None
         if (
