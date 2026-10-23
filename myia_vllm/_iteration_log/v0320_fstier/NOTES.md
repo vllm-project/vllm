@@ -371,3 +371,45 @@ pas de perte irréversible : tous les repos sont publics).
 - Le 1×400 du census (20:41:45, corps 922 570 o, UA Bun = hub) = signature
   #431 connue (sur-fenêtre 262 144), pré-fenêtre, 1 occurrence/2 h = motif
   habituel. Commit 76,5 % ; VRAM 20 917/19 992 MiB (sous la référence).
+
+## 23/10 23:46Z — ★ LA PORTE v6 A ARBITRÉ EN BUSY EN CONDITIONS RÉELLES (×2)
+
+**C'est la preuve attendue depuis la fenêtre de maintenance.** Deux épisodes
+`fail 2/2` ont été interceptés, compteurs en avant, moteur **non redémarré** :
+
+```
+2026-10-23 21:43:32 WEDGE-BUSY health=200 decode=000 — counters ADVANCED
+             (p 32->202476 g 42->86), NOT restarting (1/10)
+2026-10-23 23:27:37 WEDGE-BUSY health=200 decode=000 — counters ADVANCED
+             (p 56409985->56642623 g 321175->321285), NOT restarting (1/10)
+```
+
+Les deux épisodes sont sortis en `RECOVERED` au cycle de sonde suivant
+(`BUSY streak was 1`) : la fenêtre de famine s'est résorbée d'elle-même en
+≤ 2 min. **Sous v5, ces deux-là auraient été deux démarrages** (KV effacé,
+22 M de tokens de préfixe à re-prefill), soit les 20ᵉ et 21ᵉ restarts de la
+journée. Le plafond `BUSY_MAX=10` (~5 min) n'a jamais approché (streak max 1).
+
+**Point chaud en cours à la clôture de cette note** : le mode 5 « saturation
+KV » est **actif** — KV 98,2-99,6 %, 7 flux en cours + 1 en attente,
+`num_preemptions_total=20`, débit agrégé mesuré **~3 tok/s** (généré
+344 122 → 344 176 en 17 s). Le moteur progresse (compteurs en avant, health
+200 en 5 ms, 0 erreur, 0 ENOENT), donc **ce n'est pas un wedge** : c'est la
+dégradation attendue sous 260K de contexte concurrent. On n'agit pas — un
+restart effacerait le KV et reconstruirait le même état (c'est exactement ce
+que la porte empêche).
+
+**Correction d'instrument** : la hausse « disque 60 % → 69 % » est un
+**artefact de comparaison** entre deux systèmes de fichiers distincts
+(`overlay /` du disque docker-desktop vs `/dev/sdd /kv-tier-fs`). Mesure
+propre sur 60 s : **+561 MiB/min, 0 nouveau bloc**, 297 GB libres, tier à
+74 GiB (au-dessus du cap 48 GiB, la min-age 30 min protège les blocs de la
+génération vivante → le pruner ne rogne que la queue froide). Aucun risque
+disque. **Leçon : ne jamais enchaîner deux `df` de montages différents.**
+
+**Reste** : census 2 h = **544 × 200, 0 × 400/500/502** ; les 23 × 401 sont
+21 × `108.165.33.236` portant la clé **MEDIUM_VL morte** (`Bearer 7711C3D0…`,
+retirée du `.env` le 20/10 → Q23) + 2 × 127.0.0.1 : nuisance connue, **zéro
+200**, pas une brèche. nbaudit `ok:true` (5 séries, 3/série, 0 échec).
+Condensation : client de repli construit à 23:05:51Z (chaîne de repli
+sollicitée pendant la saturation, c'est le comportement voulu).
