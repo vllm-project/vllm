@@ -131,6 +131,8 @@ pub struct EngineCoreRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub kv_hints: Option<KvHintsEnvelope>,
+    #[serde(default)]
+    pub include_prefill_progress: bool,
 }
 
 impl EngineCoreRequest {

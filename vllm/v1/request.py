@@ -80,6 +80,7 @@ class Request:
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
+        include_prefill_progress: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -239,6 +240,10 @@ class Request:
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
+        self.include_prefill_progress = include_prefill_progress
+        self.prefill_progress_sequence = 0
+        self.last_prefill_progress: tuple[int, ...] | None = None
+        self.last_prefill_progress_time = 0.0
 
     @classmethod
     def from_engine_core_request(
@@ -264,6 +269,7 @@ class Request:
             resumable=request.resumable,
             session_id=request.session_id,
             kv_hints=request.kv_hints,
+            include_prefill_progress=request.include_prefill_progress,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,

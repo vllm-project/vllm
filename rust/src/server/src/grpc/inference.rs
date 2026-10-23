@@ -225,6 +225,11 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
+        if proto_req.include_prefill_progress {
+            return Err(Status::failed_precondition(
+                "prefill progress is only available on GenerateStream",
+            ));
+        }
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
@@ -278,6 +283,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         Ok(Response::new(pb::GenerateResponse {
             prompt_info: Some(prompt_info),
             outputs: Some(outputs),
+            prefill_progress: None,
         }))
     }
 
@@ -342,8 +348,14 @@ async fn generate_stream_responses(
                 Ok(pb::GenerateResponse {
                     prompt_info: Some(prompt_info),
                     outputs: None,
+                    prefill_progress: None,
                 })
             }
+            Ok(DecodedTextEvent::PrefillProgress(progress)) => Ok(pb::GenerateResponse {
+                prompt_info: None,
+                outputs: None,
+                prefill_progress: Some(convert::to_prefill_progress(&progress)),
+            }),
             Ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled:
@@ -362,6 +374,7 @@ async fn generate_stream_responses(
             .map(|outputs| pb::GenerateResponse {
                 prompt_info: None,
                 outputs: Some(outputs),
+                prefill_progress: None,
             }),
         };
         y.yield_ok(response?).await;

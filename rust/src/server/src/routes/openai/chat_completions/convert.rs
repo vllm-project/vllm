@@ -189,6 +189,7 @@ pub(super) fn prepare_chat_request(
                 request.kv_transfer_params.as_ref(),
             ),
             stream_interval: request.stream_interval,
+            include_prefill_progress: false,
         },
         chat_options: ChatOptions {
             generation_prompt_mode,

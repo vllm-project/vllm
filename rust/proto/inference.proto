@@ -64,6 +64,9 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // Stream request-scoped prefill work snapshots on GenerateStream.
+  bool include_prefill_progress = 19;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -185,6 +188,33 @@ message GenerateResponse {
   // Only present in first response
   optional PromptInfo prompt_info = 1;
   SequenceOutput outputs = 2;
+  PrefillProgress prefill_progress = 3;
+}
+
+enum PrefillPhase {
+  PREFILL_PHASE_UNSPECIFIED = 0;
+  PREFILL_PHASE_QUEUED = 1;
+  PREFILL_PHASE_WAITING_FOR_KV = 2;
+  PREFILL_PHASE_PREFILL = 3;
+  PREFILL_PHASE_DECODE = 4;
+  PREFILL_PHASE_PREEMPTED = 5;
+  PREFILL_PHASE_FINISHED = 6;
+  PREFILL_PHASE_FAILED = 7;
+  PREFILL_PHASE_ABORTED = 8;
+}
+
+message PrefillProgress {
+  string request_id = 1;
+  uint64 sequence = 2;
+  PrefillPhase phase = 3;
+  uint32 prompt_tokens = 4;
+  uint32 total_compute_tokens = 5;
+  uint32 completed_compute_tokens = 6;
+  uint32 remaining_compute_tokens = 7;
+  uint32 local_cached_tokens = 8;
+  uint32 external_cached_tokens = 9;
+  uint32 pending_kv_transfer_tokens = 10;
+  bool cache_accounting_final = 11;
 }
 
 message SequenceOutput {

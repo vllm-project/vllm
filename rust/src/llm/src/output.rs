@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, RequestError, RequestSpecDecodeMetrics, StopReason,
+    EngineCoreFinishReason, PrefillProgress, RequestError, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
@@ -190,6 +190,8 @@ pub struct GenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request, set on terminal outputs only.
     pub routed_experts: Option<Box<WireNdArray>>,
+    /// Optional request-scoped worker prefill-progress snapshot.
+    pub prefill_progress: Option<Box<PrefillProgress>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -251,6 +253,7 @@ impl GenerateOutput {
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
         self.routed_experts = next.routed_experts;
+        self.prefill_progress = next.prefill_progress;
         self.timestamps = next.timestamps;
     }
 }
@@ -282,6 +285,7 @@ impl GenerateOutput {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            prefill_progress: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -436,6 +440,7 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
             routed_experts,
+            prefill_progress: raw.prefill_progress,
             timestamps: self.request_metrics.timestamps(),
         };
 

@@ -54,7 +54,13 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+    PrefillProgress,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -67,6 +73,7 @@ from vllm.v1.metrics.stats import (
     KV_FETCH_IN_PROGRESS,
     KV_FETCH_STAGES,
     KV_FETCH_WAITING_TO_START,
+    PrefillStats,
     PrefixCacheStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
@@ -80,6 +87,9 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+_PREFILL_PROGRESS_MIN_INTERVAL = 0.1
+_PREFILL_PROGRESS_MAX_UPDATES = 100
 
 
 class Scheduler(SchedulerInterface):
@@ -2182,6 +2192,7 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        prefill_progress_timestamp = time.monotonic()
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2366,6 +2377,8 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
+            else:
+                prefill_stats = request.prefill_stats
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2403,6 +2416,14 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
+            prefill_progress = self._make_prefill_progress(
+                request,
+                prefill_stats,
+                bool(new_token_ids),
+                finish_reason,
+                prefill_progress_timestamp,
+            )
+
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
                 if new_token_ids and sampling_masks is not None:
@@ -2416,7 +2437,7 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
-            if should_emit_output:
+            if should_emit_output or prefill_progress is not None:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -2441,6 +2462,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        prefill_progress=prefill_progress,
                     )
                 )
             else:
@@ -2584,6 +2606,104 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    @staticmethod
+    def _make_prefill_progress(
+        request: Request,
+        prefill_stats: PrefillStats | None,
+        has_output_tokens: bool,
+        finish_reason: FinishReason | None,
+        timestamp: float,
+    ) -> PrefillProgress | None:
+        if not request.include_prefill_progress:
+            return None
+
+        prompt_tokens = request.num_prompt_tokens
+        previous = request.last_prefill_progress
+        local_cached = (
+            prefill_stats.num_local_cached_tokens
+            if prefill_stats
+            else previous[4]
+            if previous
+            else 0
+        )
+        external_cached = (
+            prefill_stats.num_external_cached_tokens
+            if prefill_stats
+            else previous[5]
+            if previous
+            else 0
+        )
+        total = max(0, prompt_tokens - local_cached - external_cached)
+        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        if finish_reason is not None:
+            phase = {
+                FinishReason.ABORT: 8,  # ABORTED
+                FinishReason.ERROR: 7,  # FAILED
+            }.get(finish_reason, 6)  # FINISHED
+            if finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
+                completed = min(
+                    total, max(0, computed - local_cached - external_cached)
+                )
+            else:
+                completed = total
+            accounting_final = True
+        elif has_output_tokens:
+            phase = 4  # DECODE
+            completed = total
+            accounting_final = True
+        else:
+            phase = 3  # PREFILL
+            completed = min(total, max(0, computed - local_cached - external_cached))
+            accounting_final = prefill_stats is not None
+
+        # Only decreasing work may wait: delaying a correction that increases
+        # remaining work would make routing underestimate the request's load.
+        if (
+            previous is not None
+            and phase == previous[0] == 3
+            and prompt_tokens == previous[1]
+            and total == previous[2]
+            and previous[3] <= completed < total
+            and local_cached == previous[4]
+            and external_cached == previous[5]
+            and accounting_final == previous[6]
+            and (
+                timestamp - request.last_prefill_progress_time
+                < _PREFILL_PROGRESS_MIN_INTERVAL
+                or completed - previous[3]
+                < max(1, cdiv(total, _PREFILL_PROGRESS_MAX_UPDATES))
+            )
+        ):
+            return None
+
+        snapshot = (
+            phase,
+            prompt_tokens,
+            total,
+            completed,
+            local_cached,
+            external_cached,
+            accounting_final,
+        )
+        if snapshot == request.last_prefill_progress:
+            return None
+
+        request.prefill_progress_sequence += 1
+        request.last_prefill_progress = snapshot
+        request.last_prefill_progress_time = timestamp
+        return PrefillProgress(
+            request_id=request.request_id,
+            sequence=request.prefill_progress_sequence,
+            phase=phase,
+            prompt_tokens=prompt_tokens,
+            total_compute_tokens=total,
+            completed_compute_tokens=completed,
+            remaining_compute_tokens=total - completed,
+            local_cached_tokens=local_cached,
+            external_cached_tokens=external_cached,
+            cache_accounting_final=accounting_final,
+        )
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
