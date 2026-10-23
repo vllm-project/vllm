@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample import batch_shard
@@ -22,12 +23,13 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     _shard_grammar_output,
 )
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 # The owner-sorted layout is expanded by a Triton kernel, so the routing math
 # can only be exercised on device.
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
+requires_gpu = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
 )
 
 
@@ -136,7 +138,7 @@ def _owned_rows(cu: np.ndarray, owned: np.ndarray) -> np.ndarray:
     return np.concatenate([np.arange(cu[r], cu[r + 1]) for r in owned])
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_local_batch_partition(tp_size: int, seed: int):
@@ -225,7 +227,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
     )
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_all_to_all_reassembly_simulated(tp_size: int):
     """Vocab shards computed from owner-sorted hidden states and routed
@@ -265,7 +267,7 @@ def test_all_to_all_reassembly_simulated(tp_size: int):
         assert torch.equal(reassembled, expected)
 
 
-@requires_cuda
+@requires_gpu
 def test_shard_no_spec():
     """Batches without draft tokens (one logits row per request) degenerate
     cleanly: rows mirror requests."""
@@ -335,7 +337,7 @@ def test_shard_grammar_output(tp_size: int):
     assert kept_total == num_grammar_rows
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_src_indices_round_trip(tp_size: int):
     """Padded per-rank result blocks indexed by gathered_src_indices restore
@@ -369,7 +371,7 @@ def test_gather_src_indices_round_trip(tp_size: int):
     assert restored.tolist() == list(range(batch.num_reqs))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_sampler_output_kernels(tp_size: int):
     """The fused pack/unpack kernels round-trip per-rank sampler results
@@ -383,7 +385,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=13, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     width = results[0][2].max_num_logits_per_req
 
@@ -465,7 +467,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         assert torch.equal(out.num_rejected.cpu(), expected_rejected.to(torch.int32))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_gather_sampler_output_logprobs_and_nans():
     """num_nans is reduced per request and gathered; LogprobsTensors are
     packed into fixed per-request blocks, width-aligned across ranks (pad
@@ -480,7 +482,7 @@ def test_gather_sampler_output_logprobs_and_nans():
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=6, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     cu = batch.cu_num_logits_np
     num_logits = int(cu[-1])

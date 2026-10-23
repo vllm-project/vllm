@@ -20,8 +20,8 @@ from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="requires CUDA or ROCm",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA, ROCm or XPU",
 )
 
 KPOOL = 4
@@ -42,7 +42,7 @@ def make_tail_spec():
 
 
 def test_kpool_tail_group_never_position_indexes_its_block_table():
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     spec = make_tail_spec()
     tail_width = get_block_table_width(
         spec.max_num_blocks_per_req(None, MAX_MODEL_LEN),
