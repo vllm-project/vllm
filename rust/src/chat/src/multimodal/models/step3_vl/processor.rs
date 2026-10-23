@@ -146,16 +146,8 @@ struct PatchedImage {
 }
 
 /// Step3-VL per-image transform (also the Step5-VL frontend in vLLM).
-///
-/// Stateless: the preprocessor config's knobs travel per call, matching the
-/// `llm-multimodal` processor contract.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Step3VLProcessor;
-
-/// The processor's knobs, resolved from the preprocessor config; absent
-/// fields fall back to the reference `Step3VLImageProcessor` defaults.
-#[derive(Debug, Clone, Copy)]
-struct Step3VLParams {
+#[derive(Debug, Clone)]
+pub struct Step3VLProcessor {
     image_size: u32,
     patch_size: u32,
     num_image_feature_size: usize,
@@ -163,9 +155,15 @@ struct Step3VLParams {
     enable_patch: bool,
 }
 
-impl Default for Step3VLParams {
-    /// The reference `Step3VLImageProcessor` defaults.
+impl Default for Step3VLProcessor {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Step3VLProcessor {
+    /// Processor with the reference `Step3VLImageProcessor` defaults.
+    pub fn new() -> Self {
         Self {
             image_size: DEFAULT_IMAGE_SIZE,
             patch_size: DEFAULT_PATCH_SIZE,
@@ -174,12 +172,10 @@ impl Default for Step3VLParams {
             enable_patch: true,
         }
     }
-}
 
-impl Step3VLParams {
-    /// Resolve from a preprocessor config, falling back to the reference
+    /// Build from a preprocessor config, falling back to the reference
     /// defaults for absent fields.
-    fn from_config(config: &PreProcessorConfig) -> Self {
+    pub fn from_preprocessor_config(config: &PreProcessorConfig) -> Self {
         Self {
             image_size: config.get_extra("image_size").unwrap_or(DEFAULT_IMAGE_SIZE),
             patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE as usize) as u32,
@@ -299,16 +295,14 @@ impl VisionPreProcessor for Step3VLProcessor {
     fn preprocess(
         &self,
         images: &[DynamicImage],
-        config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
-        let params = Step3VLParams::from_config(config);
         let mean = self.default_mean();
         let std = self.default_std();
-        let image_size = params.image_size;
-        let patch_size = params.patch_size;
+        let image_size = self.image_size;
+        let patch_size = self.patch_size;
 
         let mut globals = Vec::with_capacity(images.len());
         let mut patch_data: Vec<f32> = Vec::new();
@@ -318,7 +312,7 @@ impl VisionPreProcessor for Step3VLProcessor {
         let mut item_sizes = Vec::with_capacity(images.len());
 
         for image in images {
-            let patched = params.patch_one(image)?;
+            let patched = self.patch_one(image)?;
             let global = resize(
                 &DynamicImage::ImageRgb8(patched.global),
                 image_size,
@@ -343,8 +337,7 @@ impl VisionPreProcessor for Step3VLProcessor {
             num_patches.push(patched.patches.len() as i64);
             newline_mask.extend_from_slice(&patched.newline_mask);
             feature_token_counts.push(
-                params.num_image_feature_size
-                    + params.num_patch_feature_size * patched.patches.len(),
+                self.num_image_feature_size + self.num_patch_feature_size * patched.patches.len(),
             );
             item_sizes.push((image.width(), image.height()));
         }
@@ -367,16 +360,10 @@ impl VisionPreProcessor for Step3VLProcessor {
         )
     }
 
-    fn calculate_num_tokens(
-        &self,
-        width: u32,
-        height: u32,
-        config: &PreProcessorConfig,
-    ) -> Result<usize, TransformError> {
-        let params = Step3VLParams::from_config(config);
-        let (num_patches, num_newlines) = params.get_num_patches(width, height);
-        Ok(num_patches * (params.num_patch_feature_size + 2)
-            + params.num_image_feature_size
+    fn calculate_num_tokens(&self, width: u32, height: u32) -> Result<usize, TransformError> {
+        let (num_patches, num_newlines) = self.get_num_patches(width, height);
+        Ok(num_patches * (self.num_patch_feature_size + 2)
+            + self.num_image_feature_size
             + 2
             + num_newlines)
     }
@@ -392,11 +379,6 @@ mod tests {
 
     fn solid(width: u32, height: u32) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb([120, 30, 200])))
-    }
-
-    /// Preprocessor config whose `enable_patch` is false.
-    fn no_patch_config() -> PreProcessorConfig {
-        serde_json::from_value(serde_json::json!({"enable_patch": false})).unwrap()
     }
 
     #[test]
@@ -491,87 +473,64 @@ mod tests {
 
     #[test]
     fn newline_mask_marks_row_ends_and_unflags_trailing() {
+        let processor = Step3VLProcessor::new();
+
         // Single column, two rows: the first patch ends a row, the last patch's
         // trailing newline flag is popped.
-        let patched = Step3VLParams::default().patch_one(&solid(504, 1008)).unwrap();
+        let patched = processor.patch_one(&solid(504, 1008)).unwrap();
         assert_eq!(patched.patches.len(), 2);
         assert_eq!(patched.newline_mask, vec![1, 0]);
 
         // 2x2 grid: only the end of the first row keeps its flag.
-        let patched = Step3VLParams::default().patch_one(&solid(1008, 1008)).unwrap();
+        let patched = processor.patch_one(&solid(1008, 1008)).unwrap();
         assert_eq!(patched.patches.len(), 4);
         assert_eq!(patched.newline_mask, vec![0, 1, 0, 0]);
 
         // Small image: window size 0, no patches at all.
-        let patched = Step3VLParams::default().patch_one(&solid(400, 300)).unwrap();
+        let patched = processor.patch_one(&solid(400, 300)).unwrap();
         assert!(patched.patches.is_empty());
         assert!(patched.newline_mask.is_empty());
     }
 
     #[test]
     fn calculate_num_tokens_matches_reference_math() {
-        let processor = Step3VLProcessor;
+        let processor = Step3VLProcessor::new();
 
         // No patches: just the global span (169 + 2).
-        assert_eq!(
-            processor
-                .calculate_num_tokens(504, 504, &PreProcessorConfig::default())
-                .unwrap(),
-            171
-        );
-        assert_eq!(
-            processor
-                .calculate_num_tokens(400, 300, &PreProcessorConfig::default())
-                .unwrap(),
-            171
-        );
+        assert_eq!(processor.calculate_num_tokens(504, 504).unwrap(), 171);
+        assert_eq!(processor.calculate_num_tokens(400, 300).unwrap(), 171);
 
         // 2x2 grid: 4 * (81 + 2) + 1 newline + (169 + 2).
-        assert_eq!(
-            processor
-                .calculate_num_tokens(1008, 1008, &PreProcessorConfig::default())
-                .unwrap(),
-            504
-        );
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 504);
 
         // Single column, two rows: 2 * 83 + 1 newline + 171.
-        assert_eq!(
-            processor
-                .calculate_num_tokens(504, 1008, &PreProcessorConfig::default())
-                .unwrap(),
-            338
-        );
+        assert_eq!(processor.calculate_num_tokens(504, 1008).unwrap(), 338);
 
         // Wide strip: ratio > 4 -> window = short side (300), crop rounds
         // 2000/300 = 6.67 up to 7 windows; trailing newline popped -> 0 rows.
-        assert_eq!(
-            processor
-                .calculate_num_tokens(2000, 300, &PreProcessorConfig::default())
-                .unwrap(),
-            752
-        );
+        assert_eq!(processor.calculate_num_tokens(2000, 300).unwrap(), 752);
 
         // Consistent with the per-image patch counts.
-        let (n, rows) = Step3VLParams::default().get_num_patches(1008, 1008);
+        let (n, rows) = processor.get_num_patches(1008, 1008);
         assert_eq!((n, rows), (4, 1));
     }
 
     #[test]
     fn enable_patch_false_disables_patching() {
-        let params = Step3VLParams::from_config(&no_patch_config());
-        assert_eq!(
-            Step3VLProcessor.calculate_num_tokens(1008, 1008, &no_patch_config()).unwrap(),
-            171
-        );
-        let patched = params.patch_one(&solid(1008, 1008)).unwrap();
+        let processor = Step3VLProcessor {
+            enable_patch: false,
+            ..Step3VLProcessor::new()
+        };
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 171);
+        let patched = processor.patch_one(&solid(1008, 1008)).unwrap();
         assert!(patched.patches.is_empty());
     }
 
     #[test]
     fn preprocess_emits_engine_contract() {
-        let processor = Step3VLProcessor;
+        let processor = Step3VLProcessor::new();
         let images = [solid(1008, 1008), solid(400, 300)];
-        let out = processor.preprocess(&images, &PreProcessorConfig::default()).unwrap();
+        let out = processor.preprocess(&images).unwrap();
 
         // Global views stack to [B, 3, 728, 728].
         assert_eq!(out.encoder_input.shape(), &[2, 3, 728, 728]);
@@ -614,9 +573,9 @@ mod tests {
 
     #[test]
     fn preprocess_without_patches_emits_empty_patch_tensor() {
-        let processor = Step3VLProcessor;
+        let processor = Step3VLProcessor::new();
         let images = [solid(400, 300)];
-        let out = processor.preprocess(&images, &PreProcessorConfig::default()).unwrap();
+        let out = processor.preprocess(&images).unwrap();
 
         assert_eq!(out.encoder_input.shape(), &[1, 3, 728, 728]);
         let ModelSpecificValue::Tensor { data, shape } = &out.model_specific["patch_pixel_values"]
@@ -634,14 +593,9 @@ mod tests {
 
     #[test]
     fn tiny_extreme_aspect_image_is_square_padded_first() {
-        let processor = Step3VLProcessor;
+        let processor = Step3VLProcessor::new();
         // 20x100 pads to 100x100, then ratio 1 -> window size 0.
-        let out = processor
-            .preprocess(
-                std::slice::from_ref(&solid(20, 100)),
-                &PreProcessorConfig::default(),
-            )
-            .unwrap();
+        let out = processor.preprocess(std::slice::from_ref(&solid(20, 100))).unwrap();
         assert_eq!(out.encoder_input.shape(), &[1, 3, 728, 728]);
         assert_eq!(out.feature_token_counts, vec![169]);
         assert_eq!(out.item_sizes, vec![(20, 100)]);
@@ -661,13 +615,10 @@ mod tests {
             "enable_patch": false
         }))
         .unwrap();
-        let processor = Step3VLProcessor;
+        let processor = Step3VLProcessor::from_preprocessor_config(&config);
 
-        assert_eq!(
-            processor.calculate_num_tokens(1008, 1008, &config).unwrap(),
-            146
-        );
-        let out = processor.preprocess(std::slice::from_ref(&solid(1008, 1008)), &config).unwrap();
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 146);
+        let out = processor.preprocess(std::slice::from_ref(&solid(1008, 1008))).unwrap();
         assert_eq!(out.encoder_input.shape(), &[1, 3, 336, 336]);
         assert_eq!(out.feature_token_counts, vec![144]);
     }

@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use itertools::izip;
-use llm_multimodal::{FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip};
+use llm_multimodal::{
+    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip, VideoClipOptions,
+};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -98,21 +100,28 @@ impl MultimodalModelInfo {
         support: &VisionModalitySupport,
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let processor = support.processor;
-        let config = support.config.clone();
+        let processor = Arc::clone(&support.processor);
 
         tokio::task::spawn_blocking(move || {
+            // Request-scoped clip facts travel per call; the checkpoint's
+            // config is bound in the processor.
+            let clip_options = VideoClipOptions {
+                sample_fps: clip.sample_fps,
+                max_long_side_pixel: clip.max_long_side_pixel,
+            };
             // Prefer the borrowed-RGB fast path, which avoids materializing a
             // `DynamicImage` per sampled frame after media decode.
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &config) {
-                        Ok(preprocessed) => return Ok(preprocessed),
-                        Err(error) => warn!(
-                            error = %error.as_report(),
-                            "RGB video preprocessing fast path failed; falling back to materialized frames"
-                        ),
-                    },
+                    Ok(frame_refs) => {
+                        match processor.preprocess_video_rgb(&frame_refs, &clip_options) {
+                            Ok(preprocessed) => return Ok(preprocessed),
+                            Err(error) => warn!(
+                                error = %error.as_report(),
+                                "RGB video preprocessing fast path failed; falling back to materialized frames"
+                            ),
+                        }
+                    }
                     Err(error) => warn!(
                         error,
                         "RGB video frame refs are invalid; falling back to materialized frames"
@@ -121,7 +130,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video(&frames, &config)?)
+            Ok(processor.preprocess_video(&frames, &clip_options)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
@@ -336,7 +345,8 @@ mod tests {
 
     /// GLM-5.3-Flash stamps each temporal group with the whole second of its
     /// first sampled frame when the decoder reported the sampling, and falls
-    /// back to per-grid synthetic stamps when it did not.
+    /// back to per-grid synthetic stamps derived from the clip's sampled
+    /// rate when it did not.
     #[tokio::test]
     async fn glm_video_timestamps_follow_the_sampled_frames_or_fall_back() {
         use image::{DynamicImage, Rgb, RgbImage};
@@ -349,12 +359,15 @@ mod tests {
             let frames = (0..8)
                 .map(|_| DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([128; 3]))))
                 .collect::<Vec<_>>();
+            // The tracker samples at the spec's configured default rate
+            // (the video config's `fps`: 1), so the clip carries it.
             Arc::new(
-                VideoClip::new(
+                VideoClip::new_with_sample_fps(
                     frames,
                     bytes::Bytes::from_static(b"video"),
                     VideoSource::InlineBytes,
                     "<hash>".to_string(),
+                    1.0,
                 )
                 .with_sampling(sampling),
             )

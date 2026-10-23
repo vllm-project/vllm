@@ -12,13 +12,15 @@
 
 use std::collections::HashMap;
 
-use llm_multimodal::registry::RegistryResult;
+use serde_json::Value;
+
+use llm_multimodal::registry::{ModelRegistryError, RegistryResult};
 use llm_multimodal::{
     FieldLayout, Modality, ModelMetadata, ModelProcessorSpec, ModelSpecificValue,
-    PreprocessedEncoderInputs, PromptReplacement, TokenId,
+    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TokenId, VisionPreProcessor,
 };
 
-pub(super) use processor::Step3VLProcessor;
+use self::processor::Step3VLProcessor;
 
 mod processor;
 
@@ -91,6 +93,23 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
         _metadata: &ModelMetadata,
     ) -> RegistryResult<HashMap<Modality, usize>> {
         Ok(HashMap::from([(Modality::Image, usize::MAX)]))
+    }
+
+    fn vision_processor(
+        &self,
+        _model_config: &Value,
+        preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
+        match modality {
+            Modality::Image => Ok(Box::new(Step3VLProcessor::from_preprocessor_config(
+                preprocessor_config,
+            ))),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
     }
 
     fn prompt_replacements(

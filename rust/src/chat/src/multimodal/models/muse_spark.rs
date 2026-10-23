@@ -34,10 +34,11 @@ use llm_multimodal::registry::{
 use llm_multimodal::{
     AudioPreProcessor, EncoderFieldLayouts, FieldLayout, FrameSampling, Modality,
     ModelSpecificValue, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TokenId,
+    VisionPreProcessor,
 };
 
 use self::audio::MuseSparkAudioProcessor;
-pub(super) use processor::MuseSparkVisionProcessor;
+use self::processor::MuseSparkVisionProcessor;
 
 mod audio;
 mod processor;
@@ -271,6 +272,22 @@ impl ModelProcessorSpec for MuseSparkSpec {
         ))))
     }
 
+    fn vision_processor(
+        &self,
+        _model_config: &Value,
+        preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
+        match modality {
+            // One processor type covers both lanes; the caller passes the
+            // modality's own processor config section at construction.
+            Modality::Image | Modality::Video => Ok(Box::new(
+                MuseSparkVisionProcessor::from_config(preprocessor_config),
+            )),
+            _ => Err(self.unsupported(modality)),
+        }
+    }
+
     /// The reference video processor's `fps`: clips arrive pre-sampled by the
     /// media connector at this rate.
     fn default_video_sample_fps(&self) -> Option<f32> {
@@ -409,7 +426,7 @@ impl ModelProcessorSpec for MuseSparkSpec {
 mod tests {
     use serde_json::json;
 
-    use super::super::{lookup_spec, lookup_vision_processor, test_helpers::*};
+    use super::super::{lookup_spec, test_helpers::*};
     use super::*;
     use llm_multimodal::{ImageSize, ModelSpecificValue};
 
@@ -626,14 +643,25 @@ mod tests {
     }
 
     #[test]
-    fn muse_spark_spec_resolves_vision_and_audio_processors() {
+    fn muse_spark_spec_builds_vision_and_audio_processors() {
         let tokenizer = muse_spark_tokenizer();
         let config = omni_config();
         let metadata = metadata(&tokenizer, &config);
         let spec = lookup_spec(&metadata).unwrap();
 
-        let processor = lookup_vision_processor(&metadata).expect("vision processor");
-        assert_eq!(processor.model_name(), "muse_spark");
+        for modality in [Modality::Image, Modality::Video] {
+            let processor = spec
+                .vision_processor(&config, &PreProcessorConfig::default(), modality)
+                .unwrap();
+            assert_eq!(processor.model_name(), "muse_spark");
+        }
+        assert!(matches!(
+            spec.vision_processor(&config, &PreProcessorConfig::default(), Modality::Audio),
+            Err(ModelRegistryError::UnsupportedModality {
+                spec: "muse_spark",
+                modality: Modality::Audio,
+            })
+        ));
 
         let processor = spec
             .audio_processor(&config, &PreProcessorConfig::default())

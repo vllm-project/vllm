@@ -68,8 +68,7 @@ impl MultimodalModelInfo {
         image_frames: &[Arc<ImageFrame>],
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs> {
-        let processor = support.processor;
-        let config = support.config.clone();
+        let processor = Arc::clone(&support.processor);
         let images = image_frames
             .iter()
             .map(|frame| frame.image().cloned())
@@ -77,7 +76,7 @@ impl MultimodalModelInfo {
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
-            Ok(processor.preprocess_with_context(&images, &config, &preprocessing_context)?)
+            Ok(processor.preprocess_with_context(&images, &preprocessing_context)?)
         })
         .await
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?

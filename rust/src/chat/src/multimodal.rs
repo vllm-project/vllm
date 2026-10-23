@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use itertools::{Either, izip};
+use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
@@ -138,20 +139,21 @@ impl MultimodalModelContext {
 
     /// Resolve a vision preprocessor for one loaded model and modality.
     ///
-    /// Processors are stateless and looked up by model id / model_type —
-    /// locally for models `llm-multimodal` does not ship yet, then from the
-    /// shared registry; the preprocessor config travels per call. The
-    /// spec's modality limits keep the old factory's UnsupportedModality ->
-    /// None semantics for modalities the model does not declare.
+    /// The spec builds the processor once, with the modality's preprocessor
+    /// config resolved into it; the processor is reused across requests. A
+    /// modality the spec does not declare keeps the old factory's
+    /// UnsupportedModality -> None semantics.
     fn resolve_vision_processor(
         &self,
         model_spec: &'static dyn ModelProcessorSpec,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
-    ) -> Result<Option<&'static dyn VisionPreProcessor>> {
-        if !model_spec.modality_limits(&self.metadata())?.contains_key(&modality) {
-            return Ok(None);
+    ) -> Result<Option<Arc<dyn VisionPreProcessor>>> {
+        match model_spec.vision_processor(&self.config, preprocessor_config, modality) {
+            Ok(processor) => Ok(Some(Arc::from(processor))),
+            Err(ModelRegistryError::UnsupportedModality { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
         }
-        Ok(models::lookup_vision_processor(&self.metadata()))
     }
 
     /// Resolve an audio preprocessor for one loaded model.
@@ -287,9 +289,11 @@ impl ResolvedPlaceholder {
 struct VisionModalitySupport {
     spec: ResolvedMultimodalSpec,
     placeholder: ResolvedPlaceholder,
-    processor: &'static dyn VisionPreProcessor,
-    /// The modality's preprocessor config, passed to the stateless processor
-    /// on every call.
+    /// Built by the spec with this modality's preprocessor config resolved
+    /// into it; reused across requests.
+    processor: Arc<dyn VisionPreProcessor>,
+    /// The modality's preprocessor config, consulted per request by the
+    /// video sampling policy and media-aware prompt replacements.
     config: PreProcessorConfig,
 }
 
@@ -512,14 +516,14 @@ impl MultimodalModelInfo {
             };
 
         let image = if let Some(placeholder) = resolve_placeholder(Modality::Image) {
-            context.resolve_vision_processor(raw_spec, Modality::Image)?.map(|processor| {
-                VisionModalitySupport {
+            context
+                .resolve_vision_processor(raw_spec, &preprocessor_config, Modality::Image)?
+                .map(|processor| VisionModalitySupport {
                     spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
                     placeholder,
                     processor,
                     config: preprocessor_config,
-                }
-            })
+                })
         } else {
             None
         };
@@ -536,14 +540,18 @@ impl MultimodalModelInfo {
                 );
                 None
             } else {
-                context.resolve_vision_processor(raw_spec, Modality::Video)?.map(|processor| {
-                    VisionModalitySupport {
+                context
+                    .resolve_vision_processor(
+                        raw_spec,
+                        &video_preprocessor_config,
+                        Modality::Video,
+                    )?
+                    .map(|processor| VisionModalitySupport {
                         spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
                         placeholder,
                         processor,
                         config: video_preprocessor_config,
-                    }
-                })
+                    })
             }
         } else {
             None

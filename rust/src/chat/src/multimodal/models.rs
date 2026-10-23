@@ -4,15 +4,13 @@
 //! Multimodal model support that lives in this repository until
 //! `llm-multimodal` ships it.
 //!
-//! Both tables are consulted before the `llm-multimodal` registry. Once
+//! The table is consulted before the `llm-multimodal` registry. Once
 //! `llm-multimodal` supports a model, delete its entry in the same change that
 //! bumps the dependency.
 
 use std::sync::LazyLock;
 
-use llm_multimodal::{
-    ModelMetadata, ModelProcessorSpec, ModelRegistry, VisionPreProcessor, VisionProcessorRegistry,
-};
+use llm_multimodal::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 
 mod muse_spark;
 mod step3_vl;
@@ -22,13 +20,6 @@ mod step3_vl;
 static SPECS: &[&dyn ModelProcessorSpec] = &[
     &step3_vl::Step3VLVisionSpec, // Step3-VL, Step5-VL
     &muse_spark::MuseSparkSpec,   // MuseSpark (image + video + audio)
-];
-
-/// Vision processors for the local specs above, in the same order: a model
-/// its spec serves is preprocessed by the paired processor.
-static VISION_PROCESSORS: &[&dyn VisionPreProcessor] = &[
-    &step3_vl::Step3VLProcessor,
-    &muse_spark::MuseSparkVisionProcessor,
 ];
 
 /// `(model_type, target model_type)` pairs for checkpoints that reuse another
@@ -58,20 +49,6 @@ pub(super) fn lookup_spec(metadata: &ModelMetadata<'_>) -> Option<&'static dyn M
         config: &config,
         ..*metadata
     })
-}
-
-/// Resolve the vision preprocessor for one loaded model: the processor paired
-/// with a matching local spec first, then the `llm-multimodal` registry.
-pub(super) fn lookup_vision_processor(
-    metadata: &ModelMetadata<'_>,
-) -> Option<&'static dyn VisionPreProcessor> {
-    static LLM_MULTIMODAL_REGISTRY: LazyLock<VisionProcessorRegistry> =
-        LazyLock::new(VisionProcessorRegistry::with_defaults);
-
-    if let Some(index) = SPECS.iter().position(|spec| spec.matches(metadata)) {
-        return Some(VISION_PROCESSORS[index]);
-    }
-    LLM_MULTIMODAL_REGISTRY.find(metadata.model_id, metadata.config_model_type())
 }
 
 /// Ported from `llm-multimodal`'s `registry::test_helpers`, which is
