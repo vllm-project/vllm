@@ -65,6 +65,36 @@ steps:
       pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py &&
       pytest -v -s test_config.py'
 
+- label: ":intel: (BMG) E2E Core"
+  key: e2e-core-1-gpu
+  timeout_in_minutes: 40
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/core/
+    - vllm/v1/worker/
+    - vllm/v1/attention/backends/gdn_attn.py
+    - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/models/qwen3_next
+    - vllm/config/cache.py
+    - vllm/platforms/xpu.py
+    - tests/v1/e2e/general/test_mamba_prefix_cache.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py'
+
 - label: ":intel: (BMG) V1 e2e (2 GPUs)"
   key: v1-e2e-2-gpus
   timeout_in_minutes: 30
