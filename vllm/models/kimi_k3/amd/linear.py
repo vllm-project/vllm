@@ -202,6 +202,7 @@ class KimiMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
+        mega_moe_pool=None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -324,6 +325,14 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        mega_moe_args: dict[str, Any] = {}
+        if mega_moe_pool is not None:
+            from .mega_moe_model import K3TPMoERunner, K3TPRoutedExperts
+
+            mega_moe_args = {
+                "routed_experts_cls": K3TPRoutedExperts,
+                "routed_experts_args": {"mega_moe_pool": mega_moe_pool},
+            }
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=num_experts,
@@ -344,7 +353,14 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
-            runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
+            runner_cls=(
+                K3TPMoERunner
+                if mega_moe_pool is not None
+                else ROCmLatentMoERunner
+                if self.use_latent_moe
+                else None
+            ),
+            **mega_moe_args,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -534,6 +550,7 @@ class KimiDecoderLayer(nn.Module):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        mega_moe_pool=None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -601,6 +618,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
+                mega_moe_pool=mega_moe_pool,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -751,6 +769,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_text_config
         self.config = config
 
+        from .mega_moe_model import model_pool
+
+        self.mega_moe_pool = model_pool(vllm_config, config)
+
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
@@ -767,6 +789,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 config,
                 vllm_config,
                 prefix,
+                mega_moe_pool=self.mega_moe_pool,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
