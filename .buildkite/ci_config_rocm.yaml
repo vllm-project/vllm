@@ -10,6 +10,7 @@ run_all_patterns:
   - ".buildkite/ci_config_rocm.yaml"
   - ".buildkite/scripts/rocm/"
   - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+  - ".buildkite/scripts/hardware_ci/amd_ci_fast_exit.py"
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/rocm.txt"

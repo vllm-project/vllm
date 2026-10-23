@@ -131,8 +131,10 @@ steps:
   - .buildkite/scripts/rocm/build.sh
   - tests/tools/test_docker_build_metadata_args.py
   - tests/tools/test_rocm_build.py
+  - tests/tools/test_amd_ci_fast_exit.py
+  - .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py
   commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py
+  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
 
 - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
   timeout_in_minutes: 35
