@@ -4,7 +4,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import AutoTokenizer
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
@@ -126,11 +125,6 @@ NUL_BYTE_FUNCTION_CALL = FunctionCall(
     name="exec",
     arguments='{"command": "printf a\\u0000b"}',
 )
-
-
-@pytest.fixture(scope="module")
-def lfm2_tokenizer() -> TokenizerLike:
-    return AutoTokenizer.from_pretrained("LiquidAI/LFM2.5-2.6B")
 
 
 def _wrap(tool_text: str, content_after: str = "") -> str:

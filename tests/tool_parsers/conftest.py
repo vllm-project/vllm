@@ -10,3 +10,8 @@ from vllm.tokenizers import TokenizerLike
 @pytest.fixture(scope="module")
 def default_tokenizer() -> TokenizerLike:
     return AutoTokenizer.from_pretrained("openai-community/gpt2")
+
+
+@pytest.fixture(scope="module")
+def lfm2_tokenizer() -> TokenizerLike:
+    return AutoTokenizer.from_pretrained("LiquidAI/LFM2.5-2.6B")

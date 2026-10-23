@@ -83,7 +83,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
+    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "lfm2", "longcat", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -518,6 +518,58 @@ def get_minimax_structural_tag(
         )
 
     return StructuralTag(format=suffix_tag)
+
+
+_LFM2_TOOL_CALL_START = "<|tool_call_start|>"
+_LFM2_TOOL_CALL_END = "<|tool_call_end|>"
+
+
+@register_vllm_structural_tag("lfm2")
+def get_lfm2_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build LFM2's native pythonic tool-call block.
+
+    LFM2 calls tools as ``<|tool_call_start|>[name(k=v), ...]<|tool_call_end|>``.
+    The grammar forces the start sentinel and a known name for the first call,
+    then leaves the pythonic arguments (and any further calls) free up to the
+    end sentinel, for the lfm2 tool parser to read back. One block can hold
+    several calls, so ``parallel_tool_calls=false`` is enforced after parsing.
+
+    The sentinels are strings, not ``TokenFormat``: request validation compiles
+    the tag without a tokenizer, which cannot resolve token names. The content
+    is ``AnyTextFormat`` because ``AnyTokensFormat`` only matches whole tokens
+    and rejects one that spans the end of ``[name(`` (e.g. ``(x``).
+    """
+    del builtin_tools, reasoning, token_suffix
+
+    block = TagFormat(
+        begin=_LFM2_TOOL_CALL_START,
+        content=SequenceFormat(
+            elements=[
+                OrFormat(
+                    elements=[
+                        ConstStringFormat(value=f"[{tool.function.name}(")
+                        for tool in tools
+                    ]
+                ),
+                AnyTextFormat(),
+            ]
+        ),
+        end=_LFM2_TOOL_CALL_END,
+    )
+
+    if tool_choice == "auto":
+        return StructuralTag(
+            format=TriggeredTagsFormat(triggers=[_LFM2_TOOL_CALL_START], tags=[block])
+        )
+    # required / forced: one native block whose first call names an allowed
+    # tool (the named one for a named tool_choice).
+    return StructuralTag(format=block)
 
 
 _PLAMO3_BEGIN_TOOL_REQUESTS = "<|plamo:begin_tool_requests:plamo|>"

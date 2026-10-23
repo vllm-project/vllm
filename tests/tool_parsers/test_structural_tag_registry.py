@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import xgrammar as xgr
 from openai.types.responses import CustomTool, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
@@ -48,6 +49,7 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+from vllm.tool_parsers.lfm2_tool_parser import Lfm2ToolParser
 from vllm.tool_parsers.llama_json_engine_tool_parser import (
     LlamaJsonEngineToolParser,
 )
@@ -898,6 +900,147 @@ def test_longcat_forced_tool_choice_round_trips_native_tags(
     )
     assert _is_grammar_accept_string(grammar, output)
     assert not _is_grammar_accept_string(grammar, output.replace("longcat_", ""))
+
+    _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
+
+    assert not content
+    assert tool_calls is not None
+    assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
+        ("get_weather", {"city": "Dallas"})
+    ]
+
+
+def _lfm2_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+        for name in ("get_weather", "end-task")
+    ]
+
+
+def _lfm2_grammar(tool_choice, tools):
+    tag = get_model_structural_tag(
+        model="lfm2",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    assert isinstance(tag, StructuralTag)
+    # Request validation compiles the tag without a tokenizer, as here.
+    return Grammar.from_structural_tag(tag)
+
+
+def test_lfm2_registered_as_vllm_structural_tag_model():
+    assert "lfm2" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+    assert Lfm2ToolParser.structural_tag_model == "lfm2"
+    assert Lfm2ToolParser.supports_required_and_named is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>",
+        "<|tool_call_start|>[end-task()]<|tool_call_end|>",
+        # parentheses inside a string argument do not end the call
+        "<|tool_call_start|>[get_weather(city='Paris (FR)')]<|tool_call_end|>",
+        "<|tool_call_start|>[get_weather(city='Paris'), end-task()]<|tool_call_end|>",
+    ],
+)
+def test_lfm2_required_accepts_native_tool_call_blocks(body: str):
+    assert _is_grammar_accept_string(_lfm2_grammar("required", _lfm2_tools()), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "It is sunny in Paris.",
+        "<|tool_call_start|>[get_time(zone='UTC')]<|tool_call_end|>",
+        '[{"name": "get_weather", "parameters": {"city": "Paris"}}]',
+        "<|tool_call_start|>[get_weather(city='Paris')]",
+    ],
+)
+def test_lfm2_required_rejects_invalid_tool_call_blocks(body: str):
+    assert not _is_grammar_accept_string(_lfm2_grammar("required", _lfm2_tools()), body)
+
+
+def test_lfm2_forced_first_call_must_be_the_named_tool():
+    tool_choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="end-task")
+    )
+    grammar = _lfm2_grammar(tool_choice, _lfm2_tools())
+
+    assert _is_grammar_accept_string(
+        grammar, "<|tool_call_start|>[end-task()]<|tool_call_end|>"
+    )
+    assert not _is_grammar_accept_string(
+        grammar, "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>"
+    )
+
+
+def test_lfm2_auto_strict_allows_text_or_a_tool_call_block(sample_tools_strict):
+    grammar = _lfm2_grammar("auto", sample_tools_strict)
+
+    assert _is_grammar_accept_string(grammar, "Plain response")
+    assert _is_grammar_accept_string(
+        grammar, "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>"
+    )
+
+
+def test_lfm2_required_grammar_accepts_lfm2_token_ids(lfm2_tokenizer):
+    """The sentinels are special tokens, and LFM2 tokenizes `[get_weather(` and
+    the arguments into tokens that straddle the forced name prefix (`(city`);
+    the grammar must accept the real token stream, not just the string."""
+    tag = get_model_structural_tag(
+        model="lfm2", tools=_lfm2_tools(), tool_choice="required", reasoning=False
+    )
+    compiled = xgr.GrammarCompiler(
+        xgr.TokenizerInfo.from_huggingface(lfm2_tokenizer)
+    ).compile_structural_tag(tag)
+    matcher = xgr.GrammarMatcher(compiled)
+    output = "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>"
+
+    for token_id in lfm2_tokenizer.encode(output, add_special_tokens=False):
+        assert matcher.accept_token(token_id), lfm2_tokenizer.decode([token_id])
+    assert matcher.accept_token(lfm2_tokenizer.eos_token_id)
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_lfm2_forced_tool_choice_round_trips_native_pythonic(
+    sample_tools: list[ChatCompletionToolsParam], tool_choice, lfm2_tokenizer
+):
+    """Forced LFM2 calls must be constrained to, and parsed from, the native
+    pythonic block, not the generic JSON tool-call list."""
+
+    class Lfm2Parser(DelegatingParser):
+        tool_parser_cls = Lfm2ToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+    parser = Lfm2Parser(lfm2_tokenizer, tools=sample_tools)
+    request = parser.adjust_request(request)
+
+    assert request.structured_outputs is not None
+    assert request.structured_outputs.json is None
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    # Rendered exactly as the LFM2/LFM2.5 chat templates render tool calls.
+    output = "<|tool_call_start|>[get_weather(city='Dallas')]<|tool_call_end|>"
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(grammar, "It is sunny in Dallas.")
 
     _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
 
