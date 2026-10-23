@@ -9,11 +9,15 @@ have the original unpadded size. These tests verify that weight loading
 correctly handles this mismatch.
 """
 
+import cProfile
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import routed_experts
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -21,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from .utils import make_dummy_moe_config
 
@@ -547,6 +552,115 @@ class TestLoadWeightsExpertBias:
 
 
 class TestLoadWeightsExpertMapping:
+    @staticmethod
+    def _real_experts(layer_name, num_experts=4):
+        config = make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=torch.bfloat16,
+        )
+        manager = ExpertMapManager(
+            max_num_batched_tokens=16,
+            top_k=1,
+            global_num_experts=num_experts,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=config.moe_parallel_config,
+            placement_strategy="linear",
+            enable_eplb=False,
+        )
+        with (
+            set_current_vllm_config(VllmConfig()),
+            torch.device(config.device),
+        ):
+            return RoutedExperts(layer_name, torch.bfloat16, config, None, manager)
+
+    def test_interleaved_loads_reuse_mapping_and_update_weights(self, dist_init):
+        """Repeated visits reuse mappings while every projection is reloaded."""
+        model = torch.nn.ModuleDict(
+            {
+                "layers": torch.nn.ModuleList(
+                    torch.nn.ModuleDict(
+                        {"experts": self._real_experts(f"layers.{i}.experts")}
+                    )
+                    for i in range(2)
+                )
+            }
+        )
+        with cProfile.Profile() as profile:
+            for offset in (0, 32):
+                weights = [
+                    (
+                        f"layers.{i}.experts.{e}.{proj}.weight",
+                        torch.full(
+                            (128, 128),
+                            offset + 1 + i * 12 + e * 3 + projection,
+                            dtype=torch.bfloat16,
+                        ),
+                    )
+                    for e in range(4)
+                    for projection, proj in enumerate(
+                        ("gate_proj", "up_proj", "down_proj")
+                    )
+                    for i in range(2)
+                ]
+                assert AutoWeightsLoader(model).load_weights(weights) == {
+                    f"layers.{i}.experts.{name}"
+                    for i in range(2)
+                    for name in ("w13_weight", "w2_weight")
+                }
+                for i, block in enumerate(model["layers"]):
+                    layer = block["experts"]
+                    for e in range(4):
+                        for projection, actual in enumerate(
+                            (
+                                layer.w13_weight[e, :128],
+                                layer.w13_weight[e, 128:],
+                                layer.w2_weight[e],
+                            )
+                        ):
+                            expected = torch.full(
+                                (128, 128),
+                                offset + 1 + i * 12 + e * 3 + projection,
+                                dtype=torch.bfloat16,
+                            )
+                            torch.testing.assert_close(
+                                actual.cpu(), expected, rtol=0, atol=0
+                            )
+
+        for function in (
+            RoutedExperts.build_expert_params_mapping,
+            routed_experts._index_expert_mapping,
+        ):
+            calls = sum(
+                entry.callcount
+                for entry in profile.getstats()
+                if entry.code is function.__code__
+            )
+            assert calls == 2, function.__name__
+
+    def test_public_mapping_mutation_does_not_change_repeated_loads(self, dist_init):
+        layer = self._real_experts("model.experts")
+        for value in (1.0, 2.0):
+            list(
+                layer.load_weights(
+                    [
+                        (
+                            "0.gate_proj.weight",
+                            torch.full((128, 128), value, dtype=torch.bfloat16),
+                        )
+                    ]
+                )
+            )
+            torch.testing.assert_close(
+                layer.w13_weight[0, :128].cpu(),
+                torch.full((128, 128), value, dtype=torch.bfloat16),
+                rtol=0,
+                atol=0,
+            )
+            layer.get_expert_mapping(include_fused=True).clear()
+
     @staticmethod
     def _mapping(
         projs: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),

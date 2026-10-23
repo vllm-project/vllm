@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import cProfile
 import gc
 import importlib.machinery
 import inspect
@@ -43,6 +44,98 @@ from vllm.model_executor.model_loader.weight_utils import (
     load_attention_sink,
 )
 from vllm.platforms import current_platform
+
+
+def test_interleaved_expert_reload_reuses_mapping(
+    vllm_runner, tmp_path, monkeypatch, enable_pickle
+):
+    """LLM weight updates reuse mappings without retaining old expert weights."""
+    from safetensors.torch import load_file
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    from vllm.model_executor.layers.fused_moe import routed_experts
+
+    config = Qwen3MoeConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        moe_intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        hf_model = Qwen3MoeForCausalLM(config).to(torch.bfloat16)
+    hf_model.save_pretrained(tmp_path)
+    del hf_model
+    checkpoint = str(tmp_path / "model.safetensors")
+
+    def reload_interleaved(model):
+        saved = load_file(checkpoint)
+        prefixes = [f"model.layers.{i}.mlp.experts" for i in range(2)]
+        names = [
+            f"{prefix}.{expert}.{projection}.weight"
+            for expert in range(4)
+            for projection in ("gate_proj", "up_proj", "down_proj")
+            for prefix in prefixes
+        ]
+
+        with cProfile.Profile() as profile:
+            for offset in (0.125, 0.0):
+                assert model.load_weights(
+                    (name, saved[name] + offset) for name in names
+                ) == {
+                    f"{prefix}.routed_experts.{name}"
+                    for prefix in prefixes
+                    for name in ("w13_weight", "w2_weight")
+                }
+                for prefix in prefixes:
+                    layer = model.get_submodule(prefix).routed_experts
+                    for expert in range(4):
+                        for actual, projection in (
+                            (layer.w13_weight[expert, :128], "gate_proj"),
+                            (layer.w13_weight[expert, 128:], "up_proj"),
+                            (layer.w2_weight[expert], "down_proj"),
+                        ):
+                            name = f"{prefix}.{expert}.{projection}.weight"
+                            torch.testing.assert_close(
+                                actual.cpu(), saved[name] + offset, rtol=0, atol=0
+                            )
+        return {
+            function.__name__: sum(
+                entry.callcount
+                for entry in profile.getstats()
+                if entry.code is function.__code__
+            )
+            for function in (
+                routed_experts.RoutedExperts.build_expert_params_mapping,
+                routed_experts._index_expert_mapping,
+            )
+        }
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=32,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=1 << 20,
+        kernel_config={"moe_backend": "triton", "enable_jit_warmup": False},
+    ) as llm:
+        before = llm.generate_greedy([[1, 2, 3]], max_tokens=4)
+        calls = llm.apply_model(reload_interleaved)
+        after = llm.generate_greedy([[1, 2, 3]], max_tokens=4)
+    assert len(before[0][0]) == 7
+    assert before[0][0] == after[0][0]
+    assert calls == [{"build_expert_params_mapping": 0, "_index_expert_mapping": 0}]
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
