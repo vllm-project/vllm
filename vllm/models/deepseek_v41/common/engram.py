@@ -103,6 +103,19 @@ def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | N
     return None, None
 
 
+def _shards_engram_gate() -> bool:
+    """Whether TP ranks keep a dim slice of `wkv` and exchange gate partial sums.
+
+    CUDA's specialized decode runs `wkv` itself and reads the gathered layout
+    (nvidia/specialized_decode/engram/prefetch.py).
+    """
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+    return on_gfx942() or on_gfx950()
+
+
 def _is_prime(n: int) -> bool:
     """Deterministic Miller-Rabin for n < 2**32 (avoids a sympy import)."""
     if n < 2:
@@ -1717,9 +1730,8 @@ class Engram(nn.Module):
         # Without sequence parallelism every TP rank holds every token, so
         # shard the output columns instead of replicating the projection.
         tp_size = get_tensor_model_parallel_world_size()
-        # CUDA's specialized decode runs `wkv` itself and reads the gathered
-        # layout (nvidia/specialized_decode/engram/prefetch.py).
-        if current_platform.is_rocm() and tp_size > 1 and not use_sequence_parallel:
+        self.wkv: ColumnParallelLinear
+        if _shards_engram_gate() and tp_size > 1 and not use_sequence_parallel:
             # Each rank keeps one dim slice of every key and of the value. The
             # gate only needs per-token sums over dim, so the ranks exchange
             # those and their value slices instead of the whole projection.
