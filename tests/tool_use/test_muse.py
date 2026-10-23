@@ -663,3 +663,62 @@ def test_count_reasoning_tokens(raw, expected):
     tok = _CharTokenizer()
     parser = MuseReasoningParser(tok)
     assert parser.count_reasoning_tokens(tok.encode(raw)) == expected
+
+
+# ------------------------------------- streaming vs non-streaming at stream end
+
+_MUSE_PROMPT = "<|start|>user<|message|>hi<|eom|><|start|>assistant"
+
+
+@pytest.mark.parametrize(
+    "pieces",
+    [
+        [" to"],
+        [" to", "=self"],
+        [" to", "=self", "<|message|>"],
+        [" to", "=user", "<|message|>", "Hi"],
+        ["Hello", " there", ",", " plain", " answer", "."],
+    ],
+    ids=["1tok", "2tok", "3tok", "4tok-answer", "headerless"],
+)
+def test_parse_delta_matches_parse_at_stream_end(pieces):
+    """A generation that stops inside the channel header (e.g. ``max_tokens=1``)
+    or never writes one streams the same content that ``parse()`` returns."""
+    from vllm.parser import ParserManager
+
+    tok = _CharTokenizer()
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="muse", reasoning_parser_name="muse", enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    req = ChatCompletionRequest(
+        model="test",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read", "parameters": {}}}],
+    )
+    text = "".join(pieces)
+
+    streaming = parser_cls(tok)
+    reasoning, content = [], []
+    for i, piece in enumerate(pieces):
+        dm = streaming.parse_delta(
+            piece,
+            tok.encode(piece),
+            req,
+            prompt_token_ids=tok.encode(_MUSE_PROMPT) if i == 0 else None,
+            finished=i == len(pieces) - 1,
+        )
+        if dm is None:
+            continue
+        reasoning.append(dm.reasoning or "")
+        content.append(dm.content or "")
+        assert not dm.tool_calls
+
+    ref_reasoning, ref_content, ref_calls = parser_cls(tok).parse(
+        text, req, enable_auto_tools=True, model_output_token_ids=tok.encode(text)
+    )
+    assert "".join(reasoning) == (ref_reasoning or "")
+    assert "".join(content) == (ref_content or "")
+    assert not ref_calls
+    if "<|message|>" not in text:
+        assert "".join(content) == text
