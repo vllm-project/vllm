@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -325,6 +326,9 @@ class ModelRunnerOutput:
 
     # Iterations whose GPU timing has completed; see IterationTimer.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
+
+    # Set by the output rank when its LoRA adapter caches changed this step.
+    lora_load_event: LoRALoadEvent | None = None
 
     @staticmethod
     def with_kv_conn_output_only(
