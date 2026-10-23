@@ -1125,9 +1125,12 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
     [
         *(
             pytest.param({"method": method}, 1, id=method)
-            for method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+            for method in ("eagle", "eagle3", "mtp")
         ),
-        pytest.param({"method": "ngram"}, 0, id="not-eagle"),
+        *(
+            pytest.param({"method": method}, 0, id=method)
+            for method in ("dflash", "dspark", "ngram")
+        ),
         pytest.param({"enable_prefix_caching": False}, 0, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, 2, id="multi-module-mtp"),
         pytest.param(
