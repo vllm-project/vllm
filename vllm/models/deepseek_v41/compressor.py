@@ -325,12 +325,15 @@ class DeepseekCompressor(nn.Module):
         kv_score: torch.Tensor,
         # [num_tokens]
         positions: torch.Tensor,
+        rotary_emb=None,
     ) -> torch.Tensor | None:
         """Save states and return the BF16 latent for cache insertion and indexing.
 
         Only valid group-boundary rows are written. Under PCP each rank pools
         its own rows; the last row of every rank's chunks is gathered, both to
         close groups split across chunks and to keep every rank's ring equal.
+        Supplying ``rotary_emb`` also inserts valid rows into the 584-byte main
+        cache in this kernel.
         """
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -364,6 +367,15 @@ class DeepseekCompressor(nn.Module):
             dtype=torch.bfloat16,
             device=kv_score.device,
         )
+        cache_args = {}
+        if rotary_emb is not None:
+            k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
+            k_cache_layer = self._static_forward_context[self.k_cache_prefix]
+            cache_args = dict(
+                cos_sin_cache=rotary_emb.cos_sin_cache,
+                kv_cache=k_cache_layer.kv_cache,
+                cache_slot_mapping=k_cache_metadata.slot_mapping,
+            )
         fused_save_compress_norm(
             kv_score,
             positions,
@@ -377,6 +389,7 @@ class DeepseekCompressor(nn.Module):
             latent,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            **cache_args,
         )
         if prev_rows is not None:
             assert state_cache is not None and ring_write_slots is not None

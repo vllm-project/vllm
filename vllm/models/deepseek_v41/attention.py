@@ -525,6 +525,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.compressed_bytes_per_token = (
             288 if self.kv_cache_dtype == "nvfp4_ds_mla" else self.swa_bytes_per_token
         )
+        self._fuse_compressor_cache = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and self.kv_cache_torch_dtype == torch.uint8
+            and self.compressed_bytes_per_token == 584
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        )
         # One alignment for every page in the block: the block stride is their
         # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
         # stride, and 512 is free (its pages are already 512 B multiples).
@@ -724,8 +732,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 self.kv_mxfp8,
             )
         if self.compressor is not None:
-            latent = self.compressor(kv_score, positions)
-            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+            latent = self.compressor(
+                kv_score,
+                positions,
+                self.rotary_emb if self._fuse_compressor_cache else None,
+            )
+            if not self._fuse_compressor_cache:
+                self.compressor.insert_cache(latent, positions, self.rotary_emb)
             if self.indexer is not None and self.indexer.owns_k:
                 self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
 
@@ -860,7 +873,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         Only the latter runs in the eager break.
 
         Q/SWA preparation overlaps state saving and compression. Once the
-        latent is ready, main-cache insertion overlaps indexer preparation;
+        latent is ready, separate main-cache insertion overlaps indexer
+        preparation. Eligible Hopper caches are inserted by the compressor;
         both cache writes finish before sparse attention reads either cache.
         """
         attn_metadata = get_forward_context().attn_metadata
@@ -888,7 +902,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # compressor on aux stream 0 (sequential on ROCm).
             q, latent = maybe_execute_in_parallel(
                 project_query_and_cache_kv,
-                lambda: compressor(kv_score, positions),
+                lambda: compressor(
+                    kv_score,
+                    positions,
+                    self.rotary_emb if self._fuse_compressor_cache else None,
+                ),
                 self.ln_events[0],
                 self.ln_events[1],
                 aux_stream,
@@ -921,7 +939,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 cache_positions=cache_positions,
             )
 
-        if compressor is not None:
+        if compressor is not None and not self._fuse_compressor_cache:
             indexer_result, _ = maybe_execute_in_parallel(
                 prepare_indexer,
                 lambda: compressor.insert_cache(
