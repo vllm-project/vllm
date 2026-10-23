@@ -48,7 +48,16 @@ if is_aiter_found_and_supported():
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
+        hadamard_rotate: bool = False,
     ) -> torch.Tensor:
+        """With ``hadamard_rotate``, the HIP quant of the ASM path rotates each
+        32-element block of ``x`` by the orthonormal Sylvester Hadamard matrix
+        (`block_hadamard_rotate`); ``weight`` must be rotated the same way."""
+        assert not (hadamard_rotate and x_scales is not None), (
+            "hadamard_rotate needs an unquantized x"
+        )
+        # Only AITER releases with the fused rotation take the argument.
+        quant_kwargs = {"hadamard_rotate": True} if hadamard_rotate else {}
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
             gemm_afp4wfp4_preshuffle,
@@ -70,10 +79,7 @@ if is_aiter_found_and_supported():
             ):
                 if x_scales is None:
                     # use hip quant kernel for performance
-                    if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                    else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=M >= 32, **quant_kwargs)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -97,7 +103,7 @@ if is_aiter_found_and_supported():
             else:
                 if x_scales is None:
                     # use hip quant kernel for performance
-                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True, **quant_kwargs)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -112,6 +118,7 @@ if is_aiter_found_and_supported():
                 )
             return y[:M]
         else:
+            assert not hadamard_rotate, "hadamard_rotate needs the ASM GEMM path"
             if x_scales is None:
                 x_q, x_s = dynamic_mxfp4_quant(x)
             else:
@@ -137,9 +144,10 @@ if is_aiter_found_and_supported():
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+        hadamard_rotate: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -161,6 +169,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         super().__init__(config)
         self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
         self.use_asm_gemm = False
+        self.hadamard_rotate = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -238,6 +247,11 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
                 layer, "weight_scale", layer.weight_scale.data.T.contiguous()
             )
 
+    def fuse_input_hadamard(self, size: int) -> bool:
+        # Only the HIP activation quant of the ASM path rotates, in 32-blocks.
+        self.hadamard_rotate = self.use_asm_gemm and size == 32
+        return self.hadamard_rotate
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -250,6 +264,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             layer.weight_scale,
             self.use_asm_gemm,
             self.out_dtype,
+            hadamard_rotate=self.hadamard_rotate,
         )
         if bias is not None:
             y = y + bias
