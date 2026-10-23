@@ -1259,6 +1259,70 @@ def test_gdn_conv_sub_projection_regions_align_across_het_tp(monkeypatch):
         get_conv_state_layout.cache_clear()
 
 
+@pytest.mark.cpu_test
+def test_sd_conv_resharding_matches_layer_and_address(monkeypatch):
+    """A packed row named after an attention layer can start at the address of
+    a GDN conv state; only the conv state itself is resharded per row."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
+    )
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    get_conv_state_layout.cache_clear()
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+    try:
+        with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+            connector = MooncakeConnector(
+                vllm_config, KVConnectorRole.WORKER, kv_cache_config
+            )
+            worker = connector.connector_worker
+            # SD-shaped GDN conv state: 3 rows of Q/K/V dims (2, 2, 2), fp16.
+            worker._layer_specs["model.layers.1.linear_attn"] = MambaSpec(
+                block_size=vllm_config.cache_config.block_size,
+                shapes=((3, 6), (1, 2, 2)),
+                dtypes=(torch.float16, torch.float16),
+                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            )
+            base = 0x1000
+            worker._sd_conv_regions = {("model.layers.1.linear_attn", base)}
+            meta = SimpleNamespace(remote_tp_size=2, remote_tp_rank=1)
+
+            def region(layer_name: str, kv_block_len: int) -> TransferRegion:
+                return TransferRegion(
+                    layer_name=layer_name,
+                    layer_index=0,
+                    base_addr=base,
+                    block_len=4096,
+                    kv_block_len=kv_block_len,
+                )
+
+            conv_copies = worker._sender_block_copies(
+                region("model.layers.1.linear_attn", 36),
+                region("model.layers.1.linear_attn", 18),
+                meta,
+            )
+            assert len(conv_copies) == 9
+            row_copies = worker._sender_block_copies(
+                region("model.layers.0.self_attn", 1024),
+                region("model.layers.0.self_attn", 1024),
+                meta,
+            )
+            assert row_copies == [(0, 0, 1024)]
+
+            worker.shutdown()
+            worker.shutdown = noop_shutdown
+            connector.connector_worker = None
+    finally:
+        get_conv_state_layout.cache_clear()
+
+
 # Global conv sub-projection dims per mamba type, and the head-sharded ssm
 # state (heads, a, b). Mamba2's x:B:C is 2:1:1; GDN's Q:K:V is 1:1:2.
 _SD_RESHARD_MODELS = {

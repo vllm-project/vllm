@@ -1376,9 +1376,11 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
-        # Registered SD-layout conv state regions (base address -> layer) and
-        # their sub-projection splits, derived on first heterogeneous-TP use.
-        self._sd_conv_layer_by_base: dict[int, str] = {}
+        # Registered SD-layout conv state regions, keyed by (layer, base
+        # address): a packed row named after an attention layer can start at
+        # the same address. Their sub-projection splits are derived on first
+        # heterogeneous-TP use.
+        self._sd_conv_regions: set[tuple[str, int]] = set()
         self._sd_conv_splits: dict[str, MambaConvSplitInfo] = {}
         for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
@@ -2063,7 +2065,7 @@ class MooncakeConnectorWorker:
         seen_storage_ptrs: set[int] = set()
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
-        self._sd_conv_layer_by_base = {}
+        self._sd_conv_regions = set()
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
@@ -2133,7 +2135,7 @@ class MooncakeConnectorWorker:
                     # across rows, so the state stays one region and the
                     # sender reshards it per row (_sender_block_copies).
                     region_entries = [(0, conv_bytes)]
-                    self._sd_conv_layer_by_base[base_addr] = layer_name
+                    self._sd_conv_regions.add((layer_name, base_addr))
                 state_offset = conv_bytes
                 shape: tuple[int, ...]
                 dtype: torch.dtype
@@ -3118,12 +3120,15 @@ class MooncakeConnectorWorker:
         """(src_offset, dst_offset, length) copies for one block of a region
         pair; empty when this producer rank does not send the region."""
         spans = [(0, 0, local_region.kv_block_len, remote_region.kv_block_len)]
-        sd_conv_layer = self._sd_conv_layer_by_base.get(local_region.base_addr)
-        if sd_conv_layer is not None and agent_meta.remote_tp_size != self.tp_size:
+        if (
+            agent_meta.remote_tp_size != self.tp_size
+            and (local_region.layer_name, local_region.base_addr)
+            in self._sd_conv_regions
+        ):
             # Each SD conv row interleaves the sub-projections, so reshard
             # every (row, sub-projection) span on its own.
             spans = sd_conv_sub_spans(
-                self._sd_conv_split(sd_conv_layer),
+                self._sd_conv_split(local_region.layer_name),
                 _get_tp_ratio(self.tp_size, agent_meta.remote_tp_size),
             )
             assert spans[-1][0] + spans[-1][2] == local_region.kv_block_len
