@@ -13,19 +13,21 @@ namespace hist4096 = vllm::topk_histogram_4096;
 
 #ifndef USE_ROCM
   #if defined(CUDART_VERSION) && CUDART_VERSION >= 13040
-constexpr bool kHasOversizedSmem = true;
+constexpr bool kCudaSupportsOversizedSmem = true;
   #else
-constexpr bool kHasOversizedSmem = false;
+constexpr bool kCudaSupportsOversizedSmem = false;
   #endif
 
-template <uint32_t TopK, uint32_t CS, uint32_t Stages = 0>
+template <uint32_t TopK, uint32_t CS, bool kOversizedSmem = false>
 void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                                 size_t smem, cudaStream_t stream) {
   auto kernel = []() {
-    if constexpr (Stages != 0) {
-      return &ct::cooperative_topk_staged<TopK, CS, Stages>;
-    } else if constexpr (CS == 2) {
+    if constexpr (CS == 2) {
       return &ct::cooperative_topk_cs2<TopK>;
+    } else if constexpr (CS == 24) {
+      return &ct::cooperative_topk_cs24<TopK>;
+    } else if constexpr (CS == 16 && kOversizedSmem) {
+      return &ct::cooperative_topk_cs16_oversized<TopK>;
     } else if constexpr (CS == 16) {
       return &ct::cooperative_topk_cs16<TopK>;
     } else if constexpr (CS == 8) {
@@ -39,16 +41,15 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
     cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed,
                          1);
   }
-  const size_t optin = get_device_prop()->sharedMemPerBlockOptin;
-  const bool oversized = smem > optin;
-  size_t max_dynamic = smem;
-  if (oversized) {
+  size_t max_dynamic_smem = smem;
+  if constexpr (kOversizedSmem) {
     cudaFuncAttributes func_attrs{};
     cudaFuncGetAttributes(&func_attrs, kernel);
-    max_dynamic = optin - func_attrs.sharedSizeBytes;
+    max_dynamic_smem =
+        get_device_prop()->sharedMemPerBlockOptin - func_attrs.sharedSizeBytes;
   }
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       max_dynamic);
+                       max_dynamic_smem);
 
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(params.num_rows, CS);
@@ -60,7 +61,7 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
   attrs[0].val.clusterDim = {1, CS, 1};
   cfg.numAttrs = 1;
   #if defined(CUDART_VERSION) && CUDART_VERSION >= 13040
-  if (oversized) {
+  if constexpr (kOversizedSmem) {
     attrs[1].id = cudaLaunchAttributeSharedMemoryMode;
     attrs[1].val.sharedMemoryMode =
         cudaSharedMemoryModeAllowOversizedSharedMemory;
@@ -94,7 +95,10 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
                   "alignment, got stride (max_model_len)=",
                   stride);
 
-  (void)workspace;
+  STD_TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
+  STD_TORCH_CHECK(
+      workspace.scalar_type() == torch::headeronly::ScalarType::Byte,
+      "workspace must be uint8");
 
   ct::CooperativeTopKParams<TopK> params;
   params.input = logits.const_data_ptr<float>();
@@ -105,16 +109,17 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
 
   const cudaDeviceProp* prop = get_device_prop();
   const bool supports_cluster16 = prop->major >= 10;
-  const bool rubin_long_stride = prop->major == 10 && prop->minor == 7 &&
-                                 stride > ct::kFusedMaxStrideCS16;
-  if (num_rows <= 4 && rubin_long_stride) {
-    launch_cooperative_cluster<TopK, 24, 3>(params, ct::kSmemSizeStaged3,
-                                            stream);
+  const bool supports_cluster24 = prop->major == 10 && prop->minor == 7;
+  const bool supports_oversized_smem =
+      supports_cluster24 && kCudaSupportsOversizedSmem;
+  const bool long_stride = stride > ct::kFusedMaxStrideCS16;
+  if (num_rows <= 4 && long_stride && supports_cluster24) {
+    launch_cooperative_cluster<TopK, 24>(params, ct::kSmemSize24, stream);
   } else if (num_rows <= 4 && supports_cluster16) {
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
-  } else if (num_rows <= 8 && rubin_long_stride && kHasOversizedSmem) {
-    launch_cooperative_cluster<TopK, 16, 4>(params, ct::kSmemSizeStaged4,
-                                            stream);
+  } else if (num_rows <= 8 && long_stride && supports_oversized_smem) {
+    launch_cooperative_cluster<TopK, 16, true>(params, ct::kSmemSize16Oversized,
+                                               stream);
   } else if (num_rows <= 8) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
   } else if (num_rows <= 33) {
