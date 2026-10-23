@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -50,6 +51,7 @@ class _QwenGDNWarmupConfig:
     # Row stride of the output gate read in place by the spec-decode gated
     # norm (the in_proj_qkvz output width), or None when that path is off.
     gate_row_stride: int | None = None
+    fused_spec_decode: bool = False
 
     @property
     def conv_dim(self) -> int:
@@ -151,6 +153,9 @@ def _qwen_gdn_warmup_config(
             state_stride_token=int(ssm_state.stride(0)),
             state_dtype=ssm_state.dtype,
             gate_row_stride=_gate_row_stride(layer),
+            fused_spec_decode=bool(
+                getattr(layer, "enable_fused_gdn_spec_decode", False)
+            ),
         )
 
     if found_layer:
@@ -307,6 +312,75 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
     )
 
 
+def _warm_fused_gdn_decode_post_conv_mtp_kernel(
+    device: torch.device,
+    config: _QwenGDNWarmupConfig,
+    x_dtype: torch.dtype,
+    num_spec_tokens: int,
+    max_num_reqs: int,
+) -> None:
+    """Compile the ROCm Triton MTP decode kernels for every V tile size the
+    request count can select, with the layer's packed QKVZ/BA layouts so the
+    stride specializations match serving."""
+    from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (  # noqa: E501
+        fused_gdn_decode_post_conv_mtp_triton,
+    )
+    from vllm.utils.platform_utils import num_compute_units
+
+    num_cus = num_compute_units(device.index)
+    # Smallest request counts that select BV = 32, 64 and V (see the wrapper).
+    request_counts = sorted({1, -(-num_cus // config.hv), 4 * num_cus // config.hv + 1})
+    tokens_per_req = num_spec_tokens + 1
+    norm_weight = torch.ones(config.v, dtype=config.norm_weight_dtype, device=device)
+    state = torch.zeros(
+        2 * config.state_stride_token, dtype=config.state_dtype, device=device
+    ).as_strided(
+        (2, config.hv, config.v, config.k),
+        (config.state_stride_token, config.v * config.k, config.k, 1),
+    )
+    for num_reqs in request_counts:
+        if num_reqs > max_num_reqs:
+            continue
+        num_tokens = num_reqs * tokens_per_req
+        mixed_qkvz = torch.zeros(
+            (num_tokens, config.conv_dim + config.hv * config.v),
+            dtype=x_dtype,
+            device=device,
+        )
+        mixed_qkv, output_gate = mixed_qkvz.split(
+            [config.conv_dim, config.hv * config.v], dim=-1
+        )
+        ba = torch.zeros((num_tokens, 2 * config.hv), dtype=x_dtype, device=device)
+        b, a = ba.chunk(2, dim=-1)
+        fused_gdn_decode_post_conv_mtp_triton(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=config.a_log,
+            dt_bias=config.dt_bias,
+            state_indices=torch.zeros(
+                (num_reqs, tokens_per_req), dtype=torch.int32, device=device
+            ),
+            cu_seqlens=torch.arange(
+                0,
+                num_tokens + 1,
+                tokens_per_req,
+                dtype=torch.int32,
+                device=device,
+            ),
+            num_accepted_tokens=torch.ones(num_reqs, dtype=torch.int32, device=device),
+            state=state,
+            output_gate=output_gate.reshape(num_tokens, config.hv, config.v),
+            norm_weight=norm_weight,
+            out=torch.empty(
+                (num_tokens, config.hv, config.v), dtype=x_dtype, device=device
+            ),
+            scale=config.k**-0.5,
+            norm_eps=1e-6,
+            output_gate_activation=config.norm_activation,
+        )
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.accelerator.synchronize(device)
@@ -340,4 +414,18 @@ def qwen_triton_warmup(
     # Pooling only runs full prefills; the decode update kernel is unused.
     if not runner.is_pooling_model:
         _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, gdn_config)
+    # ROCm runs the Triton port of the fused MTP decode kernel.
+    spec_config = runner.speculative_config
+    if (
+        current_platform.is_rocm()
+        and gdn_config.fused_spec_decode
+        and spec_config is not None
+    ):
+        _warm_fused_gdn_decode_post_conv_mtp_kernel(
+            device,
+            gdn_config,
+            model_config.dtype,
+            spec_config.num_speculative_tokens,
+            runner.max_num_reqs,
+        )
     _synchronize_device(device)
