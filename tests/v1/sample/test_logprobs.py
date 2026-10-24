@@ -24,9 +24,14 @@ from tests.v1.sample.utils import (
 from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.entrypoints.generate.beam_search.utils import (
+    trim_step_logprobs,
+    validate_beam_width,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams
 from vllm.v1.engine.input_processor import InputProcessor
 
 from ...conftest import HfRunner, VllmRunner
@@ -422,6 +427,133 @@ def test_max_logprobs():
         bad_sampling_params = SamplingParams(logprobs=2)
         with pytest.raises(VLLMValidationError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+
+
+def test_trim_step_logprobs_keeps_the_beams_own_token():
+    """A beam must describe the step it actually took.
+
+    Beam search hands every sibling expanded from one parent the same candidate
+    mapping, so trimming has to produce a per-beam copy -- and a plain "top cap"
+    would drop the chosen token for any beam whose token ranked below the cap,
+    leaving that beam carrying a step that does not mention its own token.
+    """
+    # Rank 0 is the best candidate, rank 4 the worst.
+    step = {100 + i: Logprob(logprob=-float(i)) for i in range(5)}
+
+    # The beam that took the worst-ranked token still gets it, and the cap holds.
+    trimmed = trim_step_logprobs(step, chosen_token_id=104, cap=2)
+    assert 104 in trimmed, f"chosen token dropped by trimming: {sorted(trimmed)}"
+    assert len(trimmed) == 2
+    # Highest logprob first, as the untrimmed mapping is ordered.
+    assert list(trimmed) == sorted(
+        trimmed, key=lambda t: trimmed[t].logprob, reverse=True
+    )
+
+    # Trimming must not mutate or alias the shared parent mapping.
+    assert len(step) == 5
+    assert trim_step_logprobs(step, 100, cap=2) is not step
+
+    # A cap at or above the candidate count copies the mapping unchanged.
+    assert trim_step_logprobs(step, 100, cap=5) == step
+    assert trim_step_logprobs(step, 100, cap=None) == step
+
+    # cap=1 keeps exactly the beam's own token, whatever its rank.
+    assert trim_step_logprobs(step, 103, cap=1) == {103: step[103]}
+
+    # `max_logprobs` permits 0, meaning nothing may be returned.
+    assert trim_step_logprobs(step, 103, cap=0) == {}
+
+    # Negative control: the naive rule this guards against would fail the above.
+    naive = dict(sorted(step.items(), key=lambda kv: kv[1].logprob, reverse=True)[:2])
+    assert 104 not in naive, "the naive top-k rule would have kept the token anyway"
+
+
+def test_beam_width_is_not_bounded_by_max_logprobs():
+    """`max_logprobs` caps what a client is returned, not how widely beam search looks.
+
+    Beam search asks the engine for `2 * beam_width` candidates per step to expand
+    its beams. Those are a search input, so the cap on returned logprobs does not
+    apply to them -- only the vocabulary size does. What each returned beam carries
+    stays capped.
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=4,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        prompts = [TokensPrompt(prompt_token_ids=[0, 100, 200])]
+
+        # 2 * beam_width far exceeds max_logprobs=4 and must now be served.
+        outputs = runner.llm.beam_search(
+            prompts, BeamSearchParams(beam_width=8, max_tokens=2)
+        )
+
+        # ...while every returned beam still respects the cap AND describes the step
+        # it took. The second half is the integration-level check on trimming: a
+        # naive top-cap would silently drop the token a low-ranked beam chose.
+        prompt_len = len(prompts[0]["prompt_token_ids"])
+        for sdx, seq in enumerate(outputs[0].sequences):
+            assert seq.logprobs, f"beam {sdx} carries no per-step logprobs"
+            for step in seq.logprobs:
+                assert len(step) <= 4, (
+                    f"beam {sdx} returned {len(step)} logprobs for one step, "
+                    f"above max_logprobs=4"
+                )
+            generated = seq.tokens[prompt_len:]
+            # A beam stopped on EOS may omit that token, so its logprobs can run one
+            # step longer than `tokens`; every token it does report must be present.
+            for idx, token_id in enumerate(generated):
+                assert token_id in seq.logprobs[idx], (
+                    f"beam {sdx} step {idx} took token {token_id} but its stored "
+                    f"logprobs only hold {sorted(seq.logprobs[idx])}"
+                )
+
+        # A client's own request is still capped.
+        with pytest.raises(VLLMValidationError, match=r"sample logprobs"):
+            runner.llm.generate(prompts, SamplingParams(logprobs=8, max_tokens=1))
+
+        # So is the prompt-side cap, which this change must not touch.
+        with pytest.raises(VLLMValidationError, match=r"prompt logprobs"):
+            runner.llm.generate(
+                prompts, SamplingParams(prompt_logprobs=8, max_tokens=1)
+            )
+
+        # `allowed_token_ids` clears `logprobs` entirely; that path must stay served.
+        try:
+            runner.llm.beam_search(
+                prompts,
+                BeamSearchParams(
+                    beam_width=3, max_tokens=2, allowed_token_ids=[100, 200, 300]
+                ),
+            )
+        except ValueError as exc:
+            assert "beam_width" not in str(exc), (
+                f"beam-width guard rejected an exact-ID request it should ignore: {exc}"
+            )
+
+
+def test_validate_beam_width_rejects_top_k_wider_than_vocab():
+    """The one real impossibility: a top-k wider than the vocabulary.
+
+    Reachable only for a small-vocabulary model, since `beam_width` is separately
+    capped at `VLLM_MAX_N_SEQUENCES` (16384 by default) by
+    `BeamSearchParams.__post_init__`, so `2 * beam_width` tops out at 32768. A
+    32k-vocabulary model is well within that. Checked against a stub config rather
+    than an engine, which is why no small-vocabulary model has to be downloaded.
+    """
+    config = SimpleNamespace(model_config=SimpleNamespace(get_vocab_size=lambda: 32000))
+
+    # Within the vocabulary: silent.
+    validate_beam_width(8, SamplingParams(logprobs=16), config)
+    validate_beam_width(16000, SamplingParams(logprobs=32000), config)
+
+    with pytest.raises(ValueError, match=r"exceeds the vocabulary size 32000"):
+        validate_beam_width(16001, SamplingParams(logprobs=32002), config)
+
+    # The exact-ID path clears `logprobs`; nothing to check, so no rejection.
+    validate_beam_width(16001, SamplingParams(logprobs=None), config)
 
 
 @pytest.mark.parametrize("token_ids", [[0], [0, 9]])
