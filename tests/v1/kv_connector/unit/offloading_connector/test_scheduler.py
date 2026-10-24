@@ -1500,6 +1500,31 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+@pytest.mark.parametrize(
+    "token_count",
+    [
+        "num_computed_tokens",
+        "num_in_flight_tokens",
+        "num_prompt_tokens",
+        "num_tokens",
+    ],
+)
+def test_req_context_token_counts_follow_request(token_count):
+    """Token counts stay live, or remain unknown for synthetic contexts."""
+    request = SimpleNamespace(
+        request_id="req",
+        kv_transfer_params=None,
+        kv_hints=None,
+        **{token_count: 0},
+    )
+    ctx = _create_req_context(request)
+
+    assert getattr(ctx, token_count) == 0
+    setattr(request, token_count, 32)
+    assert getattr(ctx, token_count) == 32
+    assert getattr(ReqContext(req_id="synthetic"), token_count) is None
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_on_request_finished_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
