@@ -46,7 +46,7 @@ IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
 
 # Indexed in numpy: uint8 indices are masks in torch
 _NORMALIZE_LUT = (
-    ((torch.arange(256, dtype=torch.float32) / 255 - 0.5) / 0.5)
+    ((torch.arange(256, dtype=torch.float32, device="cpu") / 255 - 0.5) / 0.5)
     .to(torch.bfloat16)
     .view(torch.int16)
     .numpy()
