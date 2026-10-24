@@ -398,7 +398,7 @@ chunks = split_audio(
     audio_data=audio,
     sample_rate=sr,
     max_clip_duration_s=30.0,      # Maximum chunk length in seconds
-    overlap_duration_s=1.0,         # Search window for finding quiet split points
+    overlap_duration_s=None,        # Search window for quiet split points (None: 10 s, at most half the clip)
     min_energy_window_size=1600,    # Window size for energy calculation (~100ms at 16kHz)
 )
 
