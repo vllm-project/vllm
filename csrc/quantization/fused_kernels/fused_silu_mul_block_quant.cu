@@ -20,8 +20,8 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                                  // num_tokens]
     scalar_t const* __restrict__ input,  // Input: [num_tokens, hidden_size * 2]
     float const* scale_ub,               // Optional scale upper bound
-    int32_t const hidden_size  // Output hidden size (input is 2x this)
-) {
+    int32_t const hidden_size,  // Output hidden size (input is 2x this)
+    int64_t const outer_scale_stride = 1) {
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
 
@@ -29,7 +29,6 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   int64_t const token_idx = blockIdx.x;
   int const group_idx = blockIdx.y;
   int const tid = threadIdx.x;  // tid in [0, group_size)
-  int const num_tokens = gridDim.x;
 
   // Input layout: [gate || up] concatenated along last dimension
   int const input_stride = hidden_size * 2;
@@ -41,10 +40,15 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   scalar_t const* token_input_up = token_input_gate + hidden_size;
   scalar_out_t* token_output = out + token_idx * hidden_size + group_start;
 
-  // Scale pointer for this group
+  // Scale pointer for this group (respects TMA-aligned column stride when
+  // is_scale_transposed is true).
   int const num_groups = gridDim.y;
+  int64_t const scale_rows = is_scale_transposed
+                                 ? ((gridDim.x + outer_scale_stride - 1) /
+                                    outer_scale_stride * outer_scale_stride)
+                                 : 0;
   float* group_scale_ptr = is_scale_transposed
-                               ? scales + group_idx * num_tokens + token_idx
+                               ? scales + group_idx * scale_rows + token_idx
                                : scales + token_idx * num_groups + group_idx;
 
   // Shared memory for reduction (compile-time sized)
@@ -137,6 +141,14 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                   "input last dim must be 2x output hidden_size");
   STD_TORCH_CHECK(hidden_size % group_size == 0,
                   "hidden_size must be divisible by group_size");
+  if (scales.stride(1) > 1) {
+    STD_TORCH_CHECK(
+        is_scale_transposed,
+        "Outer scale stride must be 1 when scales are not transposed");
+  }
+  STD_TORCH_CHECK(scales.numel() >= num_tokens * num_groups,
+                  "scales buffer too small: need ", num_tokens * num_groups,
+                  " elements, got ", scales.numel());
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -165,7 +177,7 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                               scale_ub.has_value()
                                   ? scale_ub->const_data_ptr<float>()
                                   : nullptr,
-                              hidden_size);
+                              hidden_size, scales.stride(1));
                     });
               });
             });

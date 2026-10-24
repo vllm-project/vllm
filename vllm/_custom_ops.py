@@ -518,10 +518,14 @@ def silu_and_mul_per_block_quant(
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
         f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
+    )
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(
+        tma_alignment
     )
 
     # Output is half the width of input (after silu_and_mul)
@@ -536,11 +540,22 @@ def silu_and_mul_per_block_quant(
     # Allocate scales tensor
     num_groups = hidden_size // group_size  # Directly use group_size
     if is_scale_transposed:
-        scales = torch.empty(
-            (num_groups, num_tokens),
-            device=input.device,
-            dtype=torch.float32,
-        ).t()
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (num_groups, num_tokens),
+                device=input.device,
+                dtype=torch.float32,
+            ).t()
+        else:
+            tma_aligned_m = (
+                (num_tokens + tma_alignment - 1) // tma_alignment * tma_alignment
+            )
+            scales = torch.empty_strided(
+                (num_tokens, num_groups),
+                (1, tma_aligned_m),
+                device=input.device,
+                dtype=torch.float32,
+            )
     else:
         scales = torch.empty(
             (num_tokens, num_groups),
