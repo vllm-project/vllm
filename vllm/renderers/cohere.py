@@ -27,8 +27,9 @@ also pass them):
 * ``documents``: list of documents (v2 ``documents``)
 * ``tools``: list of tools (v2 ``tools``)
 * ``safety_mode``: v2 ``safety_mode`` (``CONTEXTUAL`` / ``STRICT`` /
-  ``NONE``) -- forwarded to melody's cmd3 ``safety_mode`` slot;
-  lowercased.
+  ``OFF``) -- forwarded to melody's cmd3 ``safety_mode`` slot;
+  lowercased, with ``OFF`` mapped to melody's ``none`` (v1's ``NONE``
+  is still accepted).
 * ``citation_options``: v2 ``citation_options``. Its ``.mode``
   (``ENABLED`` / ``DISABLED`` / ``FAST`` / ``ACCURATE`` / ``OFF``) is
   normalized into melody's cmd3 ``citation_quality`` (``on`` / ``off``)
@@ -701,7 +702,10 @@ def _build_render_config(
 
     if fmt == "cmd3":
         if (sm := chat_template_kwargs.get("safety_mode")) is not None:
-            config["safety_mode"] = str(sm).lower()
+            sm = str(sm).lower()
+            # v2 spells "omit the safety instruction" as ``OFF``; melody
+            # (like v1) calls it ``none``.
+            config["safety_mode"] = "none" if sm == "off" else sm
         # citation_quality: ``on`` / ``off``
         cq = chat_template_kwargs.get("citation_quality")
         if cq is None and (co := chat_template_kwargs.get("citation_options")):

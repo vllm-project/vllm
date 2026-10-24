@@ -745,6 +745,16 @@ class TestBuildRenderConfig:
         )
         assert cfg["safety_mode"] == "contextual"
 
+    @pytest.mark.parametrize("mode", ["OFF", "off", "NONE"])
+    def test_cmd3_safety_mode_off_maps_to_none(self, mode):
+        # v2 ``OFF`` (and v1 ``NONE``) mean "omit the safety instruction",
+        # which melody spells ``none``.
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"cohere_format": "cmd3", "safety_mode": mode},
+        )
+        assert cfg["safety_mode"] == "none"
+
     def test_cmd3_citation_quality_direct(self):
         _, cfg = _build_render_config(
             self._conv(),
@@ -1254,3 +1264,30 @@ class TestRequestCitationsReachRenderedPrompt:
 
         assert "<co>" not in rendered
         assert "</co:" not in rendered
+
+
+def test_v2_safety_mode_off_renders_with_cmd3():
+    """v2 ``OFF`` renders with cmd3 the same as v1's ``NONE`` (no safety
+    instruction) instead of failing melody's validation."""
+    pytest.importorskip("cohere")
+    melody = pytest.importorskip("cohere_melody")
+    from vllm.entrypoints.cohere.protocol import CohereChatV2Request
+    from vllm.entrypoints.cohere.serving import CohereServingChatV2
+
+    def render(mode):
+        request = CohereChatV2Request.model_validate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "safety_mode": mode,
+            }
+        )
+        chat_request = CohereServingChatV2._convert_v2_to_chat_completion(request)
+        kwargs = dict(chat_request.chat_template_kwargs, cohere_format="cmd3")
+        _, config = _build_render_config([{"role": "user", "content": "hi"}], kwargs)
+        return melody.render_cmd3(config)
+
+    off = render("OFF")
+    assert off == render("NONE")
+    assert off != render("CONTEXTUAL")
+    assert off != render("STRICT")
