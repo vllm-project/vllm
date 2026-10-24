@@ -37,18 +37,20 @@ logger = init_logger(__name__)
 
 # The TRT-LLM gen fused-MoE kernels behind this backend are only guaranteed
 # on SM100/SM103 by FlashInfer (its tests/moe suite skips them on every other
-# architecture), and on SM120 they silently corrupt output: verified serving
+# architecture), and on SM120 the MXFP4xMXFP8 variant silently corrupts
+# output (the NVFP4 variant is fine on the same GPUs): verified serving
 # DeepSeek-V4.1-Flash on 8x RTX 6000D (vllm 0.32.1rc1.dev440 + flashinfer
 # 0.7.2), identical weights and config produce correct output under the
 # default `auto` selection (DEEPGEMM_MXFP4) and corrupted output under
 # --moe-backend flashinfer_cutlass, in both eager and CUDA-graph modes.
 # Refuse loudly instead of serving garbage.
 _SM120_UNSUPPORTED_REASON = (
-    "flashinfer_cutlass MoE is not supported on SM120/SM121: the underlying "
-    "TRT-LLM gen fused-MoE kernels are only guaranteed on SM100/SM103 "
-    "upstream, and serving with them on SM120 silently corrupts output. "
-    "Use --moe-backend auto (selects DEEPGEMM_MXFP4 on SM120) or another "
-    "supported backend."
+    "flashinfer_cutlass MoE with MXFP4 experts and MXFP8 activations is not "
+    "supported on SM120/SM121: the underlying TRT-LLM gen fused-MoE kernels "
+    "are only guaranteed on SM100/SM103 upstream, and serving with them on "
+    "SM120 silently corrupts output. Use --moe-backend auto (selects "
+    "DEEPGEMM_MXFP4 on SM120) or another supported backend. The NVFP4 "
+    "expert variants are unaffected by this refusal."
 )
 
 
@@ -87,7 +89,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        if current_platform.is_device_capability_family(120):
+        if (
+            current_platform.is_device_capability_family(120)
+            and activation_key == kMxfp8Dynamic
+        ):
             return False, _SM120_UNSUPPORTED_REASON
         return mk.FusedMoEExpertsModular.is_supported_config(
             cls,
