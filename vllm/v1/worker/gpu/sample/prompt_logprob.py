@@ -154,28 +154,50 @@ class PromptLogprobsWorker:
             else int(requested_num_prompt_logprobs.max())
         )
 
-        # Get the prompt logprobs token_ids.
-        prompt_logprobs_token_ids = get_prompt_logprobs_token_ids(
-            input_batch.num_tokens,
-            input_batch.query_start_loc,
-            input_batch.idx_mapping,
-            num_computed_tokens,
-            all_token_ids,
+        pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
+        is_prompt_chunked = pos_after_step < prompt_lens
+
+        num_prompt_tokens = np.where(
+            needs_prompt_logprobs,
+            np.where(
+                is_prompt_chunked,
+                input_batch.num_scheduled_tokens,
+                input_batch.num_scheduled_tokens - 1,
+            ),
+            0,
         )
-        prompt_token_ids, prompt_logprobs, prompt_ranks = (
-            compute_prompt_logprobs_with_chunking(
+        prompt_start_loc_np = np.zeros(len(num_prompt_tokens) + 1, dtype=np.int32)
+        np.cumsum(num_prompt_tokens, out=prompt_start_loc_np[1:])
+        num_tokens = int(prompt_start_loc_np[-1])
+        prompt_scores = None
+        if num_tokens > 0:
+            prompt_rows = None
+            if num_tokens != input_batch.num_tokens:
+                row_offsets = (
+                    input_batch.query_start_loc_np[: input_batch.num_reqs]
+                    - prompt_start_loc_np[:-1]
+                )
+                prompt_rows = async_tensor_h2d(
+                    np.repeat(row_offsets, num_prompt_tokens) + np.arange(num_tokens),
+                    self.device,
+                )
+            # Get the prompt logprobs token_ids.
+            prompt_logprobs_token_ids = get_prompt_logprobs_token_ids(
+                num_tokens,
+                async_tensor_h2d(prompt_start_loc_np, self.device),
+                input_batch.idx_mapping,
+                num_computed_tokens,
+                all_token_ids,
+            )
+            prompt_scores = compute_prompt_logprobs_with_chunking(
                 prompt_logprobs_token_ids,
                 hidden_states[: input_batch.num_tokens],
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                prompt_rows,
             )
-        )
 
-        pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
-        is_prompt_chunked = pos_after_step < prompt_lens
-
-        query_start_loc_np = input_batch.query_start_loc_np
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
         for i, req_id in enumerate(input_batch.req_ids):
             if not needs_prompt_logprobs[i]:
@@ -183,29 +205,22 @@ class PromptLogprobsWorker:
 
             req_is_prompt_chunked = is_prompt_chunked[i]
             req_num_prompt_logprobs = int(num_prompt_logprobs[i])
-            start_idx = query_start_loc_np[i]
-            end_idx = query_start_loc_np[i + 1]
-            assert start_idx < end_idx, (
-                f"start_idx ({start_idx}) >= end_idx ({end_idx})"
-            )
-            if not req_is_prompt_chunked:
-                end_idx -= 1
-
-            width = (
-                prompt_logprobs.shape[1]
-                if req_num_prompt_logprobs == -1
-                else req_num_prompt_logprobs + 1
-            )
-            # no logprobs if start_idx >= end_idx
-            logprobs = (
-                None
-                if start_idx >= end_idx
-                else LogprobsTensors(
+            start_idx = prompt_start_loc_np[i]
+            end_idx = prompt_start_loc_np[i + 1]
+            logprobs = None
+            if start_idx < end_idx:
+                assert prompt_scores is not None
+                prompt_token_ids, prompt_logprobs, prompt_ranks = prompt_scores
+                width = (
+                    prompt_logprobs.shape[1]
+                    if req_num_prompt_logprobs == -1
+                    else req_num_prompt_logprobs + 1
+                )
+                logprobs = LogprobsTensors(
                     logprob_token_ids=prompt_token_ids[start_idx:end_idx, :width],
                     logprobs=prompt_logprobs[start_idx:end_idx, :width],
                     selected_token_ranks=prompt_ranks[start_idx:end_idx],
                 )
-            )
 
             prompt_logprobs_list = self.in_progress_prompt_logprobs[req_id]
             if logprobs is not None and (req_is_prompt_chunked or prompt_logprobs_list):
@@ -282,10 +297,11 @@ def get_prompt_logprobs_token_ids(
 
 def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
-    prompt_hidden_states: torch.Tensor,
+    hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    prompt_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -296,8 +312,13 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids = prompt_token_ids.to(torch.int64)
     for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
+        chunk_hidden_states = (
+            hidden_states[start_idx:end_idx]
+            if prompt_rows is None
+            else hidden_states[prompt_rows[start_idx:end_idx]]
+        )
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        prompt_logits = logits_fn(chunk_hidden_states)
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1
