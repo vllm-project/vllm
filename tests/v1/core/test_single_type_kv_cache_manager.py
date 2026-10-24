@@ -630,6 +630,133 @@ def test_sliding_window_possible_cached_prefix():
     )
 
 
+@pytest.mark.parametrize("drop_eagle_block", [False, True])
+def test_sliding_window_cache_hit_matches_brute_force(drop_eagle_block):
+    """The strided probe search must find the same window as a full scan."""
+    block_size = 2
+    sliding_window = 8
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+    # Twice the block size, so the search has to retry with an alignment step.
+    alignment_tokens = 2 * block_size
+    block_pool = BlockPool(
+        num_gpu_blocks=200, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    need = SlidingWindowManager._contiguous_blocks_for_hit(
+        sliding_window, block_size, drop_eagle_block
+    )
+    # A hit may only end on a block aligned with `alignment_tokens`.
+    align_shift = 0 if drop_eagle_block else 1
+
+    def is_aligned(edge: int) -> bool:
+        return ((edge + align_shift) * block_size) % alignment_tokens == 0
+
+    def find_longest(block_is_cached):
+        block_hash_list = [
+            BlockHash(str(i).encode()) for i in range(len(block_is_cached))
+        ]
+        block_pool.cached_block_hash_to_block._cache.clear()
+        for i, block_hash in enumerate(block_hash_list):
+            if block_is_cached[i]:
+                block_pool.cached_block_hash_to_block.insert(
+                    make_block_hash_with_group_id(block_hash, 0),
+                    block_pool.blocks[i + 10],
+                )
+        computed_blocks, hit_length = manager.find_longest_cache_hit(
+            block_hashes=block_hash_list,
+            max_length=len(block_hash_list) * block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            kv_cache_spec=sliding_window_spec,
+            drop_eagle_block=drop_eagle_block,
+            alignment_tokens=alignment_tokens,
+        )
+        return computed_blocks[0], hit_length
+
+    rng = random.Random(0)
+    for _ in range(200):
+        num_blocks = rng.randint(0, 24)
+        cache_prob = rng.choice([0.2, 0.5, 0.8, 1.0])
+        block_is_cached = [rng.random() < cache_prob for _ in range(num_blocks)]
+        computed_blocks, hit_length = find_longest(block_is_cached)
+
+        assert hit_length == len(computed_blocks) * block_size
+        assert hit_length % alignment_tokens == 0
+        # Reused blocks are cached; skipped blocks stay null.
+        assert all(
+            block == block_pool.null_block or block_is_cached[block.block_id - 10]
+            for block in computed_blocks
+        )
+
+        # Brute force: the rightmost aligned run of `need` cached blocks.
+        best_edge = next(
+            (
+                edge
+                for edge in range(num_blocks - 1, need - 2, -1)
+                if is_aligned(edge) and all(block_is_cached[edge - need + 1 : edge + 1])
+            ),
+            None,
+        )
+        if best_edge is None:
+            # No run is long enough: the hit is a (aligned) cached prefix.
+            assert computed_blocks == [
+                block for block in computed_blocks if block != block_pool.null_block
+            ]
+            continue
+        # EAGLE drops the last matched block, so the hit ends one block early.
+        assert len(computed_blocks) == best_edge + align_shift
+        last = min(best_edge + 1, len(computed_blocks))
+        for i in range(best_edge - need + 1, last):
+            assert computed_blocks[i].block_id == i + 10
+
+
+@pytest.mark.parametrize("cached_block", [None, 4])
+def test_sliding_window_single_token_window(cached_block):
+    """A one-token window needs no contiguous blocks; the probe loop must
+    terminate and reuse a single cached block."""
+    block_size = 2
+    num_blocks = 8
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=1,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    block_hashes = [BlockHash(str(i).encode()) for i in range(num_blocks)]
+    if cached_block is not None:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[cached_block], 0),
+            block_pool.blocks[10],
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=num_blocks * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+
+    expected_blocks = 0 if cached_block is None else cached_block + 1
+    assert hit_length == expected_blocks * block_size
+    assert len(computed_blocks[0]) == expected_blocks
+    if cached_block is not None:
+        assert computed_blocks[0][cached_block] is block_pool.blocks[10]
+
+
 def test_sliding_window_cache_hit_with_finer_hash_alignment():
     """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
     hash_block_size = 2

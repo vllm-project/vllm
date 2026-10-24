@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
@@ -995,49 +996,90 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
         )
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [block_pool.null_block] * max_num_blocks
-            for _ in range(len(kv_cache_group_ids))
-        )
         block_size = kv_cache_spec.block_size
-        num_contiguous_blocks = 0
+        # A hit is a run of `sliding_window_contiguous_blocks` contiguous cached
+        # blocks, so every candidate run contains exactly one probe of a scan
+        # that walks from the right in steps of that stride. Probing therefore
+        # cannot skip a hit, while a full scan costs O(max_num_blocks) lookups
+        # even when little is cached; low cache hit rate is the common case for
+        # sliding window groups.
+        # A window of one token needs no contiguous blocks. Clamp to keep the
+        # probe loop advancing while still allowing a single cached block.
+        stride = max(sliding_window_contiguous_blocks, 1)
+        # Only right edges aligned to `alignment_tokens` are valid, so retries
+        # move by the alignment period in blocks (1 when none applies).
+        align_period = alignment_tokens // math.gcd(alignment_tokens, block_size)
+        align_shift = 0 if drop_eagle_block else 1
+
+        def align_down(idx: int) -> int:
+            return idx - (idx + align_shift) % align_period
+
+        # Blocks of the accepted window, keyed by block index.
+        hits: dict[int, list[KVCacheBlock]] = {}
         match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
-            ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
-                if num_contiguous_blocks == 0 and block_size != alignment_tokens:
-                    post_pop_blocks = i if drop_eagle_block else i + 1
-                    if (post_pop_blocks * block_size) % alignment_tokens != 0:
-                        continue
-                # Add the cached block to the computed blocks.
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed[i] = cached
-                num_contiguous_blocks += 1
-                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks :]
+        i = max_num_blocks - 1
+        while i >= 0:
+            if block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids) is None:
+                i -= stride
+                continue
+            # The run containing `i` cannot extend past `i + stride - 1`: block
+            # `i + stride` was probed and missed, and a window further right
+            # does not contain `i` (a lower probe covers it).
+            right = i
+            right_limit = min(max_num_blocks - 1, i + stride - 1)
+            while right < right_limit:
+                if (
+                    block_pool.get_cached_block(
+                        block_hashes[right + 1], kv_cache_group_ids
+                    )
+                    is None
+                ):
+                    break
+                right += 1
+            edge = align_down(right)
+            # Only windows containing `i` can be this probe's candidate.
+            while edge >= max(i, stride - 1):
+                window: dict[int, list[KVCacheBlock]] = {}
+                idx = edge
+                while idx >= edge - stride + 1:
+                    cached_block = block_pool.get_cached_block(
+                        block_hashes[idx], kv_cache_group_ids
+                    )
+                    if cached_block is None:
+                        break
+                    window[idx] = cached_block
+                    idx -= 1
+                if idx < edge - stride + 1:
+                    hits = window
                     match_found = True
                     break
-            else:
-                num_contiguous_blocks = 0
+                # The miss at `idx` also disqualifies every window ending in
+                # (idx, edge], so resume below it.
+                edge = align_down(idx - 1)
+            if match_found:
+                break
+            i -= stride
+
         if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            for computed in computed_blocks:
-                del computed[num_contiguous_blocks:]
+            # The cached prefix is a hit even if it is shorter than `stride`.
+            # Only its leading blocks up to the last aligned one can be reused.
+            prefix_hits: dict[int, list[KVCacheBlock]] = {}
+            while len(prefix_hits) < max_num_blocks:
+                cached_block = block_pool.get_cached_block(
+                    block_hashes[len(prefix_hits)], kv_cache_group_ids
+                )
+                if cached_block is None:
+                    break
+                prefix_hits[len(prefix_hits)] = cached_block
+            num_hit_blocks = max(align_down(len(prefix_hits) - 1) + 1, 0)
+            hits = {idx: prefix_hits[idx] for idx in range(num_hit_blocks)}
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * min(hits, default=0)
+            + [hits[idx][group] for idx in sorted(hits)]
+            for group in range(len(kv_cache_group_ids))
+        )
+        if not match_found:
             while (
                 block_size != alignment_tokens  # Faster for common case.
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
