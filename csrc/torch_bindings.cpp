@@ -471,6 +471,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor slot_mapping, Tensor q_scale_inv, Tensor k_scale_inv, "
       "Tensor v_scale_inv, Tensor cache_scale_inv, int cache_block_size, "
       "Tensor? position_ids=None, Tensor? cos_sin_cache=None) -> ()");
+#ifndef USE_ROCM
+  ops.def(
+      "fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert("
+      "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
+      "Tensor! q_fp8, Tensor! k_fp8, Tensor! v_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor q_scale_inv, Tensor k_scale_inv, "
+      "Tensor v_scale_inv, Tensor cache_scale_inv, int cache_block_size) "
+      "-> ()");
+#endif
 
   // Kimi-K3 MLA decode epilogue: concat mqa_q = [ql_nope | q_pe] and insert the
   // latent [kv_c_normed | k_pe] into the paged cache (bf16 / fp8 / fp8_ds_mla).
@@ -861,6 +870,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_kv_concat_quant_fp8));
   ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
            TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
+#ifndef USE_ROCM
+  ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert));
+#endif
   ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
            TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_kv_cache_insert));
   ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert",
@@ -1033,6 +1046,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                             int entry_stride,"
       "                             Tensor? kv_scales=None,"
       "                             str kv_cache_dtype='auto') -> ()");
+  // Quantize kv_c to NVFP4 (linear block scales) and k_pe to FP8-E4M3,
+  // then cache them in the page-segmented MLA NVFP4 layout.
+  ops.def(
+      "concat_and_cache_mla_nvfp4(Tensor kv_c, Tensor k_pe,"
+      "                           Tensor! kv_cache,"
+      "                           Tensor slot_mapping,"
+      "                           Tensor scale) -> ()");
 
 #ifndef USE_ROCM
   ops.def(
@@ -1116,6 +1136,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                               str kv_cache_dtype, "
       "                               Tensor scale, Tensor? seq_starts) -> ()");
 
+  // Gather + dequantize context tokens from the page-segmented MLA NVFP4
+  // KV cache into the chunked-prefill workspace (inverse of
+  // concat_and_cache_mla_nvfp4).
+  ops.def(
+      "gather_and_dequant_cache_mla_nvfp4(Tensor src_cache, Tensor! dst, "
+      "                                   Tensor block_table, "
+      "                                   Tensor cu_seq_lens, "
+      "                                   int num_tokens, int kv_lora_rank, "
+      "                                   Tensor scale, "
+      "                                   Tensor? seq_starts) -> ()");
+
   ops.def(
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
@@ -1192,6 +1223,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
   ops.impl("concat_and_cache_mla_grouped",
            TORCH_BOX(&concat_and_cache_mla_grouped));
+  ops.impl("concat_and_cache_mla_nvfp4",
+           TORCH_BOX(&concat_and_cache_mla_nvfp4));
 
 #ifndef USE_ROCM
   ops.impl("hisparse_resolve_residency",
@@ -1206,6 +1239,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
   ops.impl("gather_and_maybe_dequant_cache",
            TORCH_BOX(&gather_and_maybe_dequant_cache));
+  ops.impl("gather_and_dequant_cache_mla_nvfp4",
+           TORCH_BOX(&gather_and_dequant_cache_mla_nvfp4));
   ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
   ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
            TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));

@@ -1912,6 +1912,22 @@ def test_merge_mla_spec():
         kv_cache_specs[0].merge(kv_cache_specs)
 
 
+def test_nvfp4_mla_spec_page_size():
+    """The page-segmented NVFP4 MLA cache stores 352 bytes per token (512 FP4
+    NoPE values, 64 FP8 RoPE values and 32 FP8 block scales), not the generic
+    head_size bytes of a uint8 cache."""
+    spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=576,
+        dtype=torch.uint8,
+        cache_dtype_str="nvfp4",
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+    assert spec.page_size_bytes == 64 * 352
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
     block_size = 3

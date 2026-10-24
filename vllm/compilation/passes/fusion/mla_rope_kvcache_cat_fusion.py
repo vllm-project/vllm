@@ -247,6 +247,9 @@ class MLARoPEKVCacheCatFusionPass(VllmFusionPatternMatcherPass):
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
         for _, layer in attn_layers.items():
+            if layer.kv_cache_dtype == "nvfp4":
+                # concat_and_cache_mla_rope_fused cannot write the NVFP4 layout.
+                continue
             for is_neox in [False, True]:
                 for use_deepseek_scaling in [False, True]:
                     if RotaryEmbedding.enabled():

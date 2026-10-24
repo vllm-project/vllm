@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.attention.mla_attention as mla_attention
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonImpl,
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import nvfp4_mla_kv_cache_full_dim
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Kimi-K3 fused MLA requires CUDA"
@@ -201,7 +203,7 @@ def _build_prefill_metadata(
 
 
 @pytest.mark.parametrize("honors_out", [False, True], ids=["copy_out", "writes_out"])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "nvfp4"])
 @pytest.mark.parametrize(
     "kv_b_proj_quantized", [True, False], ids=["fp8_kv_b_proj", "bf16_kv_b_proj"]
 )
@@ -215,14 +217,16 @@ def test_fused_context_matches_generic_impl(
     fused loop cannot assume the gathered latent is already in the dtype
     ``kv_b_proj`` accepts.
     """
+    if kv_cache_dtype == "nvfp4" and not current_platform.has_device_capability(100):
+        pytest.skip("The NVFP4 MLA cache ops need SM100 or newer")
     torch.manual_seed(0)
     device = torch.device("cuda")
     fp8 = current_platform.fp8_dtype()
-    quantized = kv_cache_dtype == "fp8"
     # An fp8 cache is read by an fp8 query, so the workspace keeps the fp8
-    # layout; a bf16 cache dequantizes into a bf16 workspace.
-    q_data_type = fp8 if quantized else torch.bfloat16
-    workspace_dtype = q_data_type
+    # layout. bf16 and NVFP4 caches dequantize into a bf16 workspace; the NVFP4
+    # one is read by an fp8 query, as in Kimi-K3's FP8 prefill.
+    q_data_type = torch.bfloat16 if kv_cache_dtype == "auto" else fp8
+    workspace_dtype = fp8 if kv_cache_dtype == "fp8" else torch.bfloat16
 
     kv_b_proj = _KVBProj(
         device, weight_dtype=fp8 if kv_b_proj_quantized else torch.bfloat16
@@ -242,7 +246,22 @@ def test_fused_context_matches_generic_impl(
     cache = torch.randn(
         (num_blocks, _BLOCK_SIZE, _ENTRY), device=device, dtype=torch.bfloat16
     )
-    kv_cache = cache.to(fp8) if quantized else cache
+    if kv_cache_dtype == "nvfp4":
+        kv_cache = torch.empty(
+            (num_blocks, _BLOCK_SIZE, nvfp4_mla_kv_cache_full_dim(_ENTRY)),
+            device=device,
+            dtype=torch.uint8,
+        )
+        latent = cache.view(-1, _ENTRY)
+        ops.concat_and_cache_mla_nvfp4(
+            latent[:, :_KV_LORA_RANK].contiguous(),
+            latent[:, _KV_LORA_RANK:].contiguous(),
+            kv_cache,
+            torch.arange(latent.shape[0], device=device),
+            k_scale,
+        )
+    else:
+        kv_cache = cache.to(fp8) if kv_cache_dtype == "fp8" else cache
     q = (
         torch.randn(
             (sum(_QUERY_LENS), _NUM_HEADS, _QK_NOPE + _QK_ROPE),

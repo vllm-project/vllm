@@ -10,7 +10,12 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
+from vllm.utils.torch_utils import (
+    nvfp4_mla_kv_cache_full_dim,
+    nvfp4_mla_kv_cache_split_views,
+    nvfp4_split_data_scale,
+    set_random_seed,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -1205,6 +1210,111 @@ def test_concat_and_cache_nvfp4_ds_mla(
         rope_vals = rope_payload.view(torch.float8_e4m3fn).to(torch.float32)
         rope_tol = k_pe_ref.abs() * 2.0**-3 + 2.0**-9
         assert ((rope_vals - k_pe_ref).abs() <= rope_tol).all()
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_concat_and_gather_cache_mla_nvfp4(
+    block_size: int, dtype: torch.dtype, use_seq_starts: bool, device: str
+) -> None:
+    """Round trip through the page-segmented NVFP4 MLA cache that FlashInfer's
+    Cake decode reads: the writer puts each token's bytes at the layout's
+    offsets (exact RoPE bytes, block scales within one E4M3 step, NoPE within
+    1.5 block scales of the input), and the reader dequantizes exactly what was
+    stored, in request order."""
+    if not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    kv_lora_rank, rope_dim, num_blocks, k_scale = 512, 64, 32, 0.25
+    scale = torch.tensor(k_scale, dtype=torch.float32)
+
+    # Partial first and last pages, shuffled pages, and one padded token.
+    seq_lens = [3 * block_size + 5, 1, block_size]
+    num_reqs = len(seq_lens)
+    pages_per_req = (max(seq_lens) + block_size - 1) // block_size
+    block_table = (
+        torch.randperm(num_blocks)[: num_reqs * pages_per_req]
+        .view(num_reqs, pages_per_req)
+        .to(torch.int32)
+    )
+    req = torch.repeat_interleave(torch.arange(num_reqs), torch.tensor(seq_lens))
+    pos = torch.cat([torch.arange(n) for n in seq_lens])
+    page = block_table[req, pos // block_size].long()
+    slot = pos % block_size
+    slot_mapping = torch.cat([page * block_size + slot, torch.tensor([-1])])
+    num_written = page.numel()
+
+    kv_c = torch.randn(slot_mapping.numel(), kv_lora_rank, dtype=dtype)
+    k_pe = torch.randn(slot_mapping.numel(), rope_dim, dtype=dtype)
+    full_dim = nvfp4_mla_kv_cache_full_dim(kv_lora_rank + rope_dim, rope_dim)
+    cache = torch.full((num_blocks, block_size, full_dim), 0xA5, dtype=torch.uint8)
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla_nvfp4,
+        (kv_c, k_pe, cache, slot_mapping, scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    ops.concat_and_cache_mla_nvfp4(kv_c, k_pe, cache, slot_mapping, scale)
+
+    nope, rope, sf = (
+        view.view(torch.uint8)
+        for view in nvfp4_mla_kv_cache_split_views(cache, rope_dim)
+    )
+
+    def e4m3(raw: torch.Tensor) -> torch.Tensor:
+        return raw.view(torch.float8_e4m3fn).float()
+
+    kv_c_ref = kv_c[:num_written].float()
+    # Block scales are e4m3(amax / 6 / k_scale), within one e4m3 step.
+    ref_sf = _ref_nvfp4_sf_bytes(kv_c_ref / k_scale, 6.0).view(num_written, -1)
+    sf_diff = sf[page, slot].to(torch.int16) - ref_sf.to(torch.int16)
+    assert (sf_diff.abs() <= 1).all()
+    nope_scale = e4m3(sf[page, slot]).repeat_interleave(16, dim=-1) * k_scale
+    nope_vals = _unpack_e2m1(nope[page, slot]).view(num_written, -1) * nope_scale
+    assert ((nope_vals - kv_c_ref).abs() <= 1.5 * nope_scale).all()
+    ref_rope = (k_pe[:num_written].float() / k_scale).to(torch.float8_e4m3fn)
+    assert torch.equal(rope[page, slot], ref_rope.view(torch.uint8))
+    # Unwritten slots keep the fill; the padded token (slot -1) writes nothing.
+    unwritten = torch.ones(num_blocks, block_size, dtype=torch.bool)
+    unwritten[page, slot] = False
+    for view in (nope, rope, sf):
+        assert (view[unwritten] == 0xA5).all()
+
+    # Read each request's context from its start (0 unless use_seq_starts).
+    starts = [block_size - 3, 0, 1] if use_seq_starts else [0] * num_reqs
+    lens = [n - s for n, s in zip(seq_lens, starts)]
+    total = sum(lens)
+    cu_seq_lens = torch.tensor([0] + lens).cumsum(0).to(torch.int32)
+    seq_starts = torch.tensor(starts, dtype=torch.int32) if use_seq_starts else None
+    dst = torch.full((total + 4, kv_lora_rank + rope_dim), float("nan"), dtype=dtype)
+    args = (cache, dst, block_table, cu_seq_lens, total, kv_lora_rank, scale)
+    opcheck(
+        torch.ops._C_cache_ops.gather_and_dequant_cache_mla_nvfp4,
+        (*args, seq_starts),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    ops.gather_and_dequant_cache_mla_nvfp4(*args, seq_starts)
+
+    out_req = torch.repeat_interleave(torch.arange(num_reqs), torch.tensor(lens))
+    out_pos = torch.cat([torch.arange(s, n) for s, n in zip(starts, seq_lens)])
+    out_page = block_table[out_req, out_pos // block_size].long()
+    out_slot = out_pos % block_size
+    # The reader computes fp4 * (sf * k_scale) and fp8 * k_scale in fp32.
+    sf_scale = e4m3(sf[out_page, out_slot]) * k_scale
+    nope_codes = _unpack_e2m1(nope[out_page, out_slot]).view(total, -1, 16)
+    expected = torch.cat(
+        [
+            (nope_codes * sf_scale[..., None]).view(total, kv_lora_rank),
+            e4m3(rope[out_page, out_slot]) * k_scale,
+        ],
+        dim=-1,
+    ).to(dtype)
+    torch.testing.assert_close(dst[:total], expected, rtol=0, atol=0)
+    assert dst[total:].isnan().all()
 
 
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)

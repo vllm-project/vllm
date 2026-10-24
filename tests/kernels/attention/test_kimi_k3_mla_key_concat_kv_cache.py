@@ -10,6 +10,7 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_key_concat_ds_mla_insert,
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
+    fused_mla_qkv_quant_kv_cache_nvfp4_insert,
 )
 from vllm.platforms import current_platform
 
@@ -22,6 +23,7 @@ QK_HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 V_HEAD_DIM = 128
 CACHE_ENTRY = KV_LORA_RANK + ROPE_HEAD_DIM
 DS_MLA_CACHE_ENTRY = 656
+NVFP4_CACHE_ENTRY = 352
 BLOCK_SIZE = 8
 OWNED_TOKEN_INDICES = [1, 3]
 
@@ -255,3 +257,44 @@ def test_ds_mla_cache_insert_bit_compatible_with_reference(decode: bool) -> None
     torch.testing.assert_close(
         torch.log2(scales), torch.log2(scales).round(), rtol=0, atol=0
     )
+
+
+def test_nvfp4_prefill_insert_bit_compatible_with_reference() -> None:
+    """The fused NVFP4 insert and concat_and_cache_mla_nvfp4 are separate
+    implementations (8 vs 16 values per lane) of one cache layout, so their
+    bytes must match exactly; the insert also returns the fp8 insert's q/k/v."""
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major not in (10, 11):
+        pytest.skip("The Kimi-K3 NVFP4 insert requires SM10x/SM11x")
+    torch.manual_seed(0)
+    num_tokens, num_blocks, k_scale = 33, 16, 0.25
+    dt = torch.bfloat16
+    q = torch.randn(num_tokens, NUM_HEADS, QK_HEAD_DIM, device="cuda", dtype=dt)
+    k_nope = torch.randn(num_tokens, NUM_HEADS, NOPE_HEAD_DIM, device="cuda", dtype=dt)
+    k_pe = torch.randn(num_tokens, 1, ROPE_HEAD_DIM, device="cuda", dtype=dt)
+    kv_c = torch.randn(num_tokens, KV_LORA_RANK, device="cuda", dtype=dt)
+    v = torch.randn(num_tokens, NUM_HEADS, V_HEAD_DIM, device="cuda", dtype=dt)
+    slots = torch.randperm(num_blocks * BLOCK_SIZE, device="cuda")[:num_tokens].long()
+    slots[torch.rand(num_tokens, device="cuda") < 0.3] = -1
+    ref = torch.full(
+        (num_blocks, BLOCK_SIZE, NVFP4_CACHE_ENTRY),
+        165,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    got = ref.clone()
+    scale = torch.tensor([k_scale], device="cuda", dtype=torch.float32)
+    ops.concat_and_cache_mla_nvfp4(kv_c, k_pe.squeeze(1), ref, slots, scale)
+    one = torch.ones(1, device="cuda", dtype=torch.float32)
+    q_fp8, k_fp8, v_fp8 = fused_mla_qkv_quant_kv_cache_nvfp4_insert(
+        q, k_nope, k_pe, kv_c, v, got, slots, one, one, one, 1.0 / scale
+    )
+
+    assert torch.equal(ref, got)
+    expected = (
+        q.to(torch.float8_e4m3fn),
+        _full_key(k_nope, k_pe.squeeze(1)).to(torch.float8_e4m3fn),
+        v.to(torch.float8_e4m3fn),
+    )
+    for actual, reference in zip((q_fp8, k_fp8, v_fp8), expected):
+        torch.testing.assert_close(actual.float(), reference.float(), rtol=0, atol=0)

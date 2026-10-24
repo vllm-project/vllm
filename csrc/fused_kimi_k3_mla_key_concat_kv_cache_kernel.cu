@@ -39,6 +39,12 @@
  *       power-of-two scales, RoPE bf16), bit-compatible with
  *       concat_and_cache_ds_mla_kernel.
  *
+ *   nvfp4 (fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert):
+ *     - the fp8 variant's q/k/v outputs, with the cache insert in the 352-byte
+ *       page-segmented NVFP4 MLA layout (NoPE e2m1 with e4m3 block scales,
+ *       RoPE e4m3), bit-compatible with concat_and_cache_mla_nvfp4_kernel.
+ *       NoPE only; SM10x/11x only.
+ *
  * Both use Programmatic Dependent Launch (PDL) to overlap the tail of the
  * producing GEMMs on sm_90+, and are structured after
  * `fusedDeepseekV4FullCacheKernel`: one grid, one warp per (token, slot) with
@@ -64,6 +70,7 @@
 #ifndef USE_ROCM
   #include <cuda_fp8.h>
   #include "quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "quantization/fp4/nvfp4_utils.cuh"
 #else
   #include <hip/hip_fp8.h>
   #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
@@ -528,6 +535,156 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
   cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
+
+// The E2M1 cvt of the NVFP4 insert exists only in the SM10x/11x family- or
+// arch-specific builds CMake gives this file (nvcc 12.8 marks sm_100a/sm_101a
+// only with the FEAT macros); its launcher rejects other GPUs.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) ||         \
+     defined(__CUDA_ARCH_FEAT_SM100_ALL) ||            \
+     defined(__CUDA_ARCH_FEAT_SM101_ALL))
+  #define KIMI_K3_NVFP4_NATIVE_CVT 1
+#else
+  #define KIMI_K3_NVFP4_NATIVE_CVT 0
+#endif
+
+#ifndef USE_ROCM
+// Write one token's NVFP4 latent record, bit-compatible with
+// concat_and_cache_mla_nvfp4_kernel's page-segmented layout:
+// per token, kv_lora_rank/2 packed-E2M1 NoPE bytes + pe_dim E4m3 RoPE bytes in
+// the page's data segment, and kv_lora_rank/16 E4m3 block scales in the page's
+// scale segment. One warp; two lanes per 16-element scale group.
+template <typename scalar_t>
+__device__ __forceinline__ void writeLatentNvfp4(
+    uint8_t* __restrict__ data_dst, uint8_t* __restrict__ sf_dst,
+    const scalar_t* __restrict__ a512, const scalar_t* __restrict__ b64,
+    int laneId, float global_scale) {
+  #if !KIMI_K3_NVFP4_NATIVE_CVT
+  __trap();
+  #else
+  using CudaType = typename CUDATypeConverter<scalar_t>::Type;
+  using PVec = PackedVec<CudaType, CVT_FP4_PACK16>;
+  constexpr int ELTS = CVT_FP4_ELTS_PER_THREAD;
+  constexpr int THREADS_PER_SF = CVT_FP4_SF_VEC_SIZE / ELTS;
+  constexpr int kGroups = kKvLoraRank / CVT_FP4_SF_VEC_SIZE;  // 32
+
+  const auto* nope_src = reinterpret_cast<const CudaType*>(a512);
+  const int tg_id = laneId / THREADS_PER_SF;
+  const int tg_lane = laneId % THREADS_PER_SF;
+
+  for (int g = tg_id; g < kGroups; g += 32 / THREADS_PER_SF) {
+    PVec in_vec;
+    const CudaType* src_ptr =
+        nope_src + g * CVT_FP4_SF_VEC_SIZE + tg_lane * ELTS;
+    #pragma unroll
+    for (int i = 0; i < ELTS / 2; i++) {
+      in_vec.elts[i] =
+          reinterpret_cast<const typename PackedTypeConverter<CudaType>::Type*>(
+              src_ptr)[i];
+    }
+    uint8_t sf_val;
+    uint8_t* sf_out_ptr = (tg_lane == 0) ? &sf_val : nullptr;
+    fp4_packed_t packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
+        in_vec, global_scale, sf_out_ptr);
+    reinterpret_cast<uint32_t*>(data_dst + g * CVT_FP4_SF_VEC_SIZE / 2 +
+                                tg_lane * ELTS / 2)[0] = packed;
+    if (sf_out_ptr != nullptr) sf_dst[g] = sf_val;
+  }
+
+  // RoPE tail: E4M3 of k_pe * global_scale, no block scales. The 320-byte
+  // records keep the +256 tail 8-byte aligned for the uint2 stores.
+  uint8_t* rope_dst = data_dst + kKvLoraRank / 2;
+  constexpr int kRopeVecs = kQkRopeHeadDim / kVecElems;  // 8
+  if (laneId < kRopeVecs) {
+    const scalar_t* src = b64 + laneId * kVecElems;
+    alignas(8) uint8_t out[kVecElems];
+    #pragma unroll
+    for (int j = 0; j < kVecElems; ++j) {
+      __nv_fp8_e4m3 q(static_cast<float>(src[j]) * global_scale);
+      out[j] = *reinterpret_cast<uint8_t*>(&q);
+    }
+    *reinterpret_cast<uint2*>(rope_dst + laneId * kVecElems) =
+        *reinterpret_cast<const uint2*>(out);
+  }
+  #endif
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// nvfp4 variant: quant q / k / v to fp8 + NVFP4 latent cache insert
+// ────────────────────────────────────────────────────────────────────────────
+template <typename scalar_t>
+__global__ void fusedKimiK3MLAQKVQuantKVCacheNvfp4Kernel(
+    const scalar_t* __restrict__ q, int64_t const q_tok_stride,
+    int64_t const q_head_stride, const scalar_t* __restrict__ k_nope,
+    int64_t const kn_tok_stride, int64_t const kn_head_stride,
+    const scalar_t* __restrict__ k_pe, int64_t const k_pe_tok_stride,
+    const scalar_t* __restrict__ kv_c, int64_t const kv_c_tok_stride,
+    const scalar_t* __restrict__ v, int64_t const v_tok_stride,
+    int64_t const v_head_stride, uint8_t* __restrict__ q_fp8,
+    int64_t const qo_tok_stride, int64_t const qo_head_stride,
+    uint8_t* __restrict__ k_fp8, int64_t const ko_tok_stride,
+    int64_t const ko_head_stride, uint8_t* __restrict__ v_fp8,
+    int64_t const vo_tok_stride, int64_t const vo_head_stride,
+    uint8_t* __restrict__ k_cache, int64_t const cache_block_stride,
+    const int64_t* __restrict__ slot_mapping,
+    const float* __restrict__ q_scale_inv,
+    const float* __restrict__ k_scale_inv,
+    const float* __restrict__ v_scale_inv,
+    const float* __restrict__ cache_scale_inv, int const num_tokens,
+    int const num_heads, int const cache_block_size) {
+  int const warpsPerBlock = blockDim.x / 32;
+  int const laneId = threadIdx.x % 32;
+  int const globalWarpIdx = blockIdx.x * warpsPerBlock + threadIdx.x / 32;
+  int const slotsPerToken = num_heads + 1;
+  int const tokenIdx = globalWarpIdx / slotsPerToken;
+  int const slotIdx = globalWarpIdx % slotsPerToken;
+  if (tokenIdx >= num_tokens) return;
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+  #endif
+
+  if (slotIdx < num_heads) {
+    int const h = slotIdx;
+    float const qsi = __ldg(q_scale_inv);
+    const scalar_t* qh = q + tokenIdx * q_tok_stride + h * q_head_stride;
+    uint8_t* qo = q_fp8 + tokenIdx * qo_tok_stride + h * qo_head_stride;
+    writePrefillQuery<scalar_t, true>(qo, qh, laneId, 1, qsi);
+    writeFullKey<scalar_t, true>(
+        k_fp8 + tokenIdx * ko_tok_stride + h * ko_head_stride,
+        k_nope + tokenIdx * kn_tok_stride + h * kn_head_stride,
+        k_pe + tokenIdx * k_pe_tok_stride, laneId, 1, __ldg(k_scale_inv));
+    float const vsi = __ldg(v_scale_inv);
+    const scalar_t* vh = v + tokenIdx * v_tok_stride + h * v_head_stride;
+    uint8_t* vo = v_fp8 + tokenIdx * vo_tok_stride + h * vo_head_stride;
+    for (int e = laneId * kVecElems; e < kVHeadDim; e += 32 * kVecElems) {
+      copyChunk8<scalar_t, true>(vo + e, vh + e, vsi);
+    }
+  } else {
+    int64_t const slot_id = slot_mapping[tokenIdx];
+    if (slot_id >= 0) {
+      // cache_scale_inv is 1 / k_scale, which is exactly the global scale
+      // concat_and_cache_mla_nvfp4_kernel derives from k_scale.
+      float const gs = __ldg(cache_scale_inv);
+      constexpr int kTokenDataBytes = kKvLoraRank / 2 + kQkRopeHeadDim;  // 320
+      constexpr int kSfDim = kKvLoraRank / CVT_FP4_SF_VEC_SIZE;          // 32
+      uint8_t* page_base =
+          k_cache + (slot_id / cache_block_size) * cache_block_stride;
+      int const block_offset = static_cast<int>(slot_id % cache_block_size);
+      writeLatentNvfp4<scalar_t>(
+          page_base + static_cast<int64_t>(block_offset) * kTokenDataBytes,
+          page_base + static_cast<int64_t>(cache_block_size) * kTokenDataBytes +
+              static_cast<int64_t>(block_offset) * kSfDim,
+          kv_c + tokenIdx * kv_c_tok_stride, k_pe + tokenIdx * k_pe_tok_stride,
+          laneId, gs);
+    }
+  }
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+  #endif
+}
+#endif  // !USE_ROCM
 
 // ────────────────────────────────────────────────────────────────────────────
 // K/V pack variant (chunked context): concatenate the strided kv_b_proj output
@@ -1320,6 +1477,118 @@ void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
         }
       });
 }
+
+#ifndef USE_ROCM
+void fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert(
+    torch::stable::Tensor const& q,             // [Tp, H, 192] bf16
+    torch::stable::Tensor const& k_nope,        // [Tp, H, 128] bf16
+    torch::stable::Tensor const& k_pe,          // [Tp, 64] bf16
+    torch::stable::Tensor const& kv_c_normed,   // [Tp, 512] bf16
+    torch::stable::Tensor const& v,             // [Tp, H, 128] bf16
+    torch::stable::Tensor& q_fp8,               // [Tp, H, 192] fp8, written
+    torch::stable::Tensor& k_fp8,               // [Tp, H, 192] fp8, written
+    torch::stable::Tensor& v_fp8,               // [Tp, H, 128] fp8, written
+    torch::stable::Tensor& k_cache,             // [nblk, bs, 352] u8, written
+    torch::stable::Tensor const& slot_mapping,  // [Tp] int64
+    torch::stable::Tensor const& q_scale_inv,   // scalar fp32 (1 / q scale)
+    torch::stable::Tensor const& k_scale_inv,   // scalar fp32 (1 / k scale)
+    torch::stable::Tensor const& v_scale_inv,   // scalar fp32 (1 / v scale)
+    torch::stable::Tensor const& cache_scale_inv,  // scalar fp32 (1 / k_scale)
+    int64_t cache_block_size) {
+  using torch::headeronly::ScalarType;
+  namespace kk3 = vllm::kimi_k3_fused_ops;
+  ScalarType const dt = k_nope.scalar_type();
+  auto check_in = [&](torch::stable::Tensor const& t, int d2, char const* n) {
+    STD_TORCH_CHECK(t.device().is_cuda() && t.scalar_type() == dt &&
+                        t.dim() == 3 && t.size(2) == d2,
+                    n);
+  };
+  check_in(q, 192, "q shape [Tp, H, 192]");
+  check_in(k_nope, 128, "k_nope shape [Tp, H, 128]");
+  check_in(v, 128, "v shape [Tp, H, 128]");
+  STD_TORCH_CHECK(k_pe.device().is_cuda() && k_pe.dim() == 2 &&
+                      k_pe.stride(1) == 1 && k_pe.scalar_type() == dt &&
+                      k_pe.size(1) == 64,
+                  "k_pe shape [Tp, 64], unit last-dim stride");
+  STD_TORCH_CHECK(kv_c_normed.device().is_cuda() &&
+                      kv_c_normed.is_contiguous() &&
+                      kv_c_normed.scalar_type() == dt &&
+                      kv_c_normed.dim() == 2 && kv_c_normed.size(1) == 512,
+                  "kv_c_normed shape [Tp, 512] contiguous");
+  auto check_out = [&](torch::stable::Tensor const& t, int d2, char const* n) {
+    STD_TORCH_CHECK(t.device().is_cuda() && t.is_contiguous() &&
+                        t.scalar_type() == ScalarType::Float8_e4m3fn &&
+                        t.dim() == 3 && t.size(2) == d2,
+                    n);
+  };
+  check_out(q_fp8, 192, "q_fp8 shape [Tp, H, 192] fp8 contiguous");
+  check_out(k_fp8, 192, "k_fp8 shape [Tp, H, 192] fp8 contiguous");
+  check_out(v_fp8, 128, "v_fp8 shape [Tp, H, 128] fp8 contiguous");
+  // 352 = 512/2 packed NoPE + 64 E4m3 RoPE + 512/16 block scales.
+  STD_TORCH_CHECK(k_cache.device().is_cuda() && k_cache.dim() == 3 &&
+                      k_cache.size(1) == cache_block_size &&
+                      k_cache.size(2) == 352 && k_cache.stride(1) == 352 &&
+                      k_cache.stride(2) == 1 &&
+                      k_cache.scalar_type() == ScalarType::Byte,
+                  "k_cache shape [nblk, block_size, 352] uint8, pages "
+                  "contiguous");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() == ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  auto check_scale = [&](torch::stable::Tensor const& s, char const* n) {
+    STD_TORCH_CHECK(s.device().is_cuda() &&
+                        s.scalar_type() == ScalarType::Float && s.size(0) == 1,
+                    n);
+  };
+  check_scale(q_scale_inv, "q_scale_inv must be scalar float32 CUDA");
+  check_scale(k_scale_inv, "k_scale_inv must be scalar float32 CUDA");
+  check_scale(v_scale_inv, "v_scale_inv must be scalar float32 CUDA");
+  check_scale(cache_scale_inv, "cache_scale_inv must be scalar float32 CUDA");
+  kk3::checkBfloat16Support(dt);
+
+  int const num_tokens = static_cast<int>(k_nope.size(0));
+  int const num_heads = static_cast<int>(k_nope.size(1));
+  if (num_tokens == 0) return;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      k_nope.get_device_index());
+  int const sm_family = kk3::getSMVersion() / 10;
+  STD_TORCH_CHECK(sm_family == 10 || sm_family == 11,
+                  "The Kimi-K3 NVFP4 MLA cache insert needs an SM10x/SM11x "
+                  "GPU");
+  const cudaStream_t stream =
+      get_current_cuda_stream(k_nope.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      dt, "fused_kimi_k3_mla_qkv_quant_kv_cache_nvfp4_insert", [&] {
+        kk3::launchPdl(
+            kk3::fusedKimiK3MLAQKVQuantKVCacheNvfp4Kernel<scalar_t>, num_tokens,
+            num_heads, stream,
+            reinterpret_cast<scalar_t const*>(q.const_data_ptr()), q.stride(0),
+            q.stride(1),
+            reinterpret_cast<scalar_t const*>(k_nope.const_data_ptr()),
+            k_nope.stride(0), k_nope.stride(1),
+            reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
+            k_pe.stride(0),
+            reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
+            kv_c_normed.stride(0),
+            reinterpret_cast<scalar_t const*>(v.const_data_ptr()), v.stride(0),
+            v.stride(1), reinterpret_cast<uint8_t*>(q_fp8.mutable_data_ptr()),
+            q_fp8.stride(0), q_fp8.stride(1),
+            reinterpret_cast<uint8_t*>(k_fp8.mutable_data_ptr()),
+            k_fp8.stride(0), k_fp8.stride(1),
+            reinterpret_cast<uint8_t*>(v_fp8.mutable_data_ptr()),
+            v_fp8.stride(0), v_fp8.stride(1),
+            reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+            k_cache.stride(0), slot_mapping.const_data_ptr<int64_t>(),
+            q_scale_inv.const_data_ptr<float>(),
+            k_scale_inv.const_data_ptr<float>(),
+            v_scale_inv.const_data_ptr<float>(),
+            cache_scale_inv.const_data_ptr<float>(), num_tokens, num_heads,
+            static_cast<int>(cache_block_size));
+      });
+}
+#endif  // !USE_ROCM
 
 // ────────────────────────────────────────────────────────────────────────────
 // Decode epilogue torch ops

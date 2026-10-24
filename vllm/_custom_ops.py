@@ -2974,6 +2974,40 @@ def kimi_k3_attn_res(
     return output
 
 
+def concat_and_cache_mla_nvfp4(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla_nvfp4(
+        kv_c, k_pe, kv_cache, slot_mapping, scale
+    )
+
+
+def gather_and_dequant_cache_mla_nvfp4(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    num_tokens: int,
+    kv_lora_rank: int,
+    scale: torch.Tensor,
+    seq_starts: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C_cache_ops.gather_and_dequant_cache_mla_nvfp4(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        num_tokens,
+        kv_lora_rank,
+        scale,
+        seq_starts,
+    )
+
+
 def concat_and_cache_mla_rope_fused(
     positions: torch.Tensor,
     q_pe: torch.Tensor,

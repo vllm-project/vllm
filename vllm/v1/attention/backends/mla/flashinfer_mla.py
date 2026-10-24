@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -23,11 +24,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import nvfp4_mla_kv_cache_split_views
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
@@ -117,6 +120,134 @@ def _get_multi_ctas_kv_counter_buffer(
     return _fi_multi_ctas_kv_counter
 
 
+def _cake_nvfp4_mla_decode_unsupported_reason() -> str | None:
+    """Why FlashInfer's Cake NVFP4 MLA decode (flashinfer #6242) cannot run here."""
+    try:
+        from flashinfer.experimental.cake_mla_nvfp4_paged_decode import cake_jit
+    except ImportError:
+        return (
+            "kv_cache_dtype='nvfp4' needs a FlashInfer build with the Cake "
+            "NVFP4 MLA decode (flashinfer-ai/flashinfer#6242)"
+        )
+    if not all(cake_jit.toolkit_supports(p) for p in cake_jit.KERNELS.values()):
+        return (
+            "kv_cache_dtype='nvfp4' MLA decode JIT-builds kernels that need "
+            "nvcc from a CUDA 13.4+ toolkit (CUDA_HOME)"
+        )
+    return None
+
+
+def cake_nvfp4_mla_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    sm_scale: float,
+    k_scale: float,
+    max_seq_len: int,
+    return_lse: bool = False,
+    cum_seq_lens_q: torch.Tensor | None = None,
+    max_q_len: int | None = None,
+    cp_world: int = 1,
+    cp_rank: int = 0,
+    kv_len_global: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """FlashInfer Cake MLA decode over the page-segmented NVFP4 MLA cache.
+
+    The kernel's QK runs on NVFP4 x NVFP4 block-scaled MMAs, so it takes no FP8
+    query: the BF16 query is quantized per row here (NVFP4 NoPE, FP8 RoPE).
+    ``concat_and_cache_mla_nvfp4`` stores ``x / k_scale`` for both the NoPE and
+    the RoPE, so ``k_scale`` is both of Cake's ``ckv_scale`` and ``kpe_scale``.
+
+    Args:
+        q: BF16 ``[B, q_len, H, 576]``, or packed ``[total_q, H, 576]`` with
+            ``cum_seq_lens_q`` and ``max_q_len``.
+        kv_cache: uint8 NVFP4 MLA cache ``[num_blocks, block_size, 352]``.
+        block_table: int32 ``[B, max_blocks]``.
+        seq_lens: int32 ``[B]`` (local lengths under DCP).
+        sm_scale: softmax scale of the real-unit ``q . k``.
+        k_scale: the cache's global scale (a host float).
+        max_seq_len: KV bound used to plan the KV splits.
+        return_lse: also return the natural-log LSE.
+        cum_seq_lens_q: int32 ``[B + 1]`` query offsets of a packed ``q``.
+        max_q_len: query-length bound of a packed ``q``.
+        cp_world: decode context parallel world size.
+        cp_rank: decode context parallel rank.
+        kv_len_global: int32 ``[B]`` global KV lengths when ``cp_world > 1``.
+
+    Returns:
+        BF16 ``q.shape[:-1] + (512,)`` in real units, and the FP32
+        ``q.shape[:-1]`` LSE when ``return_lse``.
+
+    """
+    from flashinfer.experimental.cake_mla_nvfp4_paged_decode import cake_backend
+    from flashinfer.mla import cake_mla_nvfp4_paged_decode, quantize_mla_nvfp4_query
+
+    q = q.contiguous()
+    lead = tuple(q.shape[:-1])
+    rows = math.prod(lead)
+    query_workspace = torch.empty(
+        cake_backend.query_workspace_bytes(rows), dtype=torch.uint8, device=q.device
+    )
+    q_nope, q_sf, q_rope, q_scale = quantize_mla_nvfp4_query(
+        q,
+        k_scale,
+        k_scale,
+        out=cake_backend.mla_nvfp4_query_buffers(query_workspace, lead),
+    )
+    # Size the split partials for the plan the call below makes.
+    if cum_seq_lens_q is not None:
+        assert max_q_len is not None
+        batch, plan_q_len = cum_seq_lens_q.shape[0] - 1, max_q_len
+    else:
+        batch, plan_q_len = q.shape[0], q.shape[1]
+    plan = cake_backend.plan_mla_nvfp4_paged_decode(
+        batch=batch,
+        max_q_len=plan_q_len,
+        num_heads=q.shape[-2],
+        max_seq_len=max_seq_len,
+        sm_count=get_device_sm_count(q.device),
+        rows=rows,
+    )
+    workspace = torch.empty(
+        cake_backend.workspace_bytes(plan.rows_max, plan.num_split),
+        dtype=torch.uint8,
+        device=q.device,
+    )
+    ckv, kpe, ckv_sf = nvfp4_mla_kv_cache_split_views(kv_cache)
+    out = torch.empty(
+        lead + (ckv.shape[-1] * 2,), dtype=torch.bfloat16, device=q.device
+    )
+    lse = (
+        torch.empty(lead, dtype=torch.float32, device=q.device) if return_lse else None
+    )
+    cake_mla_nvfp4_paged_decode(
+        q_nope,
+        q_sf,
+        q_rope,
+        q_scale,
+        ckv,
+        ckv_sf,
+        kpe,
+        block_table,
+        seq_lens,
+        workspace,
+        sm_scale=sm_scale,
+        ckv_scale=k_scale,
+        out=out,
+        lse=lse,
+        return_lse=return_lse,
+        cum_seq_lens_q=cum_seq_lens_q,
+        max_q_len=max_q_len,
+        max_seq_len=max_seq_len,
+        cp_world=cp_world,
+        cp_rank=cp_rank,
+        kv_len_global=kv_len_global,
+    )
+    return out, lse
+
+
 @dataclass
 class FlashInferMLADecodeMetadata(MLACommonDecodeMetadata):
     flattened_block_table: torch.Tensor | None = None
@@ -198,6 +329,7 @@ class FlashInferMLABackend(MLACommonBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "nvfp4",
     ]
 
     @staticmethod
@@ -237,6 +369,20 @@ class FlashInferMLABackend(MLACommonBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if kv_cache_dtype == "nvfp4":
+            reason = _cake_nvfp4_mla_decode_unsupported_reason()
+            if reason is not None:
+                return reason
+            if (device_capability.major, device_capability.minor) not in (
+                (10, 0),
+                (10, 3),
+            ):
+                return "kv_cache_dtype='nvfp4' MLA decode needs SM100 or SM103"
+            if dtype != torch.bfloat16 or head_size != 576:
+                return (
+                    "kv_cache_dtype='nvfp4' MLA decode needs bfloat16 activations, "
+                    "kv_lora_rank 512 and qk_rope_head_dim 64"
+                )
         # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
@@ -301,6 +447,27 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
+        if kv_cache_dtype == "nvfp4":
+            # The Cake decode quantizes the BF16 query itself (per-row NVFP4).
+            self.supports_quant_query_input = False
+            from flashinfer.experimental.cake_mla_nvfp4_paged_decode import (
+                cake_backend,
+            )
+
+            # Cake's two-CTA route, taken above WIDE_MIN_ROWS (token, head) rows
+            # per request, zeroes V blocks whose E4M3 scale is below 2^-3.
+            q_len = max_decode_query_len(get_current_vllm_config())
+            rows = num_heads * self.dcp_world_size * q_len
+            if cake_backend.use_wide_route(rows):
+                raise NotImplementedError(
+                    "kv_cache_dtype='nvfp4' MLA decode supports at most "
+                    f"{cake_backend.WIDE_MIN_ROWS} query rows per request, got "
+                    f"{rows} ({num_heads} heads x decode context parallel size "
+                    f"{self.dcp_world_size} x {q_len} query tokens); use fewer "
+                    "speculative tokens, a smaller decode context parallel size, "
+                    "more tensor parallelism or --kv-cache-dtype fp8."
+                )
+
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
@@ -350,11 +517,14 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 block_table, seq_lens, row_req = self._flattened_decode_metadata(
                     attn_metadata, q.shape[0]
                 )
-        elif attn_metadata.decode.max_query_len > 1 and self.dcp_world_size == 1:
+        elif attn_metadata.decode.max_query_len > 1 and (
+            self.dcp_world_size == 1 or self.kv_cache_dtype == "nvfp4"
+        ):
             # Causal spec decode: keep q compact and let the kernel tile each
             # request's length (uniform 1+k and adaptive ragged). Mirrors vllm #52157.
             # DCP keeps the uniform reshape below: it needs LSE, which the kernels
-            # do not return on the ragged path (flashinfer #3238).
+            # do not return on the ragged path (flashinfer #3238). The NVFP4 decode
+            # returns LSE for a packed query too.
             cum_seq_lens_q = attn_metadata.decode.query_start_loc
             max_q_len = attn_metadata.decode.max_query_len
         # trtllm API requires extra dimension q_len_per_request for MTP
@@ -367,6 +537,32 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             q = q.unsqueeze(1)
         else:
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
+
+        if self.kv_cache_dtype == "nvfp4":
+            kv_len_global = None
+            if self.dcp_world_size > 1:
+                kv_len_global = attn_metadata.decode.dcp_tot_seq_lens
+                assert kv_len_global is not None
+                if row_req is not None:
+                    kv_len_global = kv_len_global[row_req]
+            o, lse = cake_nvfp4_mla_decode(
+                q,
+                kv_c_and_k_pe_cache,
+                block_table,
+                seq_lens,
+                sm_scale=self.scale,
+                k_scale=layer._k_scale_float,
+                max_seq_len=attn_metadata.max_seq_len,
+                return_lse=self.need_to_return_lse_for_decode,
+                cum_seq_lens_q=cum_seq_lens_q,
+                max_q_len=max_q_len,
+                cp_world=self.dcp_world_size,
+                cp_rank=self.dcp_rank,
+                kv_len_global=kv_len_global,
+            )
+            if lse is not None:
+                lse = lse.view(-1, lse.shape[-1])
+            return o.view(-1, o.shape[-2], o.shape[-1]), lse
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale

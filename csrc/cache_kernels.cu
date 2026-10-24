@@ -6,6 +6,7 @@
 
 #include "quantization/vectorization_utils.cuh"
 #include "concat_mla_q.cuh"
+#include "gather_page_task.cuh"
 
 #if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
   #include "nvfp4_ds_mla_cache.h"
@@ -1135,6 +1136,89 @@ void concat_and_cache_mla_grouped(
 #undef LAUNCH_GROUPED_FP8
 }
 
+// Quantize kv_c to NVFP4 (with linear E4M3 block scales) and k_pe to
+// FP8-E4M3, then cache them in the page-segmented MLA NVFP4 layout.
+void concat_and_cache_mla_nvfp4(
+    torch::stable::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
+    torch::stable::Tensor& k_pe,          // [num_tokens, pe_dim]
+    torch::stable::Tensor& kv_cache,      // [num_blocks, block_size,
+                                          // kv_lora_rank/2 + pe_dim +
+                                          // kv_lora_rank/16] bytes, see
+                                          // nvfp4_kv_cache_kernels.cu
+    torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
+    torch::stable::Tensor& scale) {       // [1], float, k_scale
+#if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
+  // NVFP4 dispatch is compiled separately for SM100+.
+  extern void concat_and_cache_mla_nvfp4_dispatch(
+      torch::stable::Tensor & kv_c, torch::stable::Tensor & k_pe,
+      torch::stable::Tensor & kv_cache, torch::stable::Tensor & slot_mapping,
+      torch::stable::Tensor & scale);
+  concat_and_cache_mla_nvfp4_dispatch(kv_c, k_pe, kv_cache, slot_mapping,
+                                      scale);
+#else
+  STD_TORCH_CHECK(false,
+                  "NVFP4 MLA KV cache requires SM100+ (Blackwell). "
+                  "Please rebuild vllm with a Blackwell-compatible CUDA "
+                  "target.");
+#endif
+}
+
+// Gather context tokens from the page-segmented MLA NVFP4 KV cache and
+// dequantize them into dst (the chunked-prefill workspace). The inverse of
+// concat_and_cache_mla_nvfp4; indexing mirrors gather_and_maybe_dequant_cache
+// (cu_seq_lens/seq_starts have the same semantics).
+void gather_and_dequant_cache_mla_nvfp4(
+    torch::stable::Tensor const& src_cache,    // [num_blocks, block_size,
+                                               //  full_dim] uint8
+    torch::stable::Tensor const& dst,          // [tot_tokens, nope+pe]
+    torch::stable::Tensor const& block_table,  // [batch, max_blocks]
+    torch::stable::Tensor const& cu_seq_lens,  // [batch+1]
+    int64_t num_tokens, int64_t kv_lora_rank,
+    torch::stable::Tensor const& scale,  // [1], float, k_scale
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt) {
+#if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
+  STD_TORCH_CHECK(
+      block_table.scalar_type() == torch::headeronly::ScalarType::Int,
+      "block_table must be int32");
+  STD_TORCH_CHECK(
+      cu_seq_lens.scalar_type() == torch::headeronly::ScalarType::Int,
+      "cu_seq_lens must be int32");
+  STD_TORCH_CHECK(src_cache.device() == dst.device(),
+                  "src_cache and dst must be on the same device");
+  STD_TORCH_CHECK(src_cache.device() == block_table.device(),
+                  "src_cache and block_table must be on the same device");
+  STD_TORCH_CHECK(src_cache.device() == cu_seq_lens.device(),
+                  "src_cache and cu_seq_lens must be on the same device");
+  const int32_t* seq_starts_ptr = nullptr;
+  if (seq_starts.has_value()) {
+    STD_TORCH_CHECK(
+        seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
+        "seq_starts must be int32");
+    STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                    "src_cache and seq_starts must be on the same device");
+    seq_starts_ptr = seq_starts.value().const_data_ptr<int32_t>();
+  }
+  if (num_tokens == 0) {
+    return;
+  }
+
+  extern void gather_and_dequant_cache_mla_nvfp4_dispatch(
+      const torch::stable::Tensor& src_cache, const torch::stable::Tensor& dst,
+      const torch::stable::Tensor& block_table,
+      const torch::stable::Tensor& cu_seq_lens, int64_t num_tokens,
+      int64_t kv_lora_rank, const torch::stable::Tensor& scale,
+      const int32_t* seq_starts_ptr);
+  gather_and_dequant_cache_mla_nvfp4_dispatch(
+      src_cache, dst, block_table, cu_seq_lens, num_tokens, kv_lora_rank, scale,
+      seq_starts_ptr);
+#else
+  STD_TORCH_CHECK(false,
+                  "NVFP4 MLA KV cache requires SM100+ (Blackwell). "
+                  "Please rebuild vllm with a Blackwell-compatible CUDA "
+                  "target.");
+#endif
+}
+
 namespace vllm {
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
@@ -1218,52 +1302,6 @@ void convert_fp8(torch::stable::Tensor& dst_cache,
 }
 
 namespace vllm {
-
-struct GatherPageTask {
-  int32_t req_id;
-  int32_t logical_block;
-  int32_t page_token_begin;
-  int32_t page_token_end;
-  int32_t output_token_begin;
-};
-
-template <bool has_terminal_start>
-__device__ __forceinline__ bool map_gather_page_task(
-    int32_t task, const int32_t* __restrict__ output_starts, int32_t num_reqs,
-    int32_t total_tokens, int32_t block_size,
-    const int32_t* __restrict__ seq_starts, GatherPageTask& page) {
-  int32_t relative_page = task;
-  for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
-    const int32_t output_begin = min(output_starts[req_id], total_tokens);
-    int32_t output_end;
-    if constexpr (has_terminal_start) {
-      output_end = min(output_starts[req_id + 1], total_tokens);
-    } else {
-      output_end =
-          min(req_id + 1 < num_reqs ? output_starts[req_id + 1] : total_tokens,
-              total_tokens);
-    }
-    const int32_t seq_len = max(output_end - output_begin, 0);
-    const int32_t source_begin = seq_starts == nullptr ? 0 : seq_starts[req_id];
-    const int32_t first_block = source_begin / block_size;
-    const int32_t num_pages =
-        div_ceil(source_begin + seq_len, block_size) - first_block;
-    if (relative_page < num_pages) {
-      page.req_id = req_id;
-      page.logical_block = first_block + relative_page;
-      const int32_t page_begin = page.logical_block * block_size;
-      const int32_t copy_begin = max(source_begin, page_begin);
-      const int32_t copy_end =
-          min(source_begin + seq_len, page_begin + block_size);
-      page.page_token_begin = copy_begin - page_begin;
-      page.page_token_end = copy_end - page_begin;
-      page.output_token_begin = output_begin + copy_begin - source_begin;
-      return true;
-    }
-    relative_page -= num_pages;
-  }
-  return false;
-}
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           int ENTRY_SIZE>
