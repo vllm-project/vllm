@@ -153,6 +153,7 @@ def plamo3_config(thinking: bool = True) -> ParserEngineConfig:
         strip_trailing_reasoning_whitespace=False,
         preserve_tokens=PLAMO_MARKER_TOKENS,
         tool_args_json=True,
+        turn_boundary_tokens=frozenset({EOT}),
     )
 
 
