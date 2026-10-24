@@ -33,7 +33,7 @@ Routing is stored by the aux output connector (`vllm/distributed/aux_output_conn
 
 - **Shape:** `(num_tokens - 1 - routed_experts_prompt_start, num_moe_layers, num_experts_per_tok)`, `num_tokens` = prompt + output. The last sampled token has no row.
 - **Rows:** row `i` is position `routed_experts_prompt_start + i` of `prompt_token_ids + output_token_ids`.
-- **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
+- **dtype:** `uint8` for at most 256 experts, else `uint16`; the payload is returned with the dtype the engine produced (including `int32` when supplied), without conversion or re-sorting.
 - Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
 
 ```python
@@ -49,6 +49,9 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 ## Limitations
 
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
+- Both the Python and Rust frontends return `routed_experts` on non-streaming
+  `/v1/completions` and `/v1/chat/completions`, and on `/inference/v1/generate`
+  (final chunk when streaming). OpenAI streaming chunks do not carry the field
+  in either frontend.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).

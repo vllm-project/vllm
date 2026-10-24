@@ -10,7 +10,10 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_llm::{
+    FinishReason, GenerateOutput, RequestTimestamps, TokenUsage, concat_routed_experts_rows,
+};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -55,6 +58,13 @@ pub struct Finished {
     pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned with all generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Routed-expert rows for the whole request, including prompt rows that
+    /// survive `routed_experts_prompt_start`.
+    ///
+    /// The engine only delivers its terminal rows after the request finishes,
+    /// so this is assembled from the per-update rows when the frontend stops
+    /// the request early (for example on a stop string).
+    pub routed_experts: Option<Box<WireNdArray>>,
     pub timestamps: RequestTimestamps,
 }
 
@@ -127,10 +137,15 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let mut routed_experts_chunks: Vec<WireNdArray> = Vec::new();
 
     while let Some(next) = raw_stream.next().await {
-        let output = next?;
+        let mut output = next?;
         cached_token_count = cached_token_count.max(output.cached_token_count);
+        let routed_experts_delta = std::mem::take(&mut output.routed_experts_delta);
+        let current_has_routed_rows =
+            output.routed_experts.is_some() || !routed_experts_delta.is_empty();
+        routed_experts_chunks.extend(routed_experts_delta);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -223,7 +238,9 @@ pub async fn decoded_text_event_stream(
         let mut new_sampling_mask = output.sampling_mask;
 
         // Trim tokens and logprobs if we matched stop string.
+        let mut num_surplus_tokens = 0;
         if let Some(num_tokens) = truncate_tokens_to {
+            num_surplus_tokens = new_token_ids.len().saturating_sub(num_tokens);
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -295,6 +312,21 @@ pub async fn decoded_text_event_stream(
                 trace!(full_text, "request finished with terminal decoded text");
             }
 
+            let mut routed_experts = match output.routed_experts {
+                Some(rows) => Some(rows),
+                None => concat_routed_experts_rows(
+                    std::mem::take(&mut routed_experts_chunks),
+                    &request_id,
+                )?,
+            };
+            // Drop the rows of tokens removed after the stop string was
+            // matched, including tokens from engine updates coalesced by
+            // `stream_interval` that Python would never have appended.
+            if current_has_routed_rows && num_surplus_tokens > 0 {
+                routed_experts = routed_experts
+                    .map(|rows| Box::new(drop_trailing_rows(*rows, num_surplus_tokens)));
+            }
+
             // Intentionally drop the stream with explicit cause, so that the engine core
             // can distinguish between such normal completion vs an unexpected
             // early drop.
@@ -318,6 +350,7 @@ pub async fn decoded_text_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
+                    routed_experts,
                     timestamps: output.timestamps,
                 })),
             })
@@ -339,6 +372,26 @@ pub async fn decoded_text_event_stream(
     }
 
     Err(Error::StreamClosedBeforeTerminalOutput { request_id })
+}
+
+/// Drop at most `num_rows` rows from the trailing edge of `array`.
+///
+/// Mirrors Python `OutputProcessor._trim_surplus_tokens()`, which removes the
+/// rows of tokens generated past a stop string.
+fn drop_trailing_rows(array: WireNdArray, num_rows: usize) -> WireNdArray {
+    let Some(&rows) = array.shape.first() else {
+        return array;
+    };
+    let kept_rows = rows.saturating_sub(num_rows);
+    if kept_rows == rows {
+        return array;
+    }
+    let data = array.data.as_raw_view().expect("resolved on decode");
+    let row_bytes = data.len().checked_div(rows).unwrap_or(0);
+    let data = data.slice(..row_bytes * kept_rows);
+    let mut shape = array.shape;
+    shape[0] = kept_rows;
+    WireNdArray::from_raw_bytes(array.dtype, shape, data)
 }
 
 /// If stop string matches, returns tuple
@@ -579,6 +632,7 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            routed_experts: None,
                             timestamps: RequestTimestamps {
                                 queued_ts: 8.0,
                                 scheduled_ts: 9.0,
@@ -617,6 +671,7 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            routed_experts: None,
                             timestamps: Default::default(),
                         }),
                     ),
