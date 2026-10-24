@@ -36,6 +36,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -63,6 +64,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -208,6 +210,59 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     config.hidden_size,
                 ),
             )
+
+        self.fused_full_attn_decode = (
+            self.layer_type == "full_attention"
+            and _use_rocm_fused_full_attn_decode(
+                self.self_attn, vllm_config, self.layer_scale
+            )
+        )
+        if self.fused_full_attn_decode:
+            from vllm.model_executor.layers.rocm_qwen_full_attn_decode import (
+                register_layer,
+            )
+
+            register_layer(self.self_attn.attn.layer_name, self)
+
+
+def _use_rocm_fused_full_attn_decode(
+    attn: Qwen3NextAttention, vllm_config: VllmConfig, layer_scale: bool
+) -> bool:
+    if not (envs.VLLM_ROCM_QWEN_FUSED_FULL_ATTN and current_platform.is_rocm()):
+        return False
+    from vllm.model_executor.layers.rocm_qwen_full_attn_decode import (
+        supports_fused_full_attn_decode,
+    )
+
+    rope = attn.rotary_emb
+    mrope_section = getattr(rope, "mrope_section", None)
+    return (
+        vllm_config.quant_config is None
+        and vllm_config.parallel_config.tensor_parallel_size == 1
+        and vllm_config.model_config.dtype == torch.bfloat16
+        and vllm_config.cache_config.cache_dtype == "auto"
+        and not layer_scale
+        and attn.attn_output_gate
+        and attn.dual_chunk_attention_config is None
+        and attn.attn.attn_backend.get_name() == "ROCM_ATTN"
+        and getattr(rope, "is_neox_style", False)
+        and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
+        and (
+            not mrope_section
+            or (
+                len(mrope_section) == 3
+                and sum(mrope_section) == rope.rotary_dim // 2
+                and getattr(rope, "mrope_interleaved", False)
+            )
+        )
+        and supports_fused_full_attn_decode(
+            attn.hidden_size,
+            attn.num_heads,
+            attn.num_kv_heads,
+            attn.head_dim,
+            rope.rotary_dim,
+        )
+    )
 
 
 @support_torch_compile(

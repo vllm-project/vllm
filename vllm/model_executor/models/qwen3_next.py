@@ -59,6 +59,7 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -563,6 +564,19 @@ class Qwen3NextDecoderLayer(nn.Module):
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
+
+        if residual is not None and getattr(self, "fused_full_attn_decode", False):
+            sa = self.self_attn
+            name = _encode_layer_name(sa.attn.layer_name)
+            q, gate, k, v, residual = torch.ops.vllm.rocm_qwen_full_attn_front(
+                hidden_states, residual, positions, sa.q_size, sa.kv_size, name
+            )
+            attn = torch.empty_like(q)
+            torch.ops.vllm.rocm_qwen_full_attn_core(q, k, v, gate, attn, name)
+            hidden_states, residual = torch.ops.vllm.rocm_qwen_full_attn_back(
+                attn, residual, name
+            )
+            return self.mlp(hidden_states), residual
 
         if residual is None:
             residual = hidden_states
