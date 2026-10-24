@@ -320,6 +320,9 @@ flashinfer_b12x_fused_moe = _lazy_import_wrapper(
 flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
     "flashinfer.fused_moe.utils", "get_hybrid_num_tokens_buckets"
 )
+flashinfer_map_to_hybrid_bucket_uncapped = _lazy_import_wrapper(
+    "flashinfer.fused_moe.utils", "map_to_hybrid_bucket_uncapped"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -1287,6 +1290,7 @@ __all__ = [
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_b12x_fused_moe",
     "flashinfer_get_hybrid_num_tokens_buckets",
+    "flashinfer_map_to_hybrid_bucket_uncapped",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
