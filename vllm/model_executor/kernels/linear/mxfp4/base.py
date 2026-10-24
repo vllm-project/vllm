@@ -72,3 +72,10 @@ class MxFp4LinearKernel(ABC):
     ) -> torch.Tensor:
         """Run the quantized GEMM."""
         raise NotImplementedError
+
+    def fuse_input_hadamard(self, size: int) -> bool:
+        """Rotate the input by the size-`size` block Hadamard matrix inside
+        `apply_weights` from now on, if supported (see
+        `LinearMethodBase.fuse_input_hadamard`). Call after
+        `process_weights_after_loading`."""
+        return False

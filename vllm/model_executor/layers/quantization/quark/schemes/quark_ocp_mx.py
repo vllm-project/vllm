@@ -260,3 +260,8 @@ class QuarkOCP_MX(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.ocp_mx_linear.apply_weights(layer, x, bias)
+
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        if isinstance(self.ocp_mx_linear, MxFp4LinearKernel):
+            return self.ocp_mx_linear.fuse_input_hadamard(size)
+        return False

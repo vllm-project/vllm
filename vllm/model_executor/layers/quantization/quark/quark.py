@@ -5,6 +5,7 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
+from transformers import PreTrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
@@ -41,6 +45,9 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     parse_w4a16_int4_weight_config,
     should_ignore_layer,
+)
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    find_matching_patterns,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
@@ -75,6 +82,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -116,6 +124,9 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        # Checkpoint layer name -> rotation size, for linear layers exported
+        # with an online input rotation (`input_rotation` tensor).
+        self.input_rotation_sizes: dict[str, int] = {}
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -159,6 +170,55 @@ class QuarkConfig(QuantizationConfig):
                     quant_config_with_hf_to_vllm_mapper[k] = v
 
         self.quant_config = quant_config_with_hf_to_vllm_mapper
+        self.input_rotation_sizes = hf_to_vllm_mapper.apply_dict(
+            self.input_rotation_sizes
+        )
+
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PreTrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        """Find the linear layers exported with an online input rotation.
+
+        Quark's ``RotationConfig`` with ``online_r1_rotation`` (or ``r4``)
+        keeps the activation rotation online: the weight is stored rotated
+        along its input dimension, and the layer carries an ``input_rotation``
+        tensor (a +-1 int8 Hadamard matrix of size ``rotation_size``) that the
+        activation must be multiplied by first.
+        """
+        algo_configs = self.quant_config.get("algo_config") or []
+        if not any(algo.get("name") == "rotation" for algo in algo_configs):
+            return
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        suffix = ".input_rotation"
+        for name, info in metadata.items():
+            if not name.endswith(suffix):
+                continue
+            shape = info.get("shape")
+            if info.get("dtype") != "I8" or len(shape) != 2 or shape[0] != shape[1]:
+                raise NotImplementedError(
+                    f"{name}: only square int8 (Hadamard) input rotations are "
+                    f"supported, got dtype={info.get('dtype')} shape={shape}. "
+                    "Trained rotations are not supported."
+                )
+            self.input_rotation_sizes[name.removesuffix(suffix)] = shape[0]
+
+    def _input_rotation_size(self, prefix: str) -> int | None:
+        if not self.input_rotation_sizes:
+            return None
+        per_shard_matches = find_matching_patterns(
+            prefix, self.input_rotation_sizes, self.packed_modules_mapping
+        )
+        if not any(per_shard_matches):
+            return None
+        sizes = {self.input_rotation_sizes[m] for ms in per_shard_matches for m in ms}
+        if not all(per_shard_matches) or len(sizes) != 1:
+            raise ValueError(
+                f"The shards of {prefix} must all use the same input rotation."
+            )
+        return sizes.pop()
 
     def _scale_block_rows(self, prefix: str, layer_type: type[torch.nn.Module]) -> int:
         """How many weight rows one checkpoint scale row covers.
@@ -181,6 +241,16 @@ class QuarkConfig(QuantizationConfig):
             self.get_quant_method_target(prefix, type(layer))
         )
 
+        input_rotation_size = self._input_rotation_size(prefix)
+        if input_rotation_size is not None and not (
+            method_cls is QuarkLinearMethod and weight_quant_key == kMxfp4Static
+        ):
+            # TODO: InputHadamardLinearMethod is format-agnostic; allow other
+            # weight formats (and unquantized layers) once validated.
+            raise NotImplementedError(
+                f"{prefix}: Quark online input rotation is only supported on "
+                f"MXFP4 linear layers, not with weight={weight_quant_key}."
+            )
         if method_cls is UnquantizedFusedMoEMethod:
             return UnquantizedFusedMoEMethod(layer.moe_config)
         if method_cls is UnquantizedLinearMethod:
@@ -201,6 +271,10 @@ class QuarkConfig(QuantizationConfig):
                 ),
             )
             layer.scheme = scheme
+            if input_rotation_size is not None:
+                return InputHadamardLinearMethod(
+                    QuarkLinearMethod(self), input_rotation_size, rotate_weight=False
+                )
             return QuarkLinearMethod(self)
         if method_cls is QuarkKVCacheMethod:
             return QuarkKVCacheMethod(self)
@@ -1009,6 +1083,9 @@ class QuarkLinearMethod(LinearMethodBase):
             raise ValueError("A scheme must be defined for each layer")
 
         return scheme.apply_weights(layer, x, bias=bias)
+
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        return layer.scheme.fuse_input_hadamard(layer, size)
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
