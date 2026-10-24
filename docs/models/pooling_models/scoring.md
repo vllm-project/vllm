@@ -138,7 +138,6 @@ The following [pooling parameters][vllm.PoolingParams] are only supported by cro
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
 ### `LLM.score`
