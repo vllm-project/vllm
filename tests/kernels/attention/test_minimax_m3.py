@@ -2584,7 +2584,7 @@ def test_amd_decode_fused_topk_emits_sparse_table(
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize(
     "seq_lens_list",
-    [(130, 257), (129, 200, 384)],
+    [(130, 257), (129, 200, 384), (4096, 4096, 4096)],
 )
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])

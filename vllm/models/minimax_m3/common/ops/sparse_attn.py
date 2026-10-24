@@ -19,8 +19,11 @@ leaves the prefill kernels (which parallelize over the query dim) idle.
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
@@ -283,6 +286,7 @@ def _gqa_sparse_decode_kernel(
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     USE_PDL: tl.constexpr,
+    USE_FP16_DOT: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     # split-K over the topk dimension: pid(0) folds (query-token, chunk).
@@ -330,6 +334,8 @@ def _gqa_sparse_decode_kernel(
         mask=hd_mask,
         other=0.0,
     )
+    if USE_FP16_DOT:
+        q = tl.clamp(q.to(tl.float32), -65504.0, 65504.0).to(tl.float16)
 
     cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
@@ -357,6 +363,8 @@ def _gqa_sparse_decode_kernel(
             k = k.to(q.dtype)
             if KV_SCALE_MODE == 1:
                 k = (k * tl.load(k_scale_ptr)).to(q.dtype)
+                if USE_FP16_DOT:
+                    k = tl.clamp(k, -65504.0, 65504.0).to(q.dtype)
             elif KV_SCALE_MODE == 2:
                 k_scale = tl.load(
                     k_scale_ptr
@@ -388,6 +396,8 @@ def _gqa_sparse_decode_kernel(
             v = v.to(q.dtype)
             if KV_SCALE_MODE == 1:
                 v = (v * tl.load(v_scale_ptr)).to(q.dtype)
+                if USE_FP16_DOT:
+                    v = tl.clamp(v, -65504.0, 65504.0).to(q.dtype)
             elif KV_SCALE_MODE == 2:
                 v_scale = tl.load(
                     v_scale_ptr
@@ -458,7 +468,7 @@ def _merge_topk_attn_out_kernel(
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
 
-    off_c = tl.arange(0, NUM_TOPK_CHUNKS)
+    off_c = tl.arange(0, triton.next_power_of_2(NUM_TOPK_CHUNKS))
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
     o_ptrs = (
@@ -469,8 +479,10 @@ def _merge_topk_attn_out_kernel(
         + off_d[None, :] * stride_o_d
     )
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
-    o = tl.load(o_ptrs, mask=d_mask[None, :], other=0.0)
-    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+    o = tl.load(
+        o_ptrs, mask=(off_c < NUM_TOPK_CHUNKS)[:, None] & d_mask[None, :], other=0.0
+    )
+    lse = tl.load(lse_ptrs, mask=off_c < NUM_TOPK_CHUNKS, other=float("-inf"))
     lse_max = tl.max(lse, axis=0)
     weights = tl.exp2(lse - lse_max)
     weights = weights / tl.sum(weights, axis=0)
@@ -626,6 +638,7 @@ def minimax_m3_sparse_attn_decode(
     decode_query_len: int,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    fp16_dot: bool = False,
 ) -> None:
     """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
     total_q, num_heads, head_dim = q.shape
@@ -660,10 +673,28 @@ def minimax_m3_sparse_attn_decode(
     # launch_pdl was specified but unrecognised"). Only pass it when PDL is
     # actually supported -- on ROCm use_pdl is always False, so it's omitted.
     pdl_launch = {"launch_pdl": True} if use_pdl else {}
+    tune_decode = (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and not envs.VLLM_BATCH_INVARIANT
+    )
+    fp16_dot = (
+        tune_decode
+        and q.dtype == torch.bfloat16
+        and use_fp8
+        and kv_scale_mode != _KV_SCALE_PER_TOKEN_HEAD
+        and fp16_dot
+    )
     # split-K over the selected blocks; chunk count is shape-constant (cuda graph).
-    TARGET_GRID = 256
-    target = max(1, min(max_topk, TARGET_GRID // max(1, total_q * num_kv_heads)))
-    num_topk_chunks = 1 << (target.bit_length() - 1)
+    if tune_decode:
+        # Target two CTAs per SM without rounding the split count to a power of two.
+        resident = 2 * num_compute_units(q.device.index or 0)
+        target = max(1, min(max_topk, resident // max(1, total_q * num_kv_heads)))
+        num_topk_chunks = cdiv(max_topk, cdiv(max_topk, target))
+    else:
+        TARGET_GRID = 256
+        target = max(1, min(max_topk, TARGET_GRID // max(1, total_q * num_kv_heads)))
+        num_topk_chunks = 1 << (target.bit_length() - 1)
     o_partial = torch.empty(
         num_topk_chunks, total_q, num_heads, head_dim, dtype=q.dtype, device=q.device
     )
@@ -714,6 +745,7 @@ def minimax_m3_sparse_attn_decode(
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
         USE_PDL=use_pdl,
+        USE_FP16_DOT=fp16_dot,
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)
