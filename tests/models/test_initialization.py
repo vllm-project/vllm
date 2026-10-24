@@ -176,7 +176,7 @@ def can_initialize(
         from vllm.platforms import current_platform
         from vllm.platforms.interface import DeviceCapability
 
-        if (
+        if not current_platform.is_rocm() and (
             not current_platform.is_cuda()
             or current_platform.get_device_capability()
             not in (
@@ -184,7 +184,7 @@ def can_initialize(
                 DeviceCapability(10, 3),
             )
         ):
-            pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
+            pytest.skip("Step5 requires ROCm, or CUDA SM90 or SM103")
 
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform

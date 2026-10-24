@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import contextlib
 import math
 from collections import defaultdict
 from threading import Event, Lock
@@ -731,6 +732,32 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
 
     assert worker.block_size == 1152
     assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.parametrize(
+    "layout,kernel_block_size,raises",
+    [
+        (KVCacheLayout.LBHNC, 384, False),
+        (KVCacheLayout.LBHNC, 64, True),
+        (KVCacheLayout.BLHNC, 64, False),
+    ],
+)
+def test_compressed_kernel_split(layout, kernel_block_size, raises):
+    """Layer-outer layouts keep compressed pages whole or reject the split."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        check_compressed_kernel_split,
+    )
+
+    spec = MLAAttentionSpec(
+        384, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=8
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    kv_cache_config = KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    ctx = pytest.raises(NotImplementedError) if raises else contextlib.nullcontext()
+    with ctx:
+        check_compressed_kernel_split(vllm_config, kv_cache_config, kernel_block_size)
 
 
 def _make_remote_meta(

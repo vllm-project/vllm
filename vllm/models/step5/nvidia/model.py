@@ -86,7 +86,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
-from .config import (
+from ..common.config import (
     Step5SparseConfig,
     checkpoint_has_step5_sparse_config,
     get_step5_sparse_config,

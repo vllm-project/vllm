@@ -14,7 +14,7 @@ import torch
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Step5 kernels require CUDA"
+    not current_platform.is_cuda_alike(), reason="Step5 kernels require a GPU"
 )
 
 BLOCK_SIZE = 16
