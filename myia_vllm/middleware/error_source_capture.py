@@ -50,6 +50,12 @@ _BODY_BYTES = int(os.environ.get("ERROR_SOURCE_BODY_BYTES", "1500"))
 # buffering) and FAILS OPEN: any error in the guard lets the request through.
 _MAX_BODY_BYTES = int(os.environ.get("VLLM_MAX_REQUEST_BODY_BYTES", "0"))
 
+# Response body captured for non-2xx only (default 2 KiB). Empty for successful
+# requests, so the field costs nothing on the hot path. 2 KiB is enough for
+# vLLM's JSON error envelope, whose `message` field carries the reason
+# ("maximum context length", validation detail, ...).
+_ERR_BODY_BYTES = int(os.environ.get("ERROR_SOURCE_ERR_BODY_BYTES", "2048"))
+
 
 class ErrorSourceCapture:
     def __init__(self, app):
@@ -104,10 +110,22 @@ class ErrorSourceCapture:
             return message
 
         status_holder = {"status": 0}
+        # Response body of FAILED requests only. Added 2026-10-24 after six HTTP
+        # 400s whose cause could not be established: the request side is logged,
+        # but vLLM does not print a 4xx reason at this log level, so "context too
+        # long" and "malformed request" were indistinguishable after the fact.
+        # Buffered only when status >= 400 (the 2xx/SSE path pays nothing) and
+        # bounded, so a 200-streaming response never accumulates here.
+        err_body = bytearray()
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
                 status_holder["status"] = message.get("status", 0)
+            elif (message["type"] == "http.response.body"
+                  and status_holder["status"] >= 400
+                  and len(err_body) < _ERR_BODY_BYTES):
+                chunk = message.get("body") or b""
+                err_body.extend(bytes(chunk)[:_ERR_BODY_BYTES - len(err_body)])
             await send(message)
 
         await self.app(scope, receive_wrapper, send_wrapper)
@@ -143,6 +161,11 @@ class ErrorSourceCapture:
                 "body_head": body_head,
                 "body_tail": body_tail,
             }
+            if status_holder["status"] >= 400 and err_body:
+                # Why the request failed, from the server's own mouth.
+                entry["error_body"] = bytes(err_body).decode(
+                    "utf-8", errors="replace"
+                )
             asyncio.get_running_loop().run_in_executor(
                 None, _append_line, self.out_path, entry
             )
