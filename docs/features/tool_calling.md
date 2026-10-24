@@ -160,6 +160,8 @@ The floor never relaxes a constraint the request would already receive: tools th
 
 ## Automatic Function Calling
 
+Engine-based tool parsers, such as `qwen3_coder`, preserve assistant prose before, between, and after tool calls in non-streaming responses. The prose is returned in `message.content`, alongside the parsed calls in `message.tool_calls`.
+
 To enable this feature, you should set the following flags:
 
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. It tells vLLM that you want to enable the model to generate its own tool calls when it
