@@ -1702,14 +1702,15 @@ def init_worker_distributed_environment(
     if parallel_config.distributed_timeout_seconds is not None:
         timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
 
-    init_distributed_environment(
-        parallel_config.world_size,
-        rank,
-        init_method,
-        local_rank,
-        backend,
-        timeout,
-    )
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            parallel_config.world_size,
+            rank,
+            init_method,
+            local_rank,
+            backend,
+            timeout,
+        )
 
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
