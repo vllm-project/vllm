@@ -691,15 +691,12 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
-        elif self.metrics_collector:
+        else:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
-                self.metrics_collector.on_block_allocated(block)
-        else:
-            # Blocks popped from the free queue have ref_cnt 0.
-            for block in ret:
-                block.ref_cnt = 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
         return ret
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:

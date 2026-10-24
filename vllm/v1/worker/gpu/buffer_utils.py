@@ -20,6 +20,9 @@ logger = init_logger(__name__)
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
 
+# Elements copied per program in `_apply_write_kernel`.
+_WRITE_BLOCK_SIZE = 1024
+
 
 def set_default_max_concurrency(n: int) -> None:
     global _DEFAULT_MAX_CONCURRENCY
@@ -225,7 +228,7 @@ class StagedWriteTensor:
             write_contents,
             cu_lens_uva,
             None,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=False,
         )
         # Clear the staged writes
@@ -298,7 +301,7 @@ class FusedStagedWriter:
             contents_gpu,
             cu_lens_uva,
             group_ids_uva,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=True,
         )
         for t in tensors:
@@ -306,8 +309,8 @@ class FusedStagedWriter:
 
 
 def _num_write_chunks(max_len: int) -> int:
-    # One program per 1024-element chunk; one program per 128K-token row took 125 us.
-    return max(triton.cdiv(max_len, 1024), 1)
+    # One program per _WRITE_BLOCK_SIZE-element chunk.
+    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
 
 
 @triton.jit
