@@ -209,6 +209,10 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
     @override
+    def supports_deferred_promotion_allocation(self) -> bool:
+        return True
+
+    @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
@@ -221,14 +225,17 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
-        keys = list(job_metadata.keys)
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        keys, chunk_ids = keys_chunks
+        keys = list(keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
+            [int(cid) * self._block_size for cid in chunk_ids],
             self._block_size,
             self._use_o_direct,
         )
@@ -237,16 +244,33 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        assert not job_metadata.is_materialized(), (
+            "FS tier should materialize job in the transfer thread"
+        )
         job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
-        keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
+            assert not job_metadata.is_materialized(), (
+                "FS tier should materialize job in the transfer thread"
+            )
+
+            keys_chunks = job_metadata.get()
+            if keys_chunks is None:
+                # Job materialization failed; Setup state such that Job reaping
+                # doesn't blow up.
+                self._job_block_counts[job_id] = 0
+                self._load_job_keys[job_id] = []
+                return
+
+            keys, chunk_ids = keys_chunks
+            self._job_block_counts[job_id] = len(keys)
+            self._load_job_keys[job_id] = list(keys)
+            # TODO (varun): Path generation is expensive. Consider doing in
+            # Scheduler thread.
+            paths = [self.file_mapper.get_file_name(k) for k in keys]
+            offsets = [int(cid) * self._block_size for cid in chunk_ids]
+            assert len(paths) == len(offsets)
+
             try:
                 batch_load_block(
                     paths,

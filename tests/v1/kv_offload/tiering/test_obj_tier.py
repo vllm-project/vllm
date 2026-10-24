@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.config import (
 )
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
@@ -109,11 +110,10 @@ def make_job(
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    return CascadeTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
-        is_promotion=False,
         req_context=_CTX,
     )
 

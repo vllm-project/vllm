@@ -95,7 +95,10 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
-        for key in job_metadata.keys:
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        keys, _ = keys_chunks
+        for key in keys:
             self.blocks[key] = True
         self._held_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 

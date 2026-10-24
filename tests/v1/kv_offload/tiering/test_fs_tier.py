@@ -40,6 +40,10 @@ from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
+    PromotionTransferJob,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -109,11 +113,21 @@ def make_job(
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    if is_promotion:
+        chunk_ids_list = list(chunk_ids)
+        return PromotionTransferJob(
+            job_id=job_id,
+            req_context=_CTX,
+            keys=keys,
+            alloc_fn=lambda k, ctx: (
+                list(k),
+                np.array(chunk_ids_list, dtype=np.int32),
+            ),
+        )
+    return CascadeTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
-        is_promotion=is_promotion,
         req_context=_CTX,
     )
 
@@ -210,6 +224,12 @@ def fs_tier_with_events(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_fs_tier_is_deferred(fs_tier):
+    """FileSystemTierManager reports supports_deferred_promotion_allocation=True."""
+    tier, _ = fs_tier
+    assert tier.supports_deferred_promotion_allocation()
 
 
 def test_lookup_empty_tier(fs_tier):
@@ -995,3 +1015,205 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+class TestFSPromotion:
+    """Test deferred promotion. FS tier defers allocation by default."""
+
+    def test_submit_load_rejects_materialized_promotion_job(self, fs_tier):
+        """A materialized promotion job is rejected: the FS tier defers
+        allocation, so submit_load asserts the job is unmaterialized."""
+        tier, _ = fs_tier
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        drain(tier)
+
+        job = PromotionTransferJob(
+            job_id=2,
+            req_context=_CTX,
+            keys=[key(1)],
+            alloc_fn=lambda k, ctx: ([key(1)], np.array([0], dtype=np.int32)),
+        )
+        job.get()  # Materialize here
+        assert job.is_materialized()
+        with pytest.raises(AssertionError, match="materialize"):
+            tier.submit_load(job)
+
+        # The job was never enqueued, so it reports no result.
+        assert drain(tier) == []
+
+    def test_promotion_allocation_failure(self, fs_tier):
+        """alloc_fn returning None → get() redeems to None and the job
+        finishes with zero keys."""
+        tier, _ = fs_tier
+        job = PromotionTransferJob(
+            job_id=42,
+            req_context=_CTX,
+            keys=[key(1), key(2)],
+            alloc_fn=lambda keys, ctx: None,
+        )
+        tier.submit_load(job)
+        results = drain(tier)
+
+        # The claim was never acquired; the job finishes with zero keys.
+        assert job.get() is None
+        assert not job.is_materialized()
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.job_id == 42
+        assert result.success
+        assert result.successful_keys is None
+
+    def test_promotion_primary_key_availability(self, fs_tier):
+        """alloc_fn controls which subset of requested keys are loaded from FS.
+
+        Three sub-cases exercised in sequence,
+          - None cached:  alloc returns all 4 keys → all 4 loaded
+          - Half cached:  alloc returns 2 keys     → only those 2 loaded
+          - All cached:   alloc returns 0 keys     → no FS reads, job still succeeds.
+        """
+        tier, _ = fs_tier
+        all_keys = [key(1), key(2), key(3), key(4)]
+
+        # Store all four files on disk so every sub-case can request any key.
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        # None cached
+        job = PromotionTransferJob(
+            job_id=10,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
+
+        # Half cached
+        uncached = all_keys[2:]
+        job = PromotionTransferJob(
+            job_id=11,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(uncached),
+                np.array([0, 1], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(uncached)
+        assert list(keys_chunks[1]) == [0, 1]
+
+        # All cached
+        job = PromotionTransferJob(
+            job_id=12,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: ([], []),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert len(list(keys_chunks[0])) == 0
+        assert len(list(keys_chunks[1])) == 0
+
+    def test_promotion_fs_file_availability(self, fs_tier):
+        """FS file availability determines promotion success and partial-success
+        reporting.
+
+        Three sub-cases, each using its own keys and non-overlapping chunk slots:
+          - All files present:  full success, successful_keys is None.
+          - Half files present: partial failure, successful_keys holds the loaded half.
+          - No files present:   immediate failure, successful_keys is None.
+        """
+        tier, _ = fs_tier
+
+        # All files present → full success
+        all_keys = [key(1), key(2), key(3), key(4)]
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        job = PromotionTransferJob(
+            job_id=20,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert result.successful_keys is None  # all loaded; no partial set reported
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
+
+        # Half files deleted; partial failure
+        # Delete files for key(3) and key(4); key(1) and key(2) remain on disk.
+        for k in all_keys[2:]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = PromotionTransferJob(
+            job_id=21,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is not None
+        assert set(result.successful_keys) == {key(1), key(2)}
+        # The claim reflects the full originally-requested set, not just what
+        # loaded
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
+
+        # All files deleted → nothing loaded
+        for k in all_keys[:2]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = PromotionTransferJob(
+            job_id=22,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is None  # nothing loaded before the first failure
+        # The claim still reflects the full originally-requested set
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
