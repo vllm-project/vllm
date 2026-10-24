@@ -17,6 +17,10 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    HiddenStateCaptureResult,
+)
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import (
     PrefillStats,
@@ -164,6 +168,8 @@ class EngineCoreRequest(
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
 
+    hidden_state_capture: HiddenStateCapturePlan | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -245,6 +251,10 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+
+    # Append capture fields after existing fields for array_like compatibility.
+    hidden_state_capture: HiddenStateCaptureResult | None = None
+    hidden_capture_skip_reason: str | None = None
 
     @property
     def finished(self) -> bool:

@@ -22,6 +22,43 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("skip_reason", [None, "ended_before_window"])
+def test_engine_core_output_preserves_legacy_request_errors(skip_reason):
+    from vllm.outputs import RequestError
+    from vllm.v1.engine import EngineCoreOutput, FinishReason
+
+    capture_fields = {"hidden_state_capture", "hidden_capture_skip_reason"}
+    legacy_fields = [
+        (field.name, field.type)
+        if field.default is msgspec.NODEFAULT
+        else (field.name, field.type, field.default)
+        for field in msgspec.structs.fields(EngineCoreOutput)
+        if field.name not in capture_fields
+    ]
+    legacy_type = msgspec.defstruct(
+        "LegacyEngineCoreOutput", legacy_fields, array_like=True, omit_defaults=True
+    )
+    error = RequestError("validation_error", "Engine is paused")
+    legacy = legacy_type(
+        request_id="request",
+        new_token_ids=[],
+        finish_reason=FinishReason.ERROR,
+        error=error,
+    )
+    current = EngineCoreOutput(
+        request_id="request",
+        new_token_ids=[],
+        finish_reason=FinishReason.ERROR,
+        error=error,
+        hidden_capture_skip_reason=skip_reason,
+    )
+    for output, receiver_type in ((legacy, EngineCoreOutput), (current, legacy_type)):
+        decoded = MsgpackDecoder(receiver_type).decode(MsgpackEncoder().encode(output))
+        assert decoded.error == error
+        assert decoded.finish_reason == FinishReason.ERROR
+        assert decoded.new_token_ids == []
+
+
 class UnrecognizedType(UserDict):
     def __init__(self, an_int: int):
         super().__init__()

@@ -134,6 +134,46 @@ def test_models(
     )
 
 
+@pytest.mark.parametrize("use_v2", ["0", "1"])
+def test_windowed_capture_aux_layers_follow_metadata(vllm_runner, monkeypatch, use_v2):
+    from vllm import SamplingParams
+    from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    captures = []
+    for layers in ([3, 7], [7, 3]):
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            model_impl="transformers",
+            max_model_len=32,
+            enforce_eager=True,
+            async_scheduling=False,
+            enable_prefix_caching=False,
+            speculative_config={
+                "method": "extract_hidden_states",
+                "num_speculative_tokens": 1,
+                "draft_model_config": {
+                    "hf_config": {"eagle_aux_hidden_state_layer_ids": layers}
+                },
+            },
+        ) as runner:
+            plan = HiddenStateCapturePlan.from_window(
+                "capture", 4, 0, 1, "layers", aux_layer_ids=(3, 7)
+            )
+            output = runner.llm.generate(
+                [{"prompt_token_ids": [1, 2, 3, 4]}],
+                SamplingParams(temperature=0, max_tokens=1, ignore_eos=True),
+                hidden_state_capture=plan,
+                use_tqdm=False,
+            )[0]
+            capture = output.hidden_state_capture
+            assert capture is not None, output.hidden_capture_skip_reason
+            assert capture.layer_ids == (3, 7)
+            captures.append(capture.hidden_states)
+    torch.testing.assert_close(captures[0], captures[1], rtol=0, atol=0)
+
+
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     prompts, _, _ = prep_prompts(4, (800, 801))
     kwargs_ref = {"max_model_len": 8192, "enforce_eager": True}

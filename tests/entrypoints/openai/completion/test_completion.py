@@ -45,6 +45,44 @@ async def client(server):
         yield async_client
 
 
+@pytest.fixture
+def capture_validation_server(default_server_args):
+    with RemoteOpenAIServer(
+        MODEL_NAME, [*default_server_args, "--async-scheduling"]
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_hidden_state_capture_validation_returns_bad_request(
+    capture_validation_server,
+):
+    """Capture validation errors must survive generate() with their 400 reason."""
+    async with capture_validation_server.get_async_client() as client:
+        for stop, reason in (
+            ("END", "stop strings"),
+            (["END"], "stop strings"),
+            (None, "async scheduling"),
+        ):
+            with pytest.raises(BadRequestError) as exc_info:
+                await client.completions.create(
+                    model=MODEL_NAME,
+                    prompt="Hello",
+                    max_tokens=4,
+                    temperature=0,
+                    stop=stop,
+                    extra_body={
+                        "hidden_state_capture": {
+                            "start": 0,
+                            "end": 4,
+                            "collection_id": "validation",
+                        }
+                    },
+                )
+            assert exc_info.value.status_code == 400
+            assert reason in exc_info.value.message
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",

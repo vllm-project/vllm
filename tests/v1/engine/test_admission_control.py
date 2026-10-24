@@ -35,6 +35,7 @@ from vllm.exceptions import (
     MaxQueuedTokensError,
     QueueOverflowError,
     VLLMError,
+    VLLMValidationError,
 )
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -43,6 +44,7 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 from vllm.v1.metrics.loggers import StatLoggerManager
 
 _ADMISSION_METRIC_MODEL = "admission-metric-test"
@@ -586,3 +588,50 @@ def test_human_readable_int_parses_notation(input_str: str, expected: int):
 def test_human_readable_int_rejects_invalid(invalid: str):
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         human_readable_int(invalid)
+
+
+@pytest.mark.asyncio
+async def test_hidden_capture_rejects_streaming_input_before_admission():
+    engine = SimpleNamespace(
+        errored=False,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+        ),
+        _add_streaming_input_request=AsyncMock(),
+    )
+
+    async def prompt():
+        yield {"prompt_token_ids": [1]}
+
+    stream = prompt()
+    plan = HiddenStateCapturePlan.from_window("request", 1, 0, 1, "collection")
+    try:
+        with pytest.raises(VLLMValidationError, match="streaming input"):
+            await AsyncLLM.add_request(
+                engine, "request", stream, SamplingParams(), hidden_state_capture=plan
+            )
+        engine._add_streaming_input_request.assert_not_awaited()
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actual", [SamplingParams(n=2), SamplingParams(stop="END")])
+async def test_hidden_capture_checks_effective_engine_request_params(actual):
+    """Admission must check the params executed by EngineCore, not a spare argument."""
+    engine = _make_request_test_llm(10, AsyncMock())
+    engine.vllm_config.device_config = SimpleNamespace(device_type="cuda")
+    engine.vllm_config.scheduler_config = SimpleNamespace(async_scheduling=False)
+    engine.vllm_config.parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    engine.vllm_config.model_config = SimpleNamespace(is_encoder_decoder=False)
+    engine.vllm_config.speculative_config = None
+    request = _make_engine_request("effective", 1)
+    request.sampling_params = actual
+    request.hidden_state_capture = HiddenStateCapturePlan.from_window(
+        "effective", 1, 0, 1, "audit"
+    )
+    with pytest.raises(VLLMValidationError):
+        await engine.add_request("effective", request, SamplingParams())
+    engine.engine_core.add_request_async.assert_not_awaited()

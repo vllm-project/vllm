@@ -53,6 +53,72 @@ from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
 
 
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_capture_skip_with_first_token_preserves_prefill_and_ttft_statistics(
+    output_kind,
+):
+    processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="capture",
+        external_req_id="capture",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, output_kind=output_kind),
+        pooling_params=None,
+    )
+    processor.add_request(request, prompt=None)
+    state = processor.request_states[request.request_id]
+    stats = IterationStats()
+    processed = processor.process_outputs(
+        [], engine_core_timestamp=1, iteration_stats=stats
+    )
+    assert not processed.request_outputs
+    assert state.is_prefilling
+    assert state.stats.first_token_ts == 0
+    assert stats.time_to_first_tokens_iter == []
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[42],
+                hidden_capture_skip_reason="aux_layers_unavailable",
+            )
+        ],
+        engine_core_timestamp=2,
+        iteration_stats=stats,
+    )
+    if output_kind == RequestOutputKind.FINAL_ONLY:
+        assert not processed.request_outputs
+    else:
+        expected = (
+            "aux_layers_unavailable" if output_kind == RequestOutputKind.DELTA else None
+        )
+        assert processed.request_outputs[0].hidden_capture_skip_reason == expected
+    assert not state.is_prefilling
+    assert state.stats.first_token_ts == 2
+    assert len(stats.time_to_first_tokens_iter) == 1
+    final = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[43],
+                finish_reason=FinishReason.LENGTH,
+            )
+        ],
+        engine_core_timestamp=3,
+        iteration_stats=stats,
+    )
+    expected_final = (
+        None if output_kind == RequestOutputKind.DELTA else "aux_layers_unavailable"
+    )
+    assert final.request_outputs[0].hidden_capture_skip_reason == expected_final
+
+
 @pytest.mark.parametrize("flat_logprobs", [False, True])
 def test_delta_output_without_new_tokens_returns_empty_logprobs(
     flat_logprobs: bool,

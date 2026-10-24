@@ -46,6 +46,16 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+class HiddenStateCaptureWindowRequest(OpenAIBaseModel):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    coordinate: Literal["response", "absolute"] = "response"
+    collection_id: str
+    min_rows: int = Field(default=1, ge=1)
+    aux_layer_ids: tuple[int, ...] = ()
+    hidden_layout: Literal["final", "aux_final", "dflash_aux"] | None = None
+
+
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
@@ -72,6 +82,7 @@ class CompletionRequest(OpenAIBaseModel):
     temperature: float | None = None
     top_p: float | None = None
     user: str | None = None
+    hidden_state_capture: HiddenStateCaptureWindowRequest | None = None
 
     # --8<-- [start:completion-sampling-params]
     use_beam_search: bool = False
@@ -702,6 +713,24 @@ class CompletionResponseChoice(OpenAIBaseModel):
     weight_versions: list[WeightVersionSpan] | None = None
 
 
+class HiddenStateCaptureResponse(OpenAIBaseModel):
+    request_id: str
+    dtype: str
+    hidden_positions: list[int]
+    hidden_states_base64: str
+    hidden_states_shape: tuple[int, int]
+    hidden_position_start: int
+    hidden_position_end: int
+    hidden_window_start: int
+    hidden_window_end: int
+    layer_ids: tuple[int, ...]
+    includes_final_layer: bool
+    hidden_layout: str
+    collection_id: str
+    copied_bytes: int
+    copy_ms: float
+
+
 class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: Literal["text_completion"] = "text_completion"
@@ -720,6 +749,8 @@ class CompletionResponse(OpenAIBaseModel):
         default=None, description="ECTransfer parameters."
     )
     metrics: PerRequestMetrics | None = None
+    hidden_state_capture: HiddenStateCaptureResponse | None = None
+    hidden_capture_skip_reason: str | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
