@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MXFP4 linear kernel selection logic (CPU-only).
+"""Tests for MXFP4 linear kernels and CPU FP8/MXFP4 MoE selection.
 
 Run `pytest tests/kernels/quantization/test_mxfp4_kernel_selection.py`.
 """
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.experts.cpu_moe as cpu_moe
+import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_moe_oracle
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
@@ -22,10 +26,35 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp4_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+    CPUExpertsFp8,
+    CPUExpertsFp8W8A8,
+    CPUExpertsMxfp4,
+    CPUExpertsMxfp4W4A8,
+)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    select_fp8_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    select_mxfp4_moe_backend,
+)
+from vllm.model_executor.layers.quantization.mxfp4 import (
+    GptOssMxfp4MoEMethod,
+    Mxfp4MoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kMxfp4Dynamic,
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
@@ -320,3 +349,189 @@ def test_init_mxfp4_linear_kernel_raises_when_no_kernel_matches(platform_mock):
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
         init_mxfp4_linear_kernel()
+
+
+@pytest.mark.parametrize("method_cls", [GptOssMxfp4MoEMethod, Mxfp4MoEMethod])
+@pytest.mark.parametrize(
+    "activation_override,native_supported,in_dtype,tp_size,use_fp8",
+    [
+        pytest.param(None, True, torch.bfloat16, 1, True, id="automatic"),
+        pytest.param(kFp8DynamicTokenSym, True, torch.bfloat16, 2, True, id="w4a8-tp2"),
+        pytest.param(None, False, torch.bfloat16, 1, False, id="automatic-no-native"),
+        pytest.param(
+            kFp8DynamicTokenSym, True, torch.float16, 1, False, id="input-dtype"
+        ),
+    ],
+)
+def test_cpu_mxfp4_fp8_selection(
+    monkeypatch,
+    method_cls,
+    activation_override,
+    native_supported,
+    in_dtype,
+    tp_size,
+    use_fp8,
+):
+    monkeypatch.setattr(CPUExpertsMxfp4, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(cpu_moe.current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        cpu_moe,
+        "cpu_native_fp8_supported",
+        lambda dtype: native_supported and dtype == torch.float8_e4m3fn,
+    )
+    monkeypatch.setattr(
+        mxfp4_moe_oracle,
+        "_get_priority_backends_for_gpt_oss",
+        lambda: [Mxfp4MoeBackend.CPU, Mxfp4MoeBackend.CPU_MXFP4_FP8],
+    )
+    monkeypatch.setattr(
+        mxfp4_moe_oracle, "_user_moe_activation_override", lambda: activation_override
+    )
+    config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=32,
+        intermediate_size=32,
+        in_dtype=in_dtype,
+        activation=MoEActivation.SWIGLUOAI,
+    )
+    config.routing_method = RoutingMethodType.Default
+    config.moe_parallel_config = replace(config.moe_parallel_config, tp_size=tp_size)
+    method = method_cls(config)
+    expected = (
+        (Mxfp4MoeBackend.CPU_MXFP4_FP8, CPUExpertsMxfp4W4A8)
+        if use_fp8
+        else (Mxfp4MoeBackend.CPU, CPUExpertsMxfp4)
+    )
+    assert (method.mxfp4_backend, method.experts_cls) == expected
+
+    if (
+        method_cls is Mxfp4MoEMethod
+        and activation_override == kFp8DynamicTokenSym
+        and native_supported
+        and in_dtype is torch.bfloat16
+    ):
+        monkeypatch.setattr(
+            mxfp4_moe_oracle, "_user_moe_activation_override", lambda: None
+        )
+        declared = method_cls(config, activation_key=activation_override)
+        assert (declared.mxfp4_backend, declared.experts_cls) == expected
+
+    if use_fp8 and activation_override == kFp8DynamicTokenSym:
+        config.moe_backend = "cpu_mxfp4_bf16"
+        monkeypatch.setattr(
+            mxfp4_moe_oracle,
+            "_user_moe_activation_override",
+            lambda: activation_override,
+        )
+        pinned = method_cls(config)
+        assert (pinned.mxfp4_backend, pinned.experts_cls) == (
+            Mxfp4MoeBackend.CPU,
+            CPUExpertsMxfp4,
+        )
+
+
+def test_cpu_mxfp4_bf16_pinned_rejects_unsupported_device(monkeypatch):
+    monkeypatch.setattr(CPUExpertsMxfp4, "_supports_current_device", lambda: False)
+    monkeypatch.setattr(cpu_moe.current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        CPUExpertsMxfp4W4A8, "is_supported_config", lambda *args: (True, None)
+    )
+    monkeypatch.setattr(
+        mxfp4_moe_oracle,
+        "_get_priority_backends_for_gpt_oss",
+        lambda: [Mxfp4MoeBackend.CPU_MXFP4_FP8],
+    )
+    monkeypatch.setattr(mxfp4_moe_oracle, "_user_moe_activation_override", lambda: None)
+    config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=32,
+        intermediate_size=32,
+        activation=MoEActivation.SWIGLUOAI,
+    )
+    config.routing_method = RoutingMethodType.Default
+    assert select_mxfp4_moe_backend(config)[0] == Mxfp4MoeBackend.CPU_MXFP4_FP8
+
+    config.moe_backend = "cpu_mxfp4_bf16"
+    with pytest.raises(
+        ValueError, match="does not support the deployment configuration"
+    ):
+        select_mxfp4_moe_backend(config)
+
+
+def test_cpu_mxfp4_experts_reject_expert_parallel(monkeypatch):
+    monkeypatch.setattr(CPUExpertsMxfp4, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(cpu_moe.current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(cpu_moe, "cpu_native_fp8_supported", lambda dtype: True)
+    monkeypatch.setattr(
+        mxfp4_moe_oracle,
+        "_get_priority_backends_for_gpt_oss",
+        lambda: [Mxfp4MoeBackend.CPU, Mxfp4MoeBackend.CPU_MXFP4_FP8],
+    )
+    monkeypatch.setattr(mxfp4_moe_oracle, "_user_moe_activation_override", lambda: None)
+    config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=32,
+        intermediate_size=32,
+        activation=MoEActivation.SWIGLUOAI,
+    )
+    config.routing_method = RoutingMethodType.Default
+    config.moe_parallel_config = replace(
+        config.moe_parallel_config, use_ep=True, ep_size=2
+    )
+
+    with pytest.raises(NotImplementedError, match="No MXFP4 MoE backend supports"):
+        select_mxfp4_moe_backend(config)
+
+
+@pytest.mark.parametrize(
+    "hidden_dim,intermediate_size,in_dtype,native_supported,use_fp8",
+    [
+        pytest.param(128, 128, torch.bfloat16, True, True, id="native-w8a8"),
+        pytest.param(128, 128, torch.bfloat16, False, False, id="no-native-fp8"),
+        pytest.param(128, 128, torch.float16, True, False, id="activation-dtype"),
+        pytest.param(160, 128, torch.bfloat16, True, False, id="hidden-dimension"),
+        pytest.param(
+            128, 160, torch.bfloat16, True, False, id="intermediate-dimension"
+        ),
+    ],
+)
+def test_cpu_fp8_w8a8_selection_falls_back_when_unsupported(
+    monkeypatch,
+    default_vllm_config,
+    hidden_dim,
+    intermediate_size,
+    in_dtype,
+    native_supported,
+    use_fp8,
+):
+    monkeypatch.setattr(cpu_moe.current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        cpu_moe,
+        "cpu_native_fp8_supported",
+        lambda dtype: native_supported and dtype == torch.float8_e4m3fn,
+    )
+    monkeypatch.setattr(
+        CPUExpertsFp8,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    config = make_dummy_moe_config(
+        hidden_dim=hidden_dim,
+        intermediate_size=intermediate_size,
+        in_dtype=in_dtype,
+    )
+    config.routing_method = RoutingMethodType.Renormalize
+
+    backend, experts_cls = select_fp8_moe_backend(
+        config, kFp8Static128BlockSym, kFp8Dynamic128Sym
+    )
+
+    expected = (
+        (Fp8MoeBackend.CPU_W8A8, CPUExpertsFp8W8A8)
+        if use_fp8
+        else (Fp8MoeBackend.CPU, CPUExpertsFp8)
+    )
+    assert (backend, experts_cls) == expected

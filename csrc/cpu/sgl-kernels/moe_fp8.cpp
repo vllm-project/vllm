@@ -37,8 +37,7 @@ void fused_experts_fp_kernel_impl(
     int64_t num_tokens_post_pad,
     float alpha,
     float limit,
-    CPUActMethod act_func,
-    bool with_bias) {
+    CPUActMethod act_func) {
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
 
@@ -77,7 +76,7 @@ void fused_experts_fp_kernel_impl(
       const packed_t* __restrict__ B = packed_w1 + expert_id * stride_e + nb * BLOCK_N * stride_n;
       const param_t* __restrict__ Bs =
           w1s + expert_id * scale_size_N * scale_size_K + scale_offset_per_block(nb) * scale_size_K;
-      const float* __restrict__ B_bias = with_bias ? w1_bias + expert_id * 2 * N + nb * BLOCK_N : nullptr;
+      const float* __restrict__ B_bias = w1_bias ? w1_bias + expert_id * 2 * N + nb * BLOCK_N : nullptr;
 
       // do unpacking for the first row or a new expert
       int32_t pre_expert_id = mb == 0 ? -1 : expert_ids[mb - 1];
@@ -188,7 +187,7 @@ void fused_experts_fp_kernel_impl(
       const packed_t* __restrict__ B = packed_w2 + expert_id * stride_e2 + nb * BLOCK_N * stride_oc;
       const param_t* __restrict__ Bs =
           w2s + expert_id * scale_size_N * scale_size_K + scale_offset_per_block(nb) * scale_size_K;
-      const float* __restrict__ B_bias = with_bias ? w2_bias + expert_id * OC + nb * BLOCK_N : nullptr;
+      const float* __restrict__ B_bias = w2_bias ? w2_bias + expert_id * OC + nb * BLOCK_N : nullptr;
 
       // do unpacking for the first row or a new expert
       int32_t pre_expert_id = mb == 0 ? -1 : expert_ids[mb - 1];
@@ -264,8 +263,7 @@ void fused_experts_fp_kernel_impl(
       int64_t num_tokens_post_pad,                                           \
       float alpha,                                                           \
       float limit,                                                           \
-      CPUActMethod act_func,                                                 \
-      bool with_bias)
+      CPUActMethod act_func)
 
 INSTANTIATE_MOE_FP_TEMPLATE(at::BFloat16, at::Float8_e4m3fn, float, false);
 INSTANTIATE_MOE_FP_TEMPLATE(at::Half, at::Float8_e4m3fn, float, false);

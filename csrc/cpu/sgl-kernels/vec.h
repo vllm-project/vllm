@@ -70,6 +70,10 @@ inline at::vec::Vectorized<float> load_float_vec(const scalar_t* __restrict__ da
   return out;
 }
 
+inline Vectorized<float> load_float_vec(const float* __restrict__ data) {
+  return Vectorized<float>::loadu(data);
+}
+
 #if defined(CPU_CAPABILITY_AVX512)
 
 // `at::vec::convert_from_float<>` from PyTorch doesn't have avx512-bf16 intrinsics
