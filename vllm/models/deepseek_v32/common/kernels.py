@@ -958,7 +958,7 @@ def _fused_q_kernel(
         index_weights *= index_weights_head_scale
         tl.store(
             index_weights_out_ptr + tok_idx * index_weights_out_stride + head_idx,
-            index_weights,
+            index_weights.to(index_weights_out_ptr.dtype.element_ty),
         )
 
 
@@ -980,11 +980,12 @@ def fused_q(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
-    Returns ``(index_q_fp8, index_weights_out, mqa_q)``. When ``quantize_mqa``
-    is True (FlashInfer sparse, fp8 query) ``mqa_q`` is a single fp8 tensor
-    packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse, bf16 query) it is
-    the RoPE'd ``q_pe`` in bf16; the caller pairs it with ``ql_nope`` as the
-    ``(ql_nope, q_pe)`` tuple the backend expects.
+    Returns ``(index_q_fp8, index_weights_out, mqa_q)``. ``index_weights_out``
+    is in the dtype the MQA logits kernels take: BF16 on SM100, else FP32. When
+    ``quantize_mqa`` is True (FlashInfer sparse, fp8 query) ``mqa_q`` is a
+    single fp8 tensor packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse,
+    bf16 query) it is the RoPE'd ``q_pe`` in bf16; the caller pairs it with
+    ``ql_nope`` as the ``(ql_nope, q_pe)`` tuple the backend expects.
     """
     assert positions.ndim == 1
     assert positions.dtype == torch.int64
@@ -1046,7 +1047,10 @@ def fused_q(
         mqa_q = q_pe_out
 
     index_q_fp8 = torch.empty_like(index_q, dtype=_FP8_DTYPE)
-    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    index_weights_out = torch.empty_like(
+        index_weights,
+        dtype=torch.bfloat16 if mqa_logits_use_mx_scales() else torch.float32,
+    )
     if cutedsl_kernel is not None:
         cutedsl_kernel(
             positions,
