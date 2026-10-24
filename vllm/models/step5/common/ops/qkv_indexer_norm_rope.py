@@ -89,16 +89,22 @@ def _prepare_main(
             (d < ROTARY)[None, :], tl.where((d < half)[None, :], low, high), normalized
         )
     result = tl.where((h < QH + KH)[:, None], normalized.to(QKV.dtype.element_ty), raw)
-    target = tl.where(
-        (h < QH)[:, None],
+    # Separate stores avoid selecting pointers with different HIP layouts.
+    tl.store(
         QOut + token * QH * DIM + h[:, None] * DIM + d[None, :],
-        tl.where(
-            (h < QH + KH)[:, None],
-            KOut + token * KH * DIM + (h[:, None] - QH) * DIM + d[None, :],
-            VOut + token * KH * DIM + (h[:, None] - QH - KH) * DIM + d[None, :],
-        ),
+        result,
+        valid & (h < QH)[:, None],
     )
-    tl.store(target, result, valid)
+    tl.store(
+        KOut + token * KH * DIM + (h[:, None] - QH) * DIM + d[None, :],
+        result,
+        valid & (h >= QH)[:, None] & (h < QH + KH)[:, None],
+    )
+    tl.store(
+        VOut + token * KH * DIM + (h[:, None] - QH - KH) * DIM + d[None, :],
+        result,
+        valid & (h >= QH + KH)[:, None],
+    )
     slot = tl.load(Slots + token, token < SLOT_ROWS, other=-1)
     cache_head = tl.where(h < QH + KH, h - QH, h - QH - KH)
     offset = (
@@ -107,12 +113,16 @@ def _prepare_main(
         + cache_head[:, None] * CACHE_HEAD
         + d[None, :]
     )
-    cache_ptr = tl.where((h < QH + KH)[:, None], KCache + offset, VCache + offset)
     if FP8_CACHE:
         scale = tl.where((h < QH + KH)[:, None], tl.load(KScale), tl.load(VScale))
         result = tl.div_rn(result.to(tl.float32), scale)
         result = tl.minimum(tl.maximum(result, -448.0), 448.0)
-    tl.store(cache_ptr, result, valid & (h >= QH)[:, None] & (slot >= 0))
+    tl.store(
+        KCache + offset,
+        result,
+        valid & (h >= QH)[:, None] & (h < QH + KH)[:, None] & (slot >= 0),
+    )
+    tl.store(VCache + offset, result, valid & (h >= QH + KH)[:, None] & (slot >= 0))
 
 
 @triton.jit(do_not_specialize=["CSA_ROWS", "TOKENS", "MAIN_SLOT_ROWS"])

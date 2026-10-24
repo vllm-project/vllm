@@ -4,12 +4,15 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .sparse_indexer import DecodeIndexerMetadata
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["CAPACITY", "SCORE_ROW", "Q_GROUP", "W_GROUP", "WORKERS"]
+)
 def _direct_scores(
     Q,
     W,
@@ -24,9 +27,9 @@ def _direct_scores(
     Lengths,
     TopKLengths,
     Q_TOKEN: tl.constexpr,
-    Q_GROUP: tl.constexpr,
+    Q_GROUP,
     W_TOKEN: tl.constexpr,
-    W_GROUP: tl.constexpr,
+    W_GROUP,
     TABLE_COLS: tl.constexpr,
     TABLE_ROW: tl.constexpr,
     SLOT_STRIDE: tl.constexpr,
@@ -34,13 +37,14 @@ def _direct_scores(
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
     MEAN_BLOCK: tl.constexpr,
-    CAPACITY: tl.constexpr,
-    SCORE_ROW: tl.constexpr,
+    CAPACITY,
+    SCORE_ROW,
     HEADS: tl.constexpr,
     TILE: tl.constexpr,
-    WORKERS: tl.constexpr,
+    WORKERS,
     ROW_GROUPS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
+    USE_BF16_DOT: tl.constexpr,
 ):
     worker = tl.program_id(0)
     row = tl.program_id(1)
@@ -92,7 +96,13 @@ def _direct_scores(
             other=0,
         )
         query = query.to(tl.float8e4nv, bitcast=True)
-        dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
+        if USE_BF16_DOT:
+            # Preserve the FP8 grid without ROCm native FP8 dot rounding.
+            dot = tl.dot(
+                key.to(tl.bfloat16), query.to(tl.bfloat16), out_dtype=tl.float32
+            )
+        else:
+            dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
         dot = tl.maximum(dot, 0.0)
         w = tl.load(W + token * W_TOKEN + kv_group * W_GROUP + h, h < HEADS, other=0)
         # FI's FP32 epilogue has four independent FMA chains followed by
@@ -132,9 +142,10 @@ def decode_summary_scores(
     ``row_groups`` query rows is one token of ``slots``; each ``query_len``
     tokens are one request of ``block_table``/``seq_lens``.
     """
-    # query: [tokens, groups, 8, 256] and weights: [tokens, groups, 8], each
+    # query: [tokens, groups, heads, 256] and weights: [tokens, groups, heads], each
     # group's heads contiguous; groups may be the outer storage dimension.
-    tokens, groups = query.shape[:2]
+    tokens, groups, heads, dim = query.shape
+    assert heads in (4, 8, 16) and dim == 256
     assert groups == row_groups and query.stride(3) == 1 and query.stride(2) == 256
     assert weights.shape == query.shape[:3] and weights.stride(2) == 1
     assert mean.stride(1) == 256 and mean.stride(2) == 1
@@ -177,11 +188,12 @@ def decode_summary_scores(
         mean.stride(0),
         capacity,
         scores.stride(0),
-        8,
+        heads,
         128,
         workers,
         row_groups,
         query_len,
+        current_platform.is_rocm(),
         num_warps=4,
         enable_fp_fusion=False,
     )

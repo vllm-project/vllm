@@ -82,6 +82,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.step5.common.ops.attention_gate import headwise_sigmoid_gate
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
@@ -98,7 +99,6 @@ from .layernorm import (
     make_step5_rms_norm,
 )
 from .ops.add import add_fp32
-from .ops.attention_gate import headwise_sigmoid_gate
 
 logger = init_logger(__name__)
 
@@ -1462,7 +1462,9 @@ class Step5SparseAttention:
         value_cache,
         decode_slots,
     ):
-        from .ops.qkv_indexer_norm_rope import qkv_indexer_norm_rope
+        from vllm.models.step5.common.ops.qkv_indexer_norm_rope import (
+            qkv_indexer_norm_rope,
+        )
 
         owner = self.owner
         index_q, index_k, index_z, gate = owner.qkv_indexer_proj.split_indexer(qkzg)
@@ -1644,7 +1646,7 @@ class Step5SparseAttention:
         torch.Tensor,
         bool,
     ]:
-        from .ops.indexer_norm_rope import indexer_norm_rope
+        from vllm.models.step5.common.ops.indexer_norm_rope import indexer_norm_rope
 
         owner = self.owner
         index_q, index_k, index_z, extra_dims = owner.qkv_indexer_proj.split_indexer(
