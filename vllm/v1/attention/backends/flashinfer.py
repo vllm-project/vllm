@@ -1862,6 +1862,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                        block_tables=block_table_tensor[prefill_start:num_reqs],
                     )
                 attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
 
