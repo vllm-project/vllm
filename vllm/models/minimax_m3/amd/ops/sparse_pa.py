@@ -560,6 +560,18 @@ def _run_gluon_decode(
     # V is offset by half a block when the sides interleave, so it holds fewer
     # pages than K even though both are addressed by the same page id.
     v_nphys16 = v_cache.shape[0]
+    sides_packed = _sides_are_packed(k_cache, v_cache)
+    if sides_packed:
+        if v_nphys16 > nphys16:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA packed V view is longer than K "
+                f"({v_nphys16} > {nphys16})"
+            )
+        # AITER's pa_decode_gluon requires equal shape[0]. Trim K to the V
+        # suffix length: valid page ids only address that range (the trailing
+        # K-only pages are the last block's V pages under the K view).
+        k_cache = k_cache[:v_nphys16]
+        nphys16 = v_nphys16
     k_cache_view = k_cache.view(nphys16 * hkv, 1, *k_cache.shape[2:])
     v_cache_view = v_cache.view(v_nphys16 * hkv, 1, *v_cache.shape[2:])
     q_view = q.view(total_q * num_kv_heads, group_size, head_size)
@@ -578,7 +590,7 @@ def _run_gluon_decode(
     is_fp8 = _is_fp8_kv_cache_tensor(k_cache)
     compute_type = aiter_dtypes.fp8 if is_fp8 else q.dtype
     if is_fp8:
-        if _sides_are_packed(k_cache, v_cache) and not all(
+        if sides_packed and not all(
             scale is None or scale.numel() == 1 for scale in (k_scale, v_scale)
         ):
             raise NotImplementedError(

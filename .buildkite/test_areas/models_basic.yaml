@@ -77,8 +77,11 @@ steps:
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_muse_spark_rocm_loading.py
+  - tests/models/test_muse_spark_logits_local.py
+  - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -101,10 +104,34 @@ steps:
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
+      - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
+      - tests/models/hy_v4/test_triton_ihc.py
+      - vllm/models/muse_spark/
+      - tests/models/test_muse_spark_logits_local.py
+      - tests/models/test_muse_spark_rocm_shared_rope.py
       commands:
-      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_deepseek_v4_vl_stream_weights.py
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_muse_spark_rocm_loading.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
+      - pytest -v -s models/hy_v4/test_triton_ihc.py
+
+- label: ":amd: (MI355) MiniMax M3 MonoKernel"
+  key: minimax-m3-monokernel-mi355
+  dind: false
+  timeout_in_minutes: 45
+  device: mi355_4
+  num_devices: 4
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - tests/models/minimax_m3/amd_specialized_decode/
+  - tests/models/minimax_m3/test_index_cache_overrides.py
+  - vllm/model_executor/models/config.py
+  commands:
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -136,6 +163,17 @@ steps:
       commands:
       - pytest -v -s models/inkling/rocm
 
+- label: ":nvidia: (B200) Flint"
+  key: flint-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+    - uv pip install --system 'gguf>=0.19.0'
+    - pytest -v -s models/flint
+
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
   timeout_in_minutes: 40
@@ -166,7 +204,7 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
@@ -285,9 +323,10 @@ steps:
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
+  - tests/models/test_cohere2_moe_parallel_block.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py models/test_beam_weight_mapping.py models/test_beam_numerics.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py models/test_beam_weight_mapping.py models/test_beam_numerics.py models/test_cohere2_moe_parallel_block.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
@@ -301,6 +340,7 @@ steps:
   source_file_dependencies:
   - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
+  - vllm/models/deepseek_v41/nvidia/model_state.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   commands:
@@ -325,3 +365,43 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
+  key: dsv41-nvidia-specialized-decode-4xb200
+  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+  optional: true
+  timeout_in_minutes: 40
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/nvidia/
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/common/
+  - vllm/v1/worker/gpu/model_states/
+  - vllm/model_executor/layers/fused_moe/config.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - tests/distributed/test_custom_all_reduce.py
+  - tests/kernels/test_engram.py
+  commands:
+  # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
+  # B200 runs the kernels and the TP4 numerics; the model test skips.
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+
+- label: ':amd: (MI355) Kimi-K3 Specialized Decode'
+  key: kimi-k3-specialized-decode-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/amd/
+  - tests/models/kimi_k3/amd_specialized_decode/
+  commands:
+  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode
