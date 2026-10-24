@@ -5192,3 +5192,38 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def _run_reset_message(monkeypatch, store_worker):
+    socket = MagicMock()
+    monkeypatch.setattr(worker.zmq, "Context", MagicMock())
+    monkeypatch.setattr(worker, "get_zmq_rpc_path_lookup", lambda _: "inproc://reset")
+    monkeypatch.setattr(worker, "make_zmq_socket", lambda *args, **kwargs: socket)
+    with patch.object(worker.threading, "Thread") as thread:
+        server = worker.LookupKeyServer(store_worker, MagicMock())
+        process_request = thread.call_args.kwargs["target"]
+    socket.recv_multipart.return_value = [worker.RESET_MSG]
+    socket.send.side_effect = lambda _: setattr(server, "running", False)
+    process_request()
+    return socket.send.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (-1, worker.RESP_ERR),
+        (0, worker.RESP_OK),
+        (7, worker.RESP_OK),
+        (RuntimeError("master unavailable"), worker.RESP_ERR),
+    ],
+)
+def test_reset_reports_removal_result(monkeypatch, result, expected):
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.kv_send_thread = None
+    w.store = MagicMock(spec=["remove_all"])
+    if isinstance(result, Exception):
+        w.store.remove_all.side_effect = result
+    else:
+        w.store.remove_all.return_value = result
+    assert _run_reset_message(monkeypatch, w) == expected
+    w.store.remove_all.assert_called_once_with(force=True)

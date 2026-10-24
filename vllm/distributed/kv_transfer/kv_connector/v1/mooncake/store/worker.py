@@ -2349,9 +2349,18 @@ class LookupKeyServer:
                         # flat key space, clearing every (group_id, hash) entry.
                         if self.store_worker.kv_send_thread is not None:
                             self.store_worker.kv_send_thread.request_queue.join()
-                        self.store_worker.store.remove_all(force=True)
-                        logger.info("Mooncake store reset via remove_all succeeded.")
-                        self.socket.send(RESP_OK)
+                        removed = self.store_worker.store.remove_all(force=True)
+                        if removed < 0:
+                            logger.error(
+                                "Mooncake remove_all failed with error code %d.",
+                                removed,
+                            )
+                            self.socket.send(RESP_ERR)
+                        else:
+                            logger.info(
+                                "Mooncake store reset via remove_all succeeded."
+                            )
+                            self.socket.send(RESP_OK)
                     except Exception as e:
                         logger.error("Mooncake remove_all failed: %s", e)
                         self.socket.send(RESP_ERR)
