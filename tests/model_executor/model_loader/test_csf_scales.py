@@ -47,6 +47,19 @@ def test_decode_matches_source_scales(shape):
     assert torch.equal(decoded.view(torch.uint8), raw)
 
 
+@pytest.mark.parametrize(
+    "base, words", [(0xFF, []), (0x38, [5, 3]), (0x38, [3, 3]), (0x38, [64])]
+)
+def test_invalid_streams_are_rejected(base, words):
+    raw = torch.full((16, 4), 0x38, dtype=torch.uint8)
+    raw[0, 0] = 0x39
+    fixed, _ = _encode(raw.view(torch.float8_e4m3fn))
+    fixed[0, 0] = base
+    exceptions = torch.tensor(words, dtype=torch.int32).view(torch.uint32)
+    with pytest.raises(ValueError, match="CSF"):
+        decode_nvfp4_csf_scale(fixed, exceptions)
+
+
 def test_stream_pairs_are_replaced_by_the_scale():
     raw = torch.full((16, 4), 0x38, dtype=torch.uint8)
     fixed, exceptions = _encode(raw.view(torch.float8_e4m3fn))

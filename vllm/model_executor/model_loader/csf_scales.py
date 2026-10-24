@@ -19,6 +19,7 @@ every NVFP4 kernel consumes them unchanged.
 
 from collections.abc import Iterable, Iterator
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -39,20 +40,25 @@ def decode_nvfp4_csf_scale(
         raise ValueError(f"Invalid CSF exceptions dtype {exceptions.dtype}")
     rows = fixed.shape[0] * 16
     cols = (fixed.shape[1] // 16 - 1) * 2
-    fixed = fixed.cpu()
-    bases = fixed[:, :16].reshape(rows, 1).to(torch.int16)
-    if bool((bases > 240).any()):
+    if rows * cols > 1 << 24:
+        raise ValueError("CSF scale exceeds 24-bit exception positions")
+    # numpy keeps these small ops off torch's intra-op thread pool, whose
+    # per-op sync dominates when weight loading runs with many threads.
+    raw = fixed.cpu().numpy()
+    bases = raw[:, :16].reshape(rows, 1)
+    if (bases > 240).any():
         raise ValueError("CSF row bases must be in 0..240")
-    packed = fixed[:, 16:].reshape(rows, cols // 2)
-    codes = torch.stack((packed & 0xF, packed >> 4), dim=-1).reshape(rows, cols)
-    out = (bases + codes.to(torch.int16)).reshape(-1)
-    words = exceptions.cpu().reshape(-1).view(torch.int32).to(torch.int64)
-    words &= 0xFFFFFFFF
+    packed = raw[:, 16:].reshape(rows, cols // 2)
+    codes = np.stack((packed & 0xF, packed >> 4), axis=-1).reshape(rows, cols)
+    out = (bases + codes).reshape(-1)
+    words = exceptions.cpu().reshape(-1).numpy()
     positions = words & 0xFFFFFF
-    if positions.numel() and int(positions.max()) >= rows * cols:
-        raise ValueError("CSF exception position out of range")
-    out[positions] = (words >> 24).to(torch.int16)
-    return out.to(torch.uint8).view(torch.float8_e4m3fn).reshape(rows, cols)
+    if positions.size and (
+        positions[-1] >= rows * cols or (positions[1:] <= positions[:-1]).any()
+    ):
+        raise ValueError("CSF exception positions must be increasing and in range")
+    out[positions] = words >> 24
+    return torch.from_numpy(out).view(torch.float8_e4m3fn).reshape(rows, cols)
 
 
 def decode_csf_scale_streams(
