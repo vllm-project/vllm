@@ -428,6 +428,19 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     assert snapshot.tolist() == [0, 0, 0, 0]
 
 
+def test_main_stream_is_read_at_step_time(monkeypatch):
+    """The output copy must order against the stream the step runs on, which
+    can differ from the stream that was current when the runner was built."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cuda", 0)
+    current = ["init_stream"]
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: current[0])
+
+    assert runner.main_stream == "init_stream"
+    current[0] = "engine_stream"
+    assert runner.main_stream == "engine_stream"
+
+
 @pytest.mark.parametrize(
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],

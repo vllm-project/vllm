@@ -16,7 +16,6 @@ hidden. Prefer utility functions defined elsewhere and call them from here,
 instead of embedding feature-specific logic directly.
 """
 
-import functools
 import gc
 import time
 from collections.abc import Iterable
@@ -598,9 +597,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
-    @functools.cached_property
+    @property
     def main_stream(self) -> torch.cuda.Stream:
-        # Cache the default CUDA stream to avoid lookup overhead.
+        # Not cached: the runner may be stepped on a stream other than the
+        # one that was current when it was built.
         return torch.cuda.current_stream(self.device)
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
