@@ -388,3 +388,15 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### Images through the Decisions endpoint
+
+`/v1/decisions` also accepts ordered user content containing `input_text` and
+`input_image` parts. Image URLs use the existing multimodal renderer, media
+restrictions and processor cache. Text-only models reject images. Context limits
+include expanded image tokens. Each question retains the input's media order.
+
+Ordered image inputs are interpreted by the selected read strategy. Generic
+next-token reads preserve interleaved text and images. Fixed image-prefix
+protocols (Liquid d1, joint-schema and D3 reads) accept images before text and
+reject interleaving with a request error instead of silently moving the images.
