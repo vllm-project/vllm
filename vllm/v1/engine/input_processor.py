@@ -370,6 +370,14 @@ class InputProcessor:
         else:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
+    def validate_resumable(self, resumable: bool) -> None:
+        if (
+            resumable
+            and self.speculative_config is not None
+            and self.speculative_config.use_remote_draft()
+        ):
+            raise VLLMValidationError("remote draft does not support input streaming")
+
     def process_inputs(
         self,
         request_id: str,
@@ -386,6 +394,7 @@ class InputProcessor:
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
+        self.validate_resumable(resumable)
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
