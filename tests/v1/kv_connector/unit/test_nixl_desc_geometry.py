@@ -576,10 +576,17 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
 
 
 def _make_mla_hybrid_worker(
-    local_block_size, kernel_block_size, num_logical_blocks, worker_cls=None
+    local_block_size,
+    kernel_block_size,
+    num_logical_blocks,
+    worker_cls=None,
+    kda_only_tensor=False,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout."""
+    layout.
+
+    ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
+    no other group uses, as when a model has more SSM than MLA layers."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -612,21 +619,26 @@ def _make_mla_hybrid_worker(
     # The three groups overlay each other, so layer i of every group aliases the same
     # region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
     layer_stride = num_logical_blocks * unified_page
+    num_tensors = 3 if kda_only_tensor else 2
+    layer_names = {
+        prefix: [f"{prefix}.{i}" for i in range(num_layers)]
+        for prefix, num_layers in (("mla", 2), ("kda_a", num_tensors), ("kda_b", 2))
+    }
     kv_cache_config = KVCacheConfig(
         num_blocks=num_logical_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=2 * layer_stride,
-                layers=[f"{prefix}.0", f"{prefix}.1"],
+                size=len(names) * layer_stride,
+                layers=names,
                 layer_stride=layer_stride,
                 block_stride=unified_page,
             )
-            for prefix in ("mla", "kda_a", "kda_b")
+            for names in layer_names.values()
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
-            KVCacheGroupSpec(["kda_a.0", "kda_a.1"], kda_spec),
-            KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
+            KVCacheGroupSpec(layer_names["mla"], mla_spec),
+            KVCacheGroupSpec(layer_names["kda_a"], kda_spec),
+            KVCacheGroupSpec(layer_names["kda_b"], kda_spec),
         ],
     )
 
@@ -672,18 +684,17 @@ def _make_mla_hybrid_worker(
             torch.zeros(
                 num_logical_blocks * ppl, unified_page // ppl, dtype=torch.uint8
             )
-            for _ in range(2)
+            for _ in range(num_tensors)
         ]
         # MLA caches are [B, 1, N, C] on device, tokens on dim 2.
         mla_views = [t.view(t.shape[0], 1, kernel_block_size, -1) for t in tensors]
         worker.register_kv_caches(
             {
-                "kda_a.0": tensors[0],
-                "mla.0": mla_views[0],
-                "kda_b.0": tensors[0],
-                "kda_a.1": tensors[1],
-                "mla.1": mla_views[1],
-                "kda_b.1": tensors[1],
+                name: (mla_views if prefix == "mla" else tensors)[
+                    int(name.rsplit(".", 1)[1])
+                ]
+                for prefix, names in layer_names.items()
+                for name in names
             }
         )
     # Keep tensors alive alongside the worker; flat views for byte checks.
@@ -691,6 +702,42 @@ def _make_mla_hybrid_worker(
     worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kda_only_tensor", [False, True])
+def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
+    """A KDA-only tensor is a region without MLA pages: MLA reads of it would
+    only re-read bytes aliased by other groups (e.g. GLM-5.3-Flash). Likewise a
+    KDA group skips SSM regions holding none of its layers."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=16,
+        kernel_block_size=16,
+        num_logical_blocks=4,
+        kda_only_tensor=kda_only_tensor,
+    )
+    num_regions = 3 if kda_only_tensor else 2
+    assert worker.num_regions == num_regions
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=([1], [2], [3]),
+        dst_num_blocks=4,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    # 4 blocks per region; each SSM layer has 3 conv + 1 temporal regions.
+    num_fa_descs = 4 * num_regions
+
+    def ssm_descs(block, num_layers):
+        return [num_fa_descs + 4 * r + block for r in range(4 * num_layers)]
+
+    assert desc_ids.tolist() == [
+        1,
+        5,
+        *ssm_descs(2, num_layers=num_regions),
+        *ssm_descs(3, num_layers=2),
+    ]
 
 
 @pytest.mark.cpu_test
@@ -1394,7 +1441,7 @@ def test_csa_linear_registration_discovers_shared_regions():
     assert worker._ple_group_index == 3
     assert worker._ple_region_index == 0
     assert worker._region_is_mla == [False, False, True, True]
-    assert worker._scratch_region_indices == [2, 3]
+    assert worker._group_region_indices[1] == [2, 3]
 
 
 @pytest.mark.cpu_test
@@ -1406,7 +1453,7 @@ def test_csa_linear_scratch_descs_follow_the_pages_they_overlay():
 
     # Same MLA regions as before, but the ring now lives in the non-MLA ones.
     assert worker._region_is_mla == [False, False, True, True]
-    assert worker._scratch_region_indices == [0, 1]
+    assert worker._group_region_indices[1] == [0, 1]
 
     desc_ids = worker._compute_desc_ids(
         block_ids=([1], [0], [1], [1]),
@@ -1657,7 +1704,7 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     worker = _make_ring_worker()
 
     assert worker._ple_group_index is None
-    assert worker._scratch_region_indices == [1]
+    assert worker._group_region_indices[1] == [1]
 
     desc_ids = worker._compute_desc_ids(
         block_ids=([1], [0]),
