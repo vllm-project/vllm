@@ -406,10 +406,10 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = false)]
     pub profile: bool,
 
-    /// Minimum server batch size (num_requests_running) before starting the
-    /// profiler. When set, profiling is deferred until the /metrics endpoint
-    /// reports at least this many running requests, then captures for
-    /// --profile-duration seconds. Requires --profile.
+    /// Minimum total running requests across engines reported by /metrics
+    /// before starting the profiler. When set, profiling is deferred until
+    /// this threshold is reached, then captures for --profile-duration seconds.
+    /// Requires --profile.
     #[arg(long)]
     pub profile_batch_threshold: Option<usize>,
 
