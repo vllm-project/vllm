@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
@@ -442,6 +443,13 @@ class MultiprocExecutor(Executor):
             "take_draft_token_ids",
             unique_reply_rank=self.output_rank,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        # Every rank drains; only the output rank, which the step path reads,
+        # replies.
+        return self.collective_rpc(
+            "take_lora_load_event", unique_reply_rank=self.output_rank
         )
 
     def collective_rpc(  # type: ignore[override]

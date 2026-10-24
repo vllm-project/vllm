@@ -34,6 +34,7 @@ from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
     MultiModalCacheMissError,
@@ -232,6 +233,9 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        # In-process frontend only; EngineCoreProc broadcasts instead.
+        self._pending_lora_load_event: LoRALoadEvent | None = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -649,6 +653,28 @@ class EngineCore:
         for eco in outputs.values():
             eco.weight_version = self._weight_version
 
+    def _publish_lora_load_event(self, event: LoRALoadEvent | None) -> None:
+        """Hold the event for the in-process frontend's next output. Snapshots
+        replace each other; their timings accumulate."""
+        if event is None:
+            return
+        if self._pending_lora_load_event is not None:
+            event.loads = self._pending_lora_load_event.loads + event.loads
+        self._pending_lora_load_event = event
+
+    def _flush_lora_load_event(self, outputs: dict[int, EngineCoreOutputs]) -> None:
+        if (event := self._pending_lora_load_event) is None:
+            return
+        self._pending_lora_load_event = None
+        if (eco := next(iter(outputs.values()), None)) is None:
+            outputs[0] = eco = EngineCoreOutputs()
+        eco.lora_load_event = event
+
+    def _fetch_lora_load_event(self) -> None:
+        """Pick up LoRA changes made by an RPC, without waiting for a step."""
+        if self.vllm_config.lora_config is not None:
+            self._publish_lora_load_event(self.model_executor.take_lora_load_event())
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
         Overridden by the DP engine core; never throttles otherwise."""
@@ -683,6 +709,7 @@ class EngineCore:
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
+        self._publish_lora_load_event(model_output.lora_load_event)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -785,6 +812,7 @@ class EngineCore:
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
+        self._publish_lora_load_event(model_output.lora_load_event)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1074,16 +1102,22 @@ class EngineCore:
         return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        added = self.model_executor.add_lora(lora_request)
+        self._fetch_lora_load_event()
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        removed = self.model_executor.remove_lora(lora_id)
+        self._fetch_lora_load_event()
+        return removed
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        pinned = self.model_executor.pin_lora(lora_id)
+        self._fetch_lora_load_event()
+        return pinned
 
     def save_sharded_state(
         self,
@@ -1102,7 +1136,9 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        self._fetch_lora_load_event()
+        return result
 
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version
@@ -1854,6 +1890,16 @@ class EngineCoreProc(EngineCore):
             else v
             for v, p in zip(args, arg_types)
         )
+
+    def _publish_lora_load_event(self, event: LoRALoadEvent | None) -> None:
+        """Broadcast to every frontend so their metrics agree; a step's
+        outputs only reach the clients with requests in it."""
+        if event is None:
+            return
+        for client_index in range(len(self.addresses.outputs)):
+            self.output_queue.put_nowait(
+                (client_index, EngineCoreOutputs(lora_load_event=event))
+            )
 
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
