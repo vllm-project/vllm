@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import sys
 from typing import Literal
 from unittest import mock
 
@@ -350,6 +352,201 @@ def test_prepare_inputs_padded():
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
+
+
+def test_prepare_inputs_padded_index_stays_within_request_rows(tmp_path, monkeypatch):
+    """token_indices_to_sample must stay within each request's own query rows.
+
+    Regression: when a request's query carries no bonus-token row (observed
+    with PP > 1, where the scheduler can schedule only the draft tokens),
+    q_last_tok_idx - num_rejected_tokens underflows past the start of the
+    request. For the first request this yields -1 (out-of-bounds gather);
+    for later requests it yields an index inside the previous request's
+    rows, silently cross-wiring their sampled tokens.
+    """
+    device = torch.device(DEVICE_TYPE)
+
+    # Hermetic configs: prepare_inputs_padded is pure metadata math and
+    # never loads weights, so minimal local configs avoid network and
+    # gated-repo dependencies.
+    config = {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_hidden_layers": 1,
+        "vocab_size": 128,
+        "max_position_embeddings": 512,
+    }
+    for name in ("target", "draft"):
+        model_path = tmp_path / name
+        model_path.mkdir()
+        (model_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(sys.modules[__name__], "model_dir", str(tmp_path / "target"))
+    monkeypatch.setattr(sys.modules[__name__], "eagle_dir", str(tmp_path / "draft"))
+
+    # Two requests, 2 draft tokens each, query contains ONLY the draft
+    # tokens (no bonus row): query_start_loc = [0, 2, 4].
+    batch_spec = BatchSpec(
+        seq_lens=[8, 8],
+        query_lens=[2, 2],
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids=[[0, 0], [0, 0]],
+        device=device,
+    )
+    # Entire draft rejected: valid_count = 0 accepted + 1 bonus.
+    valid_sampled_tokens_count = torch.tensor([1, 1], dtype=torch.int32, device=device)
+
+    proposer = _create_proposer("eagle", 2)
+
+    _, token_indices_to_sample, num_rejected_tokens_gpu = (
+        proposer.prepare_inputs_padded(
+            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+        )
+    )
+
+    expected_num_rejected = torch.tensor([2, 2], dtype=torch.int32, device=device)
+    assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
+
+    # Before the fix this was [-1, 1]: request 1 underflows to -1 and
+    # request 2 lands inside request 1's rows. Both must clamp to their
+    # own first query row.
+    expected_indices = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    assert torch.equal(token_indices_to_sample, expected_indices)
+
+
+def test_prepare_inputs_padded_discarded_request_zero_valid_count(
+    tmp_path, monkeypatch
+):
+    """A discarded request (valid_count == 0) underflows by two rows.
+
+    eagle_prepare_next_token_padded_kernel stores valid_count = 0 for
+    requests the drafter discarded (over capacity). num_rejected then
+    evaluates to num_draft + 1 while the query still carries the bonus
+    row, so index_to_sample = query_start_loc[req] - 2 before the fix —
+    with the scheduler's own sanity assert
+    (num_scheduled >= num_draft + num_bonus) still satisfied. Reachable
+    on current main without pipeline parallelism.
+    """
+    device = torch.device(DEVICE_TYPE)
+
+    config = {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_hidden_layers": 1,
+        "vocab_size": 128,
+        "max_position_embeddings": 512,
+    }
+    for name in ("target", "draft"):
+        model_path = tmp_path / name
+        model_path.mkdir()
+        (model_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(sys.modules[__name__], "model_dir", str(tmp_path / "target"))
+    monkeypatch.setattr(sys.modules[__name__], "eagle_dir", str(tmp_path / "draft"))
+
+    # Standard layout (bonus row present): query = 2 drafts + 1 bonus row.
+    batch_spec = BatchSpec(
+        seq_lens=[8, 8],
+        query_lens=[3, 3],
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids=[[0, 0], [0, 0]],
+        device=device,
+    )
+    # Both requests discarded by the drafter: valid_count = 0.
+    valid_sampled_tokens_count = torch.tensor(
+        [0, 0], dtype=torch.int32, device=device
+    )
+
+    proposer = _create_proposer("eagle", 2)
+
+    _, token_indices_to_sample, num_rejected_tokens_gpu = (
+        proposer.prepare_inputs_padded(
+            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+        )
+    )
+
+    # num_rejected = 2 + 1 - 0 = 3 for both requests.
+    expected_num_rejected = torch.tensor([3, 3], dtype=torch.int32, device=device)
+    assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
+
+    # Before the fix: [-1, 2] — request 1 gathers out of bounds, request 2
+    # lands on request 1's last row. Both must clamp to their own first row.
+    expected_indices = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    assert torch.equal(token_indices_to_sample, expected_indices)
+
+
+def test_prepare_inputs_padded_unaffected_when_bonus_row_present(tmp_path, monkeypatch):
+    """The clamp is a no-op on the standard path (bonus token in query)."""
+    device = torch.device(DEVICE_TYPE)
+
+    config = {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_hidden_layers": 1,
+        "vocab_size": 128,
+        "max_position_embeddings": 512,
+    }
+    for name in ("target", "draft"):
+        model_path = tmp_path / name
+        model_path.mkdir()
+        (model_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(sys.modules[__name__], "model_dir", str(tmp_path / "target"))
+    monkeypatch.setattr(sys.modules[__name__], "eagle_dir", str(tmp_path / "draft"))
+
+    # Standard layout: query = 2 draft tokens + 1 bonus row per request.
+    # Rejections [1, 0, 2] put request 3 exactly at its first row (index 6
+    # == query_start_loc[2]), exercising the clamp boundary from above.
+    batch_spec = BatchSpec(
+        seq_lens=[3, 3, 3],
+        query_lens=[3, 3, 3],
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids=[[0, 0]] * 3,
+        device=device,
+    )
+    valid_sampled_tokens_count = torch.tensor(
+        [2, 3, 1], dtype=torch.int32, device=device
+    )
+
+    proposer = _create_proposer("eagle", 2)
+
+    _, token_indices_to_sample, num_rejected_tokens_gpu = (
+        proposer.prepare_inputs_padded(
+            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+        )
+    )
+
+    expected_num_rejected = torch.tensor([1, 0, 2], dtype=torch.int32, device=device)
+    assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
+    expected_indices = torch.tensor([1, 5, 6], dtype=torch.int32, device=device)
+    assert torch.equal(token_indices_to_sample, expected_indices)
 
 
 def test_set_inputs_first_pass_default_eagle():
