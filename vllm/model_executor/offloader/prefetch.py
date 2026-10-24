@@ -344,7 +344,7 @@ class PrefetchOffloader(BaseOffloader):
         # This is needed because process_weights_after_loading may have:
         # 1. Transformed weights (quantization, transpose, etc.)
         # 2. Created new CPU tensors via device_loading_context
-        # Our _cpu_storage would be stale otherwise.
+        # _cpu_storage is only set here, from the final param.data.
         for offloader in self.module_offloaders:
             offloader.sync_cpu_storage()
 
@@ -675,6 +675,9 @@ class _CpuParamOffloader(_BaseParamOffloader):
         # Point param.data to CPU storage - this allows weight loading to work
         # and frees GPU memory when the original GPU tensor is garbage collected
         param.data = self._cpu_storage
+        # No second reference until sync_cpu_storage(), so the copy that
+        # device_loading_context replaces is freed right away.
+        self._cpu_storage = None
 
     def _update_cpu_storage_from_param(self) -> None:
         """Update _cpu_storage from current param.data, ensuring pinned memory.
@@ -706,8 +709,16 @@ class _CpuParamOffloader(_BaseParamOffloader):
             else:
                 self._cpu_storage = param.data
         else:
-            # param.data is on GPU - copy to existing CPU storage
-            assert self._cpu_storage is not None
+            # param.data is on GPU - copy to CPU storage
+            if self._cpu_storage is None:
+                self._cpu_storage = torch.empty_strided(
+                    size=param.data.size(),
+                    stride=param.data.stride(),
+                    dtype=param.data.dtype,
+                    layout=param.data.layout,
+                    device="cpu",
+                    pin_memory=should_pin_memory(),
+                )
             self._cpu_storage.copy_(param.data)
 
     def assign_static_buffer(self, gpu_buffer: torch.Tensor) -> None:
@@ -722,7 +733,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         - Then point param.data to the GPU buffer for torch.compile
         """
         assert self._cpu_storage is not None, (
-            "_offload_to_cpu_internal() must be called before assign_static_buffer()"
+            "sync_cpu_storage() must be called before assign_static_buffer()"
         )
 
         # Get current parameter (may have been replaced by
@@ -732,7 +743,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         # Update _cpu_storage to current param.data. This is critical because:
         # 1. process_weights_after_loading may transform weights (quantization)
         # 2. device_loading_context creates NEW CPU tensors when moving back
-        # 3. Our old _cpu_storage would have pre-processed or stale data
+        # 3. _cpu_storage is set by sync_cpu_storage() from the final param.data
         self._update_cpu_storage_from_param()
 
         # Store reference to GPU buffer for use in start_onload
@@ -748,7 +759,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         with the final processed weights. This is critical because:
         1. process_weights_after_loading may transform weights (quantization)
         2. device_loading_context creates NEW CPU tensors when moving back
-        3. Our old _cpu_storage would have pre-processed or stale data
+        3. _cpu_storage is unset until then, so param.data holds the only copy
 
         If the parameter no longer exists on the module (e.g. transient
         KV-cache scale parameters such as k_scale/v_scale that are created
