@@ -19,6 +19,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+from vllm.utils.platform_utils import cuda_get_device_properties
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +126,12 @@ def get_available_device() -> str:
         return "cpu"
 
 
+# The platform checks below run at import time, which also happens in vLLM's
+# frontend process; they must not initialize CUDA there (see check_shared_mem).
 @functools.cache
 def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
+    if current_platform.is_cuda():
+        return "nvidia"
     device = get_available_device()
     mapping = {
         "cuda": "nvidia",
@@ -149,8 +154,8 @@ is_intel = device_platform == "intel"
 is_nvidia = device_platform == "nvidia"
 is_intel_alchemist = is_intel and "Intel(R) Arc(TM) A" in torch.xpu.get_device_name(0)
 is_nvidia_hopper = is_nvidia and (
-    "NVIDIA H" in torch.cuda.get_device_name(0)
-    or torch.cuda.get_device_capability()[0] >= 9
+    "NVIDIA H" in current_platform.get_device_name()
+    or current_platform.has_device_capability(90)
 )
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
@@ -193,8 +198,14 @@ class Backend(Enum):
 @functools.cache
 def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
     try:
-        device_shared_mem_list = get_all_max_shared_mem()
-        max_shared_memory = device_shared_mem_list[tensor_idx]
+        if is_nvidia:
+            # Queried in a subprocess while CUDA is uninitialized here; a
+            # forked engine inherits the autotune configs derived from it.
+            (max_shared_memory,) = cuda_get_device_properties(
+                tensor_idx, ("shared_memory_per_block_optin",)
+            )
+        else:
+            max_shared_memory = get_all_max_shared_mem()[tensor_idx]
         return max_shared_memory >= Backend.get_shared_memory(arch)
     except Exception:
         return False

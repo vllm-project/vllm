@@ -12,6 +12,7 @@ steps:
   - vllm/platforms/
   - vllm/plugins/
   - vllm/utils/
+  - vllm/third_party/flash_linear_attention/
   - tests/cuda
   commands:
     - pytest -v -s cuda/test_cuda_context.py
