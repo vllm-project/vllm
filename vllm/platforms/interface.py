@@ -720,6 +720,23 @@ class Platform:
         with set_current_vllm_config(vllm_config):
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
+
+            # Some backends accept the generic default but still prefer a larger
+            # block for their kernel geometry. In a mixed-backend model, honor
+            # such a preference whenever every backend can use it. Prefer the
+            # smallest common non-default preference to preserve this helper's
+            # "smallest common block size" contract.
+            preferred_candidates = sorted(
+                {
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                }
+                - {default_block_size}
+            )
+            for preferred in preferred_candidates:
+                if all(b.supports_block_size(preferred) for b in backend_classes):
+                    return preferred
+
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
