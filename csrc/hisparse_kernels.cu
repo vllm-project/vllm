@@ -185,8 +185,8 @@ constexpr int32_t kEntryMiss = 1 << 29;
 constexpr int32_t kEntryInvalid = 1 << 28;
 constexpr int32_t kEntrySlotMask = 0xFFFF;
 constexpr int kResidencyCounters = 5;
-// Per-request table entries per referenced top-k position (load <= 1/4
-// until the hash_size cap).
+// Per-request table entries per referenced top-k position, within the
+// device's shared-memory budget.
 constexpr int kHashLoadInverse = 4;
 
 // Translate a request-relative top-k position to its resident GPU row (-1 when
@@ -312,13 +312,14 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int32_t request_state_count, const int64_t host_rows,
     const int64_t hot_table_stride, const int32_t hot_block_size,
     const int32_t top_k, const int32_t hot_size, const int32_t hash_size,
-    const int64_t region_stride, const int64_t attention_block_stride,
-    const int64_t source_bt_stride, const int32_t source_num_reqs,
-    const int32_t source_num_blocks, const int32_t source_block_size,
-    const int64_t resident_bt_stride, const int32_t resident_num_reqs,
-    const int32_t resident_num_blocks, const int32_t resident_block_size,
-    const int32_t resident_null_block, const int64_t input_row_stride,
-    const int64_t attention_row_stride, const int64_t valid_count_stride) {
+    const int32_t max_union_rows, const int64_t region_stride,
+    const int64_t attention_block_stride, const int64_t source_bt_stride,
+    const int32_t source_num_reqs, const int32_t source_num_blocks,
+    const int32_t source_block_size, const int64_t resident_bt_stride,
+    const int32_t resident_num_reqs, const int32_t resident_num_blocks,
+    const int32_t resident_block_size, const int32_t resident_null_block,
+    const int64_t input_row_stride, const int64_t attention_row_stride,
+    const int64_t valid_count_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
 
@@ -377,9 +378,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
-  // A union within max_union_rows (hash_size - 1) and within the rows' top-k
-  // leaves an empty slot, so every probe sequence ends. Use a slice sized to
-  // this request's rows so single-row requests initialize a small table.
+  // Use a slice sized to this request's rows so single-row requests
+  // initialize a small table. Legal unions always leave an empty slot.
   const int table_size =
       min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
 
@@ -460,7 +460,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         } else {
           // A full table: push the union count past the cap so the check
           // below traps.
-          atomicAdd(&s_counters[1], hash_size);
+          atomicAdd(&s_counters[1], max_union_rows + 1);
         }
       }
     }
@@ -474,14 +474,13 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     }
     __syncthreads();
   }
-  // The table and eviction slots are sized for max_union_rows (hash_size - 1);
-  // a larger union would never reach an empty probe slot or run past s_lru_out.
-  if (s_counters[1] >= hash_size) {
+  // Hash capacity can exceed the union bound; eviction slots cannot.
+  if (s_counters[1] > max_union_rows) {
     if (tid == 0) {
       printf(
           "HiSparse residency: request %d resolves %d host rows, above the "
           "configured bound of %d\n",
-          request_row, s_counters[1], hash_size - 1);
+          request_row, s_counters[1], max_union_rows);
     }
     __trap();
   }
@@ -1213,13 +1212,12 @@ void hisparse_resolve_residency(
   STD_TORCH_CHECK(max_union_rows > 0 && max_union_rows <= hot_size,
                   "max_union_rows must be in [1, hot_size], got ",
                   max_union_rows);
-  // One spare entry above the union bound keeps every probe sequence finite.
-  const int hash_size = static_cast<int>(max_union_rows) + 1;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
-  const size_t smem_bytes =
-      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
-                         kResidencyCounters + num_buffer_chunks) +
+  const size_t fixed_smem_bytes =
+      sizeof(int32_t) * (3 * num_buffer_chunks + 2 + kResidencyCounters) +
       sizeof(int16_t) * hot_size;
+  const size_t min_smem_bytes =
+      fixed_smem_bytes + 2 * sizeof(int32_t) * (max_union_rows + 1);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
@@ -1228,14 +1226,21 @@ void hisparse_resolve_residency(
                       &max_smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
                       hot_cache.get_device_index()) == cudaSuccess,
                   "failed to query shared memory per block");
-  STD_TORCH_CHECK(smem_bytes <= static_cast<size_t>(max_smem_bytes),
+  STD_TORCH_CHECK(min_smem_bytes <= static_cast<size_t>(max_smem_bytes),
                   "HiSparse device_buffer_size=", hot_size, " needs ",
-                  smem_bytes,
+                  min_smem_bytes,
                   " bytes of shared memory to resolve residency, "
                   "but the device allows ",
                   max_smem_bytes,
                   "; lower device_buffer_size or the number of speculative "
                   "tokens.");
+  // Keep the table sparse when possible without rejecting configurations
+  // that fit the minimum table with one spare entry above the union bound.
+  const int hash_size =
+      std::min(kHashLoadInverse * static_cast<int>(max_union_rows) + 1,
+               static_cast<int>((max_smem_bytes - fixed_smem_bytes) /
+                                (2 * sizeof(int32_t))));
+  const size_t smem_bytes = fixed_smem_bytes + 2 * sizeof(int32_t) * hash_size;
   const cudaStream_t stream = get_current_cuda_stream();
   const int64_t attention_row_stride =
       attention_indices.has_value() ? attention_indices.value().stride(0) : 0;
@@ -1260,10 +1265,10 @@ void hisparse_resolve_residency(
       device_global_indices.mutable_data_ptr<int32_t>(),
       lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
       request_state_count, host_rows, hot_block_table.stride(0), hot_block_size,
-      top_k, hot_size, hash_size, region_stride, attention_block_stride,
-      source_bt_stride, source_num_reqs, source_num_blocks,
-      static_cast<int32_t>(source_block_size), resident_bt_stride,
-      resident_num_reqs, resident_num_blocks,
+      top_k, hot_size, hash_size, static_cast<int32_t>(max_union_rows),
+      region_stride, attention_block_stride, source_bt_stride, source_num_reqs,
+      source_num_blocks, static_cast<int32_t>(source_block_size),
+      resident_bt_stride, resident_num_reqs, resident_num_blocks,
       static_cast<int32_t>(resident_block_size),
       static_cast<int32_t>(resident_null_block), global_indices.stride(0),
       attention_row_stride, valid_count_stride);

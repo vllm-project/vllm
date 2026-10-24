@@ -3,6 +3,8 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
+import subprocess
+import sys
 from collections import deque
 from types import MethodType, SimpleNamespace
 from typing import Any
@@ -2488,13 +2490,14 @@ def test_hisparse_resolver_reads_current_request_ids():
 
 
 @requires_hisparse_ops
-def test_hisparse_union_table_scales_with_union_bound():
+@pytest.mark.parametrize("top_k", [128, 8192])
+def test_hisparse_union_table_scales_with_union_bound(top_k):
     """Shared memory follows the per-request union bound, not the hot buffer.
 
     Sizing the table from device_buffer_size needs ~340 KB here and fails.
     """
     device = torch.device(DEVICE_TYPE)
-    block_size, row_width, top_k = 64, 64, 128
+    block_size, row_width = 64, 64
     num_blocks = top_k // block_size
     kv_pool = torch.randn(
         (num_blocks + 1, block_size, row_width), dtype=torch.float32
@@ -2537,6 +2540,33 @@ def test_hisparse_union_table_scales_with_union_bound():
     torch.testing.assert_close(
         gathered, kv_pool.reshape(-1, row_width)[global_ref.cpu().to(torch.long)]
     )
+
+
+@requires_hisparse_ops
+def test_hisparse_expanded_hash_keeps_union_bound():
+    """Extra hash capacity must not admit more rows than the declared union."""
+    script = """
+import torch
+from vllm import _custom_ops
+host = torch.zeros((64, 16), dtype=torch.uint8).pin_memory()
+hot = torch.zeros((1, 64, 16), dtype=torch.uint8, device="cuda")
+table = torch.zeros((1, 1), dtype=torch.int32, device="cuda")
+indices = torch.arange(4, dtype=torch.int32, device="cuda").view(1, 4)
+output = torch.empty_like(indices)
+ownership = torch.full((1, 4), -1, dtype=torch.int32, device="cuda")
+lru = torch.arange(4, dtype=torch.int16, device="cuda").view(1, 4)
+torch.ops._C_cache_ops.hisparse_resolve_residency(
+    host, hot, table, indices, output, ownership, lru, None, 4, 3)
+torch.accelerator.synchronize()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0
+    assert "CUDA error" in result.stderr
 
 
 @requires_hisparse_ops
