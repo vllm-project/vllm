@@ -256,3 +256,4 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /.git_archival.txt
 /.rocm-version/
 /.rocm-wheel/
+/.rocm-kernel-map/

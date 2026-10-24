@@ -226,10 +226,20 @@ case $MODE in
     export TAG=$REPO:build-$BUILDKITE_BUILD_ID
     # AITER nightly (AITER_NIGHTLY=1 from the schedule): the test stage installs the newest
     # AITER nightly that fits the image; an AITER_SPEC in the environment pins one instead.
-    rm -rf .rocm-wheel
+    rm -rf .rocm-wheel .rocm-kernel-map
     bake ci
     # For the python-only install test (run-amd-test.sh downloads it); not in the image.
     buildkite-agent artifact upload ".rocm-wheel/vllm-*.whl"
+    # CI test selection (VLLM_KERNEL_SYMBOL_MAP=1, set by ci-infra): the kernel symbol map of this
+    # build's csrc, from the build cache. Optional: a missing map never fails the image build.
+    if [[ ${VLLM_KERNEL_SYMBOL_MAP:-0} == 1 ]]; then
+      if bake kernel-symbol-map && [[ -s .rocm-kernel-map/kernel_symbol_map.rocm.json.gz ]] \
+          && (cd .rocm-kernel-map && buildkite-agent artifact upload kernel_symbol_map.rocm.json.gz); then
+        :
+      else
+        echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
+      fi
+    fi
     ;;
 
   release)

@@ -32,7 +32,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 ENV CCACHE_COMPILERCHECK=content
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -c /etc/rocm-constraints.txt cmake ninja "setuptools<80" setuptools-scm \
-        setuptools-rust wheel jinja2 packaging
+        setuptools-rust wheel jinja2 packaging regex
 
 # NIXL/UCX build stages
 FROM dev AS build_nixl
@@ -420,7 +420,7 @@ RUN CARGO_BUILD_JOBS="$(nproc)" SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-
     bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
-# Native extensions only: copies just the files that affect the HIP/C++ build.
+# Native extensions only: copies just the files that affect the HIP/C++ build (and the map tool).
 FROM dev AS csrc
 ARG ROCM_TRITON_KERNELS_COMMIT
 COPY --from=triton-kernels /opt/rocm-triton-kernels /opt/rocm-triton-kernels
@@ -436,7 +436,11 @@ ARG ARCH
 # setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files
 # the wheel stage repackages with the real requirements, so empty files keep a requirements bump
 # from recompiling HIP.
+# CI builds (ARCH set) also write the kernel symbol map (CI test selection: which source file each
+# GPU kernel came from). It reads the build tree, so it runs here, before the tree is removed, and
+# an edit to its tool rebuilds this stage. It never fails the build.
 RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
+    --mount=type=bind,source=tools/ci/rocm_kernel_symbol_map.py,target=/tmp/rocm_kernel_symbol_map.py \
     mkdir -p requirements && : > requirements/rocm.txt \
     && { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         cmake/external_projects/triton_kernels.cmake \
@@ -444,7 +448,29 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     && CCACHE_BASEDIR="$PWD" PYTORCH_ROCM_ARCH="${ARCH:-$PYTORCH_ROCM_ARCH}" \
        SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+rocm.csrc.build PYTHONDONTWRITEBYTECODE=1 \
        LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py bdist_wheel --dist-dir=/dist \
+    && mkdir /kernel-map \
+    && { [ -z "${ARCH}" ] \
+         || timeout 30m python3 /tmp/rocm_kernel_symbol_map.py --build-root build --source-root . \
+              --out /kernel-map/kernel_symbol_map.rocm.json.gz \
+         || echo "WARNING: no kernel symbol map; CI test selection falls back to its static rule"; } \
     && rm -rf build
+
+# The map, stamped with this build's commit (CI selection only uses a map of the commit it ran). A
+# csrc layer reused from another commit was built from the same sources, so its map holds here.
+FROM dev AS kernel-symbol-map-stamp
+ARG BUILDKITE_COMMIT
+RUN --mount=type=bind,from=csrc,src=/kernel-map,target=/in python3 - "${BUILDKITE_COMMIT}" <<'EOF'
+import gzip, json, os, sys
+os.makedirs("/out")
+if os.path.exists(src := "/in/kernel_symbol_map.rocm.json.gz"):
+    with gzip.open(src, "rt") as f:
+        m = json.load(f)
+    m["commit"] = sys.argv[1]
+    with gzip.open("/out/kernel_symbol_map.rocm.json.gz", "wt") as f:
+        json.dump(m, f, separators=(",", ":"))
+EOF
+FROM scratch AS kernel-symbol-map
+COPY --from=kernel-symbol-map-stamp /out/ /
 
 # The full vLLM wheel, repackaged around the csrc extensions and the rust artifacts.
 FROM dev AS wheel

@@ -16,6 +16,7 @@ variable "AITER_SPEC"   { default = "" }       # pins the AITER nightly wheel (p
 variable "AITER_NIGHTLY" { default = "" }      # "1": test the newest AITER nightly wheel
 variable "VLLM_VERSION" { default = "" }       # release: image version label (build.sh reuse check)
 variable "CACHE_CI"     { default = true }     # false (PR builds): skip the full ci cache; compile-cache still exports
+variable "BUILDKITE_COMMIT" { default = "" }   # the commit the kernel symbol map is stamped with
 
 function "cfrom" {   # trusted cache, plus this PR's own cache when CACHE_TO points elsewhere
   params = [names]
@@ -119,6 +120,14 @@ target "vllm-wheel" {      # the python-only install test's wheel, uploaded as a
   inherits = ["test"]
   target   = "vllm-wheel"
   output   = ["type=local,dest=.rocm-wheel"]
+  cache-to = []
+}
+target "kernel-symbol-map" {   # CI test selection (build.sh ci, VLLM_KERNEL_SYMBOL_MAP=1): from test's csrc
+  inherits = ["test"]
+  target   = "kernel-symbol-map"
+  args     = { BUILDKITE_COMMIT = BUILDKITE_COMMIT }
+  tags     = []
+  output   = ["type=local,dest=.rocm-kernel-map"]
   cache-to = []
 }
 target "vllm-openai" {
