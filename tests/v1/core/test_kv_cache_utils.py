@@ -794,6 +794,54 @@ def test_generate_block_hash_extra_keys():
     assert next_mm_idx == 2
 
 
+def test_generate_block_hash_extra_keys_overlapping_mm_inputs():
+    # Qwen-Omni with use_audio_in_video places the audio and the video item
+    # on the same placeholder range; every block must key on both of them.
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(20)],
+        mm_positions=[
+            PlaceholderRange(offset=2, length=12),
+            PlaceholderRange(offset=2, length=12),
+            PlaceholderRange(offset=16, length=2),
+        ],
+        mm_hashes=["video", "audio", "image"],
+    )
+
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert extra_keys == (("mm", "video", 2), ("mm", "audio", 2))
+    assert next_mm_idx == 0
+
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 5, 10, 0)
+    assert extra_keys == (("mm", "video", -3), ("mm", "audio", -3))
+    assert next_mm_idx == 0
+
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 10, 15, 0)
+    assert extra_keys == (("mm", "video", -8), ("mm", "audio", -8))
+    assert next_mm_idx == 2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_hash_overlapping_mm_inputs_differ(hash_fn):
+    def make(audio_hash: str):
+        return make_request(
+            request_id=audio_hash,
+            prompt_token_ids=[_ for _ in range(9)],
+            block_size=3,
+            hash_fn=hash_fn,
+            mm_positions=[
+                PlaceholderRange(offset=0, length=9),
+                PlaceholderRange(offset=0, length=9),
+            ],
+            mm_hashes=["video", audio_hash],
+        )
+
+    block_hashes1 = make("audio1").block_hashes
+    block_hashes2 = make("audio2").block_hashes
+    assert len(block_hashes1) == 3
+    assert all(h1 != h2 for h1, h2 in zip(block_hashes1, block_hashes2))
+
+
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
         request_id="0",
