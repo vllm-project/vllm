@@ -1,30 +1,52 @@
 version: 2
 updates:
-  # Maintain dependencies for GitHub Actions
+  # One weekly PR for every GitHub Actions bump.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # One weekly PR for crates.io updates in the rust/ workspace.
+  # llm-multimodal is pinned to a git rev. openai-harmony is the manifest
+  # name of oss-harmony, pinned to tag v0.0.11 so it stays aligned with
+  # requirements/common.txt.
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "llm-multimodal"
+      - dependency-name: "openai-harmony"
+      - dependency-name: "oss-harmony"
+    groups:
+      rust:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Security fixes for source requirements, including optional connectors.
+  # Routine compiled-lock updates use the platform-aware refresh workflow.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
     labels: ["dependencies"]
-    open-pull-requests-limit: 5
-    reviewers: ["khluu", "simon-mo"]
+    open-pull-requests-limit: 0
     allow:
       - dependency-type: "all"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
-      - dependency-name: "torch"
-      - dependency-name: "torchvision"
-      - dependency-name: "xformers"
-      - dependency-name: "lm-format-enforcer"
-      - dependency-name: "compressed-tensors"
-      - dependency-name: "ray[cgraph]" # Ray Compiled Graph
-      - dependency-name: "lm-eval"
+    exclude-paths:
+      - "requirements/docs.txt"
+      - "requirements/test/cpu.txt"
+      - "requirements/test/cuda.txt"
+      - "requirements/test/rocm.txt"
+      - "requirements/test/xpu.txt"
     groups:
-      minor-update:
-        applies-to: version-updates
-        update-types: ["minor"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
