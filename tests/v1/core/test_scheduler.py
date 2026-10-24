@@ -2605,6 +2605,79 @@ def test_per_request_spec_decode_subtracts_invalid_drafts():
     assert payload["acceptance_histogram"] == [0, 0, 1, 0]
 
 
+DYNAMIC_SD_SCHEDULE = [(1, 1, 0), (2, 4, 2), (5, 64, 3)]
+
+
+def _scheduled_k(scheduler) -> int | None:
+    """Run one step and return the scheduled K the step reported."""
+    output = scheduler.schedule()
+    req_ids = list(output.num_scheduled_tokens)
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[0]] * len(req_ids),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+    stats = engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
+    assert stats is not None
+    return stats.spec_decode_scheduled_k
+
+
+@pytest.mark.parametrize("num_requests,expected_k", [(1, 0), (2, 2)])
+def test_scheduled_k_recorded_for_steps_that_scheduled_work(num_requests, expected_k):
+    """A step that scheduled request work reports the K the schedule selected.
+
+    The schedule sends batch size 1 to K=0, so the K=0 case is a step that did
+    real work and chose not to draft - not an absence of work.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=DYNAMIC_SD_SCHEDULE,
+    )
+    for request in create_requests(num_requests=num_requests, num_tokens=8):
+        scheduler.add_request(request)
+
+    assert _scheduled_k(scheduler) == expected_k
+
+
+def test_scheduled_k_absent_when_step_scheduled_no_work():
+    """A step that scheduled nothing is not an observation of a selected K.
+
+    The schedule is consulted per scheduled batch, so such a step still carries
+    the default K. Reporting it would count a K the schedule never selected.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=DYNAMIC_SD_SCHEDULE,
+    )
+
+    assert not scheduler.requests
+    assert _scheduled_k(scheduler) is None
+
+
+def test_scheduled_k_absent_when_requests_are_held_but_not_scheduled():
+    """Holding requests is not the same as scheduling them.
+
+    With too few KV blocks to admit the prompt, the request stays queued and the
+    step schedules nothing, so no K is reported even though the queue is not
+    empty.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=DYNAMIC_SD_SCHEDULE,
+        num_blocks=2,
+        block_size=16,
+    )
+    for request in create_requests(num_requests=1, num_tokens=4000, block_size=16):
+        scheduler.add_request(request)
+
+    assert scheduler.requests
+    assert _scheduled_k(scheduler) is None
+
+
 def test_per_request_spec_decode_acceptance_disabled_by_default():
     scheduler = create_scheduler(num_speculative_tokens=3)
     assert scheduler.spec_decode_metrics_level == "none"
