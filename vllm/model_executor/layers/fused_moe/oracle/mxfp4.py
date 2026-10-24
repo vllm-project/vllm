@@ -443,6 +443,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     if current_platform.is_rocm():
         return [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+            Mxfp4MoeBackend.B12X_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
     if current_platform.is_xpu():
@@ -888,7 +890,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_alignment = (
             128
-            if aiter_w4a4 or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
+            if is_situ_or_silu and (aiter_uses_128 or triton_uses_128 or aiter_w4a4)
             else 256
         )
         # W4A4 stage 1 still requires a 256-aligned hidden dimension.
