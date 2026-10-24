@@ -357,7 +357,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
         tools=_WEATHER_TOOLS,
     )
 
-    choices = derenderer._derender_chat(response, request)
+    choices, _ = derenderer._derender_chat(response, request)
 
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
@@ -421,7 +421,7 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
             response = GenerateTokensResponse(
                 request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
-            return derenderer._derender_chat(response, request)[0].message.content
+            return derenderer._derender_chat(response, request)[0][0].message.content
 
         # Same decode window and seeding; "length" never drops a token.
         expected = batch_content(
@@ -755,7 +755,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -773,7 +773,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -792,7 +792,7 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -811,7 +811,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         _, output_ids, _ = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -1902,7 +1902,7 @@ class TestDerenderChatStreamHarmony:
         reasoning = "".join(d.reasoning or "" for d in deltas)
         content = "".join(d.content or "" for d in deltas)
 
-        batch_choices = await harmony_derenderer.derender_chat(
+        batch_choices, _ = await harmony_derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[

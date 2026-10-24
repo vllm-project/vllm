@@ -47,6 +47,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
@@ -147,7 +148,7 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
         )
@@ -258,7 +259,7 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
 
@@ -353,7 +354,10 @@ class OnlineDerenderer:
                 )
             )
 
-        return choices
+        prompt_logprobs = _resolve_prompt_logprobs(
+            generate_response.prompt_logprobs, tokenizer
+        )
+        return choices, prompt_logprobs
 
     async def derender_text_choices(
         self,
@@ -953,6 +957,7 @@ class OnlineDerenderer:
             seed_state = _seed_stream_state(
                 tokenizer, seed_ids, skip_special_tokens=skip_special
             )
+            prompt_logprobs = _resolve_prompt_logprobs(gen.prompt_logprobs, tokenizer)
             for choice in gen.choices:
                 if not choice.token_ids:
                     raise ValueError(
@@ -991,6 +996,7 @@ class OnlineDerenderer:
                             gen.prompt_token_ids if return_token_ids else None
                         ),
                         token_ids=choice.token_ids if return_token_ids else None,
+                        prompt_logprobs=prompt_logprobs,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
@@ -1279,6 +1285,56 @@ def _completion_top_logprobs_limit(
     return completion_top_logprobs_limit(
         completion_request.logprobs, bool(completion_request.logprob_token_ids)
     )
+
+
+def _resolve_prompt_logprobs(
+    prompt_logprobs: PromptLogprobs | None, tokenizer: TokenizerLike
+) -> PromptLogprobs | None:
+    """Fill missing ``decoded_token`` values in prompt logprobs.
+
+    A ``--tokens-only`` generate server has no tokenizer, so it returns
+    ``decoded_token=None``. Mirrors LogprobsProcessor._update_prompt_logprobs
+    in v1/engine/logprobs.py: decode each token id, then fix U+FFFD using the
+    preceding prompt tokens (the first entry of each earlier position).
+    """
+    if prompt_logprobs is None:
+        return None
+
+    missing = list(
+        dict.fromkeys(
+            tid
+            for entry in prompt_logprobs
+            if entry is not None
+            for tid, lp in entry.items()
+            if lp.decoded_token is None
+        )
+    )
+    if not missing:
+        return prompt_logprobs
+    # Ids with no vocab entry decode to "", as for output logprobs.
+    decoded = {
+        tid: text
+        for tid, (text, _) in zip(missing, decode_token_ids(missing, tokenizer))
+    }
+
+    resolved: PromptLogprobs = []
+    context_token_ids: list[int] = []
+    for entry in prompt_logprobs:
+        if not entry:
+            resolved.append(entry)
+            continue
+        new_entry: dict[int, Logprob] = {}
+        for tid, lp in entry.items():
+            if lp.decoded_token is None:
+                text = decoded[tid]
+                if text.endswith("\ufffd"):
+                    text = _correct_decoded_token(tid, context_token_ids, tokenizer)
+                lp = Logprob(lp.logprob, lp.rank, text)
+            new_entry[tid] = lp
+        resolved.append(new_entry)
+        # The prompt token is always inserted first by the engine.
+        context_token_ids.append(next(iter(entry)))
+    return resolved
 
 
 def _resolve_logprobs(
