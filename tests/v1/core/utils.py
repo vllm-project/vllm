@@ -67,6 +67,7 @@ def create_scheduler(
     long_prefill_token_threshold_adaptive: bool = False,
     disable_chunked_mm_input: bool = False,
     mm_encoder_only: bool = False,
+    preemption_victim: str = "fcfs",
     use_kv_connector: None | bool | str | MockKVConfig = None,
     kv_role: str = "kv_both",
     num_blocks: int = 10000,
@@ -138,6 +139,7 @@ def create_scheduler(
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
         prefill_schedule_interval=prefill_schedule_interval,
+        preemption_victim=preemption_victim,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
