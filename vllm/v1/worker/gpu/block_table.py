@@ -121,6 +121,11 @@ class BlockTables:
             self._sliding_window_reach, dtype=torch.int32, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
+        self.input_block_table_strides = torch.tensor(
+            [bt.stride(0) for bt in self.input_block_tables],
+            dtype=torch.int64,
+            device=self.device,
+        )
 
     def append_block_ids(
         self,
@@ -220,8 +225,14 @@ class BlockTables:
         # block rather than through the previous real step's (stale) block
         # ids, which may point at blocks since freed and reallocated.
         num_rows = max(num_reqs, self._num_dirty_rows)
-        for block_table in self.input_block_tables:
-            block_table[:num_rows].zero_()
+        # One launch zeroes every group's rows instead of one zero_ per group;
+        # per-group column counts differ, hence the stride lookup.
+        if self.input_block_tables:
+            _zero_block_table_rows_kernel[(self.num_kv_cache_groups, num_rows)](
+                self.input_block_table_ptrs,
+                self.input_block_table_strides,
+                BLOCK_SIZE=1024,  # type: ignore
+            )
         # Profiling may populate the returned rows with valid block IDs.
         self._num_dirty_rows = num_reqs
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
@@ -269,6 +280,23 @@ class BlockTables:
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
         return self.slot_mappings[:, :num_tokens]
+
+
+@triton.jit
+def _zero_block_table_rows_kernel(
+    block_table_ptrs,  # [num_kv_cache_groups]
+    block_table_strides,  # [num_kv_cache_groups]
+    BLOCK_SIZE: tl.constexpr,
+):
+    group_id = tl.program_id(0)
+    row = tl.program_id(1)
+
+    stride = tl.load(block_table_strides + group_id)
+    block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
+    row_ptr = block_table_ptr + row * stride
+    for i in tl.range(0, stride, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        tl.store(row_ptr + offset, 0, mask=offset < stride)
 
 
 @triton.jit(do_not_specialize=["num_reqs"])

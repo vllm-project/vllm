@@ -20,7 +20,10 @@ from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWAIndexBatch,
+    DeepseekSparseSWAMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -219,6 +222,9 @@ class DeepseekV41ModelState(DefaultModelState):
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
+        # Batches the per-group SWA decode index builds of each step into one
+        # kernel launch; None on devices without the pointer-indirection path.
+        self._swa_index_batch: DeepseekSparseSWAIndexBatch | None = None
 
         self.decoder_replay_layers: DecoderReplayLayers | None = getattr(
             model, "decoder_replay_layers", None
@@ -403,17 +409,22 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        attn_metadata = self._build_attn_metadata(
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=for_capture,
-            ubatch_idx=ubatch_idx,
-            model_specific_attn_metadata=model_specific_attn_metadata,
-        )
+        swa_index_batch = self._begin_swa_index_batch(attn_groups, ubatch_idx)
+        try:
+            attn_metadata = self._build_attn_metadata(
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture=for_capture,
+                ubatch_idx=ubatch_idx,
+                model_specific_attn_metadata=model_specific_attn_metadata,
+            )
+        finally:
+            if swa_index_batch is not None:
+                swa_index_batch.flush()
         if self.decoder_replay_layers is not None:
             assert replay_start is not None
             self._prepare_replay_batch(
@@ -432,6 +443,28 @@ class DeepseekV41ModelState(DefaultModelState):
         return self._replay_start_staging.copy_to_gpu(
             values, out=self._replay_start[:num_reqs]
         )
+
+    def _begin_swa_index_batch(
+        self, attn_groups: list[list[AttentionGroup]], ubatch_idx: int
+    ) -> DeepseekSparseSWAIndexBatch | None:
+        """Open a batch staging the step's SWA decode index builds.
+
+        Arms every SWA metadata builder of the ubatch so their causal decode
+        builds stage into one launch at ``flush``, then returns the open batch.
+        Returns None where the batched kernel is unavailable; armed builders
+        then keep launching per group.
+        """
+        if self.device.type != "cuda":
+            return None
+        if self._swa_index_batch is None:
+            self._swa_index_batch = DeepseekSparseSWAIndexBatch(self.device)
+        for groups in attn_groups:
+            for group in groups:
+                builder = group.get_metadata_builder(ubatch_idx)
+                if isinstance(builder, DeepseekSparseSWAMetadataBuilder):
+                    builder.arm_index_batch(self._swa_index_batch)
+        self._swa_index_batch.begin()
+        return self._swa_index_batch
 
     def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""

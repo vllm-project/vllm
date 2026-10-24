@@ -57,6 +57,32 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert torch.equal(
         batch.query_start_loc.cpu(), torch.from_numpy(batch.query_start_loc_np)
     )
+    assert torch.equal(
+        batch.idx_mapping.cpu(), torch.arange(num_reqs, dtype=torch.int64)
+    )
+    assert torch.equal(
+        batch.cu_num_logits.cpu(), torch.arange(num_reqs + 1, dtype=torch.int32)
+    )
+    assert torch.equal(
+        batch.logits_indices.cpu(),
+        torch.from_numpy(batch.query_start_loc_np[1:] - 1),
+    )
+    assert bool(batch.is_padding.cpu().all())
+
+    # A smaller dummy batch over the same shared buffers must clear the
+    # seq_lens / query_start_loc tails the larger batch left behind.
+    small_reqs = max(1, num_reqs // 2)
+    small = InputBatch.make_dummy(small_reqs, num_tokens, buffers)
+    assert torch.equal(
+        buffers.seq_lens.cpu(),
+        torch.cat(
+            [
+                torch.from_numpy(small.num_scheduled_tokens),
+                torch.zeros(buffers.max_num_reqs - small_reqs, dtype=torch.int32),
+            ]
+        ),
+    )
+    assert bool((small.query_start_loc.cpu()[small_reqs + 1 :] == num_tokens).all())
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA top-k.")
