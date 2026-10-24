@@ -181,6 +181,34 @@ def _get_backend_priorities(
             ]
 
 
+# Triton-based backends whose tl.dot lowering does not use tensor cores on
+# pre-SM80 GPUs with current Triton, see
+# https://github.com/vllm-project/vllm/issues/60821.
+_SLOW_PRE_SM80_BACKENDS = (
+    AttentionBackendEnum.TRITON_ATTN,
+    AttentionBackendEnum.FLEX_ATTENTION,
+)
+
+
+def _warn_if_slow_pre_sm80_backend(
+    backend: AttentionBackendEnum, device_capability: DeviceCapability
+) -> None:
+    """Warn once when auto-selection lands on a slow path on pre-SM80 GPUs."""
+    if device_capability >= DeviceCapability(8, 0):
+        return
+    if backend not in _SLOW_PRE_SM80_BACKENDS:
+        return
+    logger.warning_once(
+        "Using the %s attention backend on a GPU with compute capability "
+        "%d.%d (pre-SM80, e.g. Turing/T4). On these GPUs the Triton attention "
+        "kernels do not use tensor cores, so prefill can be much slower than "
+        "on SM80+ GPUs. See https://github.com/vllm-project/vllm/issues/60821.",
+        backend.name,
+        device_capability.major,
+        device_capability.minor,
+    )
+
+
 def _backend_cls_path(backend_cls: type[AttentionBackend]) -> str:
     module, qualname = backend_cls.full_cls_name()
     return f"{module}.{qualname}"
@@ -504,6 +532,8 @@ class CudaPlatformBase(Platform):
                     names,
                     selected_backend.name,
                 )
+
+        _warn_if_slow_pre_sm80_backend(selected_backend, device_capability)
 
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
