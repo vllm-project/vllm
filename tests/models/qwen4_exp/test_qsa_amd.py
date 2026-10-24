@@ -398,6 +398,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     [
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
+        pytest.param(513, 12, 1, 1792, id="tp2_split1"),
         pytest.param(32, 6, 1, 1024, id="tp4_split8"),
         pytest.param(257, 6, 1, 1024, id="tp4_split4"),
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
