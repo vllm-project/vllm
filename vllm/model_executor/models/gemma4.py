@@ -57,6 +57,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.offloader import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
@@ -1026,6 +1027,19 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens_per_layer",
             )
+            # The PLE table is built directly, so `make_layers` never routes it
+            # through the offloader. Do it here so `--cpu-offload-params
+            # embed_tokens_per_layer` can keep it in host memory. Each token
+            # only gathers its own rows, so it is cheap to read over UVA.
+            # `supports_tower_offload` means the offloader accepts extra
+            # `wrap_modules` calls (UVA does, prefetch does not), not that
+            # this is a tower.
+            offloader = get_offloader()
+            if offloader.supports_tower_offload:
+                (self.embed_tokens_per_layer,) = offloader.wrap_modules(
+                    (module for module in [self.embed_tokens_per_layer]),
+                    prefix=f"{prefix}.embed_tokens_per_layer",
+                )
             # Scaled embedding factor (from config, not hardcoded)
             # Register as buffer so it moves to GPU with the model
             # and interacts correctly with torch.compile AOT caching.
