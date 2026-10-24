@@ -21,7 +21,6 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
     supported_options = EagleSpeculatorConfig.supported_options | {
         "index_share_for_mtp_iteration"
     }
-    target_embed_needs_opt_in = True
     supports_pcp = True
 
     @classmethod

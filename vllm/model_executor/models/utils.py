@@ -860,23 +860,16 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-def spec_decode_needs_target_embed(
-    vllm_config: VllmConfig, *, include_mtp: bool = False
-) -> bool:
-    """Whether the last PP rank needs the target input embedding.
-
-    Hidden-state drafters reuse the target's input embedding. Targets opt in
-    with `include_mtp` where their drafter needs it (see
-    `SpeculatorConfig.target_embed_needs_opt_in`).
-    """
+def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether the last PP rank needs the target input embedding, for a
+    hidden-state drafter that may reuse it (see `maybe_share_target_embed`)."""
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None:
-        return False
-    speculator_config = speculative_config.speculator_config
-    if not speculator_config.uses_target_hidden_states or (
-        speculator_config.target_embed_needs_opt_in and not include_mtp
+    if (
+        speculative_config is None
+        or not speculative_config.uses_target_hidden_states
+        or not speculative_config.draft_model_config.may_use_target_embed
     ):
         return False
     pp = get_pp_group()

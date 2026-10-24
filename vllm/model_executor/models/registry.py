@@ -926,6 +926,8 @@ class _ModelInfo:
     supports_mm_device_do_normalize: bool
     # See `SpeculativeDraftModel`.
     speculator_config_class: str | None
+    # Whether a draft model may reuse the target's input embedding under PP.
+    may_use_target_embed: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -965,6 +967,7 @@ class _ModelInfo:
                 model, "supports_mm_device_do_normalize", False
             ),
             speculator_config_class=getattr(model, "speculator_config_class", None),
+            may_use_target_embed=hasattr(model, "has_own_embed_tokens"),
         )
 
 
