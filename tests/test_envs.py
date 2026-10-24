@@ -75,6 +75,19 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_deepep_v2_allow_hybrid_mode_defaults_to_true(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", raising=False)
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is True
+
+    monkeypatch.setenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0")
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is False
+
+    monkeypatch.setenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "1")
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is True
+
+
 def test_p2p_resource_limit_defaults_and_override(
     monkeypatch: pytest.MonkeyPatch,
 ):
