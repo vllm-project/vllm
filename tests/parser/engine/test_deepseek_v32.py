@@ -286,6 +286,28 @@ class TestStreaming:
         args = json.loads(collect_tool_arguments(results))
         assert args == {"k": "v"}
 
+    def test_unclosed_parameter_before_invoke_end(self, mock_tokenizer, mock_request):
+        text = (
+            f"{DSML_FUNC_START}\n"
+            f"{DSML_INVOKE_PREFIX}Read{DSML_INVOKE_NAME_END}\n"
+            f"<{_PARAM_OPEN.format(name='file_path', is_str='true')}/tmp/a"
+            f"{DSML_INVOKE_END}\n"
+            f"{DSML_FUNC_END}"
+        )
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        extracted = parser.extract_tool_calls(text, mock_request)
+        assert extracted.tools_called is True
+        assert json.loads(extracted.tool_calls[0].function.arguments) == {
+            "file_path": "/tmp/a"
+        }
+
+        stream_parser = DeepSeekV32Parser(mock_tokenizer)
+        results = simulate_tool_streaming(stream_parser, mock_request, list(text))
+        finish_delta = stream_parser.finish_streaming()
+        if finish_delta is not None:
+            results.append((finish_delta, text))
+        assert json.loads(collect_tool_arguments(results)) == {"file_path": "/tmp/a"}
+
 
 class TestMissingFunctionCallsWrapper:
     """An invoke without the ``<｜DSML｜function_calls>`` wrapper is still a

@@ -1461,3 +1461,144 @@ class TestMalformedDsmlNoise:
         assert output.tool_calls[0]["name"] == "get_weather"
         assert json.loads(output.tool_calls[0]["arguments"]) == {"city": "Seoul"}
         assert "DSML" not in (output.content or "")
+
+
+# ── Incremental argument value extender & truncated/unclosed params ──
+
+WRITE_CALL_HEAD = (
+    f"{DSML_TOOL_START}\n"
+    f"{DSML_INVOKE_PREFIX}write_file{DSML_INVOKE_NAME_END}\n"
+    f"{_param('path', 'true', '/repo/app.py')}\n"
+    f"{_param('mode', 'false', '644')}\n"
+    f"<{_PARAM_OPEN.format(name='content', is_str='true')}"
+)
+WRITE_CALL_TAIL = f"{_PARAM_CLOSE}\n{DSML_INVOKE_END}\n{DSML_TOOL_END}"
+CONTENT_LINE = (
+    'if a < b > c: print("x\\y")  # </｜DSML｜ </｜DSML｜parameter '
+    "<｜DSML｜parameter\té\n\n"
+)
+
+
+class TestArgValueExtender:
+    """The open string parameter value streams without re-running the converter."""
+
+    @pytest.fixture
+    def write_tool(self):
+        return _make_tool(
+            "write_file",
+            {
+                "path": {"type": "string"},
+                "mode": {"type": "integer"},
+                "content": {"type": "string"},
+            },
+        )
+
+    @pytest.mark.parametrize("use_schema", [False, True], ids=["no_schema", "schema"])
+    def test_long_call_streams_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, write_tool, use_schema
+    ):
+        tools = [write_tool] if use_schema else []
+        mock_request.tools = tools
+        text = WRITE_CALL_HEAD + CONTENT_LINE * 200 + WRITE_CALL_TAIL
+
+        def make_parser():
+            return DeepSeekV4Parser(
+                mock_tokenizer,
+                tools=tools,
+                chat_template_kwargs={"thinking": False},
+            )
+
+        results = simulate_tool_streaming(
+            make_parser(),
+            mock_request,
+            [text[i : i + 7] for i in range(0, len(text), 7)],
+        )
+        result = make_parser().extract_tool_calls(text, mock_request)
+
+        arguments = collect_tool_arguments(results)
+        assert arguments == result.tool_calls[0].function.arguments
+        assert json.loads(arguments)["content"] == CONTENT_LINE * 200
+        assert '"mode": 644,' in arguments
+
+    def test_conversions_do_not_grow_with_argument_length(
+        self, mock_tokenizer, mock_request, write_tool
+    ):
+        import dataclasses
+
+        from vllm.parser.engine.parser_engine import ParserEngine
+
+        mock_request.tools = [write_tool]
+        base = deepseek_v4_config(thinking=False)
+        converter = base.arg_converter
+        assert converter is not None
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                calls += partial
+                return converter(raw_args, partial)
+
+            parser = ParserEngine(
+                mock_tokenizer,
+                tools=[write_tool],
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            text = WRITE_CALL_HEAD + CONTENT_LINE * lines + WRITE_CALL_TAIL
+            simulate_tool_streaming(
+                parser,
+                mock_request,
+                [text[i : i + 4] for i in range(0, len(text), 4)],
+            )
+            return calls
+
+        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    def test_truncated_and_unclosed_parameter_parity(
+        self, mock_tokenizer, mock_request
+    ):
+        """Regression test for #62051: when ``</｜DSML｜parameter>`` is omitted
+        before ``</｜DSML｜invoke>`` or truncated at stream end, both streaming
+        (with ``finish_streaming()``) and non-streaming must emit valid JSON
+        preserving the parameter value."""
+        cases = [
+            (
+                f"{DSML_TOOL_START}\n"
+                f"{DSML_INVOKE_PREFIX}WebFetch{DSML_INVOKE_NAME_END}\n"
+                f"<{_PARAM_OPEN.format(name='url', is_str='true')}https://example.com",
+                "WebFetch",
+                {"url": "https://example.com"},
+            ),
+            (
+                f"{DSML_TOOL_START}\n"
+                f"{DSML_INVOKE_PREFIX}Read{DSML_INVOKE_NAME_END}\n"
+                f"<{_PARAM_OPEN.format(name='file_path', is_str='true')}/tmp/a"
+                f"{DSML_INVOKE_END}\n{DSML_TOOL_END}",
+                "Read",
+                {"file_path": "/tmp/a"},
+            ),
+        ]
+        for text, expected_name, expected_args in cases:
+            parser = DeepSeekV4Parser(
+                mock_tokenizer, chat_template_kwargs={"thinking": False}
+            )
+            extracted = parser.extract_tool_calls(text, mock_request)
+            assert extracted.tools_called is True
+            assert len(extracted.tool_calls) == 1
+            assert extracted.tool_calls[0].function.name == expected_name
+            assert json.loads(extracted.tool_calls[0].function.arguments) == (
+                expected_args
+            )
+
+            stream_parser = DeepSeekV4Parser(
+                mock_tokenizer, chat_template_kwargs={"thinking": False}
+            )
+            results = simulate_tool_streaming(stream_parser, mock_request, list(text))
+            finish_delta = stream_parser.finish_streaming()
+            if finish_delta is not None:
+                results.append((finish_delta, text))
+            assert collect_function_name(results) == expected_name
+            assert json.loads(collect_tool_arguments(results)) == expected_args

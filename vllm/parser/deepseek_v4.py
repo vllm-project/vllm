@@ -28,6 +28,7 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -59,30 +60,44 @@ DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
 
 def _param_patterns(
     param_start: str, param_close: str
-) -> tuple[re.Pattern, re.Pattern]:
-    """Complete and trailing-partial parameter regexes for one DSML dialect.
+) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
+    """Complete, trailing-partial, and value-end parameter regexes for one DSML dialect.
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
     """
     start, close = re.escape(param_start), re.escape(param_close)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
+    value_end = rf"{close}|{start}\s+name="
     return (
         re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
         re.compile(rf"{head}(.*)$", re.DOTALL),
+        re.compile(value_end),
     )
 
 
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+_PARAM_RE, _PARTIAL_PARAM_RE, _PARAM_VALUE_END_RE = _param_patterns(
+    DSML_PARAM_START, DSML_PARAM_CLOSE
+)
 
 
-def _dsml_arg_converter(
+def _value_end_window(text: str, value_end_re: re.Pattern) -> str:
+    """Return the suffix of *text* that may still grow into a value end."""
+    start = text.rfind("<")
+    if start == -1:
+        return ""
+    tail = text[start:]
+    return tail if value_end_re.fullmatch(tail, partial=True) else ""
+
+
+def _dsml_parse_args(
     raw_args: str,
     partial: bool,
     *,
     param_re: re.Pattern = _PARAM_RE,
     partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
-) -> str:
+    value_end_re: re.Pattern = _PARAM_VALUE_END_RE,
+) -> tuple[dict[str, object], re.Match | None]:
     params: dict[str, object] = {}
 
     last_end = 0
@@ -99,23 +114,92 @@ def _dsml_arg_converter(
                 params[name] = value
         last_end = m.end()
 
-    if partial:
-        pm = partial_param_re.search(raw_args, last_end)
-        if pm:
-            name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
-            if is_str == "true":
+    open_match = None
+    pm = partial_param_re.search(raw_args, last_end)
+    # A repeated name must not replace the value already closed for it.
+    if pm and pm.group(1) in params:
+        pm = None
+    if pm:
+        name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
+        # The trailing parameter is unclosed, so a suffix that can only be the
+        # start of its close marker (or of the next parameter) is not part of
+        # the value, including at the end of a truncated output.
+        window = _value_end_window(value, value_end_re)
+        if window:
+            value = value[: -len(window)]
+        if is_str == "true":
+            params[name] = value
+            open_match = pm
+        elif partial:
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
+                params[name] = json.loads(value)
+        else:
+            try:
+                params[name] = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
                 params[name] = value
-            else:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    params[name] = json.loads(value)
 
+    return params, open_match
+
+
+def _dsml_arg_converter(
+    raw_args: str,
+    partial: bool,
+    *,
+    param_re: re.Pattern = _PARAM_RE,
+    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+    value_end_re: re.Pattern = _PARAM_VALUE_END_RE,
+) -> str:
+    params, _ = _dsml_parse_args(
+        raw_args,
+        partial,
+        param_re=param_re,
+        partial_param_re=partial_param_re,
+        value_end_re=value_end_re,
+    )
     return json.dumps(params, ensure_ascii=False)
+
+
+def _dsml_arg_value_extender(
+    raw_args: str,
+    *,
+    param_re: re.Pattern = _PARAM_RE,
+    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+    value_end_re: re.Pattern = _PARAM_VALUE_END_RE,
+) -> ArgValueExtender | None:
+    params, match = _dsml_parse_args(
+        raw_args,
+        partial=True,
+        param_re=param_re,
+        partial_param_re=partial_param_re,
+        value_end_re=value_end_re,
+    )
+    if match is None or next(reversed(params)) != match.group(1):
+        return None
+    if set(params.keys()) <= {"arguments", "input"}:
+        return None
+
+    window = _value_end_window(match.group(3), value_end_re)
+
+    def extend(delta: str) -> str | None:
+        nonlocal window
+        text = window + delta
+        if value_end_re.search(text):
+            return None
+        new_window = _value_end_window(text, value_end_re)
+        emit = text[: len(text) - len(new_window)]
+        window = new_window
+        return json.dumps(emit, ensure_ascii=False)[1:-1]
+
+    return extend
 
 
 def _unwrap_wrapper_args(
     args_json: str,
     tools: list[Tool] | None,
     func_name: str | None,
+    *,
+    partial: bool = False,
 ) -> str:
     if not tools or not func_name:
         return args_json
@@ -137,7 +221,7 @@ def _unwrap_wrapper_args(
             try:
                 inner = json.loads(inner)
             except json.JSONDecodeError:
-                return args_json
+                return "{}" if partial else args_json
         if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
             return json.dumps(inner, ensure_ascii=False)
     return args_json
@@ -237,6 +321,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_dsml_arg_converter,
+        arg_value_extender=_dsml_arg_value_extender,
         arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
@@ -274,4 +359,4 @@ class DeepSeekV4Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        return _unwrap_wrapper_args(result, self._tools, func_name, partial=partial)

@@ -28,6 +28,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_PARAM_CLOSE,
     DSML_PARAM_START,
     _dsml_arg_converter,
+    _dsml_arg_value_extender,
     _unwrap_wrapper_args,
 )
 from vllm.parser.engine.events import EventType
@@ -114,6 +115,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_dsml_arg_converter,
+        arg_value_extender=_dsml_arg_value_extender,
         arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
@@ -141,4 +143,4 @@ class DeepSeekV32Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        return _unwrap_wrapper_args(result, self._tools, func_name, partial=partial)
