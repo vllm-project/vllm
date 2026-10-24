@@ -515,12 +515,15 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token():
     assert torch.isneginf(logits[0, 1:]).all()
 
 
+@pytest.mark.parametrize("predict_bonus_token", [False, True])
 @create_new_process_for_each_test()
-def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode():
+def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode(
+    predict_bonus_token,
+):
     processor = _make_min_tokens_processor()
     processor.update_state(
         BatchUpdate(
-            batch_size=1,
+            batch_size=2 if predict_bonus_token else 1,
             removed=(),
             added=[
                 (
@@ -545,7 +548,11 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode
     logits[0, 1] = 2.0
     logits[1, 0] = 3.0
 
-    processor.apply_with_spec_decode(logits, [2])
+    processor.apply_with_spec_decode(
+        logits,
+        [1, 0] if predict_bonus_token else [2],
+        predict_bonus_token=predict_bonus_token,
+    )
 
     assert logits[0, 0] == 1.0
     assert logits[0, 1] == 2.0
