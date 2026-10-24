@@ -41,7 +41,8 @@ class MambaConfig:
     """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to fp16 cache.
+    """Enable stochastic rounding when writing SSM state to FP16 cache or
+    shared FP8/INT8 ReplaySSM checkpoints.
     Uses random bits to unbias the rounding error, which can improve
     numerical stability for long sequences."""
     stochastic_rounding_philox_rounds: int = 0

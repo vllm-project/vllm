@@ -316,6 +316,28 @@ class CacheConfig:
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
     Kimi-K3 speculative decode does not use B. Default 16."""
+    replayssm_state_dtype: Literal["auto", "fp8", "int8", "nvfp4"] = "auto"
+    """Quantized checkpoint format for ReplaySSM. The default, 'auto', preserves
+    the floating-point checkpoint path. Other formats require --use-replayssm,
+    --mamba-backend flashinfer, BF16 activations, head dimension 64, and state
+    size 128. Shared checkpoints support FP8 E4M3FN and INT8 with FP32 row
+    scales through released FlashInfer. Separate checkpoints support FP8 and
+    NVFP4 through the author CuTe kernels. Quantization can change model output.
+    See replayssm_checkpoint_mode for the storage and execution requirements."""
+    replayssm_checkpoint_mode: Literal["shared", "separate"] = "shared"
+    """Checkpoint storage for quantized ReplaySSM. The default, 'shared', uses
+    one quantized checkpoint for recurrence and output reads. It requires
+    --mamba-ssm-cache-dtype auto. The existing stochastic-rounding flag controls
+    shared decode checkpoint writes; stochastic rounding can reduce accumulated
+    quantization error. Prefill checkpoint conversion uses nearest rounding.
+    'separate' keeps an FP16 recurrence checkpoint and a quantized read copy.
+    It requires SM103 or SM121, eight or sixteen heads per group, history length 16,
+    and --mamba-ssm-cache-dtype auto or float16. Separate checkpoints currently
+    support standard decode without prefix caching. SM121 also supports up to
+    seven speculative tokens. It retains pending state until acceptance.
+    Author kernels always use stochastic FP16 recurrence rounding with seven
+    Philox rounds. They use nearest rounding for the read copy. A separate
+    checkpoint adds memory. With state dtype 'auto', only 'shared' is valid."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
@@ -327,6 +349,8 @@ class CacheConfig:
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
+    replayssm_pending_state: bool = field(default=False, init=False)
+    """Whether separate ReplaySSM retains pending verification inputs on SM121."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

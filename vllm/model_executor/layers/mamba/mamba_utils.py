@@ -92,6 +92,26 @@ class MambaStateDtypeCalculator:
         return (activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
+    def replayssm_read_dtypes(
+        cls, state_dtype: str, checkpoint_mode: str = "shared"
+    ) -> tuple[torch.dtype, ...]:
+        if state_dtype == "auto":
+            return ()
+        if checkpoint_mode == "shared" and state_dtype in ("fp8", "int8"):
+            return (torch.float32,)
+        if checkpoint_mode == "separate" and state_dtype == "fp8":
+            return (torch.float8_e4m3fn, torch.float32, torch.int64)
+        if checkpoint_mode == "separate" and state_dtype == "nvfp4":
+            return (torch.uint8, torch.uint8, torch.float32, torch.int32, torch.int64)
+        raise ValueError(f"Unsupported ReplaySSM read-state format: {state_dtype}")
+
+    @classmethod
+    def replayssm_checkpoint_dtype(cls, state_dtype: str, checkpoint_mode: str):
+        if checkpoint_mode == "separate":
+            return torch.float16
+        return torch.float8_e4m3fn if state_dtype == "fp8" else torch.int8
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -227,11 +247,15 @@ class MambaStateShapeCalculator:
         logical_window: int,
         backend: MambaBackendEnum,
         num_speculative_tokens: int = 0,
+        checkpoint_mode: str = "shared",
+        pending_state: bool = False,
     ) -> tuple[tuple[int, int, int], tuple[int, int], tuple[int, int, int]]:
         """Return the physical x, dt, and B ring shapes."""
         ring_buffer_len = logical_window
-        if backend == MambaBackendEnum.FLASHINFER:
-            # FlashInfer keeps the live window and current verify window together.
+        if backend == MambaBackendEnum.FLASHINFER and (
+            checkpoint_mode == "shared" or pending_state
+        ):
+            # Retain the live history and the current verification window.
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads = divide(num_heads, tp_world_size)
         n_groups += cls.extra_groups_for_head_shards(n_groups, tp_world_size)
@@ -241,6 +265,40 @@ class MambaStateShapeCalculator:
             (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
         )
+
+    @classmethod
+    def replayssm_read_shapes(
+        cls,
+        state_shape: tuple[int, ...],
+        state_dtype: str,
+        checkpoint_mode: str = "shared",
+        n_groups: int | None = None,
+        pending_state: bool = False,
+    ) -> tuple[tuple[int, ...], ...]:
+        if state_dtype == "auto":
+            return ()
+        num_heads, head_dim, state_size = state_shape
+        if (head_dim, state_size) != (64, 128):
+            raise ValueError(
+                "Quantized ReplaySSM requires head dimension 64 and state size 128"
+            )
+        if checkpoint_mode == "shared" and state_dtype in ("fp8", "int8"):
+            return ((num_heads, head_dim),)
+        if checkpoint_mode == "separate" and state_dtype == "nvfp4":
+            if n_groups is None or num_heads // n_groups not in (8, 16):
+                raise ValueError(
+                    "Separate ReplaySSM requires eight or sixteen heads per group"
+                )
+            return (
+                (num_heads // 2, 128, 64),
+                (num_heads // 2, 4, 256),
+                (3, n_groups),
+                (n_groups,),
+                (2 if pending_state else 1,),
+            )
+        if checkpoint_mode == "separate" and state_dtype == "fp8":
+            return (state_shape, (num_heads, head_dim), (2 if pending_state else 1,))
+        raise ValueError(f"Unsupported ReplaySSM read-state format: {state_dtype}")
 
     @classmethod
     def short_conv_state_shape(

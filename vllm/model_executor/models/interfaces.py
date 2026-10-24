@@ -83,25 +83,8 @@ The output embeddings must be one of the following formats:
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
 
-MambaStateShapes: TypeAlias = (
-    tuple[tuple[int, int]]
-    | tuple[tuple[int, int, int]]
-    | tuple[tuple[int, int], tuple[int, int]]
-    | tuple[tuple[int, int], tuple[int, int, int]]
-    | tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-    ]
-    | tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-        tuple[int, int, int],
-    ]
-)
+# Quantized ReplaySSM adds read checkpoints, scales, and position metadata.
+MambaStateShapes: TypeAlias = tuple[tuple[int, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)

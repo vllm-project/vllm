@@ -302,6 +302,7 @@ def selective_state_update_replayssm_flashinfer(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
+    state_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
     if _flashinfer_replayssm_kernel is None:
@@ -357,6 +358,7 @@ def selective_state_update_replayssm_flashinfer(
         cb_scaled=cb_scaled,
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
+        state_scale=state_scale,
     )
 
 

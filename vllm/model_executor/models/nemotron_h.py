@@ -766,10 +766,22 @@ class NemotronHForCausalLM(
             cache_config.mamba_ssm_cache_dtype,
         )
         if cache_config.use_replayssm:
+            if cache_config.replayssm_state_dtype != "auto":
+                dtypes = (
+                    dtypes[0],
+                    MambaStateDtypeCalculator.replayssm_checkpoint_dtype(
+                        cache_config.replayssm_state_dtype,
+                        cache_config.replayssm_checkpoint_mode,
+                    ),
+                )
             dtypes = (
                 *dtypes,
                 *MambaStateDtypeCalculator.replayssm_ring_dtypes(
                     vllm_config.model_config.dtype
+                ),
+                *MambaStateDtypeCalculator.replayssm_read_dtypes(
+                    cache_config.replayssm_state_dtype,
+                    cache_config.replayssm_checkpoint_mode,
                 ),
             )
         return dtypes
@@ -818,6 +830,17 @@ class NemotronHForCausalLM(
                     logical_window=cache_config.replayssm_buffer_len,
                     backend=vllm_config.mamba_config.backend,
                     num_speculative_tokens=vllm_config.num_speculative_tokens,
+                    checkpoint_mode=cache_config.replayssm_checkpoint_mode,
+                    pending_state=cache_config.replayssm_pending_state,
+                ),
+                *MambaStateShapeCalculator.replayssm_read_shapes(
+                    shapes[1],
+                    cache_config.replayssm_state_dtype,
+                    cache_config.replayssm_checkpoint_mode,
+                    n_groups=max(
+                        1, hf_config.n_groups // parallel_config.tensor_parallel_size
+                    ),
+                    pending_state=cache_config.replayssm_pending_state,
                 ),
             )
         return shapes

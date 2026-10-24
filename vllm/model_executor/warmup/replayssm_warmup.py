@@ -25,7 +25,10 @@ def _replayssm_autotune_kwargs(
     config = runner.vllm_config
     if not config.use_flashinfer_replayssm:
         return None
-    if not flashinfer_replayssm_autotune_supported():
+    if (
+        config.cache_config.replayssm_checkpoint_mode != "separate"
+        and not flashinfer_replayssm_autotune_supported()
+    ):
         logger.info_once(
             "Skipping FlashInfer ReplaySSM autotuning because "
             "flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner "
@@ -91,6 +94,20 @@ def _temporary_replayssm_autotune_state(
         for tensor in (ring_start, prev_num_accepted):
             if tensor.numel():
                 reset_trackers.setdefault(tensor.data_ptr(), tensor)
+        if len(module.kv_cache) > 5:
+            # Compile quantization before graph capture. Only use dummy slots.
+            state_indices = torch.arange(
+                1,
+                max_num_reqs + 1,
+                dtype=torch.int32,
+                device=module.kv_cache[1].device,
+            )
+            initial = torch.zeros(
+                (1, *module.kv_cache[1].shape[1:]),
+                dtype=torch.float32,
+                device=module.kv_cache[1].device,
+            ).expand(max_num_reqs, -1, -1, -1)
+            module.initialize_replayssm_state(initial, state_indices)
 
     v2_runner: Any = runner
     block_tables = saved_block_ids = None
@@ -125,6 +142,10 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
+    if config.cache_config.replayssm_checkpoint_mode == "separate":
+        # CuTe compiles both masked decode kernels before CUDA graph capture.
+        replayssm_autotune_warmup(runner)
+        return
     if not config.use_flashinfer_replayssm:
         return
     num_slots = min(runner.kv_cache_config.num_blocks - 1, 2)

@@ -69,6 +69,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.attention.backends.utils import get_prefill_to_decode_mask
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -1316,8 +1317,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         # batch_idx -> req_id
+        prefill_req_ids = None
+        if self.cache_config.replayssm_checkpoint_mode == "separate":
+            prefill_req_ids = set()
+            for req_id, num_scheduled in num_tokens_per_req.items():
+                req_idx = self.req_states.req_id_to_index[req_id]
+                num_drafts = len(draft_tokens.get(req_id, ()))
+                padded_tail = (
+                    self.req_states.num_computed_prefill_tokens[req_idx] > 0
+                    and num_drafts > 0
+                    and num_scheduled == num_drafts + 1
+                )
+                if (
+                    self.req_states.num_computed_prefill_tokens[req_idx]
+                    < self.req_states.prefill_len.np[req_idx]
+                    and not padded_tail
+                ):
+                    prefill_req_ids.add(req_id)
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
+            num_tokens_per_req, draft_tokens, self.decode_query_len, prefill_req_ids
         )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
@@ -1350,13 +1368,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         prefill_runs_as_decode_np = None
         decode_graph_eligible = not has_prefill
         if has_prefill and self.pcp_manager is None:
-            # One new prompt token over existing context (possibly padded with
-            # placeholder drafts) runs as a decode. PCP partitions prefill rows.
-            num_new_tokens = num_scheduled_tokens
-            if num_draft_tokens_np is not None:
-                num_new_tokens = num_new_tokens - num_draft_tokens_np
-            one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
-            prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
+            # Separate checkpoints allow only padded speculative prompt tails
+            # on decode. PCP partitions prefill rows and keeps its own routing.
+            prefill_runs_as_decode_np = is_prefilling_np & get_prefill_to_decode_mask(
+                num_scheduled_tokens,
+                num_computed_prefill_tokens_np,
+                num_draft_tokens_np,
+                allow_unpadded=(
+                    self.cache_config.replayssm_checkpoint_mode != "separate"
+                ),
+            )
             decode_graph_eligible = bool(
                 (prefill_runs_as_decode_np | ~is_prefilling_np).all()
             )
@@ -2490,10 +2511,12 @@ def sort_batch_req_ids(
     num_tokens_per_req: dict[str, int],
     draft_tokens: dict[str, list[int]],
     decode_query_len: int,
+    prefill_req_ids: set[str] | None = None,
 ) -> list[str]:
     # Order verification/decode -> short_extend -> prefill;
     # split_decodes_and_prefills relies on decode-like requests leading.
     key = lambda r: (
+        prefill_req_ids is not None and r in prefill_req_ids,
         not draft_tokens.get(r),
         (num := num_tokens_per_req[r]) != decode_query_len,
         num,

@@ -935,10 +935,35 @@ def split_prefill_chunks(
     return chunk_bounds
 
 
+def get_prefill_to_decode_mask(
+    num_scheduled_tokens: np.ndarray,
+    num_computed_tokens: np.ndarray,
+    num_draft_tokens: np.ndarray | None = None,
+    *,
+    allow_unpadded: bool = True,
+) -> np.ndarray:
+    """Identify prompt chunks that can use decode over existing state.
+
+    Separate ReplaySSM must disable unpadded chunks: a later prefill reads
+    its recurrence checkpoint without materializing the decode history.
+    Padded speculative tails need decode for acceptance rollback.
+    """
+    num_new_tokens = num_scheduled_tokens
+    if num_draft_tokens is not None:
+        num_new_tokens = num_new_tokens - np.maximum(num_draft_tokens, 0)
+    mask = (num_computed_tokens > 0) & (num_new_tokens == 1)
+    if not allow_unpadded:
+        if num_draft_tokens is None:
+            return np.zeros_like(mask)
+        mask &= num_draft_tokens > 0
+    return mask
+
+
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
+    separate_replayssm: bool = False,
 ) -> bool:
     """Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
@@ -964,6 +989,21 @@ def reorder_batch_to_split_decodes_and_prefills(
     has_context = num_computed_tokens_np > 0
     is_below_threshold = num_scheduled_tokens_np <= decode_threshold
     done_prefilling = num_computed_tokens_np >= num_prompt_tokens_np
+    if separate_replayssm:
+        # Padded prompt tails need acceptance rollback. Put these transactions
+        # before ordinary prompt chunks, which must remain on prefill.
+        num_drafts = np.array(
+            [
+                len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+                for req_id in input_batch.req_ids
+            ]
+        )
+        done_prefilling |= get_prefill_to_decode_mask(
+            num_scheduled_tokens_np,
+            num_computed_tokens_np,
+            num_drafts,
+            allow_unpadded=False,
+        )
 
     # Mutually exclusive categories (exactly one True per request):
     # 1. No context yet -> prefill

@@ -1582,6 +1582,7 @@ class VllmConfig:
         if (
             self.mamba_config.enable_stochastic_rounding
             and self.cache_config.mamba_ssm_cache_dtype != "float16"
+            and self.cache_config.replayssm_state_dtype == "auto"
         ):
             raise ValueError(
                 "Stochastic rounding for Mamba cache requires "
@@ -3421,6 +3422,91 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_replayssm_read_state(self) -> "VllmConfig":
+        mode = self.cache_config.replayssm_checkpoint_mode
+        state_dtype = self.cache_config.replayssm_state_dtype
+        self.cache_config.replayssm_pending_state = False
+        if state_dtype == "auto" and mode != "shared":
+            raise ValueError("Separate ReplaySSM requires --replayssm-state-dtype")
+        if self.cache_config.replayssm_state_dtype != "auto":
+            if not self.use_flashinfer_replayssm:
+                raise ValueError(
+                    "--replayssm-state-dtype requires --use-replayssm and "
+                    "--mamba-backend flashinfer"
+                )
+            allowed_dtypes = ("auto",) if mode == "shared" else ("auto", "float16")
+            if self.cache_config.mamba_ssm_cache_dtype not in allowed_dtypes:
+                raise ValueError(
+                    f"{mode} quantized ReplaySSM requires "
+                    f"--mamba-ssm-cache-dtype in {allowed_dtypes}"
+                )
+            if (mode == "shared" and state_dtype == "nvfp4") or (
+                mode == "separate" and state_dtype == "int8"
+            ):
+                raise ValueError(
+                    f"ReplaySSM {mode} checkpoints do not support {state_dtype}"
+                )
+            if mode == "separate":
+                if self.cache_config.enable_prefix_caching:
+                    raise ValueError(
+                        "Separate ReplaySSM does not support prefix caching"
+                    )
+                if self.num_speculative_tokens > 7:
+                    raise ValueError(
+                        "Separate ReplaySSM supports at most seven speculative tokens"
+                    )
+                if self.cache_config.replayssm_buffer_len != 16:
+                    raise ValueError("Separate ReplaySSM requires history length 16")
+                if self.mamba_config.stochastic_rounding_philox_rounds not in (0, 7):
+                    raise ValueError("Separate ReplaySSM requires seven Philox rounds")
+                from vllm.platforms import current_platform
+
+                self.cache_config.replayssm_pending_state = (
+                    current_platform.is_device_capability(121)
+                )
+                if not self.cache_config.replayssm_pending_state and not (
+                    current_platform.is_device_capability(103)
+                ):
+                    raise ValueError("Separate ReplaySSM requires SM103 or SM121")
+                if (
+                    self.num_speculative_tokens
+                    and not self.cache_config.replayssm_pending_state
+                ):
+                    raise ValueError(
+                        "Separate ReplaySSM speculative decoding requires SM121"
+                    )
+            if self.mamba_config.ssu_algorithm not in (None, "auto"):
+                raise ValueError(
+                    "Quantized ReplaySSM does not support explicit SSU algorithms; "
+                    "use --mamba-ssu-algorithm auto"
+                )
+            if self.model_config is not None:
+                if self.model_config.dtype != torch.bfloat16:
+                    raise ValueError("Quantized ReplaySSM requires BF16 activations")
+                hf_config = self.model_config.hf_text_config
+                if (
+                    getattr(hf_config, "mamba_head_dim", None) != 64
+                    or getattr(hf_config, "ssm_state_size", None) != 128
+                ):
+                    raise ValueError(
+                        "Quantized ReplaySSM requires Mamba2 head dimension 64 "
+                        "and state size 128"
+                    )
+                if mode == "separate" and (
+                    hf_config.mamba_num_heads
+                    // self.parallel_config.tensor_parallel_size
+                    // max(
+                        1,
+                        hf_config.n_groups // self.parallel_config.tensor_parallel_size,
+                    )
+                    not in (8, 16)
+                ):
+                    raise ValueError(
+                        "Separate ReplaySSM requires eight or sixteen heads per group"
+                    )
         return self
 
     @model_validator(mode="after")

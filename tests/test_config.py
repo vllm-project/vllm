@@ -46,7 +46,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -144,6 +144,114 @@ def test_flashinfer_replayssm_validates_config(mode, input_dtype, use_ubatching,
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize("read_dtype", ["fp8", "int8", "nvfp4"])
+def test_quantized_replayssm_requires_replay_backend(read_dtype):
+    with pytest.raises(ValueError, match="requires --use-replayssm"):
+        VllmConfig(
+            cache_config=CacheConfig(replayssm_state_dtype=read_dtype),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize("read_dtype", ["fp8", "int8", "nvfp4"])
+def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(read_dtype):
+    with pytest.raises(ValueError, match="mamba-ssm-cache-dtype"):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True,
+                replayssm_state_dtype=read_dtype,
+                mamba_ssm_cache_dtype="float32",
+            ),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "state_dtype"), [("shared", "nvfp4"), ("separate", "int8")]
+)
+def test_replayssm_rejects_unsupported_checkpoint_formats(mode, state_dtype):
+    with pytest.raises(ValueError, match="checkpoints do not support"):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True,
+                replayssm_state_dtype=state_dtype,
+                replayssm_checkpoint_mode=mode,
+            ),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("prefix_caching", "draft_tokens", "error"),
+    [(True, 0, "does not support prefix caching"), (False, 8, "at most seven")],
+)
+def test_quantized_replayssm_pending_rejects_unsupported_requests(
+    prefix_caching, draft_tokens, error
+):
+    with pytest.raises(ValueError, match=error):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True,
+                replayssm_state_dtype="fp8",
+                replayssm_checkpoint_mode="separate",
+                enable_prefix_caching=prefix_caching,
+            ),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            speculative_config=(
+                SpeculativeConfig(method="ngram", num_speculative_tokens=draft_tokens)
+                if draft_tokens
+                else None
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_quantized_replayssm_pending_matches_native_hardware():
+    capability = torch.cuda.get_device_capability()
+    if capability not in ((10, 3), (12, 1)):
+        pytest.skip("requires a supported native ReplaySSM GPU")
+    kwargs = dict(
+        cache_config=CacheConfig(
+            use_replayssm=True,
+            replayssm_state_dtype="fp8",
+            replayssm_checkpoint_mode="separate",
+            enable_prefix_caching=False,
+        ),
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=7),
+        device_config=DeviceConfig(device="cuda"),
+    )
+    if capability == (10, 3):
+        with pytest.raises(ValueError, match="speculative decoding requires SM121"):
+            VllmConfig(**kwargs)
+    else:
+        config = VllmConfig(**kwargs)
+        assert config.cache_config.replayssm_pending_state
+
+
+@pytest.mark.parametrize(
+    ("mode", "state_dtype"),
+    [("shared", "fp8"), ("shared", "int8"), ("separate", "fp8"), ("separate", "nvfp4")],
+)
+def test_quantized_replayssm_preserves_explicit_checkpoint_selection(mode, state_dtype):
+    from transformers import PreTrainedConfig
+
+    from vllm.model_executor.models.config import NemotronHForCausalLMConfig
+
+    cache = CacheConfig(
+        use_replayssm=True,
+        replayssm_state_dtype=state_dtype,
+        replayssm_checkpoint_mode=mode,
+    )
+    NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+        cache_config=cache, hf_config=PreTrainedConfig(mamba_ssm_cache_dtype="float32")
+    )
+    assert cache.mamba_ssm_cache_dtype == "auto"
 
 
 def _write_json(path: Path, value: object) -> None:

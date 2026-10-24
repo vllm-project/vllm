@@ -172,6 +172,8 @@ steps:
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
     - tests/kernels/mamba/test_ssu_dispatch.py
+    - tests/v1/attention/test_batch_reordering.py
+    - tests/v1/worker/test_gpu_batch_ordering.py
     - vllm/v1/worker/utils.py
     - vllm/v1/core/kv_cache_planning.py
     - vllm/v1/core/kv_cache_coordinator.py
@@ -183,6 +185,7 @@ steps:
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/replayssm_warmup.py
     - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/v1/attention/backends/utils.py
     - vllm/v1/attention/backends/mamba2_attn.py
     - vllm/v1/worker/mamba_utils.py
     - vllm/v1/worker/replayssm_utils.py
@@ -191,6 +194,7 @@ steps:
     - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
+    - pytest -v v1/attention/test_batch_reordering.py v1/worker/test_gpu_batch_ordering.py
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
 

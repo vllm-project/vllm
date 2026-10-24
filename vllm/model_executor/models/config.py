@@ -821,6 +821,9 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         (or not explicitly set), to the value specified in the HF config, or to
         `float32` if not specified.
         """
+        if cache_config.replayssm_state_dtype != "auto":
+            # Quantized ReplaySSM selects its checkpoint dtype independently.
+            return
         if cache_config.mamba_ssm_cache_dtype == "auto":
             mamba_ssm_cache_dtype: MambaDType = getattr(
                 hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE

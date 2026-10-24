@@ -93,7 +93,10 @@ class MambaHybridModelState(DefaultModelState):
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
-        self._use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self._use_flashinfer_replayssm = (
+            vllm_config.use_flashinfer_replayssm
+            and self.cache_config.replayssm_checkpoint_mode == "shared"
+        )
         if self._use_flashinfer_replayssm:
             self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device

@@ -1,5 +1,7 @@
 # Features
 
+See [Quantized ReplaySSM checkpoints](replayssm.md) for Mamba2 shared and separate checkpoint modes.
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

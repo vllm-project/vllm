@@ -399,12 +399,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.reorder_batch_threshold if num_accepted_tokens is not None else 1
         )
 
-        # FULL-CG dispatch is shape-based, so one-token prefills with
-        # prior Mamba state can replay a decode graph while `is_prefilling`
-        # is still true. Treat them as decode/update rows. This is required
-        # for NIXL disagg's h(N-1)->N recompute path and for sporadic
-        # final single-token prefill chunks that land in a `uniform` FULL-CG
-        # batch. Relies on `reorder` putting short extends before pure prefills.
+        # Single-token prefills with prior state can normally use decode,
+        # including NIXL's final prompt-token recompute. Separate checkpoints
+        # require ordinary prompt chunks to stay on prefill. Both runners
+        # preserve this distinction in request ordering and graph dispatch.
         is_prefilling = common_attn_metadata.is_prefilling
         assert is_prefilling is not None
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
@@ -417,6 +415,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # One-token prefills with prior state can use the decode/update path.
         prefill_to_decode = stateful_prefill_rows & (query_lens_cpu == 1)
+        if self.vllm_config.cache_config.replayssm_checkpoint_mode == "separate":
+            # A later prefill reads the recurrence checkpoint directly. Decode
+            # can leave newer inputs in the replay ring or pending storage.
+            prefill_to_decode = torch.zeros_like(stateful_prefill_rows)
 
         # The scheduler may pad a one-token remote prompt tail with placeholder
         # drafts to retain the uniform K+1 decode graph. This is a speculative
@@ -427,14 +429,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if num_decode_draft_tokens_cpu is not None:
             padded_prompt_tail_rows = (
                 stateful_prefill_rows
-                & (num_decode_draft_tokens_cpu >= 0)
+                & (num_decode_draft_tokens_cpu > 0)
                 & (query_lens_cpu == num_decode_draft_tokens_cpu + 1)
             )
             prefill_to_decode |= padded_prompt_tail_rows
 
         if torch.any(prefill_to_decode).item():
-            # ReplaySSM handles these rows as single-token flushes (see the
-            # write-position derivation below), same as the baseline decode path.
+            # Padded prompt tails need the acceptance-aware decode path.
             is_prefilling = is_prefilling.clone()
             is_prefilling[prefill_to_decode] = False
             common_attn_metadata = common_attn_metadata.replace(

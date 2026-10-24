@@ -30,6 +30,7 @@ def _store_prefill_checkpoint_kernel(
     STATE_LEN: tl.constexpr,
     SSM_ROW_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    STORE_SSM: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -55,10 +56,13 @@ def _store_prefill_checkpoint_kernel(
         mask=conv_mask,
     )
 
-    ssm_mask = valid & (cols < SSM_ROW_SIZE)
-    src = tl.load(chunk_idx_ptr + row).to(tl.int64)
-    ssm = tl.load(chunk_states_ptr + src * stride_chunk_states + cols, mask=ssm_mask)
-    tl.store(ssm_state_ptr + dst * stride_ssm_block + cols, ssm, mask=ssm_mask)
+    if STORE_SSM:
+        ssm_mask = valid & (cols < SSM_ROW_SIZE)
+        src = tl.load(chunk_idx_ptr + row).to(tl.int64)
+        ssm = tl.load(
+            chunk_states_ptr + src * stride_chunk_states + cols, mask=ssm_mask
+        )
+        tl.store(ssm_state_ptr + dst * stride_ssm_block + cols, ssm, mask=ssm_mask)
 
 
 def store_prefill_checkpoint(
@@ -71,6 +75,7 @@ def store_prefill_checkpoint(
     query_start_loc: torch.Tensor,
     *,
     state_len: int,
+    store_ssm: bool = True,
 ) -> None:
     """Write each prefill row's mid-prefill checkpoint into its paged block.
 
@@ -86,6 +91,7 @@ def store_prefill_checkpoint(
         query_start_loc: Prefill query start locations.
         state_len: ``conv_kernel_size - 1``, not the spec-widened conv width.
             Readers take the first ``state_len`` slots as the newest inputs.
+        store_ssm: False when a separate quantization kernel stores SSM state.
 
     """
     dim = x.size(0)
@@ -93,7 +99,7 @@ def store_prefill_checkpoint(
     block_size = 1024
     grid = (
         chunk_idx.numel(),
-        triton.cdiv(max(dim * state_len, ssm_row_size), block_size),
+        triton.cdiv(max(dim * state_len, ssm_row_size if store_ssm else 0), block_size),
     )
     _store_prefill_checkpoint_kernel[grid](
         x,
@@ -115,4 +121,5 @@ def store_prefill_checkpoint(
         STATE_LEN=state_len,
         SSM_ROW_SIZE=ssm_row_size,
         BLOCK_SIZE=block_size,
+        STORE_SSM=store_ssm,
     )

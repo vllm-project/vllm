@@ -36,6 +36,7 @@ def _autotune_runner(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
+            cache_config=CacheConfig(),
             use_flashinfer_replayssm=(
                 use_replayssm and backend == MambaBackendEnum.FLASHINFER
             ),

@@ -331,8 +331,16 @@ class _ReplaySSMGroupContext:
                     [m.kv_cache[3] for m in mixers]
                 ),
                 A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
-                state_scale_ptrs=zero_table,
-                state_scale_slot_strides=zero_table,
+                state_scale_ptrs=(
+                    _cuda_i64_ptrs([m.kv_cache[5] for m in mixers])
+                    if len(first.kv_cache) == 6
+                    else zero_table
+                ),
+                state_scale_slot_strides=(
+                    _cuda_i64_slot_strides([m.kv_cache[5] for m in mixers])
+                    if len(first.kv_cache) == 6
+                    else zero_table
+                ),
             ),
             src_slots=torch.full(
                 (len(mixers), max_num_reqs),

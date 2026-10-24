@@ -142,6 +142,7 @@ from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_ranges,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
+    get_prefill_to_decode_mask,
     reorder_batch_to_split_decodes_and_prefills,
 )
 from vllm.v1.core.sched.output import NewRequestData
@@ -934,7 +935,10 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
-        self._use_flashinfer_replayssm = self.vllm_config.use_flashinfer_replayssm
+        self._use_flashinfer_replayssm = (
+            self.vllm_config.use_flashinfer_replayssm
+            and self.cache_config.replayssm_checkpoint_mode == "shared"
+        )
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
             if not self._use_flashinfer_replayssm:
@@ -1149,6 +1153,9 @@ class GPUModelRunner(
                 self.input_batch,
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold,
+                separate_replayssm=(
+                    self.cache_config.replayssm_checkpoint_mode == "separate"
+                ),
             )
 
     def _init_kv_zero_meta(self) -> None:
@@ -3805,6 +3812,29 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        separate_prefill = False
+        if (
+            self.cache_config.replayssm_checkpoint_mode == "separate"
+            and force_uniform_decode is None
+        ):
+            # Ordinary prompt chunks cannot replay a decode graph. A later
+            # prefill needs the state that only the prefill path materializes.
+            is_prefilling = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                < self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+            padded_tail = get_prefill_to_decode_mask(
+                num_scheduled_tokens_np[:num_reqs],
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                self.num_decode_draft_tokens.np[:num_reqs]
+                if self.num_spec_tokens
+                else None,
+                allow_unpadded=False,
+            )
+            is_prefilling = is_prefilling & ~padded_tail
+            separate_prefill = bool(is_prefilling.any())
+            uniform_decode = uniform_decode and not separate_prefill
+
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
@@ -3826,7 +3856,9 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
-                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                invalid_modes=(
+                    {CUDAGraphMode.FULL} if disable_full or separate_prefill else None
+                ),
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(

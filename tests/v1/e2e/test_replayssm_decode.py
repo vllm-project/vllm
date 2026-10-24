@@ -9,6 +9,7 @@ import pytest
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -308,6 +309,7 @@ def _check_replayssm_prefix_caching(
     use_v2: bool,
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
+    replayssm_state_dtype: str = "auto",
 ):
     common = dict(
         max_model_len=8192,
@@ -338,6 +340,12 @@ def _check_replayssm_prefix_caching(
             enable_mamba_cache_stochastic_rounding=True,
             mamba_cache_philox_rounds=5,
         )
+    if replayssm_state_dtype != "auto":
+        common.update(
+            dtype="bfloat16",
+            mamba_ssm_cache_dtype="auto",
+            enable_mamba_cache_stochastic_rounding=False,
+        )
     outputs = []
     try:
         with monkeypatch.context() as patch:
@@ -348,6 +356,9 @@ def _check_replayssm_prefix_caching(
                     model_name,
                     use_replayssm=use_replayssm,
                     replayssm_buffer_len=16,
+                    replayssm_state_dtype=(
+                        replayssm_state_dtype if use_replayssm else "auto"
+                    ),
                     **common,
                 ) as llm:
                     config = llm.llm.llm_engine.vllm_config
@@ -387,7 +398,7 @@ def _check_replayssm_prefix_caching(
         name_0=f"baseline_{name}_cached",
         name_1=f"replayssm_{name}_cached",
     )
-    if speculative_method == "mtp":
+    if speculative_method == "mtp" or replayssm_state_dtype != "auto":
         check_logprobs_close(
             outputs_0_lst=first_pass,
             outputs_1_lst=cached,
@@ -432,6 +443,129 @@ def test_triton_replayssm_align_prefix_cache_matches_baseline_v1(
         use_v2=False,
         mamba_backend="triton",
     )
+
+
+@pytest.mark.parametrize("read_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+@large_gpu_mark(min_gb=40)
+def test_quantized_replayssm_prefix_cache(vllm_runner, monkeypatch, read_dtype, use_v2):
+    """Compare quantized reads across prefill, decode, and prefix-cache reuse."""
+    _check_replayssm_prefix_caching(
+        vllm_runner,
+        MAMBA2_MTP_MODEL,
+        monkeypatch,
+        use_v2=use_v2,
+        speculative_method="ngram",
+        replayssm_state_dtype=read_dtype,
+    )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(103)
+        or current_platform.is_device_capability(121)
+    ),
+    reason="Separate-checkpoint kernels require SM103 or SM121",
+)
+@pytest.mark.parametrize("read_dtype", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+def test_separate_replayssm_decode_and_slot_reuse(
+    vllm_runner, monkeypatch, read_dtype, use_v2
+):
+    """Exercise chunked prefill, two flushes, padded decode, and reused slots."""
+    model_name = os.environ.get("VLLM_TEST_REPLAYSSM_SEPARATE_MODEL", MAMBA2_MTP_MODEL)
+    revision = os.environ.get("VLLM_TEST_REPLAYSSM_SEPARATE_MODEL_REVISION")
+    model_kwargs = {}
+    if current_platform.is_device_capability(121):
+        # GB10 NVFP4 model execution uses the validated B12x backend profile.
+        model_kwargs = dict(
+            linear_backend="b12x",
+            moe_backend="b12x",
+            attention_backend="FLASHINFER",
+            trust_remote_code=True,
+            language_model_only=True,
+            kv_cache_dtype="fp8",
+            mamba_cache_dtype="bfloat16",
+        )
+    prefill_budget = 8
+    prompts = [
+        "The observatory records the temperature and wind speed every hour. " * 16
+        + "Explain why regular weather measurements are useful.",
+        FLASHINFER_PROMPTS[0],
+    ]
+    outputs = []
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+        envs.disable_envs_cache()
+        try:
+            for enabled in (False, True):
+                with vllm_runner(
+                    model_name,
+                    revision=revision,
+                    dtype="bfloat16",
+                    max_model_len=1024,
+                    max_num_seqs=8,
+                    max_num_batched_tokens=prefill_budget,
+                    enable_chunked_prefill=True,
+                    async_scheduling=False,
+                    enable_prefix_caching=False,
+                    mamba_backend="flashinfer",
+                    mamba_ssm_cache_dtype="float16",
+                    enable_mamba_cache_stochastic_rounding=True,
+                    mamba_cache_philox_rounds=7,
+                    use_replayssm=enabled,
+                    replayssm_state_dtype=read_dtype if enabled else "auto",
+                    replayssm_checkpoint_mode="separate" if enabled else "shared",
+                    compilation_config={"cudagraph_capture_sizes": [1, 2, 8]},
+                    **model_kwargs,
+                ) as llm:
+                    assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+                    tokenizer = llm.llm.get_tokenizer()
+                    assert prefill_budget < len(tokenizer.encode(prompts[0])) <= 984
+                    first = llm.generate_greedy_logprobs(
+                        prompts, max_tokens=40, num_logprobs=5
+                    )
+                    reused = llm.generate_greedy_logprobs(
+                        prompts[:1], max_tokens=40, num_logprobs=5
+                    )
+                    # Seven short requests leave one token of prefill capacity.
+                    # Their final decode leaves another one-token prompt chunk.
+                    # After they finish, the long request resumes larger chunks.
+                    token = tokenizer.encode("Hello", add_special_tokens=False)[0]
+                    mixed_prompts = [{"prompt_token_ids": [token]} for _ in range(7)]
+                    mixed_prompts.append(
+                        {"prompt_token_ids": tokenizer.encode(prompts[0])}
+                    )
+                    short_params = SamplingParams(
+                        temperature=0, max_tokens=2, ignore_eos=True, logprobs=5
+                    )
+                    long_params = SamplingParams(
+                        temperature=0, max_tokens=40, ignore_eos=True, logprobs=5
+                    )
+                    mixed = llm.llm.generate(
+                        mixed_prompts, [short_params] * 7 + [long_params]
+                    )
+                    assert [len(result.outputs[0].token_ids) for result in mixed] == [
+                        2
+                    ] * 7 + [40]
+                    mixed_logprobs = [
+                        (
+                            list(result.outputs[0].token_ids),
+                            result.outputs[0].text,
+                            result.outputs[0].logprobs,
+                        )
+                        for result in mixed
+                    ]
+                    outputs.append((first, reused, mixed_logprobs))
+        finally:
+            envs.disable_envs_cache()
+    for batch in range(3):
+        check_logprobs_close(
+            outputs_0_lst=outputs[0][batch],
+            outputs_1_lst=outputs[1][batch],
+            name_0="baseline_fp16_sr",
+            name_1=f"separate_{read_dtype}_batch_{batch}",
+        )
 
 
 @requires_flashinfer_replayssm_materialization

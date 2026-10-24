@@ -536,11 +536,27 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self.replayssm_state_dtype = (
+            cache_config.replayssm_state_dtype if cache_config is not None else "auto"
+        )
+        self.replayssm_checkpoint_mode = (
+            cache_config.replayssm_checkpoint_mode
+            if cache_config is not None
+            else "shared"
+        )
+        self.replayssm_pending_state = (
+            cache_config.replayssm_pending_state if cache_config is not None else False
+        )
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
             )
         num_states = 5 if self.use_replayssm else 2
+        num_states += len(
+            MambaStateDtypeCalculator.replayssm_read_dtypes(
+                self.replayssm_state_dtype, self.replayssm_checkpoint_mode
+            )
+        )
         self.kv_cache = tuple(torch.tensor([]) for _ in range(num_states))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -629,7 +645,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        ssm_state_dtype = self.get_state_dtype()[1]
+        checkpoint_dtype = self.get_state_dtype()[1]
+        ssm_state_dtype = (
+            torch.float32 if self.replayssm_state_dtype != "auto" else checkpoint_dtype
+        )
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -735,6 +754,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         assert self.cache_config is not None
         use_spec_decode = self.num_spec > 0
+        quantized_replayssm = self.replayssm_state_dtype != "auto"
+        shared_quantized = (
+            quantized_replayssm and self.replayssm_checkpoint_mode == "shared"
+        )
         ring_start = prev_num_accepted = None
 
         attn_metadata: AttentionMetadata | None = None
@@ -841,11 +864,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 assert state_indices_tensor_p is not None
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[state_indices_tensor_p],
-                    0,
-                )
+                if shared_quantized:
+                    from vllm.model_executor.layers.mamba.ops import (
+                        replayssm_quantization,
+                    )
+
+                    initial_states = replayssm_quantization.dequantize_replayssm_state(
+                        ssm_state,
+                        self.kv_cache[5],
+                        state_indices_tensor_p,
+                        has_initial_states_p,
+                    )
+                else:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p],
+                        0,
+                    )
+                    if quantized_replayssm:
+                        initial_states = initial_states.float()
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
@@ -874,9 +911,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
-                final_states_out=None if has_checkpoints else ssm_state,
-                final_state_indices=None if has_checkpoints else state_indices_tensor_p,
+                state_dtype=torch.float32 if quantized_replayssm else ssm_state.dtype,
+                final_states_out=(
+                    None if has_checkpoints or quantized_replayssm else ssm_state
+                ),
+                final_state_indices=(
+                    None
+                    if has_checkpoints or quantized_replayssm
+                    else state_indices_tensor_p
+                ),
             )
 
             if has_checkpoints:
@@ -895,8 +938,23 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state,
                     query_start_loc_p,
                     state_len=self.conv_kernel_size - 1,
+                    store_ssm=not shared_quantized,
                 )
-                ssm_state[state_indices_tensor_p] = final_states
+                if not quantized_replayssm:
+                    ssm_state[state_indices_tensor_p] = final_states
+
+            if quantized_replayssm:
+                self.initialize_replayssm_state(
+                    final_states if has_checkpoints else varlen_states,
+                    state_indices_tensor_p.contiguous(),
+                )
+                if shared_quantized and checkpoint_meta is not None:
+                    # The metadata builder uses NULL_BLOCK_ID for inactive rows.
+                    self.initialize_replayssm_state(
+                        varlen_states,
+                        checkpoint_meta.state_indices.contiguous(),
+                        source_indices=checkpoint_chunk_idx,
+                    )
 
         # Process decode requests
         if has_decode:
@@ -951,7 +1009,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
-                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+                if self.replayssm_checkpoint_mode == "separate":
+                    from vllm.model_executor.layers.mamba.ops.replayssm_cutedsl import (
+                        selective_state_update_replayssm,
+                    )
+
+                    assert replayssm_state_indices_d is not None
+                    assert self.model_config is not None
+                    selective_state_update_replayssm(
+                        self.kv_cache,
+                        hidden_states_d,
+                        dt_d,
+                        self.A,
+                        B_d,
+                        C_d,
+                        self.D,
+                        self.dt_bias,
+                        replayssm_state_indices_d,
+                        preallocated_ssm_out_d,
+                        state_dtype=self.replayssm_state_dtype,
+                        seed=self.model_config.seed,
+                        num_accepted_tokens=num_accepted_tokens,
+                        cu_seqlens=query_start_loc_d,
+                        max_seqlen=1 + self.num_spec,
+                    )
+                elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
                     assert ring_start is not None
                     assert prev_num_accepted is not None
                     assert attn_metadata.replayssm_scratch is not None
@@ -1009,6 +1091,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         cu_seqlens=fi_cu_seqlens,
                         max_seqlen=fi_max_seqlen,
                         enable_pdl=False,
+                        state_scale=self.kv_cache[5] if shared_quantized else None,
                     )
                 else:
                     selective_state_update_replayssm_output_only(
@@ -1077,10 +1160,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
+            if self.replayssm_state_dtype != "auto":
+                dtypes = (
+                    dtypes[0],
+                    MambaStateDtypeCalculator.replayssm_checkpoint_dtype(
+                        self.replayssm_state_dtype, self.replayssm_checkpoint_mode
+                    ),
+                )
             dtypes = (
                 *dtypes,
                 *MambaStateDtypeCalculator.replayssm_ring_dtypes(
                     self.model_config.dtype
+                ),
+                *MambaStateDtypeCalculator.replayssm_read_dtypes(
+                    self.replayssm_state_dtype, self.replayssm_checkpoint_mode
                 ),
             )
         return dtypes
@@ -1112,9 +1205,54 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     logical_window=self.replayssm_buffer_len,
                     backend=self.mamba_config.backend,
                     num_speculative_tokens=self.num_spec,
+                    checkpoint_mode=self.replayssm_checkpoint_mode,
+                    pending_state=self.replayssm_pending_state,
+                ),
+                *MambaStateShapeCalculator.replayssm_read_shapes(
+                    shapes[1],
+                    self.replayssm_state_dtype,
+                    self.replayssm_checkpoint_mode,
+                    n_groups=self.n_groups // tp_world_size,
+                    pending_state=self.replayssm_pending_state,
                 ),
             )
         return shapes
+
+    def initialize_replayssm_state(
+        self,
+        states: torch.Tensor,
+        state_indices: torch.Tensor,
+        source_indices: torch.Tensor | None = None,
+    ) -> None:
+        """Initialize persistent checkpoints from floating-point prefill results."""
+        if self.replayssm_state_dtype == "auto":
+            return
+        if self.replayssm_checkpoint_mode == "shared":
+            from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+                quantize_replayssm_state,
+            )
+
+            quantize_replayssm_state(
+                states,
+                self.kv_cache[1],
+                self.kv_cache[5],
+                state_indices,
+                source_indices,
+            )
+        else:
+            from vllm.model_executor.layers.mamba.ops.replayssm_cutedsl import (
+                initialize_replayssm_state,
+            )
+
+            assert source_indices is None
+            assert self.model_config is not None
+            initialize_replayssm_state(
+                self.kv_cache,
+                states,
+                state_indices,
+                state_dtype=self.replayssm_state_dtype,
+                seed=self.model_config.seed,
+            )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
