@@ -972,6 +972,10 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "Cannot resume with sleeping memory; wake all tags first"
+            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -980,6 +984,9 @@ class EngineCore:
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
+
+        Callers must serialize sleep, wake, pause, and resume operations; see
+        the control request ordering contract in docs/features/sleep_mode.md.
 
         Args:
             level: Sleep level.
@@ -991,7 +998,7 @@ class EngineCore:
                 documentation of pause_scheduler method.
 
         """
-        # Pause scheduler before sleeping.
+        # Callers serialize control operations, including the drain interval.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
         if level < 1:
@@ -999,18 +1006,20 @@ class EngineCore:
 
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
+
         if pause_future is None:
-            model_executor.sleep(level)
-            return None
+            return model_executor.sleep(level)
 
         future = Future[Any]()
 
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                result = model_executor.sleep(level)
             except Exception as e:
                 future.set_exception(e)
+            else:
+                future.set_result(result)
 
         logger.info("Waiting for in-flight requests to complete before sleeping...")
         pause_future.add_done_callback(pause_complete)
@@ -2221,8 +2230,8 @@ class EngineCoreProc(EngineCore):
         return future
 
     def resume_scheduler(self) -> None:
-        self.reject_new_requests = False
         super().resume_scheduler()
+        self.reject_new_requests = False
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
