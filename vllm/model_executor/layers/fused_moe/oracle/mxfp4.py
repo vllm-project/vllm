@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -519,6 +520,20 @@ def _resolve_activation_key(
     )
 
 
+def _humming_input_schema(model_activation_key: QuantKey | None):
+    """Humming input schema for the checkpoint activation combined with the
+    user override, or None to keep Humming's default (BF16 or the
+    VLLM_HUMMING_INPUT_QUANT_CONFIG env override, which wins)."""
+    activation_key = _resolve_activation_key(model_activation_key)
+    if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+        return None
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        quant_key_to_input_schema,
+    )
+
+    return quant_key_to_input_schema(activation_key)
+
+
 def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
     return f"Using '{backend.value}' Mxfp4 MoE backend."
 
@@ -526,9 +541,14 @@ def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
 def _warn_on_bf16_fallback(
     backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
 ) -> None:
+    # Humming quantizes activations itself to the user's override.
+    applies_request = backend == Mxfp4MoeBackend.EMULATION or (
+        backend == Mxfp4MoeBackend.HUMMING
+        and requested_activation_key == _user_moe_activation_override()
+    )
     if (
         requested_activation_key is not None
-        and backend != Mxfp4MoeBackend.EMULATION
+        and not applies_request
         and _backend_activation_key(backend) is None
     ):
         logger.warning_once(
@@ -964,7 +984,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
         convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "gpt_oss_mxfp4"}
+            layer,
+            quant_config={"quant_method": "gpt_oss_mxfp4"},
+            input_schema=_humming_input_schema(None),
+            allow_input_schema_fallback=False,
         )
         return (
             layer.w13_weight,
@@ -1627,19 +1650,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             convert_to_humming_moe_kernel_format,
         )
 
-        # The env override wins; otherwise use the checkpoint's activation
-        # scheme instead of Humming's default BF16 activations.
-        input_schema = None
-        if activation_key is not None and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
-            from vllm.model_executor.layers.quantization.utils.humming import (
-                quant_key_to_input_schema,
-            )
-
-            input_schema = quant_key_to_input_schema(activation_key)
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
-            input_schema=input_schema,
+            input_schema=_humming_input_schema(activation_key),
             allow_input_schema_fallback=False,
         )
         return (
@@ -2240,6 +2254,8 @@ _MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
     (kMxfp4Static, kFp8Dynamic128Sym),
     (kMxfp4Static, kFp8StaticTensorSym),
     (kMxfp4Static, None),
+    # gfx942's load-time int4 requant of Kimi-K3's MXFP4 experts
+    (kInt4Static32, None),
 ]
 
 
