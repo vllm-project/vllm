@@ -168,7 +168,7 @@ Remember to check whether the `reasoning` exists in the response before accessin
 
 ## Tool Calling
 
-The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning`.
+The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning`. For Qwen3, a `<tool_call>` marker can also end an open reasoning block and start a tool call, even when the model does not emit `</think>` first.
 
 ??? code
 
