@@ -1030,6 +1030,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.sinks = sinks
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        # Shape-level part of AITER's fmha_v3 varlen ASM eligibility; see
+        # _aiter_varlen_drops_sinks for the per-batch part.
+        self._sinks_may_hit_aiter_asm = (
+            sinks is not None
+            and (on_gfx942() or on_gfx950())
+            and head_size == 128
+            and alibi_slopes is None
+        )
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1055,6 +1065,90 @@ class AiterFlashAttentionImpl(AttentionImpl):
         return (
             layer._k_scale.expand(descale_shape),
             layer._v_scale.expand(descale_shape),
+        )
+
+    def _aiter_varlen_drops_sinks(
+        self, attn_metadata: AiterFlashAttentionMetadata, query: torch.Tensor
+    ) -> bool:
+        """Whether a flash_attn_varlen_func call with sinks in this batch would be
+        dispatched to AITER's fmha_v3 ASM kernels, which take no sink argument.
+
+        AITER picks them for bf16, head size 128, no ALiBi, on gfx942/gfx950,
+        when the sliding window is inactive. It treats a window that covers the
+        whole key range (window >= max_seqlen_k) as no window.
+        """
+        if not self._sinks_may_hit_aiter_asm or query.dtype != torch.bfloat16:
+            return False
+        window_left = self.sliding_window[0]
+
+        def window_inactive(max_seqlen_k: int) -> bool:
+            return window_left == -1 or window_left >= max_seqlen_k
+
+        if attn_metadata.num_prefills > 0:
+            assert attn_metadata.prefill_metadata is not None
+            if window_inactive(attn_metadata.prefill_metadata.max_seq_len):
+                return True
+        if attn_metadata.num_extends > 0:
+            if window_left == -1:
+                # The new-token attention in extend_forward has no window.
+                return True
+            assert attn_metadata.extend_metadata is not None
+            swa = attn_metadata.extend_metadata.chunk_context_metadata.swa_metadata
+            assert swa is not None
+            if window_inactive(swa.swa_max_seqlens):
+                return True
+        return False
+
+    def _forward_unified_with_sinks(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+    ) -> None:
+        """Attention over the paged KV cache for all requests in the batch."""
+        assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
+            "Shuffle KV cache layout is not supported with attention sinks."
+        )
+        from aiter.ops.triton.unified_attention import unified_attention
+
+        num_reqs = (
+            attn_metadata.num_decodes
+            + attn_metadata.num_extends
+            + attn_metadata.num_prefills
+        )
+        max_query_len = max(
+            md.max_query_len
+            for md in (
+                attn_metadata.decode_metadata,
+                attn_metadata.extend_metadata,
+                attn_metadata.prefill_metadata,
+            )
+            if md is not None
+        )
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        k_descale, v_descale = self._get_kv_cache_descales(layer, num_reqs)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=attn_metadata.query_start_loc[: num_reqs + 1],
+            max_seqlen_q=max_query_len,
+            seqused_k=attn_metadata.seq_lens[:num_reqs],
+            max_seqlen_k=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=attn_metadata.block_table[:num_reqs],
+            softcap=self.logits_soft_cap,
+            q_descale=None,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            sinks=self.sinks,
         )
 
     def extend_for_sliding_window(
@@ -1214,7 +1308,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
-                sink_ptr=self.sinks,
+                # The sink belongs in the softmax denominator once. The
+                # new-token attention above already includes it in its LSE,
+                # and merge_attn_states sums the denominators of all partials.
+                sink_ptr=None,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1317,6 +1414,23 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
+
+        if (
+            self.sinks is not None
+            and attn_metadata.causal
+            and self._aiter_varlen_drops_sinks(attn_metadata, query)
+        ):
+            # AITER's flash_attn_varlen_func silently drops sink_ptr when it
+            # dispatches to the gfx942/gfx950 fmha_v3 ASM kernels, so run the
+            # batch through unified_attention, which applies sinks.
+            # TODO: remove this fallback and _aiter_varlen_drops_sinks once
+            # https://github.com/ROCm/aiter/pull/6906 (route sinks away from
+            # the ASM kernels) is merged and required by vLLM.
+            self._forward_unified_with_sinks(
+                layer, query, key_cache, value_cache, output, attn_metadata
+            )
+            return output
+
         if (self.kv_sharing_target_layer_name is not None or key is None) and (
             num_prefills > 0 or num_extends > 0
         ):
