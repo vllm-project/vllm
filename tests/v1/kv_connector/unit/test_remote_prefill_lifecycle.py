@@ -36,6 +36,26 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
+def test_max_async_kv_loads_per_step():
+    vllm_config = create_vllm_config()
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = 2
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    for i in range(5):
+        scheduler.add_request(
+            create_request(
+                request_id=i,
+                block_size=block_size,
+                num_tokens=block_size * 3,
+                do_remote_prefill=True,
+            )
+        )
+    # Two new loads start per step; the rest stay in the waiting queue.
+    for num_loading in (2, 4, 5):
+        scheduler.schedule()
+        assert _kv_fetch_stages(scheduler)[1] == num_loading
+
+
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
     vllm_config = create_vllm_config()
