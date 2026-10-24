@@ -236,9 +236,10 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
+        output = state.get("output_tok_ids", [])
+        scan_offset = state.get("scan_offset", 0)
+        output_slice = output[scan_offset:]
         if state["start_thinking"] == -1:
-            scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
             start_thinking = self._find_last_sequence_index(
                 output_slice, self.think_start_token_ids
             )
@@ -246,14 +247,17 @@ class ThinkingBudgetStateHolder:
                 start_thinking += scan_offset
             state["start_thinking"] = start_thinking
         if state["end_thinking"] == -1:
-            scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
             end_thinking = self._find_last_sequence_index(
                 output_slice, self.think_end_token_ids
             )
             if end_thinking >= 0:
                 end_thinking += scan_offset
             state["end_thinking"] = end_thinking
+
+        max_marker_len = max(
+            len(self.think_start_token_ids), len(self.think_end_token_ids)
+        )
+        state["scan_offset"] = max(scan_offset, len(output) - max_marker_len + 1)
 
         if (
             not state.get("in_end", False)
