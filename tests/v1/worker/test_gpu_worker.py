@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import os
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -330,6 +333,80 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
     with patch("vllm.__version__", "0.0.0+plan-test"):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
+
+
+def _plan_dir():
+    return os.path.join(os.environ["VLLM_CACHE_ROOT"], "startup_plan")
+
+
+def _run_savers(payloads):
+    """Save a plan for each payload on its own thread (same PID, same
+    fingerprint), holding os.replace until every staging file is written and
+    closed: the ordering that breaks a shared staging name. Re-raises any
+    worker exception."""
+    barrier = threading.Barrier(len(payloads), timeout=10)
+    real_replace = os.replace
+    errors: list[BaseException] = []
+
+    def replace(src, dst):
+        barrier.wait()
+        return real_replace(src, dst)
+
+    def save(kv):
+        try:
+            maybe_save_startup_plan(_plan_worker(), kv)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=save, args=(kv,)) for kv in payloads]
+    with patch.object(startup_plan.os, "replace", replace):
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        # Checked before os.replace is restored, so a stuck saver never runs
+        # against the real function after the test has moved on.
+        assert not any(t.is_alive() for t in threads), "a saver did not finish"
+    if errors:
+        raise errors[0]
+
+
+def test_startup_plan_concurrent_save(plan_env, caplog_vllm):
+    """Two workers with the same fingerprint saving at once (containers that
+    share VLLM_CACHE_ROOT on a network volume) both publish cleanly: no failed
+    save, one complete plan on disk, no staging files left behind."""
+    payloads = (50 * GiB_bytes, 51 * GiB_bytes)
+    _run_savers(payloads)
+    assert not [r for r in caplog_vllm.records if "Failed to save" in r.message]
+
+    (plan_file,) = os.listdir(_plan_dir())  # the plan and nothing else
+    assert plan_file.endswith(".json")
+    with open(os.path.join(_plan_dir(), plan_file)) as f:
+        plan = json.load(f)
+    assert plan["kv_cache_memory_bytes"] in payloads  # whichever replaced last
+
+    applied = _plan_worker()
+    maybe_apply_startup_plan(applied)
+    assert applied.cache_config.kv_cache_memory_bytes == plan["kv_cache_memory_bytes"]
+
+
+def test_startup_plan_save_failure_keeps_old_plan(plan_env, caplog_vllm):
+    """A failed publish leaves the previous plan intact, logs, raises nothing,
+    and leaves no staging file behind."""
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
+
+    def replace_fails(src, dst):
+        raise OSError("injected replace failure")
+
+    with patch.object(startup_plan.os, "replace", replace_fails):
+        maybe_save_startup_plan(_plan_worker(), 51 * GiB_bytes)
+    assert [r for r in caplog_vllm.records if "Failed to save" in r.message]
+    (plan_file,) = os.listdir(_plan_dir())  # the old plan and nothing else
+    assert plan_file.endswith(".json")
+
+    applied = _plan_worker()
+    maybe_apply_startup_plan(applied)
+    assert applied.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
 
 
 def test_startup_plan_apply_gate(plan_env):
