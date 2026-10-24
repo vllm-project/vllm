@@ -9,12 +9,15 @@ longer needs an empty-span masking pass).
 """
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
+import vllm.model_executor.layers.attention.mla_attention as mla_attention
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBaseImpl,
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
@@ -278,6 +281,66 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
     for request, length in enumerate(context_lens):
         padded_local = -(-length // virtual_block_size) * interleave
         assert local_cursor[request] == padded_local
+
+
+@pytest.mark.cpu_test
+def test_dcp_context_projects_mxfp8_latent_from_bf16(monkeypatch):
+    """MXFP8 weights store fp8 but require model-dtype activations."""
+    fp8 = mla_attention.current_platform.fp8_dtype()
+    kv_b_proj = Mock(
+        weight=torch.empty((2, 2), dtype=fp8),
+        params_dtype=torch.bfloat16,
+        return_value=(torch.zeros((2, 2), dtype=torch.bfloat16), None),
+    )
+    monkeypatch.setattr(mla_attention, "np_to_pinned_tensor", torch.from_numpy)
+    chunked_context = build_chunked_context([2], [1], 2, block_size=1, dcp_world_size=2)
+    assert chunked_context is not None
+    chunked_context.workspace = torch.ones((3, 3), dtype=fp8)
+    chunked_context.dcp_manager = SimpleNamespace(
+        kv_gather=lambda dst, src: dst.copy_(src.expand_as(dst))
+    )
+
+    class _Impl(SimpleNamespace):
+        _context_parallel_compute_prefill_context = (
+            MLACommonBaseImpl._context_parallel_compute_prefill_context
+        )
+        _concat_k_nope_k_pe = MLACommonBaseImpl._concat_k_nope_k_pe
+        _use_flashinfer_concat_mla_k = False
+
+    impl = _Impl(
+        kv_b_proj=kv_b_proj,
+        kv_cache_dtype="fp8",
+        kv_lora_rank=2,
+        qk_rope_head_dim=1,
+        num_heads=1,
+        qk_nope_head_dim=1,
+        v_head_dim=1,
+    )
+    prefill = SimpleNamespace(
+        q_data_type=fp8,
+        prefill_backend=SimpleNamespace(
+            run_prefill_context_chunk=Mock(
+                return_value=(torch.zeros((1, 1, 1)), torch.zeros((1, 1)))
+            )
+        ),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        chunked_context=chunked_context,
+    )
+    monkeypatch.setattr(
+        mla_attention.ops, "gather_and_maybe_dequant_cache", lambda **_: None
+    )
+    impl._context_parallel_compute_prefill_context(
+        torch.zeros((1, 1, 2), dtype=fp8),
+        torch.empty(0, dtype=fp8),
+        SimpleNamespace(prefill=prefill),
+        torch.ones(1),
+        dcp_world_size=2,
+    )
+
+    kv_b_proj.assert_called_once()
+    torch.testing.assert_close(
+        kv_b_proj.call_args.args[0], torch.ones((2, 1, 2), dtype=torch.bfloat16)
+    )
 
 
 def test_dcp_reorg_uses_each_chunks_local_starts():
