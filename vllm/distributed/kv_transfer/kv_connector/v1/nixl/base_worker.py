@@ -3498,9 +3498,51 @@ class NixlBaseConnectorWorker:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
 
+    def _is_remote_agent_registered(self, agent_name: str) -> bool:
+        """Whether *agent_name* still belongs to a registered remote engine."""
+        with self._handshake_lock:
+            return any(
+                agent_name in agents.values() for agents in self._remote_agents.values()
+            )
+
+    def _drop_pending_recv_notifs(
+        self, agent_names: set[str], engine_id: EngineId
+    ) -> None:
+        """Forget deferred notifications addressed to removed remote agents.
+
+        ``_pending_recv_notifs`` is keyed by request, so a per-engine cleanup
+        cannot pop it directly; filter the entries by agent name instead.
+        """
+        dropped = 0
+        for req_id, entries in list(self._pending_recv_notifs.items()):
+            kept = [entry for entry in entries if entry[0] not in agent_names]
+            dropped += len(entries) - len(kept)
+            if kept:
+                self._pending_recv_notifs[req_id] = kept
+            else:
+                del self._pending_recv_notifs[req_id]
+        if dropped:
+            logger.debug(
+                "Dropped %d deferred notification(s) addressed to removed "
+                "remote engine %s.",
+                dropped,
+                engine_id,
+            )
+
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         """Send notifications deferred by split DRAM/VRAM reads."""
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
+            if not self._is_remote_agent_registered(agent_name):
+                # The remote engine was evicted or replaced after the read was
+                # issued. Its agent is gone from NIXL, so dialing it would at
+                # best fail and at worst block in the transport's connect path.
+                logger.debug(
+                    "Skipping deferred notification for request %s: remote "
+                    "agent %s is no longer registered.",
+                    req_id,
+                    agent_name,
+                )
+                continue
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
@@ -4037,6 +4079,7 @@ class NixlBaseConnectorWorker:
                     del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
+        self._drop_pending_recv_notifs(set(agents.values()), engine_id)
 
         self._failed_remote_engines.discard(engine_id)
         self._invalid_remote_engines.discard(engine_id)
