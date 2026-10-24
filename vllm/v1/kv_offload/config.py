@@ -24,6 +24,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Model configuration identity frozen before model construction.
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True)

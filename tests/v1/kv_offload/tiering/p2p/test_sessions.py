@@ -15,20 +15,36 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
+from transformers import LlamaConfig
 
 import vllm.v1.kv_offload.tiering.p2p.session.server as server_mod
+from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm.config import ModelConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
+from vllm.v1.core.kv_cache_utils import get_kv_cache_model_config_hash
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
 )
+from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -60,6 +76,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _MAX_CONSECUTIVE_DISPATCH_ERRORS,
     _PEER_FAULT_DRAIN_S,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,6 +86,66 @@ from vllm.v1.kv_offload.tiering.p2p.session.session import (
 # Shared PYTHONHASHSEED used by the session under test and the fake peer's
 # ConnectMsg so the handshake succeeds unless a test overrides one side.
 _DEFAULT_HASH_SEED = "0"
+
+
+@pytest.fixture
+def model_fingerprint(tmp_path):
+    model_path = tmp_path / "model"
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=128,
+        max_position_embeddings=512,
+    ).save_pretrained(model_path)
+
+    def fingerprint(hf_overrides=None, max_model_len=128):
+        config = create_vllm_config(
+            model=str(model_path),
+            max_model_len=max_model_len,
+            hf_overrides=hf_overrides,
+            kv_connector="OffloadingConnector",
+            kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+        )
+        config = replace(
+            config,
+            model_config=ModelConfig(
+                model=str(model_path),
+                dtype="float16",
+                max_model_len=max_model_len,
+                hf_overrides=hf_overrides or {},
+            ),
+        )
+        kv_config = KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.self_attn", "model.layers.1.self_attn"],
+                    FullAttentionSpec(
+                        block_size=16,
+                        num_kv_heads=2,
+                        head_size=16,
+                        dtype=torch.float16,
+                    ),
+                )
+            ],
+            model_config_hash=get_kv_cache_model_config_hash(config.model_config),
+        )
+        spec = TieringOffloadingSpec(build_offloading_config(config, kv_config))
+        fields = FileMapper.from_offloading_spec("/cache", spec).get_run_config()
+        view = memoryview(np.zeros((16, 4096), dtype=np.uint8))
+        with patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", None):
+            transport = NixlTransport("fingerprint", view, config_fields=fields)
+        try:
+            return transport.config_fingerprint
+        finally:
+            transport.close()
+
+    return fingerprint
 
 
 class FakeDataTransport:
@@ -533,23 +610,42 @@ class TestConnectHandshake:
         assert "peer:8000" not in transport._remote_peers
         assert not session.alive
 
-    def test_config_fingerprint_mismatch_marks_dead(self):
-        """Mismatched config fingerprint rejects peer."""
-        transport = FakeDataTransport(config_fingerprint="abc123")
+    @pytest.mark.parametrize(
+        ("hf_overrides", "max_model_len"),
+        [
+            ({"rope_parameters": {"rope_type": "default", "rope_theta": 20000}}, 128),
+            ({"output_hidden_states": True}, 128),
+            ({}, 256),
+        ],
+        ids=["rope", "output-only-hf-field", "context-limit"],
+    )
+    def test_model_config_fingerprint_mismatch_rejects_peer(
+        self, model_fingerprint, hf_overrides, max_model_len
+    ):
+        """Real model configuration changes must prevent KV sharing."""
+        local_fingerprint = model_fingerprint()
+        peer_fingerprint = model_fingerprint(hf_overrides, max_model_len)
+        assert local_fingerprint != peer_fingerprint
+        transport = FakeDataTransport(config_fingerprint=local_fingerprint)
         session, conn, _ = _make_session(transport=transport)
-        conn.enqueue(_peer_connect_msg(fingerprint="different"))
+        conn.enqueue(_peer_connect_msg(fingerprint=peer_fingerprint))
         session.poll()
         assert "peer:8000" not in transport._remote_peers
         assert not session.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
 
-    def test_config_fingerprint_match_succeeds(self):
-        """Matching fingerprints register the peer."""
-        transport = FakeDataTransport(config_fingerprint="same_fp")
+    def test_matching_model_config_fingerprints_register_peer(self, model_fingerprint):
+        """Separately constructed matching configs can share KV blocks."""
+        local_fingerprint = model_fingerprint()
+        peer_fingerprint = model_fingerprint()
+        transport = FakeDataTransport(config_fingerprint=local_fingerprint)
         session, conn, _ = _make_session(transport=transport)
-        conn.enqueue(_peer_connect_msg(fingerprint="same_fp"))
+        assert conn._sent[0][ConnectMsg.CONFIG_FINGERPRINT] == local_fingerprint
+        conn.enqueue(_peer_connect_msg(fingerprint=peer_fingerprint))
         session.poll()
         assert "peer:8000" in transport._remote_peers
         assert session.alive
+        assert any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
 
     def test_missing_fingerprint_allowed(self):
         """Missing fingerprint on either side is allowed."""
