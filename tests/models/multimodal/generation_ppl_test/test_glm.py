@@ -8,7 +8,7 @@ from tests.models.utils import GenerateModelInfo
 from .ppl_utils import vqa_ppl_test
 
 MODELS = [
-    (GenerateModelInfo("zai-org/GLM-OCR", hf_ppl=13.885052680969238), 28),
+    (GenerateModelInfo("zai-org/GLM-OCR", hf_ppl=5.783079624176025), 28),
 ]
 
 
@@ -22,6 +22,7 @@ def _pixel_size(factor: int):
     }
 
 
+@pytest.mark.usefixtures("aiter_config")
 @pytest.mark.parametrize("model_info,factor", MODELS)
 @pytest.mark.parametrize("mm_device_do_normalize", [True, False])
 def test_ppl(
