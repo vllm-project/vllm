@@ -15,7 +15,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.system_utils import (
+    claim_triton_cache_dir,
+    update_environment_variables,
+)
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
@@ -99,6 +102,9 @@ class WorkerBase:
         vllm.ir.set_default_torch_wrap(
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
+
+        # Must precede the model load, which is what first compiles Triton.
+        claim_triton_cache_dir()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
