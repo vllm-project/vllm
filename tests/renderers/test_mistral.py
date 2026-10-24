@@ -10,7 +10,8 @@ from unittest.mock import Mock
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.renderers import ChatParams
+from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -142,3 +143,29 @@ def test_apply_mistral_chat_template_thinking_chunk():
     )
 
     assert string_tokens == expected_tokens
+
+
+@pytest.mark.parametrize("truncation_side", ["left", "right"])
+def test_explicit_truncation_side_keeps_bos(truncation_side):
+    """Truncating from an explicit side must keep BOS, as the tokenizer's own
+    truncation does, although `MistralTokenizer` has no `special_tokens_mask`."""
+    renderer = MistralRenderer(
+        MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+        tokenizer=MistralTokenizer.from_pretrained(MODEL_NAME),
+    )
+    text = "The quick brown fox jumps over the lazy dog."
+
+    prompts = renderer.render_prompts([parse_model_prompt(renderer.model_config, text)])
+    (result,) = renderer.tokenize_prompts(
+        prompts,
+        TokenizeParams(
+            max_total_tokens=100,
+            truncate_prompt_tokens=4,
+            truncation_side=truncation_side,
+        ),
+    )
+
+    expected = MistralTokenizer.from_pretrained(
+        MODEL_NAME, truncation_side=truncation_side
+    )(text, truncation=True, max_length=4)
+    assert result["prompt_token_ids"] == expected["input_ids"]

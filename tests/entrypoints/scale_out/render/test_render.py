@@ -917,9 +917,11 @@ async def test_completion_render_truncated_token_offsets(client):
     assert len(offsets) == len(token_ids)
 
     # Equal length is not enough: truncating from the left keeps the *last*
-    # tokens, so the surviving offsets must cover the end of the prompt.
+    # tokens, so the surviving offsets must cover the end of the prompt. The
+    # BOS token is kept as well, and it spans no characters of the prompt.
     assert offsets[-1][1] == len(prompt)
-    assert offsets[0][0] > 0
+    assert offsets[0] == [0, 0]
+    assert offsets[1][0] > 0
 
 
 @pytest.mark.asyncio
