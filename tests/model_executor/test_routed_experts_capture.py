@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import types
+import weakref
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -166,7 +170,7 @@ def test_public_binding_binds_target_model_router(monkeypatch):
     calls = []
     capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
 
-    bind_routed_experts_capturer(
+    unbind = bind_routed_experts_capturer(
         types.SimpleNamespace(modules=lambda: [target_module]), capturer
     )
 
@@ -174,6 +178,8 @@ def test_public_binding_binds_target_model_router(monkeypatch):
     topk_ids = torch.tensor([[5, 6]])
     target_module.router.capture_fn(topk_ids)
     assert calls == [(7, topk_ids)]
+    unbind()
+    assert target_module.router.capture_fn is None
 
 
 def test_public_binding_supports_direct_capture_source():
@@ -193,6 +199,170 @@ def test_public_binding_supports_direct_capture_source():
     topk_ids = torch.tensor([[1, 2]])
     source.capture_fn(topk_ids)
     assert calls == [(3, topk_ids)]
+
+
+class _LifecycleCaptureSource(torch.nn.Module):
+    def __init__(self, layer_id: int = 0):
+        super().__init__()
+        self.layer_id = layer_id
+        self.capture_fn = None
+
+    def forward(self, topk_ids):
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+
+
+def _capture_context(num_tokens: int):
+    return patch(
+        f"{_REC_MODULE}.get_forward_context",
+        return_value=_forward_context(
+            batch_descriptor=BatchDescriptor(num_tokens=num_tokens)
+        ),
+    )
+
+
+def _bind_sources(capturer: RoutedExpertsCapturer, *sources: torch.nn.Module):
+    return bind_routed_experts_capturer(torch.nn.ModuleList(sources), capturer)
+
+
+def test_unbind_releases_capture_after_forward_without_attention():
+    source = _LifecycleCaptureSource()
+    capturer = _capturer_with_buffer()
+    buffer_ref = weakref.ref(capturer.device_buffer)
+    unbind = bind_routed_experts_capturer(source, capturer)
+    topk_ids = torch.tensor([[1, 2], [2, 3]], dtype=torch.int32)
+    with _capture_context(num_tokens=2):
+        source(topk_ids)
+    torch.testing.assert_close(capturer.device_buffer[:2, 0], topk_ids)
+
+    unbind()
+    unbind()
+    assert source.capture_fn is None
+    del capturer
+    gc.collect()
+    assert buffer_ref() is None
+
+
+def test_unbind_preserves_replacement_callback():
+    source = _LifecycleCaptureSource()
+    capturer = _capturer_with_buffer()
+    unbind = bind_routed_experts_capturer(source, capturer)
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    unbind()
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+    torch.testing.assert_close(captured[0], torch.tensor([[1, 2]]))
+
+
+def test_unbind_restores_preexisting_callback():
+    source = _LifecycleCaptureSource()
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    unbind = bind_routed_experts_capturer(source, _capturer_with_buffer())
+    unbind()
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+
+
+def _make_rejecting_source(mode: str):
+    class RejectSource(torch.nn.Module):
+        layer_id = 1
+
+        @property
+        def capture_fn(self):
+            return None
+
+        @capture_fn.setter
+        def capture_fn(self, value):
+            raise ValueError("capture binding rejected")
+
+    class MutateThenReject(torch.nn.Module):
+        layer_id = 1
+
+        def __init__(self):
+            super().__init__()
+            self._capture_fn = None
+
+        @property
+        def capture_fn(self):
+            return self._capture_fn
+
+        @capture_fn.setter
+        def capture_fn(self, value):
+            self._capture_fn = value
+            raise ValueError("capture binding rejected")
+
+    class RestoreFails(torch.nn.Module):
+        layer_id = 1
+
+        def __init__(self):
+            super().__init__()
+            self._capture_fn = None
+
+        @property
+        def capture_fn(self):
+            return self._capture_fn
+
+        @capture_fn.setter
+        def capture_fn(self, value):
+            if value is None:
+                raise RuntimeError("restore failed")
+            self._capture_fn = value
+            raise ValueError("capture binding rejected")
+
+    return {
+        "reject": RejectSource,
+        "mutate": MutateThenReject,
+        "restore_fails": RestoreFails,
+    }[mode]()
+
+
+@pytest.mark.parametrize("mode", ["reject", "mutate", "restore_fails"])
+def test_binding_rollback_preserves_original_error(mode):
+    source = _LifecycleCaptureSource()
+    captured: list[torch.Tensor] = []
+    source.capture_fn = captured.append
+    rejected = _make_rejecting_source(mode)
+
+    with pytest.raises(ValueError, match="capture binding rejected"):
+        _bind_sources(_capturer_with_buffer(), source, rejected)
+
+    source(torch.tensor([[1, 2]]))
+    assert len(captured) == 1
+    if mode == "mutate":
+        assert rejected._capture_fn is None
+    elif mode == "restore_fails":
+        # The restore setter raised before clearing the installed callback;
+        # the original binding error must still be the one observed.
+        assert rejected._capture_fn is not None
+
+
+def test_multilayer_binding_captures_each_layer():
+    sources = [_LifecycleCaptureSource(layer_id=i) for i in range(3)]
+    capturer = _capturer_with_buffer()
+    unbind = _bind_sources(capturer, *sources)
+    ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        for source in sources:
+            source(ids)
+    for layer_id in range(3):
+        torch.testing.assert_close(capturer.device_buffer[0, layer_id], ids[0])
+    unbind()
+
+
+def test_rebind_after_unbind_uses_the_new_capturer():
+    source = _LifecycleCaptureSource()
+    capturer_a = _capturer_with_buffer()
+    bind_routed_experts_capturer(source, capturer_a)()
+    capturer_b = _capturer_with_buffer()
+    unbind_b = bind_routed_experts_capturer(source, capturer_b)
+    ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        source(ids)
+    torch.testing.assert_close(capturer_b.device_buffer[0, 0], ids[0])
+    assert (capturer_a.device_buffer == -1).all()
+    unbind_b()
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -246,27 +416,32 @@ class _MonolithicMoE:
 
 def _bind_monolithic(
     monkeypatch, experts: _ToyMonolithicExperts, capture
-) -> _MonolithicMoE:
+) -> tuple[_MonolithicMoE, Callable[[], None]]:
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
     layer = _MonolithicMoE(experts)
-    bind_routed_experts_capturer(
+    unbind = bind_routed_experts_capturer(
         SimpleNamespace(modules=lambda: [layer]), SimpleNamespace(capture=capture)
     )
-    return layer
+    return layer, unbind
 
 
 def test_public_binding_gives_monolithic_layers_a_sink(monkeypatch):
     """A monolithic kernel routes internally, so binding gives the layer, which
     outlives kernel rebuilds, a sink that captures under its layer id."""
     calls = []
-    layer = _bind_monolithic(
+    layer, unbind = _bind_monolithic(
         monkeypatch, _ToyMonolithicExperts(), lambda *args: calls.append(args)
     )
     ids = torch.tensor([[1, 2]])
     layer.routed_experts.routing_sink.capture_fn(ids)
     assert calls == [(_MonolithicMoE.layer_id, ids)]
+    buffer_ref = weakref.ref(layer.routed_experts.routing_sink.buffer)
+    unbind()
+    unbind()
+    assert layer.routed_experts.routing_sink is None
+    assert buffer_ref() is None
 
 
 def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
@@ -650,108 +825,252 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def test_get_aux_output_connector_passes_config(monkeypatch):
+def _connector_config(*, max_num_batched_tokens=32, max_bytes=None):
+    return SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=8, max_num_batched_tokens=max_num_batched_tokens
+        ),
+        max_concurrent_batches=2,
+    )
+
+
+def _kv_cache_config(*, num_blocks=10):
+    return SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
+    )
+
+
+def _fake_capturer(capacity: int = 32) -> Any:
+    return SimpleNamespace(
+        shape_per_token=(2,),
+        output_dtype_name="int32",
+        device_buffer=torch.empty(capacity, 2, dtype=torch.int32),
+        snapshot_routing_data=Mock(),
+    )
+
+
+def _install_fake_capturer(
+    monkeypatch, *, capacity: int = 32, bind_error=None
+) -> tuple[Any, list[tuple[str, object]]]:
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    connector = Mock()
-    constructor = Mock(return_value=connector)
-    monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
-    config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=32)
-    )
-    model = Mock()
-    kv_cache_config = Mock()
+    events: list[tuple[str, object]] = []
+    capturer = _fake_capturer(capacity)
 
-    result = aux_output_worker.get_aux_output_connector(model, config, kv_cache_config)
+    def make_capturer(*args, **kwargs):
+        events.append(("allocate", None))
+        return capturer
 
-    constructor.assert_called_once_with(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=config,
-    )
-    assert result is connector
+    def bind(model, candidate):
+        events.append(("bind", candidate))
+        if bind_error is not None:
+            raise bind_error
+        return lambda: events.append(("unbind", None))
 
-
-def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    capturer = Mock()
-    constructor = Mock(return_value=capturer)
-    bind = Mock()
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", make_capturer)
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    return capturer, events
+
+
+def _connector_with_capturer(monkeypatch, *, capacity: int = 32):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    capturer, events = _install_fake_capturer(monkeypatch, capacity=capacity)
+    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
+    connector.initialize_routed_experts_capturer(object())
+    return connector, capturer, events
+
+
+def _install_storage(
+    monkeypatch,
+    *,
+    is_output_rank: bool = True,
+    buffer_error=None,
+    store=None,
+    on_store_close=None,
+):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    store = store if store is not None else Mock()
+    if on_store_close is not None:
+        store.close.side_effect = on_store_close
+    store_constructor = Mock()
+    background_store_constructor = Mock(side_effect=lambda inner, **_: store)
     monkeypatch.setattr(
         aux_output_worker,
         "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+        lambda: SimpleNamespace(
+            is_first_rank=is_output_rank, world_size=1 if is_output_rank else 2
+        ),
     )
-
-    config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
-        kv_transfer_config=None,
-        max_concurrent_batches=2,
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
-    )
-    model = Mock()
-    connector = aux_output_worker.AuxOutputWorkerConnector(
-        vllm_config=config,
-        model=model,
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
-    )
-
-    constructor.assert_called_once_with(
-        max_num_batched_tokens=32,
-        vllm_config=config,
-    )
-    bind.assert_called_once_with(model, capturer)
-    connector.begin_step(Mock())
-    assert connector.prepare_output(Mock()) is None
-    capturer.snapshot_routing_data.assert_not_called()
-
-
-def test_aux_output_worker_connector_default_capacity(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
-    store_constructor = Mock()
-    background_store_constructor = Mock(side_effect=lambda store, **_: store)
-    capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
-    monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
-        aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
-    )
-    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())
-    monkeypatch.setattr(
-        aux_output_worker,
-        "resolve_kv_cache_block_sizes",
-        lambda *_: (32, 16),
+        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
     )
     monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    if buffer_error is None:
+        monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    else:
+        monkeypatch.setattr(
+            aux_output_worker,
+            "RoutedExpertsBuffer",
+            Mock(side_effect=buffer_error),
+        )
+    return store, store_constructor, background_store_constructor
 
-    config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
-        kv_transfer_config=None,
-        cache_config=SimpleNamespace(enable_prefix_caching=True),
-        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
-        max_concurrent_batches=2,
-    )
-    kwargs = dict(
-        vllm_config=config,
-        model=Mock(),
-        kv_cache_config=SimpleNamespace(
-            num_blocks=10,
-            kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-        ),
-    )
 
-    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
+def test_get_aux_output_connector_creates_early_connector(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    connector = Mock()
+    constructor = Mock(return_value=connector)
+    monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
+    config = SimpleNamespace()
+
+    assert aux_output_worker.get_aux_output_connector(config) is connector
+    constructor.assert_called_once_with(config)
+
+
+def test_connector_initializes_capturer_once(monkeypatch):
+    connector, capturer, events = _connector_with_capturer(monkeypatch)
+
+    connector.initialize_routed_experts_capturer(object())
+
+    assert [event[0] for event in events] == ["allocate", "bind"]
+    assert events[1][1] is capturer
+    assert connector._capturer is capturer
+    assert connector._unbind_capturer is not None
+
+
+def test_connector_capturer_init_failure_leaves_no_owner(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    _install_fake_capturer(monkeypatch, bind_error=ValueError("no router"))
+    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
+
+    with pytest.raises(ValueError, match="no router"):
+        connector.initialize_routed_experts_capturer(object())
+
+    assert connector._capturer is None
+    assert connector._unbind_capturer is None
+    connector.close()
+
+
+def test_connector_storage_uses_capturer_and_initializes_once(monkeypatch):
+    connector, capturer, _ = _connector_with_capturer(monkeypatch)
+    _, store_constructor, background_store_constructor = _install_storage(monkeypatch)
+    kv_cache_config = _kv_cache_config()
+
+    connector.initialize_storage(kv_cache_config)
+
+    assert connector._capturer is capturer
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
+    with pytest.raises(RuntimeError, match="already initialized"):
+        connector.initialize_storage(kv_cache_config)
+
+
+def test_connector_storage_requires_capturer(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
+    with pytest.raises(AssertionError, match="must run before"):
+        connector.initialize_storage(SimpleNamespace(num_blocks=1, kv_cache_groups=[]))
+
+
+def test_connector_non_output_rank_keeps_capturer_without_storage(monkeypatch):
+    connector, capturer, _ = _connector_with_capturer(monkeypatch)
+    _install_storage(monkeypatch, is_output_rank=False)
+
+    connector.initialize_storage(_kv_cache_config(num_blocks=1))
+
+    assert connector._capturer is not None
+    assert id(connector._capturer) == id(capturer)
+    assert connector._store is None
+    assert connector._buffer is None
+    connector.begin_step(Mock())
+    assert connector.prepare_output(Mock()) is None
+    capturer.snapshot_routing_data.assert_not_called()
+
+
+def test_connector_rejects_undersized_capturer(monkeypatch):
+    """Silently truncated snapshots would blame the wrong tokens on experts."""
+    connector, _, _ = _connector_with_capturer(monkeypatch, capacity=16)
+    _install_storage(monkeypatch)
+
+    with pytest.raises(AssertionError, match="smaller than the scheduler"):
+        connector.initialize_storage(_kv_cache_config(num_blocks=1))
+
+
+def test_connector_storage_failure_releases_store(monkeypatch):
+    connector, _, _ = _connector_with_capturer(monkeypatch)
+    store, _, _ = _install_storage(
+        monkeypatch, buffer_error=RuntimeError("buffer failed")
+    )
+
+    with pytest.raises(RuntimeError, match="buffer failed"):
+        connector.initialize_storage(_kv_cache_config())
+
+    store.close.assert_called_once_with()
+    assert connector._store is None
+    assert connector._buffer is None
+
+
+def test_connector_storage_failure_keeps_original_error_when_close_fails(monkeypatch):
+    connector, _, _ = _connector_with_capturer(monkeypatch)
+    store, _, _ = _install_storage(
+        monkeypatch,
+        buffer_error=RuntimeError("buffer failed"),
+        store=Mock(),
+    )
+    store.close.side_effect = RuntimeError("store close failed")
+
+    with pytest.raises(RuntimeError, match="buffer failed"):
+        connector.initialize_storage(_kv_cache_config())
+
+    store.close.assert_called_once_with()
+    assert connector._store is None
+    assert connector._buffer is None
+
+
+def test_connector_close_releases_storage_then_capturer(monkeypatch):
+    connector, _, events = _connector_with_capturer(monkeypatch)
+    _install_storage(
+        monkeypatch,
+        on_store_close=lambda: events.append(("store_close", None)),
+    )
+    connector.initialize_storage(_kv_cache_config())
+
+    connector.close()
+    connector.close()
+
+    assert [event[0] for event in events] == [
+        "allocate",
+        "bind",
+        "store_close",
+        "unbind",
+    ]
+    assert connector._capturer is None
+    assert connector._unbind_capturer is None
+    assert connector._store is None
+    assert connector._buffer is None
+
+
+def test_connector_close_with_only_capturer_is_safe(monkeypatch):
+    connector, _, events = _connector_with_capturer(monkeypatch)
+
+    connector.close()
+    connector.close()
+
+    assert [event[0] for event in events] == ["allocate", "bind", "unbind"]
+    assert connector._capturer is None
+    assert connector._unbind_capturer is None
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):
@@ -784,3 +1103,65 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+@pytest.mark.parametrize(
+    ("has_connector", "is_rocm", "expected", "second_expected"),
+    [
+        (
+            True,
+            False,
+            ["clear", "clear_breakable", "release_graphs", "connector_close"],
+            [],
+        ),
+        (False, False, [], []),
+        (
+            False,
+            True,
+            ["clear", "clear_breakable"],
+            ["clear", "clear_breakable"],
+        ),
+    ],
+)
+def test_release_capture_resources(
+    monkeypatch, has_connector, is_rocm, expected, second_expected
+):
+    import vllm.v1.worker.gpu.model_runner as mrv2
+
+    events: list[str] = []
+
+    def recorder(name: str):
+        return lambda *args, **kwargs: events.append(name)
+
+    monkeypatch.setattr(
+        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: is_rocm)
+    )
+    monkeypatch.setattr(
+        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "BreakableCUDAGraphWrapper",
+        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
+    )
+    manager = SimpleNamespace(release_graphs=recorder("release_graphs"))
+    connector = (
+        SimpleNamespace(close=recorder("connector_close")) if has_connector else None
+    )
+    runner = SimpleNamespace(
+        cudagraph_manager=manager if (has_connector or not is_rocm) else None,
+        aux_output_connector=connector,
+    )
+
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+
+    # Graphs captured the R3 callbacks and are dropped before the connector
+    # releases the buffers and unbinds the callbacks.
+    assert events == expected
+    assert runner.aux_output_connector is None
+    if has_connector:
+        assert runner.cudagraph_manager is None
+
+    events.clear()
+    mrv2.GPUModelRunner._release_capture_resources(runner)
+    assert events == second_expected
