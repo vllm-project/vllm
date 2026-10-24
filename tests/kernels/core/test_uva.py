@@ -7,6 +7,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 
@@ -97,6 +98,29 @@ def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
     assert staged.gpu[2, 3:6].tolist() == [11, 12, 13]
     assert staged.gpu[1, 7:9].tolist() == [21, 22]
     assert staged.gpu[0, 1020:2520].tolist() == list(range(1500))
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("uva_target", [False, True])
+def test_staged_write_snapshots_token_buffers(uva_target):
+    """Token buffers interleave with list writes and are copied when staged."""
+    staged = StagedWriteTensor(
+        (3, 4096),
+        dtype=torch.int32,
+        device=torch.device(f"{DEVICE_TYPE}:0"),
+        uva_instead_of_gpu=uva_target,
+    )
+    prompt = TokenBuffer(range(3000))
+    staged.stage_write(0, 0, [7, 8])
+    staged.stage_write(1, 5, prompt)
+    staged.stage_write_elem(2, 9)
+    prompt.extend([1] * 50)
+    staged.apply_write()
+    torch.accelerator.synchronize()
+
+    assert staged.gpu[0, :2].tolist() == [7, 8]
+    assert staged.gpu[1, 5:3006].tolist() == list(range(3000)) + [0]
+    assert staged.gpu[2, 0].item() == 9
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")

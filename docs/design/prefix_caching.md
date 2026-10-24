@@ -27,6 +27,7 @@ In the example above, the KV cache in the first block can be uniquely identified
     For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
     - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
     - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
+    - `sha256_int32`: Hashes each block's token ids as raw int32 bytes with SHA-256 instead of pickling them, reading the request's int32 token buffer in place. Its hashes differ from `sha256`, so instances that share a prefix cache or KV store must use the same algorithm.
     - `xxhash`: Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
     - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
 
