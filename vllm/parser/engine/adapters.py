@@ -184,14 +184,18 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         num_fed = self._num_fed_counting_tokens or 0
         start = max(0, num_fed - 4)
         prefix_text = self.model_tokenizer.decode(token_ids[start:num_fed])
-        text = self.model_tokenizer.decode(token_ids[start:])
-        if text.endswith("\ufffd"):
+        end = len(token_ids)
+        text = self.model_tokenizer.decode(token_ids[start:end])
+        while end > num_fed and text.endswith("\ufffd"):
+            end -= 1
+            text = self.model_tokenizer.decode(token_ids[start:end])
+        if end == num_fed:
             return
         if self._num_fed_counting_tokens is None:
             # A single-pass parse finished the engine; replay its input.
             engine._reset()
-        engine._feed(text[len(prefix_text) :], token_ids[num_fed:])
-        self._num_fed_counting_tokens = len(token_ids)
+        engine._feed(text[len(prefix_text) :], token_ids[num_fed:end])
+        self._num_fed_counting_tokens = end
 
 
 class ParserEngineToolAdapter(ToolParser):
