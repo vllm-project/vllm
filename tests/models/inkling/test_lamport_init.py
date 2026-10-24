@@ -50,12 +50,12 @@ def fake_tp(monkeypatch):
 
 @pytest.mark.parametrize(
     ("world_size", "fully_connected", "expect_lamport"),
-    [(4, False, False), (8, False, False), (4, True, True), (2, False, True)],
+    [(2, False, False), (4, False, False), (8, False, False), (4, True, True)],
 )
 def test_lamport_is_skipped_on_pcie_only_tp_groups(
     fake_tp, world_size, fully_connected, expect_lamport
 ) -> None:
-    """Beyond two GPUs Lamport needs NVLink; PCIe-only TP must use NCCL."""
+    """Lamport hangs over PCIe P2P, so PCIe-only TP must use NCCL."""
     constructed = fake_tp(world_size, fully_connected)
 
     lamport.initialize_lamport_rs_conv(
