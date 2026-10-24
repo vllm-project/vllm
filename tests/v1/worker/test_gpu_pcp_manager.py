@@ -726,12 +726,13 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     assert local_batch.dcp_local_seq_lens is None
     assert local_batch.seq_lens.tolist() == [17, 25, 0, 0]
-    assert local_batch.dcp_local_seq_lens_cpu_upper_bound is not None
+    assert local_batch.pcp is not None
+    assert local_batch.pcp.dcp_local_seq_lens_cpu_upper_bound is not None
     expected_dcp_upper_bound = get_dcp_local_seq_lens(
         torch.tensor([17, 25], dtype=torch.int32), 2, 0, 1
     )
     assert torch.equal(
-        local_batch.dcp_local_seq_lens_cpu_upper_bound,
+        local_batch.pcp.dcp_local_seq_lens_cpu_upper_bound,
         torch.cat([expected_dcp_upper_bound, torch.zeros(2, dtype=torch.int32)]),
     )
 
