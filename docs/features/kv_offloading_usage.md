@@ -95,12 +95,24 @@ vllm serve <model> \
   }'
 ```
 
+### Multiple Nodes
+
+Without secondary tiers, each node's CPU region serves only its own workers and nothing below applies. With secondary tiers, an engine whose workers span several nodes must run under the multiprocessing executor (`--nnodes` > 1), and its engine core must share a node with worker rank 0 (the head node), where the tiering scheduler and its secondary tiers run:
+
+- The head node's region holds every worker's slot of each chunk; `cpu_bytes_to_use` is allocated there in full. Each worker on another node also allocates a region with its own slot of every chunk, about `cpu_bytes_to_use / world_size`, so the engine uses about `cpu_bytes_to_use * (1 + remote_workers / world_size)` of host memory in total.
+- Workers on other nodes keep a region with only their own slot and mirror it through the head region over TCP: a store is reported once the worker's slot reached the head node, and a load fetches the worker's slot before its DMA. Copies move in requests of at most 32 MiB, or of one slot when a worker's slot of a chunk is larger, and loads go ahead of stores. Remote workers fetch their slot on every CPU-tier hit.
+- Worker rank 0 serves the mirror on `VLLM_HOST_IP`, which every worker must set to a specified IP address; it admits connections only from the remote workers' `VLLM_HOST_IP`. The port is free unless `mirror_port` is set, in which case data parallel replica `i` uses `mirror_port + i`. See [Security](../usage/security.md#inter-node-communication).
+- A copy that still fails after `mirror_attempts` attempts of `mirror_timeout_s` is reported as a failed transfer: a failed store is dropped, and a request whose load failed recomputes, or fails under `kv_load_failure_policy="fail"`. If the head cannot be told to reject the late attempts of a failed store, the worker raises instead of reporting it and the engine stops, since a late attempt could still overwrite a reused chunk.
+- After a cache reset, lookups are skipped (requests recompute) until every worker reported the jobs the reset flushed.
+- Secondary tiers that key storage through `FileMapper` (fs, obj, p2p) use their own namespace on multi-node engines, topology-agnostic rows included, since rows stored across nodes before the mirror lack the remote slots.
+- `canonical_layout`, `external_launcher` and the `kvcr` tier, whose keys carry no such namespace, are not supported across nodes. Data parallel replicas run node-placement collectives together when their workers are created, so replicas added or restarted alone (elastic scaling) are not supported, and secondary tiers are rejected with `enable_elastic_ep`.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). With secondary tiers across nodes, workers off the head node also allocate their own slots (see [Multiple Nodes](#multiple-nodes)). |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
@@ -108,6 +120,9 @@ vllm serve <model> \
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
+| `mirror_port` | no | free port | multi-tier | First port of the CPU region mirror when the engine spans several nodes; replica `i` uses `mirror_port + i` (see [Multiple Nodes](#multiple-nodes)). |
+| `mirror_timeout_s` | no | `30` | multi-tier | Seconds one mirror request waits before it is retried. |
+| `mirror_attempts` | no | `3` | multi-tier | Attempts per mirror request before the copy is reported as a failed transfer. |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |

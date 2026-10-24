@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -55,6 +57,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             data_parallel_size=1,
             data_parallel_rank_local=None,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
+            local_world_size=kwargs.get("local_world_size"),
         ),
         replicated_layout=kwargs.get("replicated_layout", False),
         canonical_layout=kwargs.get("canonical_layout", False),
@@ -326,3 +329,22 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+@pytest.mark.parametrize("agnostic", [False, True])
+def test_multi_node_rows_get_their_own_namespace(agnostic: bool):
+    # Rows that multi-node engines stored before remote slots were mirrored
+    # lack them. Topology-agnostic rows of every topology share one
+    # namespace, so theirs must change as well.
+    kwargs = dict(
+        tp_size=2,
+        world_size=2,
+        is_parallelism_agnostic=agnostic,
+        parallel_agnostic=agnostic,
+    )
+    single = make_mapper_from_offloading_spec(**kwargs)
+    multi = make_mapper_from_offloading_spec(local_world_size=1, **kwargs)
+
+    assert "slot_layout" not in single.fields
+    assert multi.fields["slot_layout"] == "group_rank"
+    assert multi.base_path != single.base_path

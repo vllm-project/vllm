@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
@@ -31,6 +32,8 @@ from vllm.v1.kv_offload.config import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+
+_BUILTIN_EXECUTOR_BACKENDS = ("ray", "mp", "uni", "external_launcher")
 
 
 def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
@@ -68,6 +71,10 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    backend = parallel_config.distributed_executor_backend
+    if isinstance(backend, str) and backend not in _BUILTIN_EXECUTOR_BACKENDS:
+        # An import path names an executor class, as in Executor.get_class.
+        backend = resolve_obj_by_qualname(backend)
     selected_groups = tuple(
         (group_id, kv_cache_config.kv_cache_groups[group_id])
         for group_id in get_offloading_group_ids(kv_cache_config)
@@ -277,6 +284,17 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            local_world_size=parallel_config.local_world_size,
+            # An executor class with uses_ray places workers as Ray does;
+            # other classes keep their qualified name, never a built-in one.
+            executor_backend=(
+                "ray"
+                if parallel_config.use_ray or getattr(backend, "uses_ray", False)
+                else backend
+                if isinstance(backend, str) or backend is None
+                else f"{backend.__module__}.{backend.__qualname__}"
+            ),
+            elastic_ep=parallel_config.enable_elastic_ep,
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,

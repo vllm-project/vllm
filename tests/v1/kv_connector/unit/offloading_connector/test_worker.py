@@ -277,6 +277,63 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.build_connector_worker_meta() is None
 
 
+def _kv_cache_config(num_groups: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[MagicMock() for _ in range(num_groups)],
+    )
+
+
+def _failed(job_id: int) -> list:
+    from vllm.v1.kv_offload.base import TransferResult
+
+    return [TransferResult(job_id=job_id, success=False)]
+
+
+def test_failed_store_is_dropped_and_still_completes():
+    """A failed store is a future cache miss, not an error.
+
+    It must still be marked completed, or the scheduler's per-job pending
+    count never reaches zero, and marked failed so it is not published.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.prepare_store_kv(_store_metadata(11))
+    worker.start_kv_transfers(_empty_metadata())
+    worker.worker.get_finished.return_value = _failed(11)
+
+    finished_sending, finished_recving = worker.get_finished(set())
+
+    assert finished_sending == set()
+    assert finished_recving == set()
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.failed_jobs == {11}
+
+
+def test_failed_load_fails_its_request():
+    """A failed load leaves undefined KV in its destination blocks.
+
+    The request is reported as finished, per the base contract, and as failed,
+    which the scheduler handles for any number of KV cache groups.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(12))
+    worker.worker.get_finished.return_value = _failed(12)
+
+    _, finished_recving = worker.get_finished(set())
+
+    assert finished_recving == {"req"}
+    assert worker.take_failed_recving() == {"req"}
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {12: 1}
+    assert meta.failed_jobs == {12}
+
+
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,

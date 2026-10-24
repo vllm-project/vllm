@@ -25,6 +25,9 @@ Configuration via kv_connector_extra_config:
         via SecondaryTierFactory.register_tier()
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
+  - mirror_port, mirror_timeout_s, mirror_attempts: (optional) CPU region
+    mirror settings when secondary tiers span several nodes (see
+    docs/features/kv_offloading_usage.md)
 
 Example configuration:
 {
@@ -52,11 +55,13 @@ Example out-of-tree tier configuration:
 }
 """
 
+import math
 from typing import Any
 
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -64,9 +69,16 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.node_topology import multi_node_topology
+from vllm.v1.kv_offload.cpu.region_mirror import (
+    SlotLayout,
+    attach_region_mirror,
+    gather_construction_errors,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
@@ -82,6 +94,23 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 logger = init_logger(__name__)
+
+# Executors that keep a sole worker on the engine core's node and report
+# workers on other nodes through nnodes (mp). Ray, external_launcher and
+# custom executors give neither guarantee.
+_NODE_LOCAL_BACKENDS = ("mp", "uni", None)
+
+
+def _is_kvcr_tier(tier_cls: type) -> bool:
+    """Whether a tier class is, or derives from, the KVCR tier manager.
+
+    Compared by name: importing the KVCR manager needs the kvcr package.
+    """
+    return any(
+        cls.__module__ == "vllm.v1.kv_offload.tiering.kvcr.manager"
+        and cls.__qualname__ == "KVCRSecondaryTierManager"
+        for cls in tier_cls.__mro__
+    )
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
@@ -316,6 +345,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+        if self.secondary_tier_configs and config.parallel.elastic_ep:
+            # A replica added by scale-up initializes its KV cache alone, so
+            # it cannot run the node-placement collective with the others.
+            raise ValueError(
+                "TieringOffloadingSpec secondary tiers are not supported with "
+                "elastic expert parallelism (enable_elastic_ep)."
+            )
 
         # Pause between tier-poll rounds for tiers that need servicing
         # between engine steps. Zero or negative disables the thread, which
@@ -395,6 +431,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
+                parallel = self.config.parallel
+                if (
+                    self.secondary_tier_configs
+                    and scheduler_mmap.created_file
+                    # Only mp and uni keep a sole worker on this node.
+                    and (
+                        parallel.world_size > 1
+                        or parallel.executor_backend not in _NODE_LOCAL_BACKENDS
+                    )
+                ):
+                    # Remote slots are mirrored into worker rank 0's region.
+                    raise RuntimeError(
+                        "The tiering scheduler created the shared CPU region "
+                        "instead of joining its workers' region: the engine "
+                        "core must share a node with worker rank 0."
+                    )
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
@@ -517,28 +569,164 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return True
 
     @override
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = 0 if self.replicated_layout else self.config.parallel.rank
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
-            rank=rank,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        parallel = self.config.parallel
+        # Only secondary tiers, which run on the head node, read remote slots;
+        # without them each node's region serves its own workers.
+        mirror = bool(self.secondary_tier_configs)
+        backend = parallel.executor_backend
+        # Only mp counts nodes (nnodes) and uni runs one process; Ray,
+        # external_launcher and custom executors keep nnodes at 1, so
+        # local_world_size cannot tell whether their workers span nodes.
+        may_span_nodes = parallel.spans_nodes or backend not in _NODE_LOCAL_BACKENDS
+        replica_size = parallel.world_size
+        if backend == "external_launcher":
+            # ParallelConfig counts every data parallel replica in world_size.
+            replica_size //= parallel.data_parallel_size
+        topology, spans_nodes = (
+            multi_node_topology(replica_size)
+            if mirror and may_span_nodes
+            else (None, False)
         )
+        if spans_nodes is None and replica_size > 1:
+            raise RuntimeError(
+                "Secondary tiers need to know whether this engine's workers "
+                "span several nodes, but its worker group could not be "
+                "identified."
+            )
+        if mirror and (spans_nodes or parallel.spans_nodes):
+            if backend == "external_launcher":
+                raise RuntimeError(
+                    "TieringOffloadingSpec secondary tiers do not support the "
+                    "external_launcher executor across nodes."
+                )
+            if topology is None or not parallel.spans_nodes:
+                # The storage namespace also needs the node count.
+                raise RuntimeError(
+                    "Secondary tiers of an engine spanning several nodes require "
+                    "the multiprocessing executor with nnodes > 1; this engine's "
+                    "worker group or node count could not be identified."
+                )
+            if self.config.canonical_layout:
+                raise ValueError(
+                    "canonical_layout interleaves every rank's bytes in one row "
+                    "area and cannot be mirrored across nodes; remove "
+                    "canonical_layout from kv_connector_extra_config."
+                )
+            if any(
+                _is_kvcr_tier(SecondaryTierFactory.get_tier_class(tier))
+                for tier in self.secondary_tier_configs
+            ):
+                # KVCR keys carry no slot_layout namespace, so rows stored
+                # across nodes before the mirror would still hit.
+                raise ValueError(
+                    "The kvcr secondary tier does not support engines whose "
+                    "workers span several nodes."
+                )
+        head_layout = SlotLayout(
+            num_chunks=self.num_chunks,
+            row_stride=self.kv_bytes_per_chunk,
+            size=self.cpu_page_size_per_worker,
+        )
+        compact = topology is not None and not topology.on_head
+        if topology is not None and head_layout.num_slots < parallel.world_size:
+            raise ValueError(
+                "The head node's CPU region must hold every worker's slot to "
+                "mirror it across nodes."
+            )
+        local_layout = (
+            SlotLayout(
+                num_chunks=self.num_chunks,
+                row_stride=round_up(
+                    self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
+                ),
+                size=self.cpu_page_size_per_worker,
+            )
+            if compact
+            else head_layout
+        )
+        worker_mmap: SharedOffloadRegion | None = None
+        worker: CPUOffloadingWorker | None = None
+        error: Exception | None = None
         try:
+            if compact:
+                assert topology is not None
+                # Only this worker maps its compact region, so its name can go
+                # as soon as it is mapped.
+                worker_mmap = SharedOffloadRegion(
+                    engine_id=f"{self._engine_id}_r{topology.rank}",
+                    num_chunks=self.num_chunks,
+                    rank=0,
+                    kv_bytes_per_chunk=local_layout.row_stride,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                    barrier=lambda: None,
+                )
+            else:
+                # With a mirror, slots follow the rank the head serves them by.
+                if self.replicated_layout:
+                    rank = 0
+                elif topology is not None:
+                    rank = topology.rank
+                else:
+                    rank = parallel.rank
+                worker_mmap = SharedOffloadRegion(
+                    engine_id=self._engine_id,
+                    num_chunks=self.num_chunks,
+                    rank=rank,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
-            return CPUOffloadingWorker(
+            worker = CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
             )
-        except Exception:
-            worker_mmap.cleanup()
+        except Exception as e:
+            if worker_mmap is not None:
+                worker_mmap.cleanup()
+            if topology is None:
+                raise
+            error = e
+        if topology is None:
+            assert worker is not None
+            return worker
+        # Every rank reaches the collectives below, even after a failure.
+        try:
+            gather_construction_errors(topology, error)
+            assert worker is not None and worker_mmap is not None
+            return attach_region_mirror(
+                worker,
+                worker_mmap,
+                head_layout,
+                local_layout,
+                topology,
+                port=self._mirror_port(),
+                **self._mirror_retries(),
+            )
+        except BaseException:
+            if worker is not None:
+                worker.shutdown()
             raise
+
+    def _mirror_retries(self) -> dict[str, int]:
+        timeout_s = float(self.extra_config.get("mirror_timeout_s", 30))
+        attempts = int(self.extra_config.get("mirror_attempts", 3))
+        timeout_ms = int(timeout_s * 1000) if math.isfinite(timeout_s) else 0
+        if timeout_ms < 1 or attempts < 1:
+            raise ValueError(
+                "mirror_timeout_s must be finite and at least 0.001 and "
+                f"mirror_attempts at least 1, got {timeout_s} and {attempts}"
+            )
+        return {"timeout_ms": timeout_ms, "attempts": attempts}
+
+    def _mirror_port(self) -> int:
+        """Configured mirror port, offset per data parallel replica; 0 is free."""
+        port = int(self.extra_config.get("mirror_port", 0))
+        return port + self.config.parallel.data_parallel_index if port else 0
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
         """Require a mapping on every ref and record layer portability.

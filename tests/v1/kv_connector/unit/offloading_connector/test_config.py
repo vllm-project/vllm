@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -37,6 +38,20 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+
+class LocalExecutor(Executor):
+    """A custom executor that does not use Ray (never instantiated)."""
+
+
+class RayExecutor(Executor):
+    """A custom executor that places workers with Ray (never instantiated)."""
+
+    uses_ray = True
+
+
+# A custom executor whose name matches a built-in backend.
+mp_named_executor = type("mp", (LocalExecutor,), {"__module__": __name__})
 
 
 def _make_vllm_config(
@@ -1313,3 +1328,50 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.parametrize(
+    "executor_cls, expected",
+    [
+        (RayExecutor, "ray"),
+        # Inherited from a Ray executor.
+        (type("DerivedRayExecutor", (RayExecutor,), {}), "ray"),
+        (LocalExecutor, f"{__name__}.LocalExecutor"),
+        # Not the built-in mp backend, whose workers report their nodes.
+        (mp_named_executor, f"{__name__}.mp"),
+    ],
+)
+def test_executor_class_is_normalized(executor_cls, expected):
+    """Node placement checks key on Ray, which an executor class can use."""
+    config = _make_vllm_config()
+    config.parallel_config.distributed_executor_backend = executor_cls
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.executor_backend == expected
+
+
+@pytest.mark.parametrize(
+    "executor_cls, expected",
+    [(RayExecutor, "ray"), (LocalExecutor, f"{__name__}.LocalExecutor")],
+)
+def test_executor_import_path_is_normalized(executor_cls, expected):
+    """An import-path backend resolves to its class, as Executor.get_class does."""
+    config = _make_vllm_config()
+    config.parallel_config.distributed_executor_backend = (
+        f"{__name__}.{executor_cls.__qualname__}"
+    )
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.executor_backend == expected
+
+
+@pytest.mark.parametrize("enable_elastic_ep", [False, True])
+def test_records_elastic_ep(enable_elastic_ep):
+    config = _make_vllm_config()
+    config.parallel_config.enable_elastic_ep = enable_elastic_ep
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.elastic_ep is enable_elastic_ep

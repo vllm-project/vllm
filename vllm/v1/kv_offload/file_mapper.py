@@ -38,6 +38,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        multi_node: bool = False,
     ):
         """Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
@@ -71,6 +72,11 @@ class FileMapper:
         # identity participates in the storage namespace.
         if canonical_format is not None:
             self.fields["canonical_format"] = canonical_format
+        # Multi-node rows hold remote slots mirrored onto the head node. Rows
+        # that multi-node engines stored before the mirror lack those slots,
+        # topology-agnostic rows included, so these get their own namespace.
+        if multi_node:
+            self.fields["slot_layout"] = "group_rank"
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -95,6 +101,9 @@ class FileMapper:
         if config.canonical_layout:
             assert config.kv_cache_layout is not None
             canonical_format = canonical_format_id(config.kv_cache_layout)
+        agnostic = parallel_agnostic and (
+            parallel.is_parallelism_agnostic or config.replicated_layout
+        )
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -107,12 +116,10 @@ class FileMapper:
             rank=parallel.rank,
             dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
-            parallel_agnostic=(
-                parallel_agnostic
-                and (parallel.is_parallelism_agnostic or config.replicated_layout)
-            ),
+            parallel_agnostic=agnostic,
             replicated_layout=(parallel_agnostic and config.replicated_layout),
             canonical_format=canonical_format,
+            multi_node=parallel.spans_nodes,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

@@ -5,7 +5,7 @@
 All communications between nodes in a multi-node vLLM deployment are **insecure by default** and must be protected by placing the nodes on an isolated network. This includes:
 
 1. PyTorch Distributed communications
-2. KV cache transfer communications
+2. KV cache transfer and offloading communications
 3. Tensor, Pipeline, and Data parallel communications
 
 ### Configuration Options for Inter-Node Communications
@@ -25,6 +25,10 @@ The following options control internode communications in vLLM:
 
 - `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
 - `data_parallel_master_port`: Port of the data parallel master (default: 29500)
+
+#### 4. **Multi-Node KV Offloading:**
+
+- With `TieringOffloadingSpec` secondary tiers and workers on several nodes, worker rank 0 of each engine serves the CPU offload region mirror on `VLLM_HOST_IP`, which every worker must set; `mirror_port` in `kv_connector_extra_config` fixes the first port (default: a free port). The listener admits connections only from the engine's remote workers' `VLLM_HOST_IP` addresses, and requests must carry a random per-engine token. Neither is cryptographic authentication: traffic is unencrypted, so a host that can capture it can reuse the token, a host that can send from an admitted address can make the head node buffer large messages, and any admitted worker holding the token can read or write the slots of the other remote workers. Keep `VLLM_HOST_IP` on an isolated network.
 
 ### Notes on PyTorch Distributed
 
