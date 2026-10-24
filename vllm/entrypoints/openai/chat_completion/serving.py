@@ -544,12 +544,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     ChatStreamProcessor(
                         request,
                         self._make_parser(request, tokenizer, chat_template_kwargs),
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=self.parser_cls,
                     )
                     for _ in range(num_choices)
                 ]
             else:
                 processors = [
-                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                    ChatStreamProcessor(
+                        request,
+                        None,
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=None,
+                    )
+                    for _ in range(num_choices)
                 ]
         except Exception as e:
             logger.exception("Error in parser creation.")
@@ -809,6 +817,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        kv_transfer_params=(
+                            res.kv_transfer_params if finish_reason_sent[i] else None
+                        ),
                     )
                     # Stamp the fingerprint on terminal chunks only (those with
                     # finish_reason set). When ``include_usage`` is on, the
