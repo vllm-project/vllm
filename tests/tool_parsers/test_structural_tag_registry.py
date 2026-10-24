@@ -57,6 +57,7 @@ from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
+    TOOL_CALL_MAX_WHITESPACE_CNT,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
     ToolChoice,
@@ -1803,6 +1804,7 @@ def test_glm47_strict_only_matches_xgrammar_builtin(tool_choice: str, reasoning:
         tools=dumped,
         tool_choice=builtin_choice,
         reasoning=reasoning,
+        max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
     )
 
     assert isinstance(ours, StructuralTag)
@@ -1834,6 +1836,7 @@ def test_glm47_parameter_level_pins_schemas_like_the_builtin(
         ],
         tool_choice="required",
         reasoning=False,
+        max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
     )
 
     assert isinstance(ours, StructuralTag)
@@ -2257,3 +2260,63 @@ def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
     assert not _is_grammar_accept_string(grammar, call * 2)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_glm47_tool_call_whitespace_is_bounded(strict: bool):
+    """Whitespace runs inside a tool call are capped, so a model whose preferred
+    token is masked out cannot spin on whitespace until ``max_tokens`` (#55541)."""
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "create_job_posting",
+            "strict": strict,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "salary": {
+                        "type": "object",
+                        "properties": {"min": {"type": "integer"}},
+                    },
+                },
+                "required": ["title", "salary"],
+            },
+        },
+    )
+    tag = get_model_structural_tag(
+        "glm_4_7",
+        [tool],
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="create_job_posting")
+        ),
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+
+    def call(gap: str) -> str:
+        return (
+            "<tool_call>create_job_posting"
+            "<arg_key>title</arg_key><arg_value>Engineer</arg_value>"
+            f'<arg_key>salary</arg_key><arg_value>{{{gap}"min": 1}}</arg_value>'
+            "</tool_call>"
+        )
+
+    assert _is_grammar_accept_string(grammar, call("\n    "))
+    assert not _is_grammar_accept_string(grammar, call("\n" * 100))
+
+
+def test_hermes_tool_call_whitespace_is_bounded(sample_tools_strict):
+    tag = get_model_structural_tag(
+        "hermes", sample_tools_strict, "required", reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+
+    def call(gap: str) -> str:
+        return (
+            '<tool_call>{"name": "get_weather", "arguments": {'
+            f'{gap}"city": "Paris"}}}}</tool_call>'
+        )
+
+    assert _is_grammar_accept_string(grammar, call("\n  "))
+    assert not _is_grammar_accept_string(grammar, call(" " * 100))
