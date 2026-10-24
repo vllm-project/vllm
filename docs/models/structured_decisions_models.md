@@ -8,12 +8,12 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models                           |
-|---------------------------|---------------------|------------------|-------------------|---------------------------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash`                     |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it`                     |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc.                     |
-| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`, `baselabs/elephant-1` |
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
+|---------------------------|---------------------|------------------|-------------------|-------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
 
 ### Multimodal Models
 
@@ -394,17 +394,14 @@ vllm serve LiquidAI/d1-3B
 
 Base Labs [`baselabs/mammoth-1`](https://huggingface.co/baselabs/mammoth-1)
 and [`baselabs/elephant-1`](https://huggingface.co/baselabs/elephant-1) are
-Qwen3.5 checkpoints with a slot readout. vLLM detects their
-`modeling_overrides` and serves them as `Qwen3_5ForSlotDecision`, read by
-`SlotLMStrategy`.
+Qwen3.5 checkpoints whose `modeling_overrides` select `Qwen3_5ForSlotDecision`.
 
 ```bash
 vllm serve baselabs/mammoth-1 --max-model-len 16384
 ```
 
-- Each question is one read of the checkpoint's fixed prompt. The full
-  attention layers read the shared prefix and the question as two
-  bidirectional blocks, so each prompt is prefilled in one step.
+- The full attention layers read the shared prefix and the question as two
+  bidirectional blocks, and each prompt is prefilled in one step.
   `--max-num-batched-tokens` must be at least `--max-model-len` and, unless
   set, defaults to at least that plus `--max-num-seqs`, so a long prompt does
   not wait for running requests.

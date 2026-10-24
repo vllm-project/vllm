@@ -1447,12 +1447,10 @@ class D3Strategy(ReadStrategy):
 
 
 class SlotLMStrategy(NextTokenStrategy):
-    """Slot-readout models. Each question is one request on the fixed prompt of
-    ``slot_prompt``, read as the softmax of the slot labels' logprobs at the last
-    token. Each request sends the length of the prefix the questions share."""
+    """Slot-readout models: one PrefixLM request per question on ``slot_prompt``."""
 
     MAX_SCORE_LEVELS = 10
-    MAX_OPTIONS = 255
+    MAX_OPTIONS = 255  # As many as qev reads.
 
     def __init__(self, context: ReadContext):
         model_config = context.engine_client.model_config
@@ -1533,13 +1531,11 @@ class SlotLMStrategy(NextTokenStrategy):
         trace_headers: Mapping[str, str] | None = None,
         media: Mapping[str, Sequence[str]] | None = None,
     ) -> list[QuestionRead]:
-        if instructions:
+        fixed = chat_template_kwargs in (None, {}, {"enable_thinking": False})
+        if instructions or not fixed:
             raise StructuredDecisionError(
-                "this model reads a fixed prompt, so it takes no instructions"
-            )
-        if chat_template_kwargs and chat_template_kwargs != {"enable_thinking": False}:
-            raise StructuredDecisionError(
-                "this model reads a fixed prompt, so it takes no chat_template_kwargs"
+                "this model reads a fixed prompt, so it takes no instructions "
+                "or chat_template_kwargs"
             )
         prompts = [
             self._tokens(self._prompt(state, self._suffix(q))) for q in questions
@@ -1556,7 +1552,6 @@ class SlotLMStrategy(NextTokenStrategy):
         prefix_len = common_prefix_len([prefix, *prompts])
         cache_salt = prefix_lm_salt(prompts[0][:prefix_len], cache_salt)
 
-        # Cache hits stop at the prefix, so prefill it alone for the questions.
         await self._warm_shared_prefix(
             [ids[:prefix_len] for ids in prompts],
             request_id,

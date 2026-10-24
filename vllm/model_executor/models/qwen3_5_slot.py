@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen3.5 with a slot readout, whose full attention layers read a request's
-prefix and question as two bidirectional PrefixLM blocks."""
+"""Qwen3.5 slot-readout model with a prefix/question PrefixLM mask."""
 
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
@@ -13,8 +12,7 @@ from .qwen3_5 import Qwen3_5ForConditionalGeneration
 
 
 class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
-    """Makes a request's prefix and question its PrefixLM ranges. A request
-    without a valid prefix length is read causally."""
+    """Makes a PrefixLM request's prefix and question its bidirectional ranges."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

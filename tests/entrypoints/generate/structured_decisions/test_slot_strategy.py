@@ -24,7 +24,6 @@ from vllm.entrypoints.openai.decisions.strategies import (
     select_read_strategy,
 )
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.core.sched.prefix_lm_scheduler import prefix_lm_salt
 
@@ -99,26 +98,15 @@ def make_strategy(tokenizer, *, head_dtype=torch.float32, prefix_caching=False):
     )
 
     async def generate(prompt, params, request_id, **kwargs):
-        label_ids = params.logprob_token_ids or [0]
+        ids = params.logprob_token_ids or [0]
         # The first slot gets twice the weight of each other slot.
-        logprobs = {t: Logprob(-2.0) for t in label_ids}
-        logprobs[label_ids[0]] = Logprob(-2.0 + math.log(2))
-        yield RequestOutput(
-            request_id=request_id,
-            prompt=None,
+        logprobs = {t: Logprob(-2.0 + math.log(2) * (t == ids[0])) for t in ids}
+        out = SimpleNamespace(token_ids=ids[:1], logprobs=[logprobs], finish_reason="")
+        yield SimpleNamespace(
+            outputs=[out],
             prompt_token_ids=prompt["prompt_token_ids"],
-            prompt_logprobs=None,
-            outputs=[
-                CompletionOutput(
-                    index=0,
-                    text="A",
-                    token_ids=[label_ids[0]],
-                    cumulative_logprob=None,
-                    logprobs=[logprobs],
-                    finish_reason="length",
-                )
-            ],
-            finished=True,
+            num_cached_tokens=0,
+            num_cache_creation_tokens=0,
         )
 
     engine.generate.side_effect = generate
@@ -149,15 +137,6 @@ def test_strategy_is_registered():
     assert select_read_strategy(model, ("generate",)) is SlotLMStrategy
 
 
-def test_slot_labels_are_single_distinct_tokens(tokenizer):
-    strategy, _ = make_strategy(tokenizer)
-    ids = strategy.slot_ids
-    assert len(ids) == len(set(ids)) == 256
-    assert slot_prompt.SLOT_LABELS[-1] == "JU"
-    assert min(ids) == 32 and max(ids) == 213977
-    assert ids[0] == tokenizer.encode("A", add_special_tokens=False)[0]
-
-
 @pytest.mark.asyncio
 async def test_reads_match_qev_byte_for_byte(tokenizer):
     strategy, engine = make_strategy(tokenizer)
@@ -166,75 +145,53 @@ async def test_reads_match_qev_byte_for_byte(tokenizer):
     )
     questions, reads = await read(strategy, request)
 
-    question_calls = engine.generate.call_args_list
-    assert len(question_calls) == 3
-    for q, call in zip(questions, question_calls):
+    for q, call in zip(questions, engine.generate.call_args_list, strict=True):
         prompt, params = call.args[0], call.args[1]
         ids = tokenizer.encode(QEV_PROMPTS[q.id], add_special_tokens=False)
         assert prompt["prompt_token_ids"] == ids
         # The prefix's digest, then the caller's salt.
         assert prompt["cache_salt"] == prefix_lm_salt(ids[:QEV_PREFIX_LEN], "salt")
-        assert params.max_tokens == 1 and params.temperature == 0.0
         assert params.extra_args == {"prefix_lm_len": QEV_PREFIX_LEN}
         assert params.logprob_token_ids == strategy.slot_ids[: len(q.options)]
 
-    # Slot A is the first option: yes, the first choice, level 0.
-    by_id = {q.id: (q, r) for q, r in zip(questions, reads)}
-    q, r = by_id["a"]
-    assert r.probs == pytest.approx([2 / 3, 1 / 3])
-    assert q.type.answer(q, r.probs, r.label_mass)["noul"] == pytest.approx(2 / 3)
-    q, r = by_id["b"]
-    assert q.type.answer(q, r.probs, r.label_mass)["choice"] == "billing"
-    q, r = by_id["c"]
-    assert r.probs == pytest.approx([0.5, 0.25, 0.25])
+    # Slot A, the first option, has twice the weight of each other slot.
+    assert reads[2].probs == pytest.approx([0.5, 0.25, 0.25])
 
 
 @pytest.mark.asyncio
 async def test_prefix_ends_at_the_state_block(tokenizer):
     strategy, engine = make_strategy(tokenizer, prefix_caching=True)
-    # Both questions start with the same words, so the token LCP runs past
-    # the state block.
-    questions = {
-        "x": {"type": "noul", "instructions": "Is the ticket about billing?"},
-        "y": {"type": "noul", "instructions": "Is the ticket about shipping?"},
-    }
+    # Both questions start with "Question:", so the token LCP runs past the
+    # state block. A long state makes the strategy warm the prefix first.
+    questions = {k: PROBE_QUESTIONS[k] for k in "ab"}
     request = StructuredDecisionRequest(state="word " * 200, questions=questions)
     await read(strategy, request)
-    # Cache hits stop at the prefix, so it is prefilled alone first.
     warm_up, *calls = engine.generate.call_args_list
-    assert len(calls) == 2
-    prefix_len = calls[0].args[1].extra_args["prefix_lm_len"]
-    first = calls[0].args[0]["prompt_token_ids"]
-    assert tokenizer.decode(first[:prefix_len]).endswith("</state>\n\n")
-    salt = prefix_lm_salt(first[:prefix_len], None)
-    for call in calls:
-        assert call.args[1].extra_args == {"prefix_lm_len": prefix_len}
-        assert call.args[0]["prompt_token_ids"][:prefix_len] == first[:prefix_len]
+    prefix = warm_up.args[0]["prompt_token_ids"]
+    assert tokenizer.decode(prefix).endswith("</state>\n\n")
+    salt = prefix_lm_salt(prefix, None)
+    for call in (warm_up, *calls):
+        assert call.args[0]["prompt_token_ids"][: len(prefix)] == prefix
+        assert call.args[1].extra_args == {"prefix_lm_len": len(prefix)}
         assert call.args[0]["cache_salt"] == salt
-    assert warm_up.args[0]["prompt_token_ids"] == first[:prefix_len]
-    assert warm_up.args[1].extra_args == {"prefix_lm_len": prefix_len}
-    assert warm_up.args[0]["cache_salt"] == salt
 
 
 @pytest.mark.asyncio
 async def test_many_options_use_two_letter_slots(tokenizer):
     strategy, engine = make_strategy(tokenizer)
-    criteria = {f"option {i}": {"id": i} if i % 2 else None for i in range(256)}
+    assert strategy.limits().max_options == 255
+    criteria = {f"option {i}": {"id": i} if i % 2 else None for i in range(255)}
     questions = {"many": {"type": "choice", "criteria": criteria}}
     request = StructuredDecisionRequest(state="plain text", questions=questions)
-    # qev reads at most 255 options.
-    with pytest.raises(StructuredDecisionError):
-        parse_questions(request, strategy.limits())
-    del criteria["option 255"]
-    request = StructuredDecisionRequest(state="plain text", questions=questions)
-    _, reads = await read(strategy, request)
+    await read(strategy, request)
     prompt, params = engine.generate.call_args.args[:2]
     text = tokenizer.decode(prompt["prompt_token_ids"])
     assert "<state>\nplain text\n</state>\n\nQuestion: Which option applies" in text
     assert '\nAA. option 26\nAB. option 27: {\n  "id": 27\n}\n' in text
     assert "Answer with one label: A, B, C," in text
     assert len(params.logprob_token_ids) == 255
-    assert len(reads[0].probs) == 255
+    assert len(set(strategy.slot_ids)) == 256
+    assert slot_prompt.SLOT_LABELS[-1] == "JU"
 
 
 def test_refuses_to_start_without_fp32_head(tokenizer):

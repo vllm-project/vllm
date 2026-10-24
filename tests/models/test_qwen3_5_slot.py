@@ -47,21 +47,15 @@ OVERRIDES = {
 
 
 def make_config(overrides=OVERRIDES) -> Qwen3_5Config:
-    config = Qwen3_5Config()
-    config.architectures = ["Qwen3_5ForConditionalGeneration"]
-    config.modeling_overrides = overrides
-    return config
-
-
-def test_detected_from_modeling_overrides():
-    config = make_config()
-    arch = Qwen3_5ModelArchConfigConvertor(config, config.text_config).convert()
-    assert arch.architectures == ["Qwen3_5ForSlotDecision"]
+    arch = ["Qwen3_5ForConditionalGeneration"]
+    return Qwen3_5Config(architectures=arch, modeling_overrides=overrides)
 
 
 @pytest.mark.parametrize("head_dtype,expected", [(None, "float32"), ("model", "model")])
-def test_model_config_defaults_to_an_fp32_head(head_dtype, expected):
+def test_detected_with_an_fp32_head_by_default(head_dtype, expected):
     config = make_config()
+    arch = Qwen3_5ModelArchConfigConvertor(config, config.text_config).convert()
+    assert arch.architectures == ["Qwen3_5ForSlotDecision"]
     config.head_dtype = head_dtype
     Qwen3_5ForSlotDecisionConfig.verify_and_update_model_config(
         SimpleNamespace(hf_config=config)

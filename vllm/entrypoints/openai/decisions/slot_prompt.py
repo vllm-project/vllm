@@ -12,20 +12,13 @@ SYSTEM_PROMPT = (
     "Respond with only its uppercase letter, with no explanation or reasoning."
 )
 #: Two-letter labels that are not one token in the Qwen3.5 vocabulary.
-_NOT_ONE_TOKEN = frozenset(
-    {
-        "BQ", "BZ", "CJ", "CQ", "CZ", "DQ", "DZ", "EJ", "EY", "FJ", "FQ", "FV",
-        "FZ", "GJ", "GK", "GQ", "GZ", "HJ", "IY", "JF", "JG", "JH", "JL", "JN",
-        "JQ",
-    }
-)  # fmt: skip
+_NOT_ONE_TOKEN = frozenset({
+    "BQ", "BZ", "CJ", "CQ", "CZ", "DQ", "DZ", "EJ", "EY", "FJ", "FQ", "FV", "FZ",
+    "GJ", "GK", "GQ", "GZ", "HJ", "IY", "JF", "JG", "JH", "JL", "JN", "JQ",
+})  # fmt: skip
+_PAIRS = tuple(a + b for a in LABELS for b in LABELS if a + b not in _NOT_ONE_TOKEN)
 #: Slot i labels option i: A to Z, then the two-letter labels in order.
-SLOT_LABELS = (
-    LABELS
-    + tuple(a + b for a in LABELS for b in LABELS if a + b not in _NOT_ONE_TOKEN)[
-        : 256 - len(LABELS)
-    ]
-)
+SLOT_LABELS = LABELS + _PAIRS[: 256 - len(LABELS)]
 DEFAULT_INSTRUCTIONS = {
     "choice": "Which option applies to the state?",
     "noul": "Is the statement true, or is the answer to the question yes?",
