@@ -47,6 +47,7 @@ import os
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -460,7 +461,31 @@ def _server(
     )
 
 
-def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
+def _listen_ports(count: int) -> int:
+    """First of ``count`` free ports below the kernel's ephemeral range.
+
+    MoRIIO binds its handshake and notify ports (one per TP rank) only after
+    the model loads. A port from ``get_open_port()`` is back in the ephemeral
+    pool by then, where any ``bind(0)`` (RCCL, gloo, ZMQ) can take it.
+    """
+    with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+        ephemeral_start = int(f.read().split()[0])
+    rng = random.SystemRandom()
+    for _ in range(100):
+        base = rng.randrange(10000, ephemeral_start - count)
+        with contextlib.ExitStack() as stack:
+            try:
+                for port in range(base, base + count):
+                    stack.enter_context(socket.socket()).bind(("", port))
+            except OSError:
+                continue
+        return base
+    raise RuntimeError(f"no {count} consecutive free ports below {ephemeral_start}")
+
+
+def _moriio_config(
+    role: str, http_port: int, ping_port: int, handshake_port: int, notify_port: int
+) -> dict[str, Any]:
     return {
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
@@ -471,8 +496,8 @@ def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
             "proxy_ip": "127.0.0.1",
             "proxy_ping_port": str(ping_port),
             "http_port": str(http_port),
-            "handshake_port": str(get_open_port()),
-            "notify_port": str(get_open_port()),
+            "handshake_port": str(handshake_port),
+            "notify_port": str(notify_port),
         },
     }
 
@@ -529,6 +554,8 @@ def _pd_pair(
         f"needs {case.prefill_tp} GPUs for prefill and {case.decode_tp} for decode"
     )
     prefill_port, decode_port, ping_port = (get_open_port() for _ in range(3))
+    p, d = case.prefill_tp, case.decode_tp
+    base = _listen_ports(2 * (p + d))
     with _proxy(ping_port) as proxy_url, contextlib.ExitStack() as stack:
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
@@ -545,7 +572,7 @@ def _pd_pair(
                     port=prefill_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_producer", prefill_port, ping_port
+                        "kv_producer", prefill_port, ping_port, base, base + p
                     ),
                 ),
                 pool.submit(
@@ -559,7 +586,11 @@ def _pd_pair(
                     port=decode_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_consumer", decode_port, ping_port
+                        "kv_consumer",
+                        decode_port,
+                        ping_port,
+                        base + 2 * p,
+                        base + 2 * p + d,
                     ),
                 ),
             ]
