@@ -1252,15 +1252,19 @@ steps:
   source_file_dependencies:
   - csrc/attention/
   - csrc/core/vec_dtypes/
+  - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
+  - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+  - vllm/models/minimax_m3/common/indexer.py
+  - vllm/models/minimax_m3/amd/ops/sparse_pa.py
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/utils/flashinfer.py
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
