@@ -61,8 +61,11 @@ class Hermes2ProToolParser(ToolParser):
         # Index into the text after the last valid tool call that has already
         # been emitted as content. None until a later region stops being a call.
         self._suffix_sent_idx: int | None = None
-        # An unclosed region is still buffered; finish_streaming emits it.
+        # Unclosed region whose body is not yet known to be a call or text.
+        # ``_hold_from`` is the first index that stays buffered, including any
+        # prose after the previous call.
         self._holding_partial_region: bool = False
+        self._hold_from: int | None = None
         self._last_text: str = ""
 
     def adjust_request(
@@ -285,20 +288,21 @@ class Hermes2ProToolParser(ToolParser):
             tool_call_jsons: list[tuple[str, bool]] = []
             last_good_end: int | None = None
             self._holding_partial_region = False
+            self._hold_from = None
             for index, (start, _region_end, body, closed) in enumerate(
                 self._iter_tool_call_regions(current_text)
             ):
                 kind = self._classify_stream_region(body, closed, index)
                 if kind == "pending":
-                    # Keep the tag buffered, but do not swallow the prose
-                    # that sits between the previous call and this tag.
-                    suffix_from = start if last_good_end is None else last_good_end
-                    extra = self._take_suffix(current_text, suffix_from, start)
-                    if extra:
-                        content = extra if not content else content + extra
+                    # Prose before this tag is part of the call when the call
+                    # is valid, and part of the content when it is not. Hold
+                    # both until the region is resolved.
                     self._holding_partial_region = True
+                    self._hold_from = start if last_good_end is None else last_good_end
                     break
                 if kind == "text":
+                    self._holding_partial_region = False
+                    self._hold_from = None
                     suffix_from = start if last_good_end is None else last_good_end
                     extra = self._take_suffix(
                         current_text, suffix_from, len(current_text)
@@ -310,6 +314,8 @@ class Hermes2ProToolParser(ToolParser):
                 is_complete = closed or is_complete_json(stripped)
                 tool_call_jsons.append((stripped, is_complete))
                 last_good_end = _region_end
+                self._holding_partial_region = False
+                self._hold_from = None
                 # A region that was buffered and then became a call must not
                 # be emitted again as content.
                 if (
@@ -367,15 +373,18 @@ class Hermes2ProToolParser(ToolParser):
             return None
 
     def finish_streaming(self) -> DeltaMessage | None:
-        """Emit a tool-call tag that was still open when generation ended."""
-        if not self._holding_partial_region or self._suffix_sent_idx is None:
+        """Emit text held back while an unclosed region was still unresolved."""
+        if not self._holding_partial_region or self._hold_from is None:
             return None
-        if self._suffix_sent_idx >= len(self._last_text):
-            self._holding_partial_region = False
-            return None
-        extra = self._last_text[self._suffix_sent_idx :]
-        self._suffix_sent_idx = len(self._last_text)
+        start = self._hold_from
+        if self._suffix_sent_idx is not None:
+            start = max(start, self._suffix_sent_idx)
         self._holding_partial_region = False
+        self._hold_from = None
+        if start >= len(self._last_text):
+            return None
+        extra = self._last_text[start:]
+        self._suffix_sent_idx = len(self._last_text)
         if not extra:
             return None
         return DeltaMessage(content=extra)

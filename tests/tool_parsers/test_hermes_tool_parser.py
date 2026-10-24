@@ -575,10 +575,80 @@ def test_hermes_streaming_buffers_empty_unclosed_tag_until_finish() -> None:
         request=request,
     )
     assert delta is not None
-    assert delta.content == "First.  Second. "
+    assert delta.content == "First. "
     assert delta.tool_calls
     assert get_function_delta(delta.tool_calls[0]).name == "get_weather"
 
     flushed = parser.finish_streaming()
     assert flushed is not None
-    assert flushed.content == "<tool_call>"
+    assert flushed.content == " Second. <tool_call>"
+
+
+def test_hermes_streaming_holds_text_between_calls_until_second_resolves() -> None:
+    """Text between calls stays buffered until the next region is resolved.
+
+    A chunk that ends on the next ``<tool_call>`` must not emit that text.
+    A valid follow-up call drops it, matching non-streaming. A malformed
+    follow-up emits it.
+    """
+    request = _hermes_request()
+    opened = f"First. {_WEATHER_CALL} between <tool_call>"
+
+    valid_parser = Hermes2ProToolParser(_DummyTokenizer())
+    opened_delta = valid_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=opened,
+        delta_text=opened,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+    assert opened_delta is not None
+    assert opened_delta.content == "First. "
+
+    valid_tail = '{"name": "get_time", "arguments": {"tz": "UTC"}}</tool_call>'
+    valid_text = opened + valid_tail
+    valid_delta = valid_parser.extract_tool_calls_streaming(
+        previous_text=opened,
+        current_text=valid_text,
+        delta_text=valid_tail,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+    assert valid_delta is not None
+    assert valid_delta.content is None
+    names = [
+        get_function_delta(tool_call).name
+        for tool_call in valid_delta.tool_calls or []
+        if get_function_delta(tool_call).name
+    ]
+    assert names == ["get_time"]
+    assert valid_parser.finish_streaming() is None
+
+    bad_parser = Hermes2ProToolParser(_DummyTokenizer())
+    bad_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=opened,
+        delta_text=opened,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+    bad_tail = "not json</tool_call> tail"
+    bad_text = opened + bad_tail
+    bad_delta = bad_parser.extract_tool_calls_streaming(
+        previous_text=opened,
+        current_text=bad_text,
+        delta_text=bad_tail,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+    assert bad_delta is not None
+    assert bad_delta.content == " between <tool_call>not json</tool_call> tail"
+    assert bad_parser.finish_streaming() is None
