@@ -68,7 +68,7 @@ __global__ void dispatch_output_lse_kernel(
     const int64_t* epoch_ptr, int64_t world_size, int64_t rank,
     int64_t num_tokens, int64_t max_num_tokens, int64_t num_seqs,
     int64_t heads_per_rank, int64_t head_dim, int64_t output_token_stride,
-    int64_t lse_token_stride) {
+    int64_t lse_token_stride, int64_t lse_head_stride) {
   int64_t item = static_cast<int64_t>(blockIdx.x);
   int64_t destination_rank = item / num_tokens;
   int64_t token_idx = item - destination_rank * num_tokens;
@@ -105,11 +105,14 @@ __global__ void dispatch_output_lse_kernel(
   }
 
   float* peer_lse = get_peer_ptr<float>(peer_lse_ptrs, destination_rank);
-  int64_t source_lse = token_idx * lse_token_stride + source_head;
+  int64_t source_lse =
+      token_idx * lse_token_stride + source_head * lse_head_stride;
   for (int64_t head_idx = threadIdx.x; head_idx < heads_per_rank;
        head_idx += blockDim.x) {
     peer_lse[destination_item + head_idx] =
-        empty_kv ? -CUDART_INF_F : to_float(partial_lse[source_lse + head_idx]);
+        empty_kv
+            ? -CUDART_INF_F
+            : to_float(partial_lse[source_lse + head_idx * lse_head_stride]);
   }
 }
 
@@ -244,13 +247,12 @@ void direct_dcp_a2a_lse_reduce(
   int64_t head_dim = partial_output.size(2);
   int64_t output_token_stride = partial_output.stride(0);
   int64_t lse_token_stride = partial_lse.stride(0);
+  int64_t lse_head_stride = partial_lse.stride(1);
   STD_TORCH_CHECK(
       partial_output.stride(2) == 1 && partial_output.stride(1) == head_dim &&
           output_token_stride >= total_heads * head_dim &&
           output_token_stride % 8 == 0,
       "partial output must have packed heads and an aligned token stride");
-  STD_TORCH_CHECK(partial_lse.stride(1) == 1 && lse_token_stride >= total_heads,
-                  "partial LSE must have packed heads");
   STD_TORCH_CHECK(num_tokens > 0 && num_tokens <= max_num_tokens,
                   "token count exceeds symmetric buffer capacity");
   STD_TORCH_CHECK(total_heads % world_size == 0,
@@ -323,7 +325,7 @@ void direct_dcp_a2a_lse_reduce(
             peer_lse_ptrs.const_data_ptr<int64_t>(),
             epoch.const_data_ptr<int64_t>(), world_size, rank, num_tokens,
             max_num_tokens, num_seqs, heads_per_rank, head_dim,
-            output_token_stride, lse_token_stride);
+            output_token_stride, lse_token_stride, lse_head_stride);
   };
   if (lse_dtype == torch::headeronly::ScalarType::Float) {
     launch_dispatch.operator()<float>();

@@ -16,6 +16,8 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 from .protocol import (
     DecisionUsage,
+    JointCanvas,
+    JointDiagnostics,
     QuestionDiagnostics,
     StructuredDecisionRequest,
     StructuredDecisionResponse,
@@ -81,13 +83,14 @@ class ServingStructuredDecisions(BaseServingDecisions):
             questions = parse_questions(request, self.limits)
             media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
-            engine_client.check_admission(self.strategy.num_requests(questions))
+            joint = self._admit(questions, request.joint)
             trace_headers = (
                 None
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
-            reads = await self.strategy.read(
+            read_fn = self.strategy.read_joint if joint else self.strategy.read
+            reads = await read_fn(
                 questions,
                 request.instructions,
                 self.strategy.render_state(request.state),
@@ -106,11 +109,19 @@ class ServingStructuredDecisions(BaseServingDecisions):
 
         answers: dict[str, dict[str, Any]] = {}
         diagnostics: dict[str, QuestionDiagnostics] = {}
+        canvases: list[JointCanvas] = []
         for q, read in zip(questions, reads):
             answers[q.id] = q.type.answer(q, read.probs, read.label_mass)
             diagnostics[q.id] = QuestionDiagnostics(
                 label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
             )
+            if (slot := read.slot) is not None:
+                if slot.canvas == len(canvases):
+                    canvases.append(
+                        JointCanvas(questions=[], width=slot.width, slots=[])
+                    )
+                canvases[-1].questions.append(q.id)
+                canvases[-1].slots.append(slot.position)
         return StructuredDecisionResponse(
             id=request_id,
             model=self.models.model_name(lora_request),
@@ -120,4 +131,5 @@ class ServingStructuredDecisions(BaseServingDecisions):
                 output_tokens=sum(r.output_tokens for r in reads),
             ),
             diagnostics=diagnostics,
+            joint=JointDiagnostics(canvases=canvases) if joint else None,
         )
