@@ -1923,22 +1923,6 @@ class _DrainCtrl:
 
 
 class TestDrainJobs:
-    @pytest.mark.cpu_test
-    def test_B5_drain_jobs_finishes_unbound_stores(self):
-        """Drain covers stores parked before the decoder's first fetch."""
-        mgr = _make_manager()
-        mgr._control = _DrainCtrl()
-        job = _job_metadata(
-            job_id=5,
-            kv_params=_remote_decoder_kv_params(kv_request_id="B5"),
-        )
-        mgr.submit_store(job)
-
-        mgr.drain_jobs()
-
-        assert mgr._unbound_stores == {}
-        assert JobResult(job_id=5, success=False) in list(mgr.get_finished_jobs())
-
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()

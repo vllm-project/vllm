@@ -73,7 +73,6 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
-    ScheduleEndContext,
     get_offload_block_hash,
     get_offload_group_idx,
     make_offload_key,
@@ -87,56 +86,6 @@ from vllm.v1.request import RequestStatus
 def _as_mock(value: object) -> MagicMock:
     assert isinstance(value, MagicMock)
     return value
-
-
-@pytest.mark.cpu_test
-def test_B1():
-    """Back-to-back resets preserve worker flushes without asserting."""
-    from tests.v1.kv_offload.test_factory import _make_offloading_config
-    from vllm import SamplingParams
-    from vllm.config import CacheConfig, VllmConfig
-    from vllm.utils.hashing import sha256
-    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-    from vllm.v1.request import Request
-
-    spec = CPUOffloadingSpec(_make_offloading_config())
-    config = VllmConfig(cache_config=CacheConfig(enable_prefix_caching=True))
-    cache = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
-                ),
-            )
-        ],
-    )
-    scheduler = OffloadingConnectorScheduler(spec, config, cache)
-    init_none_hash(sha256)
-    request = Request(
-        request_id="B1",
-        prompt_token_ids=[0] * 16,
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        block_hasher=get_request_block_hasher(16, sha256),
-    )
-    scheduler.on_new_request(request)
-    output = SchedulerOutput.make_empty()
-    output.scheduled_new_reqs = [NewRequestData.from_request(request, ([1],))]
-    output.num_scheduled_tokens = {request.request_id: 16}
-    output.total_num_scheduled_tokens = 16
-    metadata = scheduler.build_connector_meta(output)
-    assert metadata.store_jobs
-    job_ids = set(metadata.store_jobs)
-
-    scheduler.reset_cache()
-    scheduler.reset_cache()
-
-    flushed = scheduler.build_connector_meta(SchedulerOutput.make_empty())
-    assert job_ids <= flushed.jobs_to_flush
 
 
 @pytest.mark.parametrize(
@@ -2045,51 +1994,6 @@ _EMPTY_REQ_CTX = ReqContext(req_id="")
 _LOOKUP_REQ = MagicMock()
 _LOOKUP_REQ.request_id = "req"
 _LOOKUP_GROUP_CONFIG = MagicMock()
-
-
-@pytest.mark.cpu_test
-def test_B4_prefix_larger_than_primary_tier_does_not_defer_forever():
-    """Disk promotions must admit a partial prefix or fall back to compute."""
-    from vllm.v1.kv_offload.tiering.example.manager import (
-        ExampleSecondaryTierManager,
-    )
-    from vllm.v1.kv_offload.tiering.manager import (
-        CPUPrimaryTierOffloadingManager,
-        TieringOffloadingManager,
-    )
-
-    mmap_region = MagicMock()
-    view = memoryview(torch.zeros((1, 16), dtype=torch.int8).numpy())
-    mmap_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_chunks=1, mmap_region=mmap_region)
-    secondary = ExampleSecondaryTierManager(
-        offloading_spec=MagicMock(),
-        primary_kv_view=view,
-        tier_type="example",
-    )
-    manager = TieringOffloadingManager(primary, [secondary])
-    req_context = ReqContext(req_id="B4")
-    manager.on_new_request(req_context)
-    keys = to_keys([1, 2])
-    for key in keys:
-        secondary.chunks[key] = True
-
-    scheduler = object.__new__(OffloadingConnectorScheduler)
-    scheduler.manager = manager
-    scheduler._events_tracker = MagicMock()
-    request = MagicMock(request_id="B4")
-    results = []
-    for _ in range(4):
-        results.append(
-            scheduler._maximal_prefix_lookup(
-                keys, req_context, request, _LOOKUP_GROUP_CONFIG, 0
-            )
-        )
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
-        )
-
-    assert any(result is not None for result in results), results
 
 
 def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):

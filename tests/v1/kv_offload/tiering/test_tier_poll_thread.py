@@ -591,6 +591,98 @@ def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch):
         manager.shutdown()
 
 
+class _RecordingStop:
+    """Stand-in for the tier-poll stop Event that records the waits it is given.
+
+    Lets a test drive _tier_poll_loop() on the calling thread and read back the
+    interval each round paused for, without real sleeping.
+    """
+
+    def __init__(self, rounds: int):
+        self.waits: list[float] = []
+        self._rounds = rounds
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set or len(self.waits) >= self._rounds
+
+    def set(self) -> None:
+        self._set = True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return False
+
+
+def _run_failing_rounds(manager, rounds: int, monkeypatch, **constants):
+    """Drive _tier_poll_loop() on this thread through `rounds` failing rounds.
+
+    Stops the real control thread first so only this call drives the loop, and
+    returns the interval each round paused for.
+    """
+    for name, value in constants.items():
+        monkeypatch.setattr(tiering_manager, name, value)
+    manager._stop_tier_poll_thread()
+    manager.secondary_tiers[0].on_serve = lambda parent: (_ for _ in ()).throw(
+        RuntimeError("persistent")
+    )
+    stop = _RecordingStop(rounds)
+    manager._tier_poll_stop = stop
+    manager._tier_poll_loop()
+    return stop.waits
+
+
+def test_backoff_waits_at_least_the_configured_interval(monkeypatch):
+    """Backing off must never poll faster than tier_poll_interval_s.
+
+    The wait is max(tier_poll_interval_s, 1 s), so a user who set a slow
+    interval does not get a faster loop after a fault.
+    """
+    manager, _ = _make_manager(tier_poll_interval_s=3.0)
+    try:
+        waits = _run_failing_rounds(
+            manager, 4, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
+        )
+    finally:
+        manager.shutdown()
+    assert waits == [3.0, 3.0, 3.0, 3.0]
+
+
+def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch):
+    """A sub-second interval still backs off to the 1 s floor."""
+    manager, _ = _make_manager(tier_poll_interval_s=0.001)
+    try:
+        waits = _run_failing_rounds(
+            manager, 3, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
+        )
+    finally:
+        manager.shutdown()
+    assert waits == [1.0, 1.0, 1.0]
+
+
+def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch):
+    """A permanent fault must not emit a full traceback every round.
+
+    The first failure of a run logs a traceback; later ones are one-line
+    summaries, so an idle rank with a broken peer cannot flood the log.
+    """
+    manager, _ = _make_manager()
+    fake_logger = MagicMock()
+    monkeypatch.setattr(tiering_manager, "logger", fake_logger)
+    try:
+        _run_failing_rounds(
+            manager,
+            4,
+            monkeypatch,
+            _TIER_POLL_BACK_OFF_AFTER_S=0.0,
+            _TIER_POLL_ERROR_LOG_INTERVAL_S=0.0,
+        )
+    finally:
+        manager.shutdown()
+    assert fake_logger.exception.call_count == 1
+    assert fake_logger.warning.call_count == 3
+
+
 def test_lock_releases_on_error(manager_and_tier):
     """Leaving a with-block on an exception must not leak the lock."""
     manager, _ = manager_and_tier
