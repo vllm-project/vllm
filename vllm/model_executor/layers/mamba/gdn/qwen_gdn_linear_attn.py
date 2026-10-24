@@ -303,11 +303,6 @@ def _log_gdn_backend_decision(
         requested_backend,
         head_k_dim,
     )
-    if active_backend == "flashinfer" and current_platform.is_device_capability(90):
-        logger.warning_once(
-            "FlashInfer GDN prefill is JIT-compiled; first run may take a "
-            "while. Set --gdn-prefill-backend triton to skip JIT.",
-        )
 
 
 def fi_chunk_gated_delta_rule(
@@ -1336,6 +1331,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._exports_checkpoints:
             # Size the workspace while profiling; it is locked afterwards.
             current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
+
+        if self.gdn_prefill_backend == "flashinfer":
+            from flashinfer.jit import env as fi_jit_env
+
+            logger.info_once(
+                "Warming up FlashInfer GDN prefill kernel (cold cache "
+                "JIT-compile may take several minutes; cached under %s). "
+                "Pass --additional-config "
+                "'{\"gdn_prefill_backend\":\"triton\"}' for faster cold "
+                "startup, potentially slower steady-state.",
+                fi_jit_env.FLASHINFER_JIT_DIR,
+            )
 
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype
