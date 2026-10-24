@@ -258,7 +258,26 @@ class XPUPlatform(Platform):
                 "Falling back to Triton Attention backend."
             )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
-        elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
+
+        # Flash Attention on XPU only runs block sizes that are multiples of 64.
+        # block_size is set here only when the user passed --block-size; honor
+        # it by falling back to Triton Attention rather than failing at KV
+        # cache setup.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        block_size = attn_selector_config.block_size
+        if selected_backend is None and not FlashAttentionBackend.supports_block_size(
+            block_size
+        ):
+            logger.warning_once(
+                "Flash Attention on XPU does not support block_size=%d. "
+                "Falling back to Triton Attention backend, which may be "
+                "slower; use a multiple of 64 to keep Flash Attention.",
+                block_size,
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
             return AttentionBackendEnum.FLASH_ATTN.get_path()
         elif selected_backend:
