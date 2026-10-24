@@ -2,6 +2,7 @@
 
 #include <cuda_runtime_api.h>
 #include <algorithm>
+#include <cstdint>
 
 // maximum blocks per SM cap
 #ifndef VLLM_LAUNCH_BLOCKS_CAP
@@ -61,4 +62,33 @@ static inline int vllm_runtime_blocks_per_sm(int block_threads) {
                          cudaDevAttrMaxThreadsPerMultiProcessor, device);
   int blocks = (block_threads > 0) ? (max_threads_per_sm / block_threads) : 1;
   return VLLM_CLAMP_BLOCKS_PER_SM(blocks);
+}
+
+// Launch config for elementwise kernels that run one block per token and stride
+// it over the hidden dim: such a grid is only num_tokens blocks wide, so at
+// decode most of the device sits idle. Splitting a token's work over `chunks`
+// blocks in gridDim.y scales the launch with the device instead. Once
+// num_tokens alone fills it this returns chunks == 1, the previous config.
+// Each element is still handled by one thread, so results are unchanged.
+struct VllmElementwiseLaunch {
+  int threads;
+  int chunks;
+};
+
+static inline VllmElementwiseLaunch vllm_elementwise_launch_config(
+    int64_t num_tokens, int work_per_token, int sm_count,
+    int max_threads = 1024) {
+  if (num_tokens >= sm_count) {
+    return {std::min(work_per_token, max_threads), 1};
+  }
+  // Smaller blocks, so a token's work spreads over more of them.
+  const int threads =
+      std::clamp(std::min(work_per_token, max_threads), 64, 256);
+  // Oversubscribe the device, capped so that no block comes up empty.
+  const int max_chunks = std::max(1, (work_per_token + threads - 1) / threads);
+  const int wanted = static_cast<int>(
+      (static_cast<int64_t>(sm_count) * VLLM_LAUNCH_BLOCKS_CAP + num_tokens -
+       1) /
+      num_tokens);
+  return {threads, std::min(max_chunks, std::max(1, wanted))};
 }

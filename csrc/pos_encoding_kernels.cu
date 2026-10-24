@@ -2,6 +2,7 @@
 
 #include "core/cuda_compat.h"
 #include "dispatch_utils.h"
+#include "launch_bounds_utils.h"
 
 namespace vllm {
 
@@ -51,7 +52,9 @@ inline __device__ void apply_rotary_embedding(
   const cache_t* sin_ptr = cache_ptr + embed_dim;
 
   const int nq = num_heads * embed_dim;
-  for (int i = threadIdx.x; i < nq; i += blockDim.x) {
+  const int begin = blockIdx.y * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.y;
+  for (int i = begin; i < nq; i += stride) {
     const int head_idx = i / embed_dim;
     const int64_t token_head =
         token_idx * query_stride + head_idx * head_stride + rope_dim_offset;
@@ -62,7 +65,7 @@ inline __device__ void apply_rotary_embedding(
 
   if (key != nullptr) {
     const int nk = num_kv_heads * embed_dim;
-    for (int i = threadIdx.x; i < nk; i += blockDim.x) {
+    for (int i = begin; i < nk; i += stride) {
       const int head_idx = i / embed_dim;
       const int64_t token_head =
           token_idx * key_stride + head_idx * head_stride + rope_dim_offset;
@@ -164,8 +167,11 @@ void rotary_embedding(
   int64_t head_stride =
       (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
+  auto cfg = vllm_elementwise_launch_config(
+      num_tokens, num_heads * rot_dim / 2,
+      get_device_prop()->multiProcessorCount, /*max_threads=*/512);
+  dim3 grid(num_tokens, cfg.chunks);
+  dim3 block(cfg.threads);
   const torch::stable::accelerator::DeviceGuard device_guard(
       query.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
