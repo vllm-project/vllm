@@ -223,15 +223,20 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         return
 
     cpu_params: set[str] = set()
-    uva_offloaded_parameters: list[str] = []
+    uva_offloaded_parameters: set[str] = set()
+    quant_method = getattr(module, "quant_method", None)
+    post_load_name = getattr(
+        quant_method, "get_post_load_parameter_name", lambda name: name
+    )
 
     # Store which parameters are on CPU and move them to the GPU
     for name, p in module.named_parameters():
+        restore_names = (name, post_load_name(name))
         if p.device.type == "cpu":
-            cpu_params.add(name)
+            cpu_params.update(restore_names)
             p.data = p.data.to(target_device)
         if getattr(p, "_vllm_is_uva_offloaded", False):
-            uva_offloaded_parameters.append(name)
+            uva_offloaded_parameters.update(restore_names)
         # Parameters already on target device are not touched
 
     try:
