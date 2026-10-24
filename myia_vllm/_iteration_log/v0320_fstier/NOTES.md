@@ -1121,3 +1121,73 @@ de `/v1/models`**. Risque documenté au hub : le cap appris vit en mémoire et e
 **Horloge** : le conteneur tourne en **TZ=UTC** (`local == utc`, pas +2) ; le mur de
 07:20:58Z côté moteur correspond à la seconde près à la ligne du hub — discipline de
 fuseau confirmée des deux côtés.
+
+## Incident 24/10 10:45Z — arrêt de Docker Desktop : pas un crash vLLM, VM bloquée dans `sync(2)`
+
+**Demande du user (11:25Z)** : réarmer le cron après le crash et le reboot, chercher si
+le crash WSL/Docker vient de mes derniers changements (TouchOnHitFsTier 08:17Z,
+`error_body`, plafond pruneur 96 GiB), et enquêter avec Maintenance.
+
+**Cause de l'arrêt (VÉRIFIÉ, reconnue par Maintenance)** : à **10:45:00.907Z**, le
+backend Docker Desktop reçoit `docker-desktop-cli POST /app/quit`, la commande
+`docker desktop restart` de Maintenance (fenêtre #15157). Elle devait corriger un
+`cgroup-parent` de `daemon.json` qui avait placé les 50 conteneurs, dont le moteur,
+dans `coursia.slice/coursia-ci.slice` (memory.high 56 Gio, memory.max 66 Gio,
+partagés avec la CI et qdrant). Le dump de goroutines de 10:45:30.96Z vient de la
+minuterie de 30 s du handler `QuitDockerDesktop` (app.go:99). **Ce n'est pas un panic.**
+
+**Arrêt du moteur : propre.** Il reçoit `[shutdown] API server: shutdown triggered`
+à 10:45:03Z, alors qu'il servait normalement juste avant (KV 43-88 %, prefill 600 à
+1 900 t/s). Il est sorti à 10:45:07.36Z, exit 0, soit **3,6 s** après le SIGTERM.
+Les **39 conteneurs** sont tous sortis entre 10:45:04.0Z et 10:45:07.6Z, exit 0 ;
+`claudish-sidecar` à 10:45:04.2Z malgré son StopTimeout de 120 s.
+
+**Ce qui a bloqué la VM (VÉRIFIÉ, `vm/init.log`)** :
+
+| heure (Z) | événement VM |
+|---|---|
+| 10:45:03.724 | `control: gracefully shutting down` → SIGTERM à dockerd |
+| 10:45:15.50 | `dockerd stopped gracefully after 11.77s` |
+| 10:45:15.80 | poweroff `all processes have shutdown` |
+| 10:45:25.53 | `init` ERROR `timeout waiting for init services to stop` — goroutine 1 bloquée dans **`unix.Sync()`** (sync(2)) ← `poweroff.shutdown` (shutdown.go:56) |
+| 10:47:03.667 | backend : `stopped waiting for VM to be ready to power off: context deadline exceeded` (120 s après 10:45:03.7) |
+| 10:47:40 | relance ratée (`bootstrapping main distribution … timed out`) → reboot Windows du user à 11:00:55Z |
+
+**Aucun conteneur n'a bloqué l'extinction.** C'est le `sync()` lancé avant
+l'extinction qui n'est pas revenu, pendant plus de 108 s. Dans WSL2, `sync()`
+s'applique à tout le noyau de la VM : il vide aussi l'ext4 de la distro Ubuntu,
+où vit le palier fs, le VHDX qdrant et les montages 9p/drvfs vers Windows. **Le
+palier fs reste donc un suspect légitime, mais les mesures ne le désignent pas.**
+Données sales de la VM Ubuntu à 10:36Z : **27,9 Mo** (reclaim-wsl-memory.log de
+Maintenance). `file_dirty` du cgroup moteur après reboot : 45 Ko. Aucun événement
+disque côté Windows entre 10:20 et 10:58Z. Au reboot, le kmsg de 11:04:57Z montre
+`EXT4-fs (sdg)/(sdf): recovery complete`, signe de journaux mal fermés.
+
+**Comparaison avec l'extinction propre de 11:43Z** (redémarrage Maintenance, conteneurs
+arrêtés d'abord à partir de 11:34:41Z) : dockerd sorti en 2,16 s, puis **`disks synced`
+en 0,36 s**, VM prête aussitôt. **Cette comparaison ne tranche pas** entre deux causes :
+- (a) des écritures encore en vol à 10:45, où le `sync()` démarrait 8 s après la
+  sortie du dernier conteneur ;
+- (b) un système de fichiers coincé, remis en état par le reboot Windows.
+Pour trancher : `time sync` dans Ubuntu juste avant un futur stop.
+**Leçon opératoire transmise à Maintenance** : sur ai-01, arrêter les conteneurs
+écrivains **avant** `docker desktop stop`.
+
+**Correction transmise à Maintenance** : les 96 GiB sont le plafond du palier
+**disque**, pas de la RAM. Le palier RAM est fixé à 8 GiB. cgroup moteur mesuré à
+11:3xZ : 16,3 Go (anon 6,5 + shmem 9,4 + cache ~0,1), pic 24,6 Go au boot, PSI 0,00,
+events high/max/oom à 0 (vue conteneur ; la tranche parente n'est visible que de
+l'hôte).
+
+**Retour après le redémarrage de Maintenance** : StartedAt 11:45:10.56Z, **health 200
+à 11:47:52Z** (boot 2 min 40, cache de compilation chaud). Génération réelle
+« Quatre » en 0,48 s, KV 750 747, TouchOnHitFsTier rechargé, sidecars Up, `/dev/shm`
+à 8,0 G avec 0 orphelin (purge inutile), palier fs intact (4 572 blocs, 113 G), VRAM
+20 684 / 19 986 MiB. La sortie de `coursia-ci.slice` est à confirmer par Maintenance.
+
+**Auto-correction** : j'avais présenté `MYIA_FS_TOUCH=0` comme un kill switch « sans
+restart ». C'est **faux** : `_ENABLED` est lu une fois, à l'import du module, donc il
+faut **recréer le conteneur**. Docstring de `lru_fs_tier.py` corrigée.
+
+**Cron** : `64a58306` a survécu au reboot ; le doublon `9505c4a1` créé après le reboot
+a été supprimé, il reste un seul cron de surveillance.

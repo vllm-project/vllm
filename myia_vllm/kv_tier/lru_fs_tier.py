@@ -56,8 +56,11 @@ imports the class when ``type`` is not a registered name::
      "module_path": "lru_fs_tier",
      "root_dir": "/kv-tier-fs", "n_read_threads": 16, "n_write_threads": 16}
 
-Kill switch without touching the config: ``MYIA_FS_TOUCH=0`` in the container
-environment makes every touch a no-op, restoring exact upstream behaviour.
+Kill switch without touching the connector config: ``MYIA_FS_TOUCH=0`` in the
+container environment makes every touch a no-op, restoring exact upstream
+behaviour. The variable is read once, at module import, so it takes effect only
+when the container is recreated (an env change needs a recreate anyway); it is
+not a live toggle.
 """
 
 import os
