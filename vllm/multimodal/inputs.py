@@ -146,6 +146,12 @@ class PlaceholderRange:
     between `offset` and `offset + length` to assign embeddings to.
     """
 
+    num_encoder_tokens: int | None = None
+    """Encoder compute cost before token pruning, in output-token units.
+
+    Defaults to the number of retained embeddings when not specified.
+    """
+
     @cached_property
     def embeds_cumsum(self) -> list[int] | None:
         # python list so python indexing avoids torch C++ overhead/conversions/deallocs
@@ -156,6 +162,11 @@ class PlaceholderRange:
             return self.length
 
         return self.embeds_cumsum[-1] if self.embeds_cumsum else 0
+
+    def get_num_encoder_tokens(self) -> int:
+        if self.num_encoder_tokens is not None:
+            return self.num_encoder_tokens
+        return self.get_num_embeds()
 
     def get_embeds_indices_in_range(
         self, start_idx: int, end_idx: int
@@ -207,6 +218,8 @@ class PlaceholderRange:
         if not isinstance(other, self.__class__):
             return False
         if not (self.offset, self.length) == (other.offset, other.length):
+            return False
+        if self.num_encoder_tokens != other.num_encoder_tokens:
             return False
 
         if self.is_embed is None:

@@ -81,7 +81,11 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
@@ -1263,6 +1267,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 and video_pruning_rate is not None
                 and video_pruning_rate > 0.0
             ):
+                num_encoder_tokens = num_tokens
                 T, H, W = map(int, grid_thw)
                 tokens_per_frame = (H // image_processor.merge_size) * (
                     W // image_processor.merge_size
@@ -1271,6 +1276,10 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                     tokens_per_frame,
                     T,
                     video_pruning_rate,
+                )
+                return PromptUpdateDetails(
+                    full=[placeholder[modality]] * num_tokens,
+                    num_encoder_tokens=num_encoder_tokens,
                 )
             # End of EVS-specific code
 

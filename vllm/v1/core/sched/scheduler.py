@@ -939,11 +939,13 @@ class Scheduler(SchedulerInterface):
                             if preempted_encoder_inputs:
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
+                                num_encoder_tokens_to_restore = sum(
+                                    preempted_req.mm_features[
+                                        i
+                                    ].mm_position.get_num_encoder_tokens()
                                     for i in preempted_encoder_inputs
                                 )
-                                encoder_compute_budget += num_embeds_to_restore
+                                encoder_compute_budget += num_encoder_tokens_to_restore
                     else:
                         preempted_req = self.running.pop()
 
@@ -2140,7 +2142,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
-            encoder_compute_budget -= num_encoder_embeds
+            encoder_compute_budget -= mm_feature.mm_position.get_num_encoder_tokens()
             mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
 

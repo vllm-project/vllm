@@ -410,6 +410,36 @@ def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, An
     return {"video": [(video, metadata)]}
 
 
+@pytest.mark.parametrize("pruning_rate", [0.0, 0.75])
+def test_qwen2_5_video_pruning_preserves_encoder_compute_cost(pruning_rate):
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+        model_config_kwargs={"video_pruning_rate": pruning_rate},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    mm_items = processor.info.parse_mm_data(
+        _build_qwen2_5_vl_video_mm_data(num_frames=16, fps=2.0)
+    )
+    for _ in range(2):
+        result = processor(
+            "<|vision_start|><|video_pad|><|vision_end|>",
+            mm_items=mm_items,
+            cache=cache,
+        )
+        position = result["mm_placeholders"]["video"][0]
+        grid = result["mm_kwargs"].get_data()["video_grid_thw"][0]
+        merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
+        compute_tokens = int(grid.prod()) // merge_size**2
+        assert position.get_num_encoder_tokens() == compute_tokens
+        if pruning_rate:
+            assert position.get_num_embeds() < compute_tokens
+        else:
+            assert position.get_num_embeds() == compute_tokens
+
+
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
 def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
     ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})

@@ -185,7 +185,10 @@ class EncoderCacheManager:
         num_embeds = request.get_num_encoder_embeds(input_id)
 
         # Not enough compute budget
-        if num_embeds > encoder_compute_budget:
+        if (
+            request.mm_features[input_id].mm_position.get_num_encoder_tokens()
+            > encoder_compute_budget
+        ):
             return False
 
         num_embeds += num_embeds_to_schedule
@@ -409,7 +412,10 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
     ) -> bool:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
         # Not enough compute budget
-        if num_encoder_embeds > encoder_compute_budget:
+        if (
+            request.mm_features[input_id].mm_position.get_num_encoder_tokens()
+            > encoder_compute_budget
+        ):
             return False
 
         num_encoder_embeds += num_embeds_to_schedule
