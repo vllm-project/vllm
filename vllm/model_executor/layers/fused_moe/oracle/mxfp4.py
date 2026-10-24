@@ -157,6 +157,8 @@ class Mxfp4MoeBackend(Enum):
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel (gfx950)
     # W4A4: aiter Triton/Gluon moe_gemm_a4w4 kernel (gfx1250)
     AITER_TRITON_MXFP4_MXFP4 = "AITER_TRITON_MXFP4_MXFP4"
+    # ROCm RDNA3 (gfx1100) native HIP kernel
+    RDNA3_MXFP4 = "RDNA3_MXFP4"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -258,6 +260,13 @@ def backend_to_kernel_cls(
         )
 
         return [UnfusedOAITritonExperts]
+
+    elif backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
+            RDNA3Mxfp4Experts,
+        )
+
+        return [RDNA3Mxfp4Experts]
 
     elif backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -390,6 +399,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
+        "rdna3": [Mxfp4MoeBackend.RDNA3_MXFP4],
     }
     if backends := mapping.get(runner_backend):
         return backends
@@ -409,6 +419,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.RDNA3_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -836,7 +847,13 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # b12x plans for the exact model dimensions. B12xExperts validates the
         # required MXFP4 block alignment before selecting the backend.
         return hidden_size, intermediate_size
-    if backend == Mxfp4MoeBackend.EMULATION:
+    if backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        # The RDNA3 kernels bound-check N and K, so only the MXFP4 block (K) and
+        # the 4-column vector loads (N) constrain them. The generic ROCm 256
+        # round-up below would double the experts at TP4 (512 / 4 = 128).
+        intermediate_size = round_up(intermediate_size, OCP_MX_BLOCK_SIZE)
+        hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
+    elif backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).
@@ -997,6 +1014,24 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
+            repack_experts_rdna3,
+        )
+
+        deinterleave = layer.activation == MoEActivation.SWIGLUOAI
+        b_q13, b_s13 = repack_experts_rdna3(
+            w13_weight.data, w13_weight_scale.data, deinterleave=deinterleave
+        )
+        b_q2, b_s2 = repack_experts_rdna3(
+            w2_weight.data, w2_weight_scale.data, deinterleave=False
+        )
+        if deinterleave and w13_bias is not None:
+            w13_bias = torch.cat(
+                [w13_bias.data[:, ::2], w13_bias.data[:, 1::2]], dim=1
+            ).contiguous()
+        return b_q13, b_q2, b_s13, b_s2, w13_bias, w2_bias
 
     elif mxfp4_backend in TRTLLM_BACKENDS:
         assert _cache_permute_indices is not None
@@ -2176,6 +2211,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+        Mxfp4MoeBackend.RDNA3_MXFP4,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
