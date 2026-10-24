@@ -216,12 +216,14 @@ def get_lora_op_configs(
     default = {}
     if op_type == "shrink":
         split_k = 64 if batch < 128 else 8
+        block_k = 256 if batch < 128 else 32
         if is_batch_invariant:
             split_k = 1
+            block_k = 32
         default = {
             "block_m": 32,
             "block_n": 16,
-            "block_k": 256 if batch < 128 else 32,
+            "block_k": block_k,
             "split_k": split_k,
             "num_warps": 4,
             "num_ctas": 1,
