@@ -34,7 +34,10 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
+    _mega_moe_fused_shared_experts,
     _num_fused_shared_experts,
+    _reject_mega_moe_reload,
+    _routed_experts_prefix,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_sparse_topk_buffer_width,
@@ -206,6 +209,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.model_config = vllm_config.model_config
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
@@ -288,6 +292,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return name
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        _reject_mega_moe_reload(self, self.model_config)
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -306,6 +311,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix=_routed_experts_prefix(self.moe_mlp_layers),
         )
 
         params_dict = dict(self.named_parameters())
@@ -329,6 +335,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            mega_experts = _mega_moe_fused_shared_experts(self, name)
+            if mega_experts is not None:
+                loaded_params.add(
+                    mega_experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
             if self.is_fused_shared_expert_enabled:
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
@@ -432,3 +444,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     f"missing from checkpoint."
                 )
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        for mlp in self.moe_mlp_layers:
+            mlp.finalize_mega_moe_weights()
