@@ -703,7 +703,12 @@ class Platform:
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends use the largest preferred size if they all
+        accept it, and otherwise keep the default. If any backend rejects the
+        default, the LCM search is unchanged.
 
         ``supports_block_size`` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -721,6 +726,16 @@ class Platform:
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Each backend can prefer a different size. Use the largest
+                # only when every backend accepts it; otherwise the default.
+                largest_preferred = max(
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                )
+                if all(
+                    b.supports_block_size(largest_preferred) for b in backend_classes
+                ):
+                    return largest_preferred
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
