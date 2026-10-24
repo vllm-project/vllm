@@ -17,7 +17,7 @@ The subclass intentionally keeps the inherited ``get_name()``
 `_canonicalize_sparse_mla_kv_cache_dtype` promotes a quantized KV cache to
 ``fp8_ds_mla`` for it, and `FlashMLASparseImpl` asserts that layout — so a new
 name would silently change KV cache behaviour. Only``supports_sink`` and the
-two kernel wrappers differ from the parent.
+kernel wrappers differ from the parent.
 """
 
 from typing import TYPE_CHECKING
@@ -213,6 +213,22 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             lse = lse[:, :actual_num_heads, :]
 
         return out, lse
+
+    def _fp8_flash_mla_kernel_per_token(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_length: torch.Tensor,
+        attn_sink: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # q shape: (num_tokens, num_heads, head_dim)
+        attn_sink = self._sinks_for_query(
+            q, head_dim=1, kernel_heads=self.fp8_decode_padded_heads
+        )
+        return super()._fp8_flash_mla_kernel_per_token(
+            q, kv_c_and_k_pe_cache, topk_indices, topk_length, attn_sink=attn_sink
+        )
 
     def _bf16_flash_mla_kernel(
         self,
