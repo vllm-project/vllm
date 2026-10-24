@@ -314,3 +314,46 @@ In addition, you can also register all your `CustomOp` at one place for better m
     for op_name, op_cls in REGISTERED_CUSTOM_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=op_name)
     ```
+
+#### Opt in to the hw-agnostic layers
+
+With `VLLM_USE_HW_AGNOSTIC=1`, the Transformers modeling backend builds layers from `vllm.model_executor.hw_agnostic.layers` where a hw-agnostic implementation exists, and from the in-tree `vllm.model_executor.layers` otherwise. These are separate classes with separate `op_registry_oot`s, so an override of the in-tree class does not reach the hw-agnostic one.
+
+To override the class the Transformers backend builds on either path, obtain it with `hw_agnostic.resolve` instead of importing it, and register through that class's `register_oot`:
+
+??? code
+
+    ```python
+    from vllm.model_executor import hw_agnostic
+
+    SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
+
+
+    @SiluAndMul.register_oot
+    class CustomSiluAndMul(SiluAndMul):
+
+        def forward_oot(...):
+            # Call optimized device-specific kernels.
+            ...
+    ```
+
+`resolve` returns the hw-agnostic class when `VLLM_USE_HW_AGNOSTIC` is set and one exists, and the in-tree class otherwise, so the plugin code is the same for both paths. Do not register through `vllm.model_executor.custom_op.CustomOp.register_oot`, which always writes to the in-tree registry. On the hw-agnostic path, vLLM warns about an override registered only for the in-tree class, and raises if an override does not derive from the class it replaces.
+
+`VLLM_USE_HW_AGNOSTIC` only affects the Transformers backend. Models with a native vLLM implementation build the in-tree class even when it is set, so a plugin that also serves those models registers its override for the in-tree class as well.
+
+The Transformers backend builds its norms as `TPAwareRMSNorm` and `TPAwareGemmaRMSNorm`, subclasses of `RMSNorm` and `GemmaRMSNorm`. Overrides are keyed on the exact class name, so an `RMSNorm` or `GemmaRMSNorm` override does not reach them yet.
+
+Type checkers do not accept a variable as a base class, so plugins that run mypy can import the in-tree class for type checking only:
+
+??? code
+
+    ```python
+    from typing import TYPE_CHECKING
+
+    from vllm.model_executor import hw_agnostic
+
+    if TYPE_CHECKING:
+        from vllm.model_executor.layers.activation import SiluAndMul
+    else:
+        SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
+    ```
