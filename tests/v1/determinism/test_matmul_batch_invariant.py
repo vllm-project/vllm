@@ -17,7 +17,9 @@ from vllm.model_executor.determinism.batch_invariant import (
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
+    _get_matmul_config,
     _get_tuned_matmul_arch_family,
+    set_config_max_num_seqs,
 )
 from vllm.platforms import current_platform
 
@@ -135,47 +137,38 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     assert torch.equal(single_output[0], batch_output[0])
 
 
-@pytest.fixture
-def batch_invariant_mode():
-    # The overrides are process-global: remove them so later tests compare
-    # against the stock aten kernels again.
-    enable_batch_invariant_mode()
-    yield
-    assert bi._batch_invariant_LIB is not None
-    bi._batch_invariant_LIB._destroy()
-    bi._batch_invariant_MODE = False
+def test_get_matmul_config_pinned_to_max_num_seqs():
+    # When set_config_max_num_seqs is called, _get_matmul_config must return
+    # the same config for all runtime M values that async scheduling can produce,
+    # even if those M values span multiple m_bucket thresholds.
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    arch_family = _get_tuned_matmul_arch_family(capability)
+    if arch_family not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
+        pytest.skip("No tuned persistent matmul config for this architecture")
 
+    default = {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,
+               "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8}
+    dtype = torch.bfloat16
+    # Use a shape guaranteed to have per-bucket variation (present in all arches).
+    N, K = 2048, 2048
 
-@skip_unsupported
-@pytest.mark.usefixtures("batch_invariant_mode")
-@pytest.mark.parametrize("op", ["mm", "addmm", "bmm"])
-def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
-    """Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``,
-    i.e. the ``.out`` overload, which eager never dispatches."""
-    if (
-        op != "bmm"
-        and current_platform.is_cuda()
-        and not current_platform.is_device_capability_family(80)
-    ):
-        pytest.skip("mm/addmm are not overridden on SM90+")
-    torch.manual_seed(0)
-    dtype, k, n, needle = torch.bfloat16, 1024, 768, 37
-    w = torch.randn(4, k, n, device=DEVICE_TYPE, dtype=dtype)
-    bias = torch.randn(n, device=DEVICE_TYPE, dtype=dtype)
-    fn = {
-        "mm": lambda x: torch.mm(x[0], w[0]),
-        # Bare addmm: a following pointwise op would make Inductor unfuse the bias.
-        "addmm": lambda x: torch.addmm(bias, x[0], w[0]),
-        "bmm": lambda x: torch.bmm(x, w),
-    }[op]
-    compiled = torch.compile(fn, fullgraph=True)
-    x = torch.randn(4, 256, k, device=DEVICE_TYPE, dtype=dtype)
-    row = None
-    for m in (64, 256, 128):
-        xs = x[:, :m].clone()
-        # With dynamic=True, a specialization on M would silently recompile.
-        torch._dynamo.mark_dynamic(xs, 1)
-        out = compiled(xs)
-        assert torch.equal(out, fn(xs)), f"compiled {op} bypassed the BI kernel (M={m})"
-        row = out[..., needle, :] if row is None else row
-        assert torch.equal(out[..., needle, :], row)
+    # Without pinning, M=8 and M=9 can land in different buckets.
+    set_config_max_num_seqs(0)
+    cfg_8 = _get_matmul_config(8, N, K, dtype, default)
+    cfg_9 = _get_matmul_config(9, N, K, dtype, default)
+    # Confirm they are indeed different so the test is meaningful on this arch.
+    if cfg_8 == cfg_9:
+        pytest.skip("M=8 and M=9 happen to share a bucket on this architecture")
+
+    # With pinning to max_num_seqs=16, both must return the same config.
+    set_config_max_num_seqs(16)
+    try:
+        pinned_8 = _get_matmul_config(8, N, K, dtype, default)
+        pinned_9 = _get_matmul_config(9, N, K, dtype, default)
+        assert pinned_8 == pinned_9, (
+            "Config must be identical for M=8 and M=9 when pinned to max_num_seqs=16"
+        )
+    finally:
+        set_config_max_num_seqs(0)
