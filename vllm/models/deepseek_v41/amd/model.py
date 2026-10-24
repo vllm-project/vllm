@@ -1345,6 +1345,18 @@ class DeepseekV41LLMForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                getattr(layer, "ffn", None),
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 AMD fused shared experts are not supported yet; "
+                "please open an issue."
+            )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
