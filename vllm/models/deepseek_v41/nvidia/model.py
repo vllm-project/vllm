@@ -116,9 +116,12 @@ from .ops.mhc import (
     supports_mhc_all_reduce,
     supports_mhc_overlap,
 )
+from .specialized_decode import specialized_decode_config
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -968,6 +971,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1055,12 +1059,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        local_input_ids = input_ids
         if (
             input_ids is not None
             and self.parallel_config.prefill_context_parallel_size > 1
             and not self.parallel_config.enable_expert_parallel
         ):
             input_ids = get_pcp_group().all_gather(input_ids, dim=0)
+
+        if decode_step is not None:
+            return decode_step.run(
+                hidden_states, positions, input_ids, engram_hashes, engram_mask
+            )
 
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
@@ -1086,7 +1096,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
-                input_ids,
+                local_input_ids
+                if self.decoder_replay_layers.replay_batch is not None
+                else input_ids,
                 pre_mix,
                 post_mix,
                 res_mix,
@@ -1228,6 +1240,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     ) -> tuple[torch.Tensor, ...]:
         """Layers ``decoder_replay_start``.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
+        assert self.decoder_replay_layers is not None
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+            and self.decoder_replay_layers.replay_batch is not None
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.decoder_replay_start, self.end_layer),
@@ -1272,14 +1292,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "the pipeline stage holding the last KV source layer must also "
                 "hold every layer after it"
             )
-        elif (
-            self.use_sequence_parallel
-            or parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.use_ubatching
-        ):
+        elif self.use_sequence_parallel or parallel_config.use_ubatching:
             reason = (
                 "the replay-layer batch shrinks per rank, which sequence and "
-                "prefill-context parallelism and microbatching cannot follow"
+                "microbatching cannot follow"
             )
         elif any(i >= cut for i in getattr(self.config, "engram_layer_ids", ())):
             reason = "an Engram layer sits at or after the last KV source layer"
@@ -1610,6 +1626,10 @@ class DeepseekV41LLMForCausalLM(
 
         config = vllm_config.model_config.hf_config
         self.config = config
+        # decode_backend=latency_specialized: a decode executor over self.model, built
+        # by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
         expert_dtype = getattr(config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
             expert_dtype, _linear_scale_param_name(vllm_config, expert_dtype)
@@ -1668,8 +1688,24 @@ class DeepseekV41LLMForCausalLM(
     ) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
-    @staticmethod
-    def get_model_state_cls():
+    def build_specialized_decode(self) -> "SpecializedDecode":
+        from .specialized_decode.logits.logits import SpecializedDecodeLogitsProcessor
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode.for_target(
+            self.model, self.specialized_decode_config, self.lm_head
+        )
+        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        return self.specialized_decode
+
+    def get_model_state_cls(self):
+        if self.specialized_decode_config is not None:
+            from .specialized_decode.runtime.model_state import (
+                DeepseekV41SpecializedDecodeModelState,
+            )
+
+            return DeepseekV41SpecializedDecodeModelState
         from .model_state import DeepseekV41ModelState
 
         return DeepseekV41ModelState
@@ -1693,12 +1729,15 @@ class DeepseekV41LLMForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
         hidden_states = self.model(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
             lookback_token_ids=lookback_token_ids,
+            decode_step=step,
         )
         return hidden_states
 
