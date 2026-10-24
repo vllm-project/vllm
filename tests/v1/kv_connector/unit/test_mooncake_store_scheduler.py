@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,10 +21,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     RequestTracker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+    BoundaryStoreStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -68,6 +74,10 @@ def _make_bare_scheduler(
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
+    scheduler._boundary_store_stats = BoundaryStoreStats()
+    scheduler._reported_boundary_store_stats = BoundaryStoreStats()
+    scheduler._last_boundary_stats_log = time.monotonic()
+    scheduler._logged_boundary_drops = 0
     scheduler._store_coord = MooncakeStoreCoordinator(
         [
             KVCacheGroupSpec(
@@ -1531,6 +1541,122 @@ def test_boundary_state_job_pins_exact_blocks_once():
         0,
         0,
     ]
+
+
+def _reported_handoffs(scheduler: MooncakeStoreScheduler) -> dict[str, int]:
+    """Hand-off outcome deltas in the metrics payload since the last report."""
+    stats = scheduler.get_kv_connector_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    return {
+        f.name: int(reduced.get(f"boundary_handoffs_{f.name}", 0))
+        for f in dataclasses.fields(BoundaryStoreStats)
+    }
+
+
+def test_boundary_store_stats_attribute_every_decline_reason():
+    """Each declined hand-off is charged to the reason that declined it.
+
+    These branches drop the only copy of a mamba state — ``store_mask`` keeps
+    mamba groups out of the positional save — and the sole runtime symptom is a
+    lower hit rate, so the counters are the whole diagnosis.
+    """
+    scheduler = _make_bare_scheduler(hash_block_size=4)
+    _register_offload_request(scheduler, prefill_end_tokens=20, num_prompt_tokens=20)
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads(
+        {
+            "req-0": [
+                (1, 7, 16),
+                (1, 9, 64),  # boundary past the save window
+                (1, NULL_BLOCK_ID, 12),  # no source block
+                (0, 5, 12),  # group does not hand off boundary states
+            ]
+        },
+        meta,
+    )
+
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 4
+    assert handoffs["accepted"] == 1
+    assert handoffs["dropped_past_prefill_end"] == 1
+    assert handoffs["dropped_null_block"] == 1
+    assert handoffs["dropped_group_not_boundary"] == 1
+    assert meta.requests[0].boundary_puts == [BoundaryPut(1, 7, 16)]
+
+
+def test_boundary_store_stats_count_a_request_that_vanished_mid_step():
+    scheduler = _make_bare_scheduler(hash_block_size=4)
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads(
+        {"req-gone": [(1, 7, 16), (1, 8, 20)]}, meta
+    )
+
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 2
+    assert handoffs["dropped_request_gone"] == 2
+    assert handoffs["accepted"] == 0
+    assert not meta.requests
+
+
+def test_boundary_store_stats_count_the_consumer_role_discard():
+    """A consumer drops every hand-off before it is ever judged per entry.
+
+    This is the shape of bug the counters exist for: the core keeps publishing
+    boundaries, the connector keeps throwing them away, and nothing else says
+    so. ``published`` with a matching ``dropped_consumer_role`` names it.
+    """
+    scheduler = _make_bare_scheduler(hash_block_size=4, kv_role="kv_consumer")
+    _register_offload_request(scheduler, prefill_end_tokens=20, num_prompt_tokens=20)
+    out = _make_offload_only_output([(1, 7, 16), (1, 9, 20)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 2
+    assert handoffs["dropped_consumer_role"] == 2
+    assert handoffs["accepted"] == 0
+    assert all(not m.boundary_puts for m in meta.requests)
+
+
+def test_boundary_store_stats_cover_the_finish_time_tail_path():
+    """The finish-time tail declines whole hand-offs; they are counted too."""
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._store_group_ids = (0, 1)
+    request = SimpleNamespace(request_id="req-0", block_hashes=[b"h0", b"h1", b"h2"])
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=12,
+        allocated_block_ids=([3], [9]),
+        token_ids=list(range(12)),
+        prefill_end_tokens=12,
+    )
+
+    assert not scheduler.register_finished_partial_tail(
+        request, ([3], [9]), [(1, 9, 40)]
+    )
+
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 1
+    assert handoffs["accepted"] == 0
+    assert handoffs["dropped_past_prefill_end"] == 1
+
+
+def test_boundary_store_stats_report_only_the_handoffs_since_the_last_report():
+    """The payload carries deltas, so successive reports do not overlap."""
+    scheduler = _make_bare_scheduler(hash_block_size=4)
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+    scheduler._handle_boundary_state_offloads({"req-gone": [(1, 7, 16)]}, meta)
+
+    first = _reported_handoffs(scheduler)
+    scheduler._handle_boundary_state_offloads({"req-gone": [(1, 8, 20)]}, meta)
+    second = _reported_handoffs(scheduler)
+
+    assert first["published"] == 1
+    assert second["published"] == 1
+    assert scheduler.get_kv_connector_stats() is None
 
 
 def test_store_job_pins_current_non_null_non_mamba_blocks():

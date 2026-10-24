@@ -12,7 +12,7 @@ enabling prefix caching via hash-based deduplication.
 """
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -62,15 +62,18 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
     def __init__(
         self,
         num_workers: int,
-        group_tp_replication_factors: Sequence[int] = (1,),
+        group_tp_replication_factors: Mapping[int, int] | None = None,
     ) -> None:
         if num_workers <= 0:
             raise ValueError("num_workers must be greater than zero.")
-        if any(factor <= 0 for factor in group_tp_replication_factors):
+        factors = dict(group_tp_replication_factors or {})
+        if any(factor <= 0 for factor in factors.values()):
             raise ValueError("TP replication factors must be greater than zero.")
         self._event_counter: Counter[KVCacheEvent] = Counter()
         self._num_workers = num_workers
-        self._group_tp_replication_factors = tuple(group_tp_replication_factors)
+        # Keyed by the cache group id an event names, which is the core's id and
+        # not the Store's own group index.
+        self._group_tp_replication_factors = factors
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         if not isinstance(events, list):
@@ -80,7 +83,9 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
     def _replication_factor(self, event: KVCacheEvent) -> int:
         if not isinstance(event, BlockStored) or event.group_idx is None:
             return 1
-        return self._group_tp_replication_factors[event.group_idx]
+        # A container built without a factor map has no topology to consult and
+        # counts every group once.
+        return self._group_tp_replication_factors.get(event.group_idx, 1)
 
     def _is_common_event(self, event: KVCacheEvent, count: int) -> bool:
         return count * self._replication_factor(event) >= self._num_workers
@@ -409,8 +414,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return kv_events
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_kv_connector_stats()
+        assert self.connector_worker is not None
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
