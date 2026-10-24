@@ -45,7 +45,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
-from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -762,13 +765,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, IndexerCaptureSource, A
                 index_weights,
             )
 
-            if self.indexer_capture is not None:
-                assert self.topk_indices_buffer is not None
-                self.indexer_capture.capture(
-                    self.topk_indices_buffer[
-                        : len(hidden_states), : self.indexer_capture.rows.shape[1]
-                    ]
-                )
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(hidden_states)
+            )
 
         # MLA attention writes into the pre-allocated `out` buffer
         # (see _alloc_attn_out).
