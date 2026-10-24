@@ -41,4 +41,4 @@ source (vllm-project/recipes#1095).
 
 A pull request that changes this directory gets the `recipe` label and a
 comment linking its own preview deployment, rebuilt a few minutes after each
-push once its author is trusted for CI or the PR is labeled `ready`.
+push.
