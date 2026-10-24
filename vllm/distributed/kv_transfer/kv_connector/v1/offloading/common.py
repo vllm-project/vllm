@@ -6,7 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_offload.base import LoadStoreSpec
+from vllm.v1.kv_offload.base import LoadStoreSpec, OffloadKey, StoreTrigger
 
 ReqId = str
 
@@ -62,6 +62,25 @@ class TransferJob:
     req_id: ReqId
     src_spec: LoadStoreSpec
     dst_spec: LoadStoreSpec
+
+
+@dataclass(slots=True)
+class TransferJobStatus:
+    """Tracks scheduler-side state for a single transfer job."""
+
+    req_id: ReqId
+    # Number of workers still pending. Starts at num_workers,
+    # decremented as each worker reports completion. Job is done at 0.
+    pending_count: int
+    # Offload keys this job covers; passed to manager.complete_*().
+    keys: set[OffloadKey]
+    is_store: bool
+    # Store source blocks fenced after the request finishes.
+    deferred_fence_block_ids: list[int] | None = None
+    # Store source blocks fenced when the transfer is created.
+    fenced_block_ids: list[int] | None = None
+    # The trigger of the handler that made a store job. The scheduler sets it.
+    trigger: StoreTrigger | None = None
 
 
 @dataclass

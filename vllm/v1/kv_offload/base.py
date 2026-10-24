@@ -127,6 +127,13 @@ class LookupResult(Enum):
     RETRY = auto()
 
 
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+
+
 class OffloadPolicy(Enum):
     # Offload only newly-computed chunks as they arrive; prefix-hit
     # chunks (already offloaded by a prior request) are skipped.
@@ -377,6 +384,7 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -385,6 +393,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -400,6 +409,7 @@ class OffloadingManager(ABC):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
+        trigger: StoreTrigger = StoreTrigger.ON_COMPUTE,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
@@ -410,6 +420,7 @@ class OffloadingManager(ABC):
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
+            trigger: the trigger given to the matching prepare_store.
 
         """
         return
