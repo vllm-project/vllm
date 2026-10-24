@@ -119,6 +119,7 @@ def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Wor
     )
     worker.model_runner = SimpleNamespace(get_draft_model=lambda: drafter)
     worker._weight_update_active = False
+    worker._asleep_tags = set()
     worker._set_draft_weight_update_target = lambda: None  # type: ignore[method-assign]
     return worker
 
@@ -187,6 +188,40 @@ def test_draft_weight_update_loads_lm_head(
             assert torch.equal(tensor, expected[name]), name
     hidden = torch.randn(64, HIDDEN, device="cuda", dtype=torch.bfloat16)
     assert LogitsProcessor(VOCAB)(draft_head, hidden).isfinite().all()
+
+
+@requires_cuda
+def test_failed_draft_weight_update_restores_copy(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A failed draft update ends the session with the quantized copy back in
+    place; the engine's abort runs while the drafter still shares the source
+    head, so it can restore that head too."""
+    head = _target_head(monkeypatch)
+    drafter = torch.nn.Module()
+    draft_head = quantized_lm_head_copy(head, "fp8")
+    drafter.lm_head = draft_head
+    shared_during_abort = []
+
+    def fail(update_info):
+        raise RuntimeError("bad chunk")
+
+    worker = _draft_update_worker(
+        default_vllm_config,
+        drafter,
+        start_weight_update=lambda: None,
+        update_weights=fail,
+        abort_weight_update=lambda: shared_during_abort.append(drafter.lm_head is head),
+    )
+    worker.start_draft_weight_update()
+    assert drafter.lm_head is head
+
+    with pytest.raises(RuntimeError, match="bad chunk"):
+        worker.update_weights({})
+
+    assert shared_during_abort == [True]
+    assert drafter.lm_head is draft_head
+    assert not worker._weight_update_active
 
 
 @requires_cuda
