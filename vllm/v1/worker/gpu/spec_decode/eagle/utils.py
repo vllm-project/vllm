@@ -77,6 +77,47 @@ def maybe_share_target_embed(
         draft_inner.embed_tokens = target_embed
 
 
+def resolve_draft_lm_head(
+    eagle_model: nn.Module,
+    draft_inner: nn.Module,
+    target_lm_head: nn.Module | None,
+    quantization: str | None,
+) -> None:
+    """Point the drafter at its lm_head: the target's when it shares one,
+    otherwise its own; with `quantization`, a quantized copy of that head."""
+    draft_lm_head = getattr(eagle_model, "lm_head", None)
+    if target_lm_head is not None and _should_share(
+        eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
+    ):
+        draft_head = target_lm_head
+        if quantization is not None:
+            draft_head = quantized_lm_head_copy(target_lm_head, quantization)
+        if draft_lm_head is not None:
+            del eagle_model.lm_head
+        eagle_model.lm_head = draft_head
+
+        # MTP layers route logits through layer.shared_head.head, not
+        # eagle_model.lm_head, so the per-layer copies need fixing up too.
+        layers = getattr(draft_inner, "layers", None)
+        if layers is not None:
+            items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+            for layer in items:
+                sh = getattr(layer, "shared_head", None)
+                if sh is not None and hasattr(sh, "head"):
+                    del sh.head
+                    sh.head = draft_head
+    elif quantization is not None:
+        if draft_lm_head is None:
+            raise ValueError(
+                "draft_lm_head_quantization needs a drafter with an lm_head."
+            )
+        # The drafter keeps its own head (e.g. an EAGLE3 draft trained with a
+        # separate one): quantize that head instead.
+        quantized = quantized_lm_head_copy(draft_lm_head, quantization)
+        del eagle_model.lm_head
+        eagle_model.lm_head = quantized
+
+
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
@@ -105,33 +146,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
-    draft_lm_head = getattr(eagle_model, "lm_head", None)
-    if target_lm_head is not None and _should_share(
-        eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
-    ):
-        draft_head = target_lm_head
-        if speculative_config.draft_lm_head_quantization is not None:
-            draft_head = quantized_lm_head_copy(
-                target_lm_head, speculative_config.draft_lm_head_quantization
-            )
-        if draft_lm_head is not None:
-            del eagle_model.lm_head
-        eagle_model.lm_head = draft_head
-
-        # MTP layers route logits through layer.shared_head.head, not
-        # eagle_model.lm_head, so the per-layer copies need fixing up too.
-        layers = getattr(draft_inner, "layers", None)
-        if layers is not None:
-            items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
-            for layer in items:
-                sh = getattr(layer, "shared_head", None)
-                if sh is not None and hasattr(sh, "head"):
-                    del sh.head
-                    sh.head = draft_head
-    elif speculative_config.draft_lm_head_quantization is not None:
-        raise ValueError(
-            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
-        )
+    resolve_draft_lm_head(
+        eagle_model,
+        draft_inner,
+        target_lm_head,
+        speculative_config.draft_lm_head_quantization,
+    )
 
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that
