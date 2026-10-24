@@ -392,6 +392,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        compressed_logits: bool = False,
     ) -> list[tuple[slice, slice]]:
         return split_prefill_chunks(
             compressed_seq_lens_cpu,

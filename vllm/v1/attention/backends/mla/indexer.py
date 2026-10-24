@@ -1020,6 +1020,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.max_prefill_buffer_size = (
             get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
         )
+        # DeepGEMM returns prefill logits as [rows, longest key range]; the XPU
+        # and ROCm kernels return [rows, total keys].
+        self.compressed_prefill_logits = current_platform.is_cuda()
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
@@ -1338,6 +1341,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             torch.from_numpy(query_lens.astype(np.int32)),
             self.max_prefill_buffer_size,
             max_logits_bytes,
+            compressed_logits=self.compressed_prefill_logits,
         )
         return [
             (
@@ -1362,11 +1366,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        compressed_logits: bool = False,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
-        - Logits constraint: M * N * 4 <= max_logits_bytes
+        - Logits constraint: M * W * 4 <= max_logits_bytes. W is N for dense
+          logits; with ``compressed_logits`` ([M, max_seqlen_k]) it is the
+          longest request's N.
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
@@ -1379,7 +1386,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         end = 0
 
         while end < n:
-            start, chunk_m, chunk_n = end, 0, 0
+            start, chunk_m, chunk_n, chunk_w = end, 0, 0, 0
 
             while end < n:
                 q, s = (
@@ -1387,8 +1394,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
-                    chunk_m, chunk_n = new_m, new_n
+                new_w = max(chunk_w, s) if compressed_logits else new_n
+                if new_n <= workspace_size and new_m * new_w <= max_logits_elems:
+                    chunk_m, chunk_n, chunk_w = new_m, new_n, new_w
                     end += 1
                 else:
                     break
@@ -1396,7 +1404,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # A single request can exceed the budget, requiring sub-chunking
             # on the query dimension.
             if end == start:
-                chunk_m, chunk_n = (
+                chunk_m, chunk_w = (
                     prefill_query_lens_cpu[end].item(),
                     compressed_seq_lens_cpu[end].item(),
                 )
@@ -1404,7 +1412,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             req_slice = slice(start + request_offset, end + request_offset)
             max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+                max(1, max_logits_elems // chunk_w) if chunk_w > 0 else max(1, chunk_m)
             )
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
@@ -1541,6 +1549,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    compressed_logits=self.compressed_prefill_logits,
                 )
 
             chunks = []
