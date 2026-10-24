@@ -68,6 +68,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tool_parsers import ToolParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
@@ -1091,6 +1092,12 @@ async def run_batch(
 async def main(args: Namespace):
     from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_run_batch_args(args)
     ignore_admission_limits(args)
