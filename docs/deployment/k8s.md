@@ -5,6 +5,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Serving with gRPC](#serving-with-grpc)
+- [Probes that check the model answers](#probes-that-check-the-model-answers)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -430,6 +431,35 @@ You can also verify the health service manually with `grpcurl`:
 ```bash
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 ```
+
+## Probes that check the model answers
+
+The `/health` endpoint only reports whether the engine process is alive. It does not generate any token, so a hung but alive engine still reports healthy. To make Kubernetes check that the model answers text, use an `exec` probe that sends a one-token completion with `curl` and succeeds only if the generated text is not empty:
+
+```yaml
+readinessProbe:
+  exec:
+    command:
+    - /bin/sh
+    - -c
+    - >-
+      curl -s --max-time 9 -H 'Content-Type: application/json' -d "$1"
+      http://localhost:8000/v1/completions
+      | grep -Eq '"text": *"[^"]'
+    - model-probe
+    - '{"model":"mistralai/Mistral-7B-Instruct-v0.3","prompt":"Hello","max_tokens":1,"temperature":0}'
+  periodSeconds: 10
+  timeoutSeconds: 10
+  failureThreshold: 3
+```
+
+!!! note
+    - Each probe consumes GPU time and competes with user traffic. For liveness, use a long `periodSeconds`, `timeoutSeconds` and `failureThreshold`, or keep `httpGet` on `/health`, so a busy pod is not restarted.
+    - `/v1/*` endpoints are protected by `--api-key`, so this probe does not work with an API key unless you add the `Authorization` header.
+    - The `model` field must match the model name or `--served-model-name`.
+    - The image must provide `curl` and `grep`.
+
+The [Helm chart](frameworks/helm.md#probes) uses this approach by default.
 
 ## Troubleshooting
 
