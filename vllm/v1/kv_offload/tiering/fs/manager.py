@@ -150,8 +150,14 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._self_describing_kv_events = bool(
+            self.events is not None
+            and offloading_spec.kv_events_config.self_describing_kv_events
+        )
+        # In-flight store data needed to emit events on completion.
+        self._store_event_metadata: dict[
+            JobId, tuple[list[OffloadKey], ReqContext | None]
+        ] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -223,7 +229,10 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = keys
+            self._store_event_metadata[job_metadata.job_id] = (
+                keys,
+                job_metadata.req_context if self._self_describing_kv_events else None,
+            )
         task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
@@ -284,7 +293,7 @@ class FileSystemTierManager(SecondaryTierManager):
             block_count = self._job_block_counts.pop(job_id, 0)
             transfer_bytes = block_count * self._block_size if block_count else None
             if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
+                keys, req_context = self._store_event_metadata.pop(job_id, ([], None))
                 if success and keys:
                     self.events.append(
                         OffloadingEvent(
@@ -292,6 +301,7 @@ class FileSystemTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=req_context,
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
@@ -336,7 +346,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool.wait_idle()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
+        self._lookup_manager.cleanup(req_context)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:

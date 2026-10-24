@@ -42,6 +42,7 @@ def make_cpu_manager(
     cache_policy: str = "lru",
     cache_policy_module_path: str | None = None,
     enable_events: bool = False,
+    self_describing_kv_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
 ) -> CPUOffloadingManager:
@@ -50,6 +51,7 @@ def make_cpu_manager(
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
+        self_describing_kv_events=self_describing_kv_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
     )
@@ -148,7 +150,11 @@ def verify_events(
 
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
-    manager = make_cpu_manager(num_chunks=2, enable_events=True)
+    manager = make_cpu_manager(
+        num_chunks=2,
+        enable_events=True,
+        self_describing_kv_events=True,
+    )
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -163,6 +169,42 @@ def test_cpu_eviction_removed_precedes_stored():
     assert removed_idx and stored_idx, events
     assert max(removed_idx) < min(stored_idx)
     assert all(event.medium == manager.medium for event in events)
+    assert all(events[i].req_context is None for i in removed_idx)
+    assert all(events[i].req_context is _EMPTY_REQ_CTX for i in stored_idx)
+
+
+def test_cpu_reset_discards_stores_but_keeps_removals():
+    manager = make_cpu_manager(
+        num_chunks=1,
+        enable_events=True,
+        self_describing_kv_events=True,
+    )
+    key1 = to_keys([1])
+    manager.prepare_store(key1, _EMPTY_REQ_CTX)
+    manager.complete_store(key1, _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    key2 = to_keys([2])
+    manager.prepare_store(key2, _EMPTY_REQ_CTX)
+    manager.complete_store(key2, _EMPTY_REQ_CTX)
+
+    manager.reset_cache()
+
+    [event] = manager.take_events()
+    assert event.removed
+    assert event.keys == key1
+    assert event.req_context is None
+
+
+def test_cpu_events_do_not_retain_context_when_provenance_is_disabled():
+    manager = make_cpu_manager(num_chunks=2, enable_events=True)
+    keys = to_keys([1])
+    manager.prepare_store(keys, _EMPTY_REQ_CTX)
+    manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+    [event] = manager.take_events()
+
+    assert event.req_context is None
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
@@ -366,13 +408,14 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
 
 
 def test_cpu_manager_clears_write_usage_after_failed_store():
-    manager = make_cpu_manager(num_chunks=4)
+    manager = make_cpu_manager(num_chunks=4, enable_events=True)
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+    assert list(manager.take_events()) == []
 
 
 def test_cpu_manager():
@@ -488,7 +531,8 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 3}, {8}, {9}),
+        # Failed write of 9 never announced residency, so it needs no removal.
+        expected_evictions=({4, 5, 3}, {8}),
     )
 
 
@@ -1036,23 +1080,22 @@ class TestARCPolicy:
         assert len(events) > 0  # should have store and eviction events
 
 
-def test_take_events_prunes_retried_cleanup_and_drains_once():
-    """Failed-write cleanup must not outlive a retry that re-owns the key, and a
-    partially consumed drain must not replay it."""
+def test_take_events_skips_failed_store_and_drains_once():
+    """A failed store announces nothing; a partially consumed drain never replays."""
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
 
     assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
-    # A retry re-allocates key 1 before the cleanup is drained.
+    assert list(manager.take_events()) == []
+
     assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
     assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
     manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
     drain = iter(manager.take_events())
-    cleanup = next(drain)
-    assert cleanup.removed and cleanup.metadata_only
-    assert cleanup.keys == to_keys([2])
-    # Stopping early must not leave the batch queued for the next drain.
+    first = next(drain)
+    assert not first.removed and first.keys == to_keys([1])
     assert list(manager.take_events()) == []
     assert [event.keys for event in drain] == [to_keys([3])]
 
