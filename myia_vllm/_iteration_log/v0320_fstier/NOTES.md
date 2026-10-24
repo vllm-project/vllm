@@ -1554,3 +1554,106 @@ Préemptions : 35 depuis 15:37Z. KV 72-99 %.
 - Pruneur 16:20Z : 97,6 GiB pour un cap de 96, 67 fichiers supprimés, 0 erreur.
 - Condensation en repli cloud de 15:21 à 15:31Z, pendant les redémarrages (prévu).
 - nbaudit ok (vague 2 Image/). G: 85 %, écriture OK. Prouveur : aucune passe.
+
+## 24/10 18:37Z — tier RAM 8 → 24 GiB (Q30=b, GO user) après 5 crashs du bug amont ; CORRECTION du cycle 16:41Z
+
+**Correction : le redémarrage de 15:18Z était un crash, pas une erreur du watchdog.** Le log moteur
+porte `AssertionError: Chunk … not found in cache` à **15:18:32Z** (EngineCore pid 108), avec la même
+trace que les autres. Le watchdog horodate sa ligne **en début de cycle** (`TS=` avant une sonde de
+décodage pouvant durer 90 s) : son « 15:18:04 RESTARTING » a été écrit après le retour de la sonde,
+donc **après** le crash, sur un moteur déjà mort. Les compteurs illisibles venaient du moteur mort, et
+les 11 × 500 de 15:18:32-34Z sont les victimes du crash. La v6.2 (PR #175) reste une protection
+valable (une lecture ratée ne doit pas suffire à redémarrer), mais elle ne corrige pas un incident
+réel de ce jour. **Leçon : une heure de watchdog date le début du cycle ; dater un redémarrage sur
+le log moteur, jamais sur la ligne du watchdog.**
+
+**Bilan du 24/10 : 5 crashs, même assert.** 14:32:09, 15:18:32, 15:35:33, 17:10:07 et 17:50:10Z.
+- RC 1 → 3 sur les deux derniers (relances Docker). Le watchdog n'a rien redémarré : il était en
+  BUSY-LONG à 17:34 et 18:26.
+- 500 par crash : 16, 11, 6, 2, 11.
+- **La même clé de bloc** (`b'\xc7\xa3\x04\t>\xe6…\x03'`) a fait planter le moteur à 15:35:33 **et**
+  17:50:10 : le déclencheur se répète sur un même préfixe. Lien avec les renvois identiques du hub
+  SUPPOSÉ, non mesuré.
+- Côté utilisateurs : une utilisatrice externe (clé scopée, sans repli cloud) signale des 502 via
+  `models.myia.io` cet après-midi. Les heures coïncident avec les crashs ; non vérifié côté hub.
+
+**État amont (lu 18:40Z, REST) :** dernière release `v0.32.0` (18/10), celle que nous servons.
+Aucun correctif publié ni fusionné sur main :
+- #54914 (issue, même assert, DeepSeek-V4 sur H100, ouverte depuis septembre) ;
+- #60729 (PR, diagnostic seulement : meilleur message d'erreur) ;
+- #62615 (PR, la bonne forme : épingler les HIT avant les promotions ; couvre le mode P2P
+  seulement) ;
+- #50014 / #49952 (PR, promotions qui s'évincent entre elles ; voisin, pas le même mécanisme).
+Toutes ouvertes.
+
+**Changement appliqué** (`medium-swift15-27b-fstier.yml`) : défaut `KV_OFFLOAD_GB_FSTIER` 8 → 24.
+- `.env` ne porte pas la variable ; `docker compose config -q` OK ; le dry-run ne recrée que le
+  moteur.
+- Annonce sur global + workspace-vllm avant le geste.
+- Commit hôte avant : 68,0 % (marge 126 Go). `/dev/shm` avant : 17G/63G.
+- Recreate `up -d --no-deps vllm-medium-swift15-27b` à 18:37:18Z, StartedAt 18:37:28Z.
+- **Critère d'échec :** un nouveau crash du même assert après ce boot → recommander (c), retirer le
+  tier fs, seule option qui supprime le mécanisme (plus de promotion fs → RAM).
+
+## 24/10 18:49Z — image overlay `vllm-openai-v0320-tierpin:v1` : notre correctif du bug amont (GO user « toute la séquence »)
+
+**Pourquoi une image dédiée.** Aucun correctif amont n'est publié ni fusionné (voir ci-dessus), et le
+tier RAM plus grand ne fait que réduire la probabilité. Le user a demandé un correctif et une image
+« le temps que ça lande dans main », puis donné son GO pour toute la séquence (correctif, tests,
+image, redémarrage).
+
+**Mécanisme lu dans le code v0.32.0** (`vllm/v1/kv_offload/tiering/manager.py`,
+`cpu/manager.py`) :
+- `TieringOffloadingManager.lookup()` rend `HIT` pour un bloc du tier RAM **sans l'épingler** :
+  le scheduler ne l'épingle que plus tard, dans `update_state_after_alloc` → `prepare_load`.
+- Un `lookup()` suivant, **dans le même pas de scheduler**, qui trouve un bloc seulement sur le tier
+  fs lance une promotion : `_initiate_promotion` → `primary_tier.prepare_write([key])`.
+- `CPUOffloadingManager.prepare_store` ne protège de l'éviction que `set(keys)` (la clé promue) :
+  l'éviction LRU peut prendre le bloc déjà compté HIT, puisqu'il est encore à `ref_cnt == 0`.
+- `prepare_load` trouve alors un bloc absent : `AssertionError: Chunk … not found in cache`
+  (`cpu/manager.py:221`), et le moteur meurt.
+- Chemins atteignables depuis le scheduler (pas seulement en P2P, que couvre la PR #62615) :
+  la boucle de bord de queue partielle dans `_lookup` rend `complete_hit` même après des
+  promotions ; la marche en fenêtre glissante continue après un MISS qui remet
+  `pending_in_window` à zéro.
+
+**Correctif (2 fichiers, `configs/docker/overlay_v0320_tierpin/PATCH.diff`).**
+- Le gestionnaire de tiers retient les HIT RAM rendus pendant le pas courant (`_step_hit_keys`).
+- Il les passe en `extra_protected` au `prepare_write` de la promotion. `CPUOffloadingManager`
+  accepte ce paramètre et l'unit à la clé promue via une vue d'appartenance sans copie (les
+  politiques d'éviction ne font que `key in protected`).
+- L'ensemble est vidé à la fin de `on_schedule_end()` et dans `reset_cache()`.
+- Si aucun bloc libre ne reste, `prepare_write` rend `None` : la promotion échoue, le bloc est
+  compté MISS et sera recalculé. Plus de crash.
+
+**Tests** (dans un conteneur jetable de l'image de base, `overlay_v0320_tierpin/tests/`) :
+- sur le stock, `test_promotion_does_not_evict_a_hit_reported_this_step` lève **l'assert de prod
+  mot pour mot** : le test reproduit le crash ;
+- avec le correctif, les 3 tests de régression et les **113 tests amont v0.32.0**
+  (`tiering/test_tiering_offloading.py`, `cpu/test_manager.py`) passent : **116/116** ;
+- mêmes résultats sur l'image construite.
+
+**Image.** `FROM vllm/vllm-openai@sha256:befccf0e…` (le digest de la release v0.32.0), deux
+`COPY`, un `compileall` et une assertion de build qui vérifie la présence du correctif.
+Image `vllm-openai-v0320-tierpin:v1`, `sha256:391801291d8c…`.
+
+**Déploiement.**
+- Profil `medium-swift15-27b-fstier.yml` : `image: ${VLLM_IMAGE_SWIFT15:-vllm-openai-v0320-tierpin:v1}`
+  (`.env` ne porte pas la variable).
+- Recreate `up -d --no-deps vllm-medium-swift15-27b` à 18:49:28Z, StartedAt 18:49:34Z, health 200
+  à **18:52:50Z** (3 min 16, cache de compilation chaud).
+- Gates : génération réelle « Quatre » ; `_step_hit_keys` présent ×5 dans le source chargé par le
+  moteur ; KV **750 747** inchangé ; tier RAM 24 GiB, tier fs `TouchOnHitFsTier` chargé dans les
+  deux process ; VRAM 19 902 / 18 938 MiB ; RC 0.
+- `/dev/shm` : 48G (77 %, au-dessus du seuil 45G) → purge bornée au StartedAt, **1 fichier** (le
+  mmap de 24 GiB de la génération 18:37Z) → **24G, 39 %**.
+
+**Rollback** : `VLLM_IMAGE_SWIFT15=vllm/vllm-openai:v0.32.0 docker compose -f
+myia_vllm/configs/docker/profiles/medium-swift15-27b-fstier.yml --env-file myia_vllm/.env up -d
+--no-deps vllm-medium-swift15-27b`.
+
+**Critère d'échec.** Un nouveau `Chunk … not found in cache` après 18:49:34Z signifie que le
+correctif ne couvre pas tous les chemins : recommander alors (c), retirer le tier fs.
+
+**Retrait de l'image** dès qu'une release amont porte un correctif équivalent (suivre #62615,
+#60729, #54914). Le correctif est proposé en amont (commentaire avec le diff).
