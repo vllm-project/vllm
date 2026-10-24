@@ -1234,7 +1234,7 @@ class ParserEngine(Parser):
                 # ``"key": `` of a middle field _safe_arg_prefix withheld.
                 suffix = self._json_prefix_terminator(final_json)
                 if not suffix:
-                    cut = self._safe_arg_prefix(final_json)
+                    cut, _ = self._safe_arg_prefix(final_json)
                     tail = self._json_prefix_terminator(cut) if cut else ""
                     if tail and len(cut) > len(prev) and cut.startswith(prev):
                         slot.streamed_json = cut + tail
