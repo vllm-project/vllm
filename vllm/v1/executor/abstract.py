@@ -289,8 +289,10 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(self) -> LoRALoadEvent | None:
+        """Run a dummy batch and return the LoRA load event taken after it."""
+        events: list[LoRALoadEvent | None] = self.collective_rpc("execute_dummy_batch")
+        return events[0]
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

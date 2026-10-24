@@ -1455,13 +1455,14 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(self) -> LoRALoadEvent | None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
+        return self.take_lora_load_event()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
