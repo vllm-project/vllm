@@ -24,8 +24,9 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -1826,3 +1827,54 @@ async def test_derender_completion_preserves_requested_token_ids(
         )
     assert choices[0].token_ids == (token_ids if return_token_ids else None)
     assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [([], False), (["--return-tokens-as-token-ids"], True)],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """An explicit false must override a true render-server default."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _make_generate_logprobs(token_id)
+    logprobs["content"][0]["top_logprobs"][0]["token_id"] = token_id
+    generated = _make_generate_response(
+        [token_id], finish_reason="length", logprobs=logprobs
+    )
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if endpoint == "chat"
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    payload = (
+        {"chat_request": original, "generate_response": generated}
+        if endpoint == "chat"
+        else {"completion_request": original, "generate_responses": [generated]}
+    )
+    response = await client.post(
+        f"/v1/{'chat/completions' if endpoint == 'chat' else 'completions'}/derender",
+        json=payload,
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["choices"][0]
+    if endpoint == "chat":
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -2.0}]

@@ -86,7 +86,7 @@ print(response["choices"][0]["token_ids"])
 
 ### Derender
 
-`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
+`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, `return_tokens_as_token_ids`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
 
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
@@ -99,6 +99,10 @@ print(response["choices"][0]["token_ids"])
 ### Logprobs
 
 With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
+
+With `output_mode: "derender"`, `parse_context.return_tokens_as_token_ids` overrides the generate server's `--return-tokens-as-token-ids` when it is not `null`: `true` returns `token_id:N` placeholders with `bytes: null`, and `false` returns decoded tokens and UTF-8 bytes even when the server flag is enabled. An omitted or `null` value uses the generate server's flag. `/render` preserves explicit `true` and `false` without applying the render server's flag, and omits the context field when the request value is omitted or `null`. This setting affects logprobs only; the assistant message is still parsed from text.
+
+Upgrade generate nodes before using explicit request overrides: older generate nodes reject `parse_context.return_tokens_as_token_ids` with a 400 in derender mode. Requests with an omitted or `null` override remain compatible because `/render` leaves that field out. Unknown parse-context fields remain ignored in `tokens` and `text` modes.
 
 ### Errors
 
