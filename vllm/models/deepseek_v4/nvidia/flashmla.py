@@ -15,6 +15,7 @@ from vllm.models.deepseek_v4.common.ops import (
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
+    maybe_dequant_wo_a,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -57,6 +58,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        maybe_dequant_wo_a(self.wo_a)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
