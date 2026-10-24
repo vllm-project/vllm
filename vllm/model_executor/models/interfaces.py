@@ -1997,6 +1997,20 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
+    def encoder_cudagraph_capture_allowed(self) -> bool:
+        """Return whether encoder CUDA graphs may be captured.
+
+        Vision encoders keep the default and still capture.
+        """
+        return True
+
+    def should_use_encoder_cudagraph(self, mm_kwargs: dict[str, Any]) -> bool:
+        """Return whether this batch should replay an encoder CUDA graph.
+
+        Vision encoders keep the default and still replay.
+        """
+        return True
+
 
 @overload
 def supports_encoder_cudagraph(

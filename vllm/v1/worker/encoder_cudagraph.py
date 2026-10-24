@@ -245,6 +245,10 @@ class EncoderCudaGraphManager:
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
+        if not self.model.encoder_cudagraph_capture_allowed():
+            logger.info("Skipping encoder CUDA graph capture; model declined capture.")
+            return
+
         self.graph_pool = graph_pool
 
         num_graphs = self.get_num_graphs_to_capture()
@@ -698,7 +702,7 @@ class EncoderCudaGraphManager:
     def execute(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> list[torch.Tensor]:
+    ) -> list[torch.Tensor] | None:
         """Execute encoder using CUDA graph with optional DP.
 
         Args:
@@ -706,9 +710,17 @@ class EncoderCudaGraphManager:
                 input tensor and grid dimensions.
 
         Returns:
-            List of encoder outputs (one per item).
+            List of encoder outputs (one per item), or None when graphs
+            were not captured or the model declines replay for this batch.
+            Runners then fall back to ``embed_multimodal``. A captured
+            batch whose budget graph is missing still raises.
 
         """
+        if not self.is_captured() or not self.model.should_use_encoder_cudagraph(
+            mm_kwargs
+        ):
+            return None
+
         if self.use_dp:
             per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
 
