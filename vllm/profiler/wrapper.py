@@ -208,6 +208,10 @@ class WorkerProfiler(ABC):
         """Set the output name for the next profiling session."""
         return None
 
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        """Set profiler keyword argument overrides for the next profiling session."""
+        return None
+
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
@@ -290,7 +294,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self._profiler_kwargs = dict(
+        self._base_profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -299,6 +303,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self._profiler_kwargs = dict(self._base_profiler_kwargs)
         if profiler_kwargs:
             self._profiler_kwargs.update(profiler_kwargs)
         self.profiler: torch.profiler.profile
@@ -330,6 +335,18 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=self._torch_profiler_use_gzip,
             )
         )
+
+    @override
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        if self._active:
+            return
+        on_trace_ready = self._profiler_kwargs["on_trace_ready"]
+        self._profiler_kwargs = {
+            **self._base_profiler_kwargs,
+            "on_trace_ready": on_trace_ready,
+        }
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
 
     def _build_profiler_table(
         self,

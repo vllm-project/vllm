@@ -1430,6 +1430,7 @@ class Worker(WorkerBase):
                 )
 
             self.profiler.set_output_name(trace_name)
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(
                 delay_iterations=delay_iterations,
                 max_iterations=max_iterations,
@@ -1441,12 +1442,11 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler in ("proton", "torch") and not (
+                if self.profiler_config.profiler == "proton" and not (
                     self.profiler.has_cuda_graph_session
                 ):
-                    # Output names and profiler_kwargs are fixed when the wrapper
-                    # is constructed. Recreate it so the next profile_prefix and
-                    # profiler_kwargs are honored.
+                    # Proton output names are fixed when the wrapper is constructed.
+                    # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
     @property

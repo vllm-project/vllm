@@ -322,6 +322,7 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
             profile_prefix="first",
             delay_iterations=5,
             max_iterations=2,
+            profiler_kwargs={"record_shapes": True},
         )
         worker.profile(is_start=False)
         worker.profile(profile_prefix="second")
@@ -331,6 +332,10 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
     assert wrapper.return_value.set_output_name.call_args_list == [
         call("first_rank0"),
         call("second_rank0"),
+    ]
+    assert wrapper.return_value.set_profiler_kwargs.call_args_list == [
+        call({"record_shapes": True}),
+        call(None),
     ]
     assert wrapper.return_value.start.call_args_list == [
         call(delay_iterations=5, max_iterations=2),
@@ -350,6 +355,7 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         "bounded",
         delay_iterations=5,
         max_iterations=2,
+        profiler_kwargs={"record_shapes": True},
     )
 
     assert executor.collective_rpc.call_args_list == [
@@ -357,7 +363,11 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         call(
             "profile",
             args=(True, "bounded"),
-            kwargs={"delay_iterations": 5, "max_iterations": 2},
+            kwargs={
+                "delay_iterations": 5,
+                "max_iterations": 2,
+                "profiler_kwargs": {"record_shapes": True},
+            },
         ),
     ]
 
