@@ -22,6 +22,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn():
@@ -138,3 +140,47 @@ def test_connector_divergent_local_hit_reports_mamba_lag():
         f"is absent, so the prefix is served misaligned."
     )
     assert blocks is not None
+
+
+@pytest.mark.parametrize("fa_bs,mamba_bs", [(2, 4), (4, 2)])
+@pytest.mark.parametrize(
+    "max_cache_hit_length,expected_hit", [(0, 0), (1, 0), (6, 4), (8, 8), (None, 12)]
+)
+def test_connector_reconciliation_preserves_hit_length_cap(
+    fa_bs, mamba_bs, max_cache_hit_length, expected_hit
+):
+    """Both divergent fallback paths must honor the caller's prefix limit."""
+    manager = _manager(1, fa_bs, mamba_bs, use_eagle=False)
+    request = make_request("capped", [7] * 14, 1, sha256)
+    # Cache valid states at every complete block boundary through token 12.
+    # Different group block sizes make a cap of 6 diverge in either direction.
+    for group_id, block_size in enumerate((fa_bs, mamba_bs)):
+        num_blocks = 12 // block_size
+        blocks = manager.block_pool.get_new_blocks(num_blocks)
+        manager.block_pool.cache_full_blocks(
+            request=request,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=num_blocks,
+            block_size=block_size,
+            kv_cache_group_id=group_id,
+        )
+        manager.block_pool.free_blocks(blocks)
+
+    assert manager.get_computed_blocks(request)[1] == 12
+    if max_cache_hit_length == 6:
+        _, hits = manager.coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, max_cache_hit_length
+        )
+        assert hits == ((6, 4) if fa_bs == 2 else (4, 6))
+
+    blocks, num_local, shared, hit_diverged = manager.get_computed_blocks_for_connector(
+        request, max_cache_hit_length
+    )
+    expected_blocks, expected_local, expected_shared = manager.get_computed_blocks(
+        request, max_cache_hit_length
+    )
+    assert num_local == expected_local == expected_hit
+    assert blocks.get_block_ids() == expected_blocks.get_block_ids()
+    assert shared == expected_shared
+    assert hit_diverged == (max_cache_hit_length == 6 and fa_bs == 2)
