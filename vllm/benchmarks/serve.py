@@ -2305,6 +2305,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
     result_json["endpoint_type"] = args.backend  # for backward compatibility
+    result_json["dataset_name"] = args.dataset_name
     result_json["backend"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
