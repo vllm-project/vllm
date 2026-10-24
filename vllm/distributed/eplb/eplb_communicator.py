@@ -308,6 +308,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         cpu_group: ProcessGroup,
         all_expert_weights: Sequence[Sequence[torch.Tensor]],
         expert_buffer: Sequence[torch.Tensor],
+        nixl_wrapper: object | None = None,
     ) -> None:
         """Create a NIXL-backed EPLB communicator.
 
@@ -315,6 +316,8 @@ class NixlEplbCommunicator(EplbCommunicator):
             cpu_group: CPU process group for metadata exchange.
             all_expert_weights: Expert weight tensors for all MoE layers.
             expert_buffer: Pre-allocated receive buffer tensors.
+            nixl_wrapper: Agent of a previous communicator that already has
+                these tensors registered, reused on reconfiguration.
 
         """
         assert all_expert_weights, (
@@ -356,24 +359,30 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._layer_idx: int | None = None
         self.set_stream(None)
 
-        nixl_agent_config = nixl_utils.nixl_agent_config
-        config = (
-            nixl_agent_config(capture_telemetry=False)
-            if nixl_agent_config is not None
-            else None
-        )
-        self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
+        self._cuda_device_id = int(self._device.index or 0)
         self._nixl_memory_type = "VRAM"
-        # NIXL registration handles; deregistered in __del__.
-        self._registered_descs: list[object] = []
         self._remote_agents: dict[int, str] = {}
         # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
         self._remote_send_meta: dict[
             int, dict[tuple[int, int], tuple[int, int, int]]
         ] = {}
 
-        self._cuda_device_id = int(self._device.index or 0)
-        self._init_step("buffers", self._init_registered_buffers)
+        # Expert weights and expert_buffer keep their storage across elastic EP
+        # reconfigurations, so the agent (and its registrations) is shared by
+        # all communicators of this worker instead of registering the same
+        # memory again with a new agent. NIXL deregisters everything when the
+        # last communicator drops the agent.
+        if nixl_wrapper is None:
+            nixl_agent_config = nixl_utils.nixl_agent_config
+            config = (
+                nixl_agent_config(capture_telemetry=False)
+                if nixl_agent_config is not None
+                else None
+            )
+            self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
+            self._init_step("buffers", self._init_registered_buffers)
+        else:
+            self._nixl_wrapper = nixl_wrapper
         self._init_remote_state()
         self._log_initialized()
 
@@ -493,6 +502,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                 continue
             peer_metadata = gathered_metadata[peer]
             assert peer_metadata is not None
+            # No-op if the (shared) agent already knows this peer.
             self._remote_agents[peer] = self._nixl_wrapper.add_remote_agent(
                 peer_metadata
             )
@@ -505,7 +515,6 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         descs = self._nixl_wrapper.get_reg_descs(all_tensors)
         self._nixl_wrapper.register_memory(descs)
-        self._registered_descs.append(descs)
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
@@ -643,6 +652,16 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._layer_idx = None
 
     def __del__(self) -> None:
+        # At interpreter shutdown the module globals this body needs, down to
+        # `contextlib` itself, may already be None, and every worker exit then
+        # prints a traceback per communicator. Nothing here is worth that, so
+        # the whole teardown is guarded without touching a module global.
+        try:  # noqa: SIM105 `contextlib` is exactly what may be gone here
+            self._teardown()
+        except BaseException:  # noqa: BLE001
+            pass
+
+    def _teardown(self) -> None:
         with contextlib.suppress(Exception):
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -651,16 +670,9 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._nixl_wrapper.release_dlist_handle(local_h)
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
-        with contextlib.suppress(Exception):
-            for descs in self._registered_descs:
-                with contextlib.suppress(Exception):
-                    self._nixl_wrapper.deregister_memory(descs)
-            self._registered_descs.clear()
-        with contextlib.suppress(Exception):
-            for agent_name in self._remote_agents.values():
-                with contextlib.suppress(Exception):
-                    self._nixl_wrapper.remove_remote_agent(agent_name)
-            self._remote_agents.clear()
+        # Registrations and remote agents belong to the shared agent and may
+        # still be used by a newer communicator; NIXL releases them when the
+        # agent itself is destroyed.
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
@@ -712,6 +724,7 @@ def create_eplb_communicator(
     backend: str,
     expert_weights: Sequence[Sequence[torch.Tensor]],
     expert_buffer: Sequence[torch.Tensor],
+    prev_communicator: EplbCommunicator | None = None,
 ) -> EplbCommunicator:
     """Create an EPLB communicator for the given backend.
 
@@ -732,6 +745,8 @@ def create_eplb_communicator(
             zero-copy RDMA reads.
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
+        prev_communicator: Communicator being replaced, if any. The NIXL
+            backend reuses its agent and memory registrations.
 
     """
     first_layer = expert_weights[0] if expert_weights else []
@@ -808,6 +823,11 @@ def create_eplb_communicator(
                 cpu_group=group_coordinator.cpu_group,
                 all_expert_weights=expert_weights,
                 expert_buffer=expert_buffer,
+                nixl_wrapper=(
+                    prev_communicator._nixl_wrapper
+                    if isinstance(prev_communicator, NixlEplbCommunicator)
+                    else None
+                ),
             )
         except Exception as exc:
             raise RuntimeError(

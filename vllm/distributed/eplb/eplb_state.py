@@ -1178,6 +1178,7 @@ class EplbState:
             backend,
             model_state.model.expert_weights,
             model_state.expert_buffer,
+            prev_communicator=model_state.communicator,
         )
 
     def update_communicator(
