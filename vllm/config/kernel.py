@@ -284,6 +284,14 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    flashinfer_autotune_cache_only: bool = False
+    """Load the saved FlashInfer autotune cache instead of autotuning at
+    startup. Every rank loads its own legacy per-rank cache file; startup fails
+    on every rank if any rank's file is missing, empty, unreadable, or rejected
+    by FlashInfer, and never falls back to autotuning. Not supported where the
+    FlashInfer managed autotune cache is used (currently single-GPU
+    deployments). No effect when FlashInfer autotune is disabled."""
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -426,6 +434,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "flashinfer_autotune_cache_only",
             "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
         }

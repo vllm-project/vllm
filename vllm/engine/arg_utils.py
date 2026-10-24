@@ -776,6 +776,9 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    flashinfer_autotune_cache_only: bool = get_field(
+        KernelConfig, "flashinfer_autotune_cache_only"
+    )
     monokernel: bool = get_field(KernelConfig, "monokernel")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
@@ -1839,6 +1842,10 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--flashinfer-autotune-cache-only",
+            **kernel_kwargs["flashinfer_autotune_cache_only"],
+        )
         kernel_group.add_argument("--monokernel", **kernel_kwargs["monokernel"])
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
@@ -2795,6 +2802,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.flashinfer_autotune_cache_only:
+            kernel_config.flashinfer_autotune_cache_only = True
         if self.monokernel:
             kernel_config.monokernel = True
         if self.moe_backend != "auto":

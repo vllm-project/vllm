@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    load_flashinfer_autotune_cache_only,
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
     use_flashinfer_autotune_v2,
@@ -268,6 +269,11 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
+        if worker.vllm_config.kernel_config.flashinfer_autotune_cache_only:
+            logger.warning_once(
+                "--flashinfer-autotune-cache-only has no effect because "
+                "FlashInfer autotune is disabled; no cache is loaded."
+            )
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
@@ -475,8 +481,17 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
+    cache_only = runner.vllm_config.kernel_config.flashinfer_autotune_cache_only
     use_autotune_v2 = use_flashinfer_autotune_v2(runner)
     cache_hit = False
+    if cache_only and use_autotune_v2:
+        # The managed cache replays misses with default tactics instead of
+        # failing, and this deployment never writes the per-rank files.
+        raise RuntimeError(
+            "--flashinfer-autotune-cache-only is not supported where vLLM uses "
+            "FlashInfer's managed autotune cache (currently single-GPU "
+            "deployments); drop the flag."
+        )
     if use_autotune_v2:
         from flashinfer import autotune_v2, autotune_v2_reload
 
@@ -498,6 +513,20 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 "--disable-flashinfer-autotune to skip autotuning.",
                 cache_path,
             )
+
+        if cache_only:
+            load_flashinfer_autotune_cache_only(cache_path, world)
+            # Besides tuning, this raises the KDA projection-overlap limit on
+            # the model, which the cache does not carry.
+            with torch.inference_mode():
+                _autotune_kimi_k3_kda_qkvg(runner.get_model())
+            if is_leader:
+                logger.info_once(
+                    "Loaded the FlashInfer autotune cache; skipping autotuning "
+                    "because --flashinfer-autotune-cache-only is set. Ops "
+                    "without a cached entry use FlashInfer's default tactic."
+                )
+            return
 
         cache_hit = _load_shared_autotune_cache(cache_path, tuner, tune_group)
         autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)

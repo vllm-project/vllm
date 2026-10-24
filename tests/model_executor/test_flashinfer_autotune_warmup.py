@@ -3,6 +3,7 @@
 
 import json
 import sys
+import threading
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from inspect import signature
@@ -14,6 +15,7 @@ from unittest.mock import Mock, call, patch
 import pytest
 import torch
 
+import vllm.model_executor.warmup.flashinfer_autotune_cache as fi_cache
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
 from vllm.model_executor.warmup.kernel_warmup import (
@@ -41,11 +43,12 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
     return moe
 
 
-def _make_runner(modules, *, max_tokens: int = 8192):
+def _make_runner(modules, *, max_tokens: int = 8192, cache_only: bool = False):
     """Create a runner carrying only the state used by FlashInfer warmup."""
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            kernel_config=SimpleNamespace(flashinfer_autotune_cache_only=cache_only),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
@@ -683,3 +686,227 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
         _normalize_cache_config_for_hash(resolved).compute_hash()
         != fresh.compute_hash()
     )
+
+
+class _CacheOnlyWorld:
+    """World group whose all_gather rendezvouses across one thread per rank."""
+
+    def __init__(self, run):
+        self.run = run
+        self.world_size = run.world_size
+        self.rank_in_group = run.rank
+        self.cpu_group = self
+
+    def all_gather_object(self, out, obj):
+        run = self.run
+        run.collectives[run.rank].append("all_gather")
+        run.slots[run.rank] = obj
+        run.barrier.wait()
+        out[:] = run.slots
+        run.barrier.wait()
+
+
+class _CacheOnlyTuner:
+    def __init__(self, result):
+        self.result = result
+        self.loaded = None
+
+    def load_configs(self, path):
+        self.loaded = Path(path).read_bytes()
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class _CacheOnlyRun:
+    def __init__(self, pp, tp, cache_dir, load_results):
+        self.pp, self.tp = pp, tp
+        self.world_size = pp * tp
+        self.cache_dir = cache_dir
+        self.load_results = load_results
+        self.local = threading.local()
+        self.barrier = threading.Barrier(self.world_size, timeout=5)
+        self.slots: list[Any] = [None] * self.world_size
+        self.collectives: dict[int, list[str]] = defaultdict(list)
+        self.tuners: dict[int, _CacheOnlyTuner] = {}
+        self.errors: dict[int, Exception] = {}
+        self.autotuned: list[int] = []
+        self.kda_models: list[Any] = []
+
+    @property
+    def rank(self):
+        return self.local.rank
+
+    def cache_path(self, rank):
+        return self.cache_dir / f"autotune_configs_dp0_rank{rank}.json"
+
+    def tensor_group(self):
+        start = self.rank // self.tp * self.tp
+        return SimpleNamespace(
+            world_size=self.tp, rank_in_group=self.rank - start, cpu_group=None
+        )
+
+    def _run_rank(self, rank):
+        self.local.rank = rank
+        self.tuners[rank] = _CacheOnlyTuner(self.load_results.get(rank, True))
+        runner = _make_runner([], cache_only=True)
+        runner.vllm_config.parallel_config.pipeline_parallel_size = self.pp
+        try:
+            flashinfer_autotune(runner)
+        except Exception as exc:
+            self.errors[rank] = exc
+
+    def execute(self):
+        threads = [
+            threading.Thread(target=self._run_rank, args=(rank,))
+            for rank in range(self.world_size)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads), "ranks hung"
+        assert not any(
+            isinstance(error, threading.BrokenBarrierError)
+            for error in self.errors.values()
+        ), "ranks issued mismatched collectives"
+        expected = ["all_gather"] if self.world_size > 1 else []
+        assert all(
+            self.collectives[rank] == expected for rank in range(self.world_size)
+        )
+        return self
+
+    def assert_all_failed(self, *fragments):
+        assert set(self.errors) == set(range(self.world_size))
+        messages = {str(error) for error in self.errors.values()}
+        assert len(messages) == 1, messages
+        message = messages.pop()
+        assert "--flashinfer-autotune-cache-only" in message
+        for fragment in fragments:
+            assert fragment in message
+
+
+@pytest.fixture
+def cache_only_run(monkeypatch, tmp_path):
+    import vllm.utils.flashinfer as fi_utils
+    from vllm.distributed import parallel_state
+
+    def make_run(*, pp=1, tp=2, load_results=None, managed_cache=False):
+        run = _CacheOnlyRun(pp, tp, tmp_path, load_results or {})
+        monkeypatch.setattr(
+            fi_utils, "has_flashinfer_autotune_v2", lambda: managed_cache
+        )
+        monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+        autotuner = ModuleType("flashinfer.autotuner")
+        monkeypatch.setattr(
+            autotuner,
+            "AutoTuner",
+            SimpleNamespace(get=lambda: run.tuners[run.rank]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            autotuner,
+            "set_autotune_process_group",
+            lambda group: run.autotuned.append(run.rank),
+            raising=False,
+        )
+        monkeypatch.setitem(sys.modules, "flashinfer.autotuner", autotuner)
+        monkeypatch.setattr(
+            "torch.distributed.all_gather_object",
+            lambda out, obj, group: group.all_gather_object(out, obj),
+        )
+        monkeypatch.setattr(
+            parallel_state, "get_world_group", lambda: _CacheOnlyWorld(run)
+        )
+        monkeypatch.setattr(parallel_state, "get_tp_group", run.tensor_group)
+        monkeypatch.setattr(
+            parallel_state, "get_pp_group", lambda: SimpleNamespace(world_size=pp)
+        )
+        monkeypatch.setattr(fi_utils, "autotune", lambda **kwargs: nullcontext())
+        monkeypatch.setattr(
+            fi_cache,
+            "resolve_flashinfer_autotune_file",
+            lambda runner: tmp_path / "autotune_configs.json",
+        )
+        monkeypatch.setattr(
+            warmup, "_flashinfer_autotune_skip_ops", lambda runner: None
+        )
+        monkeypatch.setattr(
+            warmup,
+            "_run_flashinfer_autotune_dummy_runs",
+            lambda runner, **kwargs: run.autotuned.append(run.rank),
+        )
+        monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", run.kda_models.append)
+        return run
+
+    return make_run
+
+
+def _write_rank_caches(run):
+    for rank in range(run.world_size):
+        run.cache_path(rank).write_bytes(json.dumps({"rank": rank}).encode())
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 2), (2, 2)])
+def test_cache_only_loads_each_rank_cache_and_skips_autotune(cache_only_run, pp, tp):
+    run = cache_only_run(pp=pp, tp=tp)
+    _write_rank_caches(run)
+    files = sorted(run.cache_dir.iterdir())
+    run.execute()
+    assert not run.errors
+    for rank, tuner in run.tuners.items():
+        assert tuner.loaded == run.cache_path(rank).read_bytes()
+    assert not run.autotuned
+    assert sorted(run.cache_dir.iterdir()) == files
+    # The KDA projection-overlap limit is model state the cache lacks.
+    assert len(run.kda_models) == pp * tp
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 4), (2, 2)])
+@pytest.mark.parametrize(
+    "corrupt, fragment",
+    [
+        (lambda path: path.unlink(), "FileNotFoundError"),
+        (lambda path: path.write_bytes(b""), "is empty"),
+    ],
+)
+@pytest.mark.parametrize("failing_rank", [0, 3])
+def test_cache_only_unreadable_cache_on_any_rank_fails_every_rank(
+    cache_only_run, pp, tp, corrupt, fragment, failing_rank
+):
+    """A failure on a stage-1 rank must also stop stage-0 ranks."""
+    run = cache_only_run(pp=pp, tp=tp)
+    _write_rank_caches(run)
+    corrupt(run.cache_path(failing_rank))
+    run.execute()
+    run.assert_all_failed(f"rank {failing_rank}: ", fragment)
+    assert run.tuners[failing_rank].loaded is None
+    assert not run.autotuned and not run.kda_models
+
+
+@pytest.mark.parametrize(
+    "result, fragment",
+    [
+        (False, "FlashInfer rejected"),
+        (ValueError("bad tactic"), "ValueError: bad tactic"),
+    ],
+)
+@pytest.mark.parametrize("failing_rank", [0, 3])
+def test_cache_only_load_failure_on_any_rank_fails_every_rank(
+    cache_only_run, result, fragment, failing_rank
+):
+    run = cache_only_run(tp=4, load_results={failing_rank: result})
+    _write_rank_caches(run)
+    run.execute()
+    run.assert_all_failed(f"rank {failing_rank}: {fragment}")
+    assert not run.autotuned and not run.kda_models
+
+
+def test_cache_only_rejects_managed_cache_deployments(cache_only_run):
+    """The managed cache would replay misses instead of failing closed."""
+    run = cache_only_run(tp=1, managed_cache=True)
+    _write_rank_caches(run)
+    run.execute()
+    assert "managed autotune cache" in str(run.errors[0])
+    assert run.tuners[0].loaded is None
+    assert not run.autotuned and not run.kda_models
