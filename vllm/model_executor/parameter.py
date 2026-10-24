@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.utils import copy_weight_
 
 __all__ = [
     "BasevLLMParameter",
@@ -92,7 +93,7 @@ class BasevLLMParameter(Parameter):
         assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(
             loaded_weight
         )
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
@@ -148,7 +149,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -170,7 +171,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -195,7 +196,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
 
 class RowvLLMParameter(BasevLLMParameter):
@@ -223,7 +224,7 @@ class RowvLLMParameter(BasevLLMParameter):
             loaded_weight = loaded_weight.reshape(1)
 
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
@@ -297,7 +298,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
 
 class PackedColumnParameter(_ColumnvLLMParameter):
