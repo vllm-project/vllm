@@ -4175,7 +4175,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # KV tokens walked per split-K iteration. gfx942 (64 KiB LDS) runs 16-row
+    # tiles with a 2-stage pipeline; 32 is tuned for gfx950.
+    block_k = 16 if _ON_GFX942 else 32
     if _ON_GFX950:
         inv_q = 1.0 / max(1, num_queries)
         avg_main_len = main_indices.numel() * inv_q
@@ -4296,7 +4298,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             NUM_SPLITS=num_splits,
-            NUM_STAGES=1,
+            NUM_STAGES=2 if _ON_GFX942 else 1,
             num_warps=4,
         )
 
