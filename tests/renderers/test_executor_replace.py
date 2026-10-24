@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 import torch
 
+import vllm.renderers.hf as hf_renderer
+from vllm import envs
 from vllm.renderers.base import _SwappableExecutor
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.params import TokenizeParams
@@ -125,3 +129,80 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
         asyncio.run(_run())
     finally:
         renderer.shutdown()
+
+
+def _patch_render(monkeypatch, timeout_s, render):
+    monkeypatch.setattr(
+        envs, "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", timeout_s, raising=False
+    )
+    monkeypatch.setattr(hf_renderer, "safe_apply_chat_template", render)
+
+
+def test_render_timeout_excludes_queue_wait(monkeypatch):
+    """A fast render queued behind other pool work (for example tokenization of
+    a long prompt) for longer than the timeout must not time out."""
+    _patch_render(monkeypatch, 0.5, lambda *args, **kwargs: "rendered")
+    renderer = _build_renderer()
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        busy = loop.run_in_executor(renderer._executor, time.sleep, 1.0)
+        assert await renderer._render_with_timeout(None, None, []) == "rendered"
+        await busy
+
+    try:
+        asyncio.run(_run())
+    finally:
+        renderer.shutdown()
+
+
+def test_slow_render_still_times_out_and_replaces_pool(monkeypatch):
+    def slow(*args, **kwargs):
+        time.sleep(1.0)
+        return "late"
+
+    _patch_render(monkeypatch, 0.3, slow)
+    renderer = _build_renderer()
+    old_inner = renderer._executor._inner
+
+    async def _run():
+        with pytest.raises(TimeoutError, match="timed out"):
+            await renderer._render_with_timeout(None, None, [])
+        assert renderer._executor._inner is not old_inner
+
+    try:
+        asyncio.run(_run())
+    finally:
+        renderer.shutdown()
+
+
+def test_render_queued_behind_stuck_render_moves_to_new_pool(monkeypatch):
+    release = threading.Event()
+
+    def render(model_config, tokenizer, conversation, **kwargs):
+        if conversation == ["stuck"]:
+            release.wait(10)
+            return "stuck"
+        return "fast"
+
+    _patch_render(monkeypatch, 0.3, render)
+    renderer = _build_renderer()
+
+    async def _run():
+        stuck = asyncio.ensure_future(
+            renderer._render_with_timeout(None, None, ["stuck"])
+        )
+        await asyncio.sleep(0.05)
+        queued = asyncio.ensure_future(
+            renderer._render_with_timeout(None, None, ["fast"])
+        )
+        with pytest.raises(TimeoutError, match="timed out"):
+            await stuck
+        assert await asyncio.wait_for(queued, timeout=5) == "fast"
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        renderer.shutdown()
+
