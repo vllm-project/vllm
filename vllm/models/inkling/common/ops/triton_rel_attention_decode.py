@@ -68,7 +68,7 @@ def use_split_kv_decode(
     return max_kv_len >= 8192
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_kv_splits"])
 def _split_kv_stage1(
     q_ptr,
     rel_ptr,
@@ -105,7 +105,7 @@ def _split_kv_stage1(
     num_q_heads: tl.constexpr,
     head_dim: tl.constexpr,
     rel_extent: tl.constexpr,
-    max_kv_splits: tl.constexpr,
+    max_kv_splits,
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -229,7 +229,7 @@ def _split_kv_stage1(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_kv_splits"])
 def _split_kv_stage2(
     mid_out_ptr,
     mid_lse_ptr,
@@ -245,7 +245,7 @@ def _split_kv_stage2(
     stride_o_h,
     window_left: tl.constexpr,
     head_dim: tl.constexpr,
-    max_kv_splits: tl.constexpr,
+    max_kv_splits,
     BLOCK_D: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
