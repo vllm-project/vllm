@@ -4585,10 +4585,12 @@ def rocm_sparse_attn_decode(
 ) -> int:
     """Run sparse MLA decode into ``output``.
 
-    Passing ``inv_rope_positions`` folds the inverse RoPE into the reduce
-    epilogue. Returns how many leading rows of ``output`` came back rotated,
-    so a caller mixing in a decode path that does not fuse still knows what it
-    owes the standalone pass. Read it from the eager attention segment only.
+    Passing ``inv_rope_positions`` asks the reduce epilogue to fold in the
+    inverse RoPE. Only the split-K reduce (gfx942 / gfx950) does that; the
+    fallback kernel on other GPUs ignores the positions. Returns how many
+    leading rows of ``output`` came back rotated (every row when the reduce
+    folded the RoPE, 0 otherwise), so the caller knows which rows still owe
+    the standalone pass. Read it from the eager attention segment only.
 
     ``output_mxfp8 = (data, scale)`` replaces ``output``: the reduce also
     MXFP8-quantizes the rotated rows for the FP8 wo_a (see
@@ -4657,7 +4659,10 @@ def rocm_sparse_attn_decode(
     assert output is not None
     if direct_out is None:
         output.copy_(attn_out.to(output.dtype))
-    return output.shape[0] if inv_rope_positions is not None else 0
+    # Only the split-K reduce (gfx942/gfx950) folds in the inverse RoPE; the
+    # un-tuned fallback kernel leaves every row to the caller's standalone pass.
+    fused_inv_rope = inv_rope_positions is not None and (_ON_GFX942 or _ON_GFX950)
+    return output.shape[0] if fused_inv_rope else 0
 
 
 @triton.jit(do_not_specialize=["token_offset"])
