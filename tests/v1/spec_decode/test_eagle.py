@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from typing import Literal
 from unittest import mock
 
@@ -1107,6 +1108,135 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
         assert torch.allclose(
             draft_probs[:, step, :],
             torch.softmax(expected_logits, dim=-1),
+        )
+
+
+@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN"])
+def test_propose_uses_kernel_block_size_for_hybrid_kv_cache(attn_backend):
+    """Regression test for vllm#37035 (fixed by #36036).
+
+    Hybrid models give the KV cache group a large block size (e.g. 544) while
+    the block table uses kernel-sized blocks (e.g. 32). Draft steps must compute
+    slot_mapping with the metadata builder's block size, not the group's.
+    """
+    if attn_backend not in get_attn_backend_list_based_on_platform():
+        pytest.skip(f"{attn_backend} not available on this platform")
+
+    device = torch.device(current_platform.device_type)
+    GROUP_BLOCK_SIZE = 544  # KV cache group spec (hybrid-aligned)
+    KERNEL_BLOCK_SIZE = 32  # what the block table actually uses
+    num_speculative_tokens = 4
+    batch_size = 2
+    vocab_size = 100
+    seq_lens = [40, 9]
+    query_lens = [40, 5]  # mixed batch: one prefill, one decode
+    total_tokens = sum(query_lens)
+
+    proposer = _create_proposer(
+        "eagle", num_speculative_tokens, attention_backend=attn_backend
+    )
+    proposer.block_size = KERNEL_BLOCK_SIZE  # what initialize_attn_backend sets
+    hidden_size = proposer.hidden_size
+
+    # Fake draft model: deterministic tokens, zero hidden states
+    model_mock = mock.MagicMock()
+    model_mock.side_effect = [
+        (
+            torch.zeros(total_tokens, hidden_size, device=device),
+            torch.zeros(total_tokens, hidden_size, device=device),
+        )
+    ] + [
+        (
+            torch.zeros(batch_size, hidden_size, device=device),
+            torch.zeros(batch_size, hidden_size, device=device),
+        )
+        for _ in range(num_speculative_tokens - 1)
+    ]
+
+    def logits_for(tokens):
+        logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        for i, t in enumerate(tokens):
+            logits[i, t] = 100.0
+        return logits
+
+    model_mock.compute_logits.side_effect = [
+        logits_for([42 + i, 60 + i]) for i in range(num_speculative_tokens)
+    ]
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    # Builder uses kernel blocks; the group's spec says 544
+    base_spec = create_standard_kv_cache_spec(proposer.vllm_config)
+    kernel_spec = dataclasses.replace(base_spec, block_size=KERNEL_BLOCK_SIZE)
+    group_spec = dataclasses.replace(base_spec, block_size=GROUP_BLOCK_SIZE)
+    builder_cls, _ = try_get_attention_backend(AttentionBackendEnum[attn_backend])
+    builder = builder_cls(
+        kv_cache_spec=kernel_spec,
+        layer_names=["layer.0"],
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+
+    # Spy on build_for_drafting to capture each draft step's slot_mapping
+    captured = {}
+    real_build = builder.build_for_drafting
+
+    def spy(common_attn_metadata, draft_index):
+        captured[draft_index] = (
+            common_attn_metadata.slot_mapping.clone(),
+            common_attn_metadata.block_table_tensor.clone(),
+        )
+        return real_build(
+            common_attn_metadata=common_attn_metadata, draft_index=draft_index
+        )
+
+    # proposer.runner = mock.MagicMock()
+    attn_group = mock.MagicMock()
+    attn_group.get_metadata_builder.return_value = builder
+    attn_group.layer_names = ["layer.0"]
+    attn_group.kv_cache_spec = group_spec  # the 544 the old code read
+    proposer.draft_attn_groups = [attn_group]
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    cad = create_common_attn_metadata(
+        batch_spec,
+        block_size=KERNEL_BLOCK_SIZE,
+        device=device,
+        arange_block_indices=True,
+    )
+    cad.block_table_tensor += 5
+    target_positions = torch.cat(
+        [torch.arange(s - q, s, device=device) for s, q in zip(seq_lens, query_lens)]
+    )
+
+    with mock.patch.object(builder, "build_for_drafting", side_effect=spy):
+        proposer.propose(
+            num_speculative_tokens=num_speculative_tokens,
+            target_token_ids=torch.randint(
+                0, vocab_size, (total_tokens,), device=device
+            ),
+            target_positions=target_positions,
+            target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+            next_token_ids=torch.randint(
+                0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+            ),
+            token_indices_to_sample=None,
+            common_attn_metadata=cad,
+            sampling_metadata=mock.MagicMock(),
+        )
+
+    # Draft steps 1..k-1 recompute slot_mapping; it must use 32-token blocks
+    last_pos = torch.tensor([s - 1 for s in seq_lens], device=device)
+    for k in range(1, num_speculative_tokens):
+        slot_mapping, block_table = captured[k]
+        pos = last_pos + k
+        block_ids = block_table.gather(1, (pos // KERNEL_BLOCK_SIZE).view(-1, 1)).view(
+            -1
+        )
+        expected = block_ids * KERNEL_BLOCK_SIZE + pos % KERNEL_BLOCK_SIZE
+        assert torch.equal(slot_mapping[:batch_size].long(), expected.long()), (
+            f"draft step {k}: slot_mapping {slot_mapping[:batch_size].tolist()} "
+            f"!= expected {expected.tolist()} (block size mismatch?)"
         )
 
 
