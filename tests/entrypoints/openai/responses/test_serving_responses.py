@@ -1813,6 +1813,23 @@ async def test_background_stream_replay_stops_on_response_incomplete():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_stream_without_stored_events_returns_400():
+    """A stored response that was not created with background=true and
+    stream=true has no events to replay, so stream=true must be rejected
+    before the SSE response starts instead of failing mid-stream."""
+    serving = _make_serving_instance()
+    serving.response_store["resp_fg"] = MagicMock(spec=ResponsesResponse)
+
+    result = await serving.retrieve_responses(
+        "resp_fg", starting_after=None, stream=True
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 400
+    assert result.error.param == "stream"
+
+
+@pytest.mark.asyncio
 async def test_responses_metrics_suppressed_for_multiple_generation_turns():
     response = await _make_full_metrics_response(
         True, request_metrics_cover_all_generation_turns=False
