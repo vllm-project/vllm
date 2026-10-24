@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
+    VLLM_MEDIA_USER_AGENT: str | None = None
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
@@ -992,6 +993,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
         int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))
     ),
+    # User-Agent header sent when fetching media URLs.
+    # Defaults to "vLLM/<version>".
+    "VLLM_MEDIA_USER_AGENT": lambda: os.getenv("VLLM_MEDIA_USER_AGENT"),
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
     # Default is 8
@@ -2414,6 +2418,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_CACHE_TTL_HOURS",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
+        "VLLM_MEDIA_USER_AGENT",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",

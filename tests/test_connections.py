@@ -16,6 +16,7 @@ from vllm.connections import (
     HTTPResponseSizeExceededError,
     MediaRequestDownloadBudget,
 )
+from vllm.version import __version__ as VLLM_VERSION
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -27,6 +28,14 @@ _CHUNK_SIZE = 64 * 1024
 
 class _MediaHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        if self.path == "/user-agent":
+            body = self.headers.get("User-Agent", "").encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         body = _LARGE_BODY if "large" in self.path else _SMALL_BODY
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -289,6 +298,26 @@ async def test_get_bytes_allows_body_within_limit(
     try:
         actual = await connection.async_get_bytes(f"{local_media_server}/small")
         assert actual == _SMALL_BODY
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [None, "custom-agent/1.0"])
+async def test_media_user_agent(
+    monkeypatch: pytest.MonkeyPatch, local_media_server: str, override: str | None
+) -> None:
+    """Media fetches default to vLLM/<version>; VLLM_MEDIA_USER_AGENT overrides it."""
+    monkeypatch.setattr(envs, "VLLM_MEDIA_USER_AGENT", override, raising=False)
+    expected = (override or f"vLLM/{VLLM_VERSION}").encode()
+    connection = HTTPConnection(reuse_client=False)
+    url = f"{local_media_server}/user-agent"
+
+    assert connection.get_bytes(url) == expected
+
+    try:
+        assert await connection.async_get_bytes(url) == expected
     finally:
         if connection._async_client is not None:
             await connection._async_client.close()

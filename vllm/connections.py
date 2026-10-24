@@ -402,7 +402,8 @@ class HTTPConnection:
             )
 
     def _headers(self, **extras: str) -> MutableMapping[str, str]:
-        return {"User-Agent": f"vLLM/{VLLM_VERSION}", **extras}
+        user_agent = envs.VLLM_MEDIA_USER_AGENT or f"vLLM/{VLLM_VERSION}"
+        return {"User-Agent": user_agent, **extras}
 
     def get_response(
         self,
