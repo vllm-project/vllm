@@ -2916,6 +2916,7 @@ async fn http_metrics_record_list_models_requests() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
 
     let after = METRICS.render().unwrap();
     assert_eq!(
@@ -3859,6 +3860,35 @@ async fn happy_path_returns_sse_stream() {
         Some("text/event-stream")
     );
 
+    let after_headers = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/v1/chat/completions\""),
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_request_duration_seconds_count",
+            Some("method=\"POST\",handler=\"/v1/chat/completions\""),
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        0.0
+    );
+
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
@@ -3886,6 +3916,69 @@ async fn happy_path_returns_sse_stream() {
             &after,
             "http_request_duration_seconds_count",
             Some("method=\"POST\",handler=\"/v1/chat/completions\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        1.0
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn http_metrics_record_request_cancelled_before_response() {
+    async fn pending_handler(
+        axum::extract::State(started): axum::extract::State<Arc<tokio::sync::Notify>>,
+    ) -> StatusCode {
+        started.notify_one();
+        std::future::pending::<StatusCode>().await
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut app = axum::Router::new()
+        .route("/pending", axum::routing::get(pending_handler))
+        .with_state(started.clone())
+        .layer(axum::middleware::from_fn(
+            crate::middleware::track_http_metrics,
+        ));
+    let before = METRICS.render().unwrap();
+
+    let request_task = tokio::spawn(async move {
+        app.call(
+            Request::builder()
+                .method("GET")
+                .uri("/pending")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+    });
+    started.notified().await;
+    request_task.abort();
+    assert!(request_task.await.expect_err("request should be cancelled").is_cancelled());
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"GET\",status=\"5xx\",handler=\"/pending\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"GET\",handler=\"/pending\""),
         ),
         1.0
     );
@@ -3974,6 +4067,7 @@ async fn http_metrics_group_error_statuses() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
 
     let after = METRICS.render().unwrap();
     assert_eq!(
@@ -7164,6 +7258,7 @@ async fn release_kv_cache_memory_error_records_http_status_and_operation_duratio
         .await
         .expect("call app");
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let after = METRICS.render().expect("render metrics");
     assert_eq!(
