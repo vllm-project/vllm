@@ -577,9 +577,10 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.filter(|&c| c > 0).map(|c| PromptTokenUsageInfo {
+                cached_tokens: c,
+                created_cache_tokens: None,
+            }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -596,12 +597,28 @@ impl Usage {
             usage.reasoning_tokens,
         )
     }
+
+    /// Include cache-creation counts for chat, matching the Python frontend.
+    pub fn from_chat_token_usage(
+        usage: ChatTokenUsage,
+        enable_prompt_tokens_details: bool,
+    ) -> Self {
+        let mut result = Self::from_token_usage(usage, enable_prompt_tokens_details);
+        if enable_prompt_tokens_details {
+            result.prompt_tokens_details = Some(PromptTokenUsageInfo {
+                cached_tokens: usage.cached_token_count,
+                created_cache_tokens: Some(usage.cache_creation_token_count),
+            });
+        }
+        result
+    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    pub created_cache_tokens: Option<usize>,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -624,6 +641,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 3,
+                ..Default::default()
             },
             false,
         );
@@ -640,6 +658,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 3,
+                ..Default::default()
             },
             true,
         );
@@ -658,6 +677,7 @@ mod usage_tests {
                     prompt_token_count: 5,
                     output_token_count: 4,
                     cached_token_count: 0,
+                    ..Default::default()
                 },
                 reasoning_tokens: 3,
             },
@@ -677,6 +697,7 @@ mod usage_tests {
                     prompt_token_count: 5,
                     output_token_count: 0,
                     cached_token_count: 0,
+                    ..Default::default()
                 },
                 reasoning_tokens: 0,
             },
@@ -694,6 +715,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 0,
+                ..Default::default()
             },
             false,
         );

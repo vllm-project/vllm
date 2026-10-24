@@ -54,6 +54,7 @@ fn finished() -> Finished {
             prompt_token_count: 0,
             output_token_count: 0,
             cached_token_count: 0,
+            ..Default::default()
         },
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
@@ -132,6 +133,7 @@ fn interrupted_final_message_is_preserved() {
                 prompt_token_count: 0,
                 output_token_count: 0,
                 cached_token_count: 0,
+                ..Default::default()
             }),
             timestamps: Default::default(),
             finish_reason: FinishReason::stop_eos(),
@@ -184,6 +186,7 @@ fn interrupted_analysis_message_is_preserved() {
                 prompt_token_count: 0,
                 output_token_count: 0,
                 cached_token_count: 0,
+                ..Default::default()
             }),
             timestamps: Default::default(),
             finish_reason: FinishReason::stop_eos(),

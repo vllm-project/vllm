@@ -488,6 +488,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
+                                    num_cache_creation_tokens: 1,
                                     ..Default::default()
                                 })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
@@ -542,6 +543,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
     assert_eq!(collected.usage.cached_token_count, 1);
+    assert_eq!(collected.usage.cache_creation_token_count, 1);
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
@@ -572,6 +574,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
         cached_token_count: 0,
+        cache_creation_token_count: 0,
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: Some(SamplingMask {
