@@ -41,6 +41,20 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+### MRV2 prefill context parallelism
+
+With model runner V2, a `kv_producer` can use
+`--prefill-context-parallel-size` with a supported MLA model and attention
+backend. The producer must use `--decode-context-parallel-size 1` so that
+PCP ranks at each TP/PP position hold replicated KV caches. Only PCP rank 0
+registers as a sender and transfers KV; all workers report save completion
+before the scheduler frees the request's blocks.
+
+The decoder must use `--prefill-context-parallel-size 1`. PCP greater than 1
+is rejected for `kv_consumer` and `kv_both`, and for producers using DCP
+greater than 1. Use PP=1 and DP=1 for this producer-only PCP setup; other
+PP/DP combinations require separate validation.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
