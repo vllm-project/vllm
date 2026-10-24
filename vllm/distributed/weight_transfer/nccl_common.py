@@ -127,6 +127,28 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
+def build_worker_init_payload(
+    *,
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    packed: bool = False,
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+) -> dict:
+    # Workers sit at rank_offset 1, after the single trainer sender rank 0.
+    worker_init_info = NCCLWeightTransferInitInfo(
+        master_address=master_address,
+        master_port=master_port,
+        rank_offset=1,
+        world_size=world_size,
+        packed=packed,
+        packed_buffer_size_bytes=packed_buffer_size_bytes,
+        packed_num_buffers=packed_num_buffers,
+    )
+    return worker_init_payload(worker_init_info)
+
+
 def run_trainer_rendezvous(
     *, init_worker: Callable[[], None], init_trainer: Callable[[], None]
 ) -> None:

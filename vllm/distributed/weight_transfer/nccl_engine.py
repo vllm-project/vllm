@@ -25,8 +25,8 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    build_worker_init_payload,
     run_trainer_rendezvous,
-    worker_init_payload,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -283,17 +283,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
     @classmethod
     def _build_worker_init_payload(cls, init_info: NCCLTrainerInitInfo) -> dict:
-        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
-        worker_init_info = NCCLWeightTransferInitInfo(
+        return build_worker_init_payload(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
-            rank_offset=1,
             world_size=init_info.world_size,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
         )
-        return worker_init_payload(worker_init_info)
 
     def _open_trainer_endpoint(self, init_info: NCCLTrainerInitInfo) -> None:
         self.model_update_group = open_trainer_endpoint(init_info)

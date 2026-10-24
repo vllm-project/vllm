@@ -30,8 +30,8 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    build_worker_init_payload,
     run_trainer_rendezvous,
-    worker_init_payload,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -232,17 +232,11 @@ class SparseNCCLTrainerWeightTransferEngine(
 
     @classmethod
     def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
-        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
-        # Sparse transfers are never packed, so the worker keeps the unpacked
-        # defaults on its init info.
-        worker_init_info = NCCLWeightTransferInitInfo(
+        return build_worker_init_payload(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
-            rank_offset=1,
             world_size=init_info.world_size,
         )
-
-        return worker_init_payload(worker_init_info)
 
     @classmethod
     def trainer_init(
