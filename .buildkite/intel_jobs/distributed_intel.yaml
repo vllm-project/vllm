@@ -30,4 +30,4 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests && pytest -v -s v1/shutdown'
+      'bash .buildkite/scripts/hardware_ci/shutdown-loop.sh'

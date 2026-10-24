@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import faulthandler
 import multiprocessing
 import os
 import pickle
@@ -929,8 +930,12 @@ class WorkerProc:
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
+        logger.warning("[sigdiag] pid=%d destroy_model_parallel start", os.getpid())
         destroy_model_parallel()
         destroy_distributed_environment()
+        logger.warning(
+            "[sigdiag] pid=%d destroy_distributed_environment done", os.getpid()
+        )
 
     def monitor_death_pipe(self, death_pipe, shutdown_requested: threading.Event):
         if death_pipe is None:
@@ -974,6 +979,10 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested.is_set():
                 shutdown_requested.set()
+                logger.warning(
+                    "[sigdiag] pid=%d got signal %d; stacks:", os.getpid(), signum
+                )
+                faulthandler.dump_traceback(all_threads=True)
                 logger.debug(
                     "WorkerProc handling signal %d, raising SystemExit", signum
                 )
