@@ -1406,9 +1406,8 @@ class MoRIIOConnectorScheduler:
                 for b in block_ids[0]
             }
             scheduler_output.new_block_ids_to_zero = [
-                b
-                for b in scheduler_output.new_block_ids_to_zero
-                if b not in read_dst_block_ids
+                [b for b in group_block_ids if b not in read_dst_block_ids]
+                for group_block_ids in scheduler_output.new_block_ids_to_zero
             ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
