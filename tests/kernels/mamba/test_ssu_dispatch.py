@@ -550,6 +550,8 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_query_len = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_rand_seed = None
+    mixer._replayssm_rand_seeds = None
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),

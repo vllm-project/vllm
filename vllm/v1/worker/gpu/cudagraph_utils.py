@@ -897,7 +897,11 @@ def prepare_inputs_to_capture(
     # for PIECEWISE graphs, to ensure correct execution and capture.
     attn_metadata = model_state.prepare_attn(
         input_batch,
-        CUDAGraphMode.NONE,
+        # FULL capture keeps NONE (model states use the dummy batch's
+        # unpadded sizes). Piecewise capture passes PIECEWISE, which model
+        # states size like NONE, so that a Mamba2 mixer captured inside the
+        # piecewise graphs gets its static metadata.
+        CUDAGraphMode.NONE if full_cudagraph else CUDAGraphMode.PIECEWISE,
         input_block_tables,
         slot_mappings,
         attn_groups,
