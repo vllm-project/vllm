@@ -4,7 +4,9 @@
 
 Each entry of `csrc/rocm/rdna_{decode,prefill}_configs.h` is one
 build, with its shape and launch knobs as compile-time constants; those of
-`rdna_decode_batch_configs.h` serve a batch.
+`rdna_decode_batch_configs.h` serve a batch. Each header has a table per GPU
+family: gfx1151's (1536 VGPRs a SIMD lane) and gfx1150's (1024), which gfx1152
+and gfx1153 also use. `_rocm_C` lists the builds of the current device's tables.
 """
 
 import contextlib
