@@ -1698,3 +1698,64 @@ l'admission (défaut 0.0).
 **Rollback** : remettre la ligne `--no-scheduler-reserve-full-isl \` après `--async-scheduling \`,
 puis `docker compose -f myia_vllm/configs/docker/profiles/medium-swift15-27b-fstier.yml --env-file
 myia_vllm/.env up -d --no-deps vllm-medium-swift15-27b`.
+
+## Cycle 24/10 20:41Z — premières mesures après Q32, trous de décodage résiduels expliqués
+
+**État.** health 200 (3 ms), RC 0, StartedAt 20:01:52Z, OOM 0, **0 `not found in cache`** depuis
+le boot overlay de 18:49Z (deux générations). VRAM 21 473 / 20 552 / 45 MiB, `/dev/shm` 24G (39 %),
+3 conteneurs Up. Watchdog depuis 20:01Z : 3 × `fail 1/2` récupérés (20:10, 20:18, 20:26Z),
+1 BUSY, **0 restart**. Marge commit hôte **70,5 %** (278,5/395,3 Go). G: écriture OK (85 % plein).
+nbaudit `ok:true`, 0 échec consécutif (vague `19451:Image/`).
+
+**Q32, premiers chiffres (43 min, recharge post-restart incluse, trop tôt pour conclure).**
+
+| | avant Q32 (génération 18:49Z, ~66 min) | après Q32 (20:01Z → 20:44Z, 43 min) |
+|---|---|---|
+| préemptions | 66 | **2** |
+| requêtes terminées | 177 (2,7/min) | 149 (3,5/min) |
+| génération | 164 820 tok (~42 tok/s moy.) | 126 046 tok (~49 tok/s moy.) |
+| erreurs / abandons | 0 / 0 | 0 / 0 |
+| tokens de prompt servis par cache | — | **91 %** (GPU 2,55 M · RAM 12,73 M · disque 1,33 M sur 18,24 M) |
+| attente en file / TTFT / e2e (moyennes) | — | 21,3 s / 36,0 s / 74,4 s |
+
+Le trafic n'est pas le même d'une génération à l'autre : ces deux colonnes indiquent une tendance
+et ne valent pas un A/B. Deux points ne font pas une pente.
+
+**Trous de décodage résiduels : mécanisme mesuré.** Sur les 189 fenêtres actives de 10 s depuis
+le boot, **38** ont produit moins de 1 tok/s au total avec 5-6 requêtes en cours. Le log affiche
+alors P=0, le KV monte, puis une rafale de P suit. Cause : le prefill d'un long prompt **non
+caché** (~200 K tokens). Une étape qui porte une tranche pleine de 8 192 tokens dure ~5 s sur le
+27B dense (~1 600 tok/s). Chaque décodage en cours ne reçoit qu'un token par étape, soit ~0,2 tok/s
+par flux. Il ne s'agit pas d'une sur-admission (Q32 l'a réglée). C'est l'entrelacement
+prefill/décodage. Note de lecture : « Avg prompt throughput » ne crédite un prompt qu'à la **fin**
+de son prefill. Il lit donc 0 pendant le prefill par tranches, puis une rafale.
+
+**Levier identifié, non appliqué (registre Q35).** v0.32 `SchedulerConfig` (source vérifiée,
+`config/scheduler.py:79-90`, `v1/core/sched/scheduler.py:636-660`, exposé en CLI par
+`engine/arg_utils.py:600-605`) :
+- `--long-prefill-token-threshold N` (défaut 0 = pas de plafond) : plafonne les tokens d'un long
+  prefill par étape **quand plus d'une requête est éligible**. Une requête seule garde le budget
+  entier.
+- `--long-prefill-token-threshold-adaptive` : relève le plafond à
+  `max_num_batched_tokens // nb_requêtes`. À 5 requêtes, ~1 600, ce qui retire l'essentiel de
+  l'effet. Déconseillé ici.
+- `max_num_active_seqs` (limite RUNNING sans réduire les graphes) et `max_num_queued_reqs` (503
+  au-delà) existent aussi. Non pertinents pour ce symptôme.
+- `throttle_prefills` / `prefill_capacity_bound` : équilibrage DP uniquement, sans objet à DP=1.
+
+Ordre de grandeur **calculé, non mesuré**, à partir du prefill mesuré (~1 600 tok/s, ~25 ms de
+fixe par étape) : avec N=512, l'étape passe à ~0,35 s, le décodage concurrent à ~2-3 tok/s par
+flux, et le long prompt prend +5 à 10 %. Mesures à faire si le GO tombe : fenêtres < 1 tok/s,
+décodage par flux pendant un long prefill, débit de prefill sur prompt long. Retour arrière si le
+prefill perd plus de 15 %.
+
+**Sécurité (7 h, `x_forwarded_for`).** 200 : site `90.65.170.144` (642), sans XFF (326, flotte
+interne), web1 `37.187.180.135` (2), `92.184.141.186` (2, 18:15:09Z, OpenAI/JS 4.104.0, clé
+MEDIUM, corps 20/54 K, même empreinte que `92.184.113.119` du 20/10 = pool mobile flotte,
+condensation RSM, **non-alerte**). 401 : `108.165.33.236` Go-http-client ×30 (scanner, refusé).
+500 : 46, toutes dans la fenêtre des crashs du bug amont (14:30-17:50Z), aucune depuis l'overlay.
+Aucun 400 à corps > 100 K.
+
+**Condensation.** Bannière 20:41Z `primary=qwen3.6-35b-a3b @ :5002 … key=OK`. Repli cloud réussi
+à 15:22-15:31Z, pendant les crashs : dégradation gracieuse nominale. Les WARN du log sont des
+`BaselineManager NonNominativeBaselineService`, périmètre RSM, pas vllm.
