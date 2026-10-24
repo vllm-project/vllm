@@ -157,6 +157,39 @@ def test_qwen4_exp_mtp_remaps_mixed_precision_layer_indices(backend: str) -> Non
     }
 
 
+@spawn_new_process_for_each_test
+def test_qwen4_exp_amd_mtp_remaps_quark_layer_names() -> None:
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.models.qwen4_exp.amd import mtp as mtp_module
+
+    exclude = ["lm_head", "mtp.layers.0.mlp.experts.0.gate_proj", r"re:mtp\..*"]
+    checkpoint_config = {
+        "exclude": exclude,
+        "layer_quant_config": {"mtp.layers.0.self_attn.q_proj": {}},
+    }
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(draft_model_config=object())
+    )
+    with (
+        patch.object(
+            mtp_module,
+            "get_draft_quant_config",
+            return_value=QuarkConfig(checkpoint_config),
+        ),
+        patch.object(mtp_module, "replace", return_value=SimpleNamespace()),
+    ):
+        draft_config = mtp_module._make_draft_vllm_config(vllm_config, 48, 1)
+
+    remapped = draft_config.quant_config.quant_config
+    assert remapped["exclude"] == [
+        "lm_head",
+        "mtp.layers.48.mlp.experts.0.gate_proj",
+        r"re:mtp\..*",
+    ]
+    assert remapped["layer_quant_config"] == {"mtp.layers.48.self_attn.q_proj": {}}
+    assert exclude[1] == "mtp.layers.0.mlp.experts.0.gate_proj"
+
+
 @pytest.mark.parametrize("wrapped_config", [False, True])
 def test_qwen4_exp_mtp_override_sets_draft_config(
     wrapped_config: bool,
