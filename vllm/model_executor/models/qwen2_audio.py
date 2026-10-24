@@ -286,11 +286,14 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
 
         def get_replacement_qwen2_audio(item_idx: int):
             if "audio_num_tokens" in out_mm_data:
-                num_features = int(out_mm_data["audio_num_tokens"][item_idx])
+                audio_num_tokens = out_mm_data["audio_num_tokens"]
+                assert isinstance(audio_num_tokens, torch.Tensor)
+                num_features = int(audio_num_tokens[item_idx])
             elif audio_output_lengths:
                 num_features = audio_output_lengths[item_idx]
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
+                assert isinstance(audio_embeds, torch.Tensor)
                 assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
 
@@ -413,9 +416,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         # Create mask
         padding_mask = seq_range >= lengths_expand
 
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
+        audio_attention_mask_ = padding_mask[:, None, None, :]
         audio_attention_mask = audio_attention_mask_.to(
             dtype=self.audio_tower.conv1.weight.dtype,
             device=self.audio_tower.conv1.weight.device,

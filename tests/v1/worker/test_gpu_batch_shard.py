@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample import batch_shard
@@ -22,12 +23,13 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     _shard_grammar_output,
 )
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 # The owner-sorted layout is expanded by a Triton kernel, so the routing math
 # can only be exercised on device.
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
+requires_gpu = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
 )
 
 
@@ -96,6 +98,7 @@ def _make_batch(
         num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
         is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
         has_prefill=False,
+        decode_graph_eligible=True,
         input_ids=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE),
         positions=torch.arange(num_tokens, dtype=torch.int64, device=DEVICE),
         is_padding=torch.zeros(num_tokens, dtype=torch.bool, device=DEVICE),
@@ -135,7 +138,7 @@ def _owned_rows(cu: np.ndarray, owned: np.ndarray) -> np.ndarray:
     return np.concatenate([np.arange(cu[r], cu[r + 1]) for r in owned])
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_local_batch_partition(tp_size: int, seed: int):
@@ -224,7 +227,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
     )
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_all_to_all_reassembly_simulated(tp_size: int):
     """Vocab shards computed from owner-sorted hidden states and routed
@@ -264,7 +267,7 @@ def test_all_to_all_reassembly_simulated(tp_size: int):
         assert torch.equal(reassembled, expected)
 
 
-@requires_cuda
+@requires_gpu
 def test_shard_no_spec():
     """Batches without draft tokens (one logits row per request) degenerate
     cleanly: rows mirror requests."""
@@ -291,25 +294,22 @@ def test_shard_grammar_output(tp_size: int):
     max_num_reqs = 32
     num_reqs = 12
     slots = rng.choice(np.arange(max_num_reqs), size=num_reqs, replace=False)
-    k = rng.integers(0, 4, size=num_reqs)
-    cu = np.zeros(num_reqs + 1, dtype=np.int32)
-    np.cumsum(1 + k, out=cu[1:])
+    mask_stride = 4
     owner = slots % tp_size
 
     # Grammar requests: every other request, in a scrambled order.
     req_ids = [f"req-{i}" for i in range(num_reqs)]
     grammar_idx = list(rng.permutation(np.arange(0, num_reqs, 2)))
     grammar_req_ids = [req_ids[i] for i in grammar_idx]
-    num_grammar_rows = sum(int(cu[i + 1] - cu[i]) for i in grammar_idx)
+    num_grammar_rows = len(grammar_idx) * mask_stride
     bitmask = rng.integers(0, 2**31, size=(num_grammar_rows, 4), dtype=np.int32)
-    input_batch = SimpleNamespace(req_ids=req_ids, cu_num_logits_np=cu)
 
     # Global row offset of each grammar request within the bitmask.
     row_offsets = {}
     cursor = 0
     for i in grammar_idx:
         row_offsets[i] = cursor
-        cursor += int(cu[i + 1] - cu[i])
+        cursor += mask_stride
 
     grammar_output = GrammarOutput(
         structured_output_request_ids=grammar_req_ids,
@@ -319,7 +319,7 @@ def test_shard_grammar_output(tp_size: int):
     kept_total = 0
     for rank in range(tp_size):
         local_req_ids = [req_ids[i] for i in range(num_reqs) if owner[i] == rank]
-        local = _shard_grammar_output(grammar_output, input_batch, local_req_ids)
+        local = _shard_grammar_output(grammar_output, local_req_ids)
         expected_idx = [i for i in grammar_idx if owner[i] == rank]
         if not expected_idx:
             assert local is None
@@ -328,7 +328,7 @@ def test_shard_grammar_output(tp_size: int):
         assert local.structured_output_request_ids == [req_ids[i] for i in expected_idx]
         expected_rows = np.concatenate(
             [
-                np.arange(row_offsets[i], row_offsets[i] + cu[i + 1] - cu[i])
+                np.arange(row_offsets[i], row_offsets[i] + mask_stride)
                 for i in expected_idx
             ]
         )
@@ -337,7 +337,7 @@ def test_shard_grammar_output(tp_size: int):
     assert kept_total == num_grammar_rows
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_src_indices_round_trip(tp_size: int):
     """Padded per-rank result blocks indexed by gathered_src_indices restore
@@ -371,7 +371,7 @@ def test_gather_src_indices_round_trip(tp_size: int):
     assert restored.tolist() == list(range(batch.num_reqs))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_sampler_output_kernels(tp_size: int):
     """The fused pack/unpack kernels round-trip per-rank sampler results
@@ -385,7 +385,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=13, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     width = results[0][2].max_num_logits_per_req
 
@@ -467,7 +467,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         assert torch.equal(out.num_rejected.cpu(), expected_rejected.to(torch.int32))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_gather_sampler_output_logprobs_and_nans():
     """num_nans is reduced per request and gathered; LogprobsTensors are
     packed into fixed per-request blocks, width-aligned across ranks (pad
@@ -482,7 +482,7 @@ def test_gather_sampler_output_logprobs_and_nans():
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=6, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     cu = batch.cu_num_logits_np
     num_logits = int(cu[-1])

@@ -34,6 +34,7 @@ class Sample:
     tools: list[dict] | None = None
     chat_template_kwargs: dict | None = None
     prompt_token_ids: list[int] | None = None
+    content_lstrip: str | None = None
 
 
 @dataclass

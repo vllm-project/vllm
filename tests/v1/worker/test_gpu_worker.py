@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
@@ -15,6 +17,100 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_v2_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
+)
+def test_cpu_worker_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(
+        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
+    )
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(
+            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
+        ),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner
+
+
+def test_sleep_preservation_restores_private_draft_not_shared_target():
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module()
+    draft.private = torch.nn.Linear(2, 2, bias=False)
+    draft.shared = target.weight
+    expected = draft.private.weight.detach().clone()
+    pointer = draft.private.weight.data_ptr()
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    assert set(worker._get_sleep_parameters(target)) == {
+        "weight",
+        "draft.private.weight",
+    }
+    worker._sleep_saved_parameters = {"draft.private.weight": expected}
+    with torch.no_grad():
+        target.weight.fill_(3.0)
+        draft.private.weight.zero_()
+    worker._restore_sleep_parameters(target)
+    torch.testing.assert_close(draft.private.weight, expected)
+    assert draft.private.weight.data_ptr() == pointer
+    assert torch.all(target.weight == 3.0)
+    assert worker._sleep_saved_parameters == {}
+
+
+@pytest.mark.parametrize("has_shared_draft", [False, True])
+def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
+    has_shared_draft,
+):
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module() if has_shared_draft else None
+    if draft is not None:
+        draft.shared = target.weight
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
+    worker._save_sleep_parameters(target)
+    assert worker._sleep_saved_parameters == {}
+    worker.model_config.sleep_preserve_parameter_names = ["missing"]
+    with pytest.raises(ValueError, match="No parameter matches sleep retention"):
+        worker._save_sleep_parameters(target)
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
@@ -50,6 +146,144 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         assert counter.frame_count == 1
     finally:
         torch.set_num_threads(original_threads)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+# A fresh allocator: blocks cached by earlier tests could serve the large buffer.
+@create_new_process_for_each_test("spawn")
+def test_scoped_max_split_keeps_freed_large_blocks_releasable():
+    """A small allocation made after a large buffer is freed must not pin the
+    buffer's segment: the profiling run (determine_available_memory) grows
+    workspaces this way, and a pinned segment survives empty_cache() and is
+    counted as consumed memory."""
+    large = 512 * 1024 * 1024
+    small = 2 * 1024 * 1024  # large pool, so it is served by splitting cached blocks
+
+    def reserved_while_small_is_live(scope) -> int:
+        torch.accelerator.empty_cache()
+        with scope:
+            buf = torch.empty(large, dtype=torch.uint8, device="cuda")
+            del buf
+            tensor = torch.empty(small, dtype=torch.uint8, device="cuda")
+            torch.accelerator.empty_cache()
+            reserved = torch.accelerator.memory_reserved()
+            del tensor
+        torch.accelerator.empty_cache()
+        return reserved
+
+    baseline = torch.accelerator.memory_reserved()
+    # Without the limit the small tensor is split off the freed block and pins it.
+    assert reserved_while_small_is_live(nullcontext()) - baseline >= large
+    scoped = gpu_worker.Worker._scoped_allocator_max_split(
+        SimpleNamespace(), max_split_size_mb=20
+    )
+    assert reserved_while_small_is_live(scoped) - baseline < large
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("snapshot_fallback", [False, True])
+@pytest.mark.parametrize("suffix", ["", ", "])
+def test_scoped_max_split_preserves_allocator_settings(
+    monkeypatch, fail, snapshot_fallback, suffix
+):
+    """Preserve allocator settings across successful and failed profiling runs."""
+    if snapshot_fallback:
+        monkeypatch.delattr(
+            torch._C, "_accelerator_getAllocatorSettings", raising=False
+        )
+
+    def settings():
+        return torch.cuda.memory._snapshot()["allocator_settings"]
+
+    original = settings()["PYTORCH_CUDA_ALLOC_CONF"]
+    configured = (
+        "max_split_size_mb:128,garbage_collection_threshold:0.8,"
+        "roundup_power2_divisions:[256:1,512:2,>:4],max_non_split_rounding_mb:32"
+    )
+    try:
+        torch._C._accelerator_setAllocatorSettings(configured + suffix)
+        before = settings()
+        expected_error = pytest.raises(RuntimeError, match="profiling failed")
+        with (
+            expected_error if fail else nullcontext(),
+            gpu_worker.Worker._scoped_allocator_max_split(SimpleNamespace(), 20),
+        ):
+            scoped = settings()
+            assert scoped["max_split_size"] == 20 * 1024 * 1024
+            for key in ("garbage_collection_threshold", "roundup_power2_divisions"):
+                assert scoped[key] == before[key]
+            if fail:
+                raise RuntimeError("profiling failed")
+        assert settings() == before
+    finally:
+        torch._C._accelerator_setAllocatorSettings(original)
+
+
+def test_scoped_max_split_ignores_async_allocator(monkeypatch):
+    """Async allocators ignore max_split and may not support memory snapshots."""
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda.memory, "get_allocator_backend", lambda: "cudaMallocAsync"
+    )
+    with (
+        patch.object(torch.cuda.memory, "_snapshot") as snapshot,
+        patch.object(torch._C, "_accelerator_setAllocatorSettings") as set_settings,
+        gpu_worker.Worker._scoped_allocator_max_split(SimpleNamespace(), 20),
+    ):
+        pass
+    snapshot.assert_not_called()
+    set_settings.assert_not_called()
+
+
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
+def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_bytes):
+    """ROCm decode workspace uses max_num_seqs during startup profiling."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+
+    class Profiled(Exception):
+        pass
+
+    def profile_run(*, randomize_inputs=False):
+        assert randomize_inputs is True
+        # Without the config context, the helper falls back to all 32768
+        # batched tokens, which would reserve 128 GiB at 1M context.
+        assert _max_decode_logits_rows(32768) == 16 * (1 + 5)
+        raise Profiled
+
+    worker = SimpleNamespace(
+        vllm_config=config,
+        randomize_dummy_inputs=True,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
+        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        init_snapshot=SimpleNamespace(free_memory=2),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext()
+    )
+
+    assert get_current_vllm_config_or_none() is None
+    with pytest.raises(Profiled):
+        gpu_worker.Worker.determine_available_memory(worker)
+    assert get_current_vllm_config_or_none() is None
 
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
@@ -238,15 +472,12 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                pass_config=SimpleNamespace(enable_sp=False)
-            ),
             parallel_config=SimpleNamespace(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )
