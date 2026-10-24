@@ -1103,9 +1103,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         *args,
         **kwargs,
     ):
-        response = await self.responses_full_generator(request, *args, **kwargs)
+        try:
+            response = await self.responses_full_generator(request, *args, **kwargs)
+        except Exception:
+            # Nobody awaits this task, so record the failure for retrieval.
+            logger.exception("Background response %s failed", request.request_id)
+            response = None
 
-        if isinstance(response, ErrorResponse):
+        if not isinstance(response, ResponsesResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
             async with self.response_store_lock:

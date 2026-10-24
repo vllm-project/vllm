@@ -68,6 +68,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -1810,6 +1811,41 @@ async def test_background_stream_replay_stops_on_response_incomplete():
 
     assert await asyncio.wait_for(replay(), timeout=5) == events
     assert await asyncio.wait_for(replay(starting_after=0), timeout=5) == events[1:]
+
+
+@pytest.mark.asyncio
+async def test_background_request_fails_when_generation_raises():
+    """Errors raised by the engine (e.g. request validation) must mark a
+    background response "failed" instead of leaving it "queued" forever."""
+    serving = _make_serving_instance()
+    request = ResponsesRequest(input="hi", tools=[], background=True)
+    sampling_params = SamplingParams(max_tokens=16)
+    serving.response_store[request.request_id] = ResponsesResponse.from_request(
+        request,
+        sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="queued",
+        usage=None,
+    )
+
+    async def failing_generator():
+        raise VLLMValidationError("Requested sample logprobs of 50")
+        yield
+
+    await serving._run_background_request(
+        request,
+        sampling_params,
+        failing_generator(),
+        SimpleContext(),
+        "test-model",
+        MagicMock(),
+        RequestResponseMetadata(request_id="req"),
+        0,
+    )
+
+    assert serving.response_store[request.request_id].status == "failed"
 
 
 @pytest.mark.asyncio
