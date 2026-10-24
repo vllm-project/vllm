@@ -171,7 +171,9 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["align", "none"]
-PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
+PrefixCachingHashAlgo = Literal[
+    "sha256", "sha256_cbor", "sha256_int32", "xxhash", "xxhash_cbor"
+]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -260,6 +262,10 @@ class CacheConfig:
       default, as SHA256 is the most secure choice to avoid potential hash collisions.
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
       serializes objects using canonical CBOR and hashes them with SHA-256.
+    - "sha256_int32" hashes each block's token ids as raw int32 bytes with SHA-256
+      instead of pickling one Python int per token, reading the request's int32
+      token buffer in place. Its hashes differ from "sha256", so instances that
+      share a prefix cache or KV store must use the same algorithm.
     - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
       non-cryptographic hashing. Requires the optional ``xxhash`` package.
       IMPORTANT: Use of a hashing algorithm that is not considered  cryptographically

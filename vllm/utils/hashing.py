@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import pickle
 from _hashlib import HASH, UnsupportedDigestmodError
+from array import array
 from collections.abc import Callable
 from typing import Any
 
@@ -60,6 +61,35 @@ def sha256_cbor(input: Any) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
+def sha256_int32(input: Any) -> bytes:
+    """Hash prefix-cache blocks with SHA-256, reading token ids as raw int32.
+
+    A block input ``(parent_hash, token_ids, extra_keys)`` hashes the parent hash,
+    the token count, the token ids as int32 in native byte order and the pickled
+    extra keys, so no Python object is created per token. ``token_ids`` may be a
+    sequence of ints or a memoryview of an int32 buffer, which is hashed in place.
+    Other inputs (the ``NONE_HASH`` seed) are hashed as in ``sha256``.
+
+    Args:
+        input: A block input as above, or any picklable Python object.
+
+    Returns:
+        Bytes representing the SHA-256 hash of the input.
+
+    """
+    if not isinstance(input, tuple):
+        return sha256(input)
+    parent_hash, token_ids, extra_keys = input
+    if not isinstance(token_ids, memoryview):
+        token_ids = array("i", token_ids)
+    hasher = hashlib.sha256(parent_hash)
+    hasher.update(len(token_ids).to_bytes(8, "little"))
+    hasher.update(token_ids)
+    if extra_keys is not None:
+        hasher.update(pickle.dumps(extra_keys, protocol=pickle.HIGHEST_PROTOCOL))
+    return hasher.digest()
+
+
 def _xxhash_digest(input_bytes: bytes) -> bytes:
     if _xxhash is None:
         raise ModuleNotFoundError(
@@ -95,6 +125,8 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
         return sha256
     if hash_fn_name == "sha256_cbor":
         return sha256_cbor
+    if hash_fn_name == "sha256_int32":
+        return sha256_int32
     if hash_fn_name == "xxhash":
         return xxhash
     if hash_fn_name == "xxhash_cbor":
