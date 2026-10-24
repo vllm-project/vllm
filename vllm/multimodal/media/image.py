@@ -95,7 +95,12 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image.load()
             converted = self._convert_image_mode(image)
         # Pillow raises SyntaxError (not OSError) for broken PNG chunks.
-        except (OSError, Image.UnidentifiedImageError, SyntaxError) as e:
+        except (
+            OSError,
+            Image.UnidentifiedImageError,
+            SyntaxError,
+            Image.DecompressionBombError,
+        ) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
         io_config = None
