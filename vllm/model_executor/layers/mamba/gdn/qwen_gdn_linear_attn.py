@@ -798,6 +798,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         if not supports_fused_mtp_decode():
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
+        if not ops.fused_gdn_decode_kernel_available(self.A_log):
+            return "fused GDN decode kernel has no image for the current device"
         return None
 
     def create_qkvz_proj(
