@@ -22,6 +22,7 @@ from vllm.benchmarks.throughput import (
     add_cli_args,
     assign_loras,
     get_requests,
+    validate_args,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -72,6 +73,60 @@ def test_bench_throughput_accepts_custom_audio_args():
     assert args.no_oversample
     assert args.custom_output_len == 32
     assert args.enable_multimodal_chat
+
+
+@pytest.mark.parametrize("dataset_name", [None, "random-rerank", "prefix_repetition"])
+def test_validate_args_without_dataset_path(dataset_name: str | None):
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        [] if dataset_name is None else ["--dataset-name", dataset_name]
+    )
+
+    validate_args(args)
+
+    assert args.dataset_name == (dataset_name or "random")
+
+
+@pytest.mark.parametrize("dataset_args", [[], ["--dataset-path", "unused"]])
+@pytest.mark.parametrize(
+    ("sampling_args", "invalid_arg"),
+    [
+        ([], "--random-batch-size"),
+        (["--random-batch-size", "0"], "--random-batch-size"),
+        (["--random-batch-size", "2", "--num-prompts", "1"], "--num-prompts"),
+    ],
+)
+def test_validate_args_rejects_invalid_non_reranker_sizes(
+    dataset_args: list[str], sampling_args: list[str], invalid_arg: str
+) -> None:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        ["--dataset-name", "random-rerank", "--no-reranker"]
+        + dataset_args
+        + sampling_args
+    )
+
+    with pytest.raises(ValueError, match=f"{invalid_arg} must be greater than 1"):
+        validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "sampling_args",
+    [
+        ["--num-prompts", "1"],
+        ["--no-reranker", "--random-batch-size", "2", "--num-prompts", "2"],
+    ],
+)
+def test_validate_args_accepts_valid_rerank_sizes(sampling_args: list[str]) -> None:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(["--dataset-name", "random-rerank"] + sampling_args)
+
+    validate_args(args)
+
+    assert args.dataset_name == "random-rerank"
 
 
 def test_vllm_chat_requests_include_multimodal_content():
@@ -320,6 +375,46 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
     assert serve_args.random_prefix_len == 16
     assert serve_args.backend == "vllm"
     assert not serve_args.enable_multimodal_chat
+
+
+@pytest.mark.benchmark
+def test_get_requests_random_mm_without_dataset_path(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Throughput validation must retain synthetic images without a dataset path."""
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--backend",
+            "vllm-chat",
+            "--dataset-name",
+            "random-mm",
+            "--num-prompts",
+            "3",
+            "--random-input-len",
+            "32",
+            "--random-output-len",
+            "1",
+            "--random-mm-base-items-per-request",
+            "1",
+            "--random-mm-num-mm-items-range-ratio",
+            "0",
+            "--random-mm-limit-mm-per-prompt",
+            '{"image": 1}',
+            "--random-mm-bucket-config",
+            "{(224, 224, 1): 1.0}",
+        ]
+    )
+    validate_args(args)
+
+    requests = get_requests(args, hf_tokenizer)
+    assert len(requests) == 3
+    assert all(isinstance(r, SampleRequest) for r in requests)
+    for req in requests:
+        assert isinstance(req.prompt, list)
+        assert req.prompt[0]["role"] == "user"
+        assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
 
 
 @pytest.mark.benchmark
