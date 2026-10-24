@@ -262,6 +262,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_EC_SIDE_CHANNEL_HOST: str = ""
+    VLLM_EC_SIDE_CHANNEL_PORT: int = 0
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -1744,6 +1746,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
     # Default: 300. Set to 0 to disable.
     "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
+    # Optional EC control address override; otherwise use get_ip().
+    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv("VLLM_EC_SIDE_CHANNEL_HOST", ""),
+    # EC control base port plus DP index. Zero requests an OS-assigned port.
+    "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
+        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
+    ),
     # Per-request timeout (seconds) when a prefiller worker registers with
     # the Mooncake bootstrap server.
     "VLLM_MOONCAKE_CONNECTOR_TIMEOUT": lambda: float(

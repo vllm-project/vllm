@@ -309,3 +309,13 @@ def test_zmq_servers_allocate_distinct_reachable_ports():
         client.close()
         for server in servers:
             server.close()
+
+
+def test_zmq_server_rejects_an_occupied_explicit_port():
+    server = ZmqServerTransport(host="127.0.0.1")
+    try:
+        with pytest.raises(zmq.ZMQError) as exc:
+            ZmqServerTransport(host="127.0.0.1", port=server.port)
+        assert exc.value.errno == zmq.EADDRINUSE
+    finally:
+        server.close()

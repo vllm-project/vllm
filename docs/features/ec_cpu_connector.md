@@ -71,7 +71,7 @@ vllm serve <model> --ec-transfer-config '{
 
 ### Protocol
 
-- **Control plane**: ZMQ. Each producer binds a `ROUTER` socket on the local IP returned by vLLM's `get_ip()` with an OS-assigned port and advertises the bound port through `ec_transfer_params.peer_port`; no EC-specific host or port configuration is required. Each consumer opens one `DEALER` connection per producer peer, with ZMQ heartbeating (2s interval, 4s timeout, 8s TTL) to detect a dead peer. `XferReq`/`XferAck` are `msgspec` msgpack structs, versioned by `EC_CONNECTOR_VERSION` (currently `1`) — a version mismatch is NACKed.
+- **Control plane**: ZMQ. By default, each producer binds a `ROUTER` socket on the local IP returned by vLLM's `get_ip()` with an OS-assigned port and advertises the bound port through `ec_transfer_params.peer_port`. Optional host and port overrides are listed below. Each consumer opens one `DEALER` connection per producer peer, with ZMQ heartbeating (2s interval, 4s timeout, 8s TTL) to detect a dead peer. `XferReq`/`XferAck` are `msgspec` msgpack structs, versioned by `EC_CONNECTOR_VERSION` (currently `1`) — a version mismatch is NACKed.
 - **Compatibility check**: every `XferReq` carries a SHA-256 hash over `(vllm_version, model, dtype, block_size_bytes)`; the producer NACKs (`NACK_INCOMPAT`) any peer whose hash differs.
 - **Ack statuses**: `OK`, `NACK_MISSING` (the producer no longer holds the encoding), `NACK_NOT_READY` (held, but its save has not landed), `NACK_INCOMPAT`, `NACK_VERSION`, `NACK_INTERNAL`. Only `NACK_NOT_READY` is retryable — `RETRYABLE_NACKS` in `cpu/protocol.py` is what both ends consult, so the classification lives with the wire vocabulary rather than at each call site.
 - **Data plane**: NIXL, `UCX` backend, consumer-initiated `READ` — the consumer pulls bytes directly out of the producer's registered mmap region; the producer never pushes.
@@ -99,6 +99,13 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where each block holds one LLM input-embedding vector. Entries allocate enough blocks for their modality-specific output shape, including visual DeepStack features. |
 
 The control address uses vLLM's standard IP discovery. Set `VLLM_HOST_IP` to select a specific network interface when automatic discovery is unsuitable.
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_EC_SIDE_CHANNEL_HOST` | Unset | Override the EC control host instead of using `get_ip()`. Must be reachable by consumers; wildcard addresses are rejected. |
+| `VLLM_EC_SIDE_CHANNEL_PORT` | `0` | `0` selects an OS-assigned port per producer. A nonzero value binds `base_port + data_parallel_index`; an occupied port fails startup. |
+
+For fixed ports, assign non-overlapping ranges to independent instances sharing a host. Consumers use the advertised address and do not need matching port configuration.
 
 ## Limitations
 

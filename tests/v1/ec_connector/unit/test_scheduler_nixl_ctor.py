@@ -14,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
 from vllm.distributed.nixl_utils import NixlWrapper
+from vllm.utils.network_utils import get_open_port
 
 _N = 16
 _BS = 64
@@ -127,8 +128,20 @@ def test_control_transport_failure_releases_nixl_and_shared_region(monkeypatch):
 
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
 @pytest.mark.parametrize("dp_index", [0, 1])
-def test_gate_on_wires_data_transport_and_producer_session(monkeypatch, dp_index):
+@pytest.mark.parametrize("port_mode", ["unset", "zero", "fixed"])
+def test_gate_on_wires_data_transport_and_producer_session(
+    monkeypatch, dp_index, port_mode
+):
     monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    monkeypatch.delenv("VLLM_EC_SIDE_CHANNEL_HOST", raising=False)
+    monkeypatch.delenv("VLLM_EC_SIDE_CHANNEL_PORT", raising=False)
+    port = 0
+    if port_mode == "fixed":
+        port = get_open_port()
+        monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_PORT", str(port - dp_index))
+        monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "localhost")
+    elif port_mode == "zero":
+        monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
     cfg = create_ec_vllm_config(ec_role="ec_both")
     cfg.parallel_config.data_parallel_index = dp_index
@@ -139,31 +152,48 @@ def test_gate_on_wires_data_transport_and_producer_session(monkeypatch, dp_index
         assert s._data is not None
         assert s._compat_hash is not None
         assert s._producer_session is not None
-        assert s._peer_host == "127.0.0.1"
+        assert s._peer_host == ("localhost" if port else "127.0.0.1")
         assert s._peer_port is not None and 0 < s._peer_port <= 65535
+        if port:
+            assert s._peer_port == port
+        else:
+            assert s._peer_port != dp_index  # Port 0 must not get the DP offset.
         assert s._transport is not None  # is_ec_consumer is also True
     finally:
         s.shutdown()
 
 
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
-def test_producers_allocate_distinct_ports_across_dp_and_instances(monkeypatch):
-    """Both DP replicas and independent instances can start on one host."""
+def test_producers_allocate_distinct_ports_and_agent_names(monkeypatch):
+    """DP replicas retain their configured identity without peer collisions."""
     monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    monkeypatch.delenv("VLLM_EC_SIDE_CHANNEL_HOST", raising=False)
+    monkeypatch.delenv("VLLM_EC_SIDE_CHANNEL_PORT", raising=False)
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
-    instance_id = f"ec-test-{uuid.uuid4()}"
+    engine_id = f"ec-test-{uuid.uuid4()}"
     schedulers = []
+    expected_names = []
     try:
-        for instance, dp_index in [(instance_id, 0), (instance_id, 1), (None, 0)]:
+        for engine, dp_index in [(engine_id, 0), (engine_id, 1), (None, 0)]:
             cfg = create_ec_vllm_config(ec_role="ec_producer")
-            if instance is not None:
-                cfg.instance_id = instance
+            if engine is not None:
+                cfg.ec_transfer_config.engine_id = engine
             cfg.parallel_config.data_parallel_index = dp_index
             cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
+            expected_names.append(f"{cfg.ec_transfer_config.engine_id}_dp{dp_index}")
             schedulers.append(ECCPUScheduler(cfg))
         ports = [s._peer_port for s in schedulers]
         assert all(port is not None and 0 < port <= 65535 for port in ports)
         assert len(set(ports)) == len(schedulers)
+        for index, scheduler in enumerate(schedulers):
+            peer = schedulers[(index + 1) % len(schedulers)]._data
+            name = peer.add_remote_peer(
+                scheduler._data.get_agent_metadata(),
+                scheduler._data.get_mem_descriptor(),
+            )
+            if isinstance(name, bytes):
+                name = name.decode()
+            assert name == expected_names[index]
     finally:
         for scheduler in reversed(schedulers):
             scheduler.shutdown()
