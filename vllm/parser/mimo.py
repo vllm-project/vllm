@@ -12,6 +12,7 @@ from vllm.parser.qwen3 import (
     CHATML_TURN_BOUNDARIES,
     Qwen3Parser,
     _param_value_extender,
+    _split_open_value,
     qwen3_config,
 )
 
@@ -20,8 +21,9 @@ def _mimo_arg_converter(raw_args: str, partial: bool) -> str:
     params = {m.group(1): m.group(2) for m in _PARAM_RE.finditer(raw_args)}
     if partial:
         match = _PARTIAL_PARAM_RE.search(_PARAM_RE.sub("", raw_args))
-        if match and match.group(1):
-            params[match.group(1)] = match.group(2)
+        if match and match.group(1) and "</" not in match.group(1):
+            stable, _ = _split_open_value(match.group(2), trim_newlines=False)
+            params[match.group(1)] = stable
     return json.dumps(params, ensure_ascii=False)
 
 
