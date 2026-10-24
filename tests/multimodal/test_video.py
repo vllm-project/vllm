@@ -16,6 +16,7 @@ import torch
 from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
 from transformers.video_utils import VideoMetadata
 
+import vllm.multimodal.video as video_module
 from vllm.assets.base import get_vllm_public_assets
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
@@ -2157,6 +2158,71 @@ def test_glm5next_backend_selected_for_processor():
     with the new checkpoint) must resolve."""
     for name in ("Glm5NextVideoProcessor", "Glm5nextVideoProcessor"):
         assert VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(name) == "glm5next"
+
+
+@pytest.mark.parametrize(
+    "backend", [Glm5NextVideoBackend, GLM46VVideoBackend, GLMGAVideoBackend]
+)
+@pytest.mark.parametrize(
+    "total,fps,duration",
+    [
+        (1, 30.0, 0),
+        (7, 30.0, 10.0),
+        (300, 29.97, 0),
+        (1800, 60.0, 30.0),
+        (9001, 30.0, 300.1),
+        (72000, 30.0, 2400.0),
+    ],
+)
+def test_glm_sampling_matches_frame_walk(monkeypatch, backend, total, fps, duration):
+    source = VideoSourceMetadata(
+        total_frames_num=total, original_fps=fps, duration=duration
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=-1)
+    actual = backend.compute_frames_index_to_sample(source, target)
+
+    def frame_walk(total_frames, duration_per_frame, inv_fps, max_second, extract_t):
+        indices = []
+        current_second = 0.0
+        for index in range(total_frames):
+            if index * duration_per_frame >= current_second:
+                current_second += inv_fps
+                indices.append(index)
+                if current_second >= max_second:
+                    break
+        return indices
+
+    monkeypatch.setattr(video_module, "_sample_glm_candidates", frame_walk)
+    assert actual == backend.compute_frames_index_to_sample(source, target)
+
+
+@pytest.mark.parametrize(
+    "backend", [Glm5NextVideoBackend, GLM46VVideoBackend, GLMGAVideoBackend]
+)
+def test_glm_sampling_work_is_bounded(monkeypatch, backend):
+    visited = 0
+
+    class CountedRange:
+        def __init__(self, *args):
+            self.values = range(*args)
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, index):
+            nonlocal visited
+            visited += 1
+            assert visited < 100000, "Sampling traversed the entire source video"
+            return self.values[index]
+
+    monkeypatch.setattr(video_module, "range", CountedRange, raising=False)
+    source = VideoSourceMetadata(
+        total_frames_num=100_000_000, original_fps=120, duration=100_000_000 / 120
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=-1)
+    indices = backend.compute_frames_index_to_sample(source, target)
+    assert indices
+    assert all(0 <= index < source.total_frames_num for index in indices)
 
 
 @pytest.mark.parametrize(
