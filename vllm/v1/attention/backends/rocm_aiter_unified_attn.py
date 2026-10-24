@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
@@ -15,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.platforms.rocm import on_gfx1250
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -39,6 +41,97 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
+@dataclass
+class _FmhaExtend:
+    """Row split of a batch with long extend-prefill requests (built on the host)."""
+
+    long_tok: torch.Tensor  # [n] int64: query rows of the long requests
+    long_cu_q: torch.Tensor  # [L+1] int32
+    long_cu_k: torch.Tensor  # [L+1] int32
+    long_max_q: int
+    long_max_k: int
+    kv_rows: torch.Tensor  # [sum k] int64: (block * H) * block_size + offset
+    short_tok: torch.Tensor | None  # [m] int64, None if every request is long
+    short_cu_q: torch.Tensor | None
+    short_seq_lens: torch.Tensor | None
+    short_block_table: torch.Tensor | None
+    short_max_q: int
+    short_max_k: int
+
+
+@dataclass
+class RocmAiterUnifiedAttentionMetadata(RocmAttentionMetadata):
+    fmha_extend: _FmhaExtend | None = None
+
+
+def _build_fmha_extend(
+    cm: CommonAttentionMetadata,
+    block_size: int,
+    num_kv_heads: int,
+    max_decode_q: int = 1,
+) -> _FmhaExtend | None:
+    min_q = envs.VLLM_ROCM_UNIFIED_ATTN_FMHA_EXTEND_MIN_Q
+    if min_q <= 0 or not on_gfx950():
+        return None
+    # Only prefill rows have an exact seq_lens_cpu_upper_bound; (async spec)
+    # decode rows of up to max_decode_q tokens never take the FMHA path.
+    min_q = max(min_q, max_decode_q + 1)
+    if cm.max_query_len < min_q:
+        return None
+    seq_ub = cm.seq_lens_cpu_upper_bound  # exact on prefill rows
+    if seq_ub is None or cm.causal is not True:
+        return None
+    qsl = cm.query_start_loc_cpu.tolist()
+    n = cm.num_reqs
+    q_lens = [qsl[i + 1] - qsl[i] for i in range(n)]
+    long_reqs = [i for i in range(n) if q_lens[i] >= min_q]
+    if not long_reqs:
+        return None
+    short_reqs = [i for i in range(n) if 0 < q_lens[i] < min_q]
+    dev = cm.query_start_loc.device
+    seq = seq_ub.tolist()
+
+    def rows_of(reqs):
+        return torch.cat([torch.arange(qsl[i], qsl[i + 1]) for i in reqs]).to(
+            dev, non_blocking=True
+        )
+
+    def cumsum(vals):
+        out = [0]
+        for v in vals:
+            out.append(out[-1] + v)
+        return torch.tensor(out, dtype=torch.int32).to(dev, non_blocking=True)
+
+    kv_rows = []
+    for i in long_reqs:
+        t = torch.arange(seq[i], device=dev)
+        blocks = cm.block_table_tensor[i].index_select(0, t // block_size).long()
+        kv_rows.append(blocks * (num_kv_heads * block_size) + t % block_size)
+    ext = _FmhaExtend(
+        long_tok=rows_of(long_reqs),
+        long_cu_q=cumsum([q_lens[i] for i in long_reqs]),
+        long_cu_k=cumsum([seq[i] for i in long_reqs]),
+        long_max_q=max(q_lens[i] for i in long_reqs),
+        long_max_k=max(seq[i] for i in long_reqs),
+        kv_rows=torch.cat(kv_rows),
+        short_tok=None,
+        short_cu_q=None,
+        short_seq_lens=None,
+        short_block_table=None,
+        short_max_q=0,
+        short_max_k=0,
+    )
+    if short_reqs:
+        idx = torch.tensor(short_reqs, dtype=torch.long).to(dev, non_blocking=True)
+        ext.short_tok = rows_of(short_reqs)
+        ext.short_cu_q = cumsum([q_lens[i] for i in short_reqs])
+        ext.short_seq_lens = cm.seq_lens.index_select(0, idx)
+        ext.short_block_table = cm.block_table_tensor.index_select(0, idx)
+        ext.short_max_q = max(q_lens[i] for i in short_reqs)
+        ext.short_max_k = max(seq[i] for i in short_reqs)
+    return ext
+
+
 def _kv_connector_enabled() -> bool:
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
@@ -48,10 +141,32 @@ def _kv_connector_enabled() -> bool:
 
 
 class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmAttentionMetadata:
+        md = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        spec = self.vllm_config.speculative_config
+        ext = _build_fmha_extend(
+            common_attn_metadata,
+            self.block_size,
+            self.kv_cache_spec.num_kv_heads,
+            1 + (spec.num_speculative_tokens if spec is not None else 0),
+        )
+        if ext is None:
+            return md
+        return RocmAiterUnifiedAttentionMetadata(**vars(md), fmha_extend=ext)
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
+        if isinstance(attn_metadata, RocmAiterUnifiedAttentionMetadata):
+            # The FMHA row split is built on the host each step; graphs only
+            # capture unified attention.
+            attn_metadata.fmha_extend = None
         # Avoid capturing the real maximum sequence length while preserving
         # query_start_loc, which unified attention consumes during replay.
         attn_metadata.seq_lens.fill_(1)
@@ -301,6 +416,38 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        ext = getattr(attn_metadata, "fmha_extend", None)
+        if ext is not None and self._fmha_extend_ok(query, kv_cache, output_scale):
+            self._forward_fmha_extend(layer, query, kv_cache, output, ext)
+            if ext.short_tok is None:
+                return output
+            # The remaining rows (decode / short extend) as a compact batch.
+            short_out = output.new_empty((ext.short_tok.numel(), *output.shape[1:]))
+            self.unified_attention(
+                q=query.index_select(0, ext.short_tok),
+                k=key_cache,
+                v=value_cache,
+                out=short_out,
+                cu_seqlens_q=ext.short_cu_q,
+                max_seqlen_q=ext.short_max_q,
+                seqused_k=ext.short_seq_lens,
+                max_seqlen_k=ext.short_max_k,
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=ext.short_block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+                sinks=self.sinks,
+                output_scale=None,
+                shuffled_kv_cache=self._use_shuffle_kv,
+            )
+            output.index_copy_(0, ext.short_tok, short_out)
+            return output
+
         if attn_metadata.causal:
             self.unified_attention(
                 q=query[:num_actual_tokens],
@@ -356,6 +503,81 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             )
 
         return output
+
+    def _fmha_extend_ok(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output_scale: torch.Tensor | None,
+    ) -> bool:
+        return (
+            output_scale is None
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and not self._shuffle_kv_layout
+            and self.alibi_slopes is None
+            and self.sinks is None
+            and not self.logits_soft_cap
+            and tuple(self.sliding_window) == (-1, -1)
+            and self.head_size in (64, 128)
+            and kv_cache.is_contiguous()
+        )
+
+    def _forward_fmha_extend(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+        ext: _FmhaExtend,
+    ) -> None:
+        """Long extend-prefill rows: gather their fp8 K/V (context + new tokens,
+        already in the cache) to contiguous tensors and run AITER's FMHA v3 fp8
+        varlen kernel, bottom-right causal. The query is the layer's statically
+        quantized fp8 query, the same input unified attention would have read."""
+        from aiter.ops.mha import _flash_attn_varlen_forward
+
+        hs = self.head_size
+        kv = kv_cache.view(self.fp8_dtype)  # [blocks, H, block_size, 2 * hs]
+        nkv, block_size = kv.shape[1], kv.shape[2]
+        heads = torch.arange(nkv, device=kv.device) * block_size
+        rows = (ext.kv_rows[:, None] + heads[None, :]).view(-1)
+        sel = kv.view(-1, 2 * hs).index_select(0, rows).view(-1, nkv, 2 * hs)
+        k = sel[..., :hs].contiguous()
+        v = sel[..., hs:].contiguous()
+        q = query.index_select(0, ext.long_tok)
+        if q.dtype != self.fp8_dtype:
+            q = q.to(self.fp8_dtype)  # unscaled, as a q_scale of 1.0 would
+            q_descale = torch.ones(1, dtype=torch.float32, device=q.device)
+        else:
+            q_descale = layer._q_scale.view(1)
+        out = _flash_attn_varlen_forward(
+            q,
+            k,
+            v,
+            ext.long_cu_q,
+            ext.long_cu_k,
+            None,
+            None,
+            ext.long_max_q,
+            ext.long_max_k,
+            0,
+            0.0,
+            self.scale,
+            causal=True,
+            logits_soft_cap=0.0,
+            window_size_left=-1,
+            window_size_right=-1,
+            sink_size=0,
+            bias=None,
+            alibi_slopes=None,
+            q_descale=q_descale,
+            k_descale=layer._k_scale.view(1),
+            v_descale=layer._v_scale.view(1),
+            return_lse=False,
+            return_softmax=False,
+        )[0]
+        output.index_copy_(0, ext.long_tok, out.to(output.dtype))
 
     def do_kv_cache_update(
         self,

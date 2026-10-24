@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_UNIFIED_ATTN_FMHA_EXTEND_MIN_Q: int = 0
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1396,6 +1397,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    # ROCM_AITER_UNIFIED_ATTN on gfx950 with an fp8 KV cache: requests whose
+    # query has at least this many tokens (long extend-prefill chunks) run
+    # AITER's fp8 FMHA v3 over their gathered context instead of unified
+    # attention. 0 disables.
+    "VLLM_ROCM_UNIFIED_ATTN_FMHA_EXTEND_MIN_Q": lambda: int(
+        os.getenv("VLLM_ROCM_UNIFIED_ATTN_FMHA_EXTEND_MIN_Q", "0")
+    ),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
