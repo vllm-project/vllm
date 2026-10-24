@@ -399,7 +399,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
         return sc.topk(6, dim=1).indices.sort(1).values
 
     steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
+    # at TP2 the ratio-2 steps run the tuned builds (MonoBuild.tuned): 12 rows
+    # their small-width paths, 36 a last partial token tile, 48 whole tiles
+    for ratio, R, T in ((1, 1, 6), (2, 2, 6), (2, 6, 6), (2, 8, 6)):
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -489,8 +491,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
             topk_indices=s["topk"], comp_cache=s["comp_cache"],
             comp_block_table=s["comp_block_table"],
         )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        tuned = runner.build_key(M, ratio).tuned
+        off = scratch_layout(M, tp, tuned=tuned)["normed"][0]
+        normed = runner.scratch(M, tuned)[off : off + M * HIDDEN * 2]
+        normed = normed.view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (
@@ -518,6 +522,11 @@ def _check_layers(rank: int, tp: int, device) -> None:
         # ---- the FFN launch, from the same unreduced wo_b output
         f = runner.ffn(mw, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        # the FFN launch is a generic build: it writes the width's generic
+        # scratch, which a tuned whole layer does not use
+        off = scratch_layout(M, tp)["normed"][0]
+        normed = runner.scratch(M)[off : off + M * HIDDEN * 2]
+        normed = normed.view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
@@ -568,6 +577,187 @@ def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+# ---------------------------------------------------------------- tuned builds
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_tuned(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        init_workspace_manager(device)
+        _check_tuned_builds(rank, tp_size, device)
+
+
+def _check_tuned_builds(rank: int, tp: int, device) -> None:
+    """The tuned builds of a ratio-2 layer at TP2 (``MonoBuild.tuned``) against
+    the generic builds of the same layer, which a ``generic`` runner compiles:
+    every output of K1 and K2 bit for bit, on the same inputs."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.distributed import get_tp_group
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
+    from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
+    from vllm.models.deepseek_v41.amd.mono.runner import (
+        AttnWeights,
+        DSV41MonoLayer,
+        MonoLayerWeights,
+    )
+    from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    vc = EngineArgs(
+        model=MODEL,
+        tensor_parallel_size=tp,
+        moe_backend="aiter",
+        load_format="dummy",
+        max_model_len=65536,
+        language_model_only=True,
+    ).create_engine_config()
+    cfg = vc.model_config.hf_config
+    cfg = getattr(cfg, "text_config", cfg)
+    g = torch.Generator().manual_seed(1000)
+    gs = torch.Generator().manual_seed(1001 + rank)
+    H, G = N_HEADS // tp, O_GROUPS // tp
+    bf = torch.bfloat16
+    with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
+        moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
+    _random_moe(
+        moe,
+        torch.Generator(device=device).manual_seed(2001 + rank),
+        torch.Generator(device=device).manual_seed(2000),
+        inter=2304 // tp,
+    )
+    process_weights_after_loading(moe, vc.model_config, device)
+
+    def f32(*shape, s=1.0, gen=g):
+        return (torch.randn(*shape, generator=gen) * s).to(device)
+
+    with set_current_vllm_config(VllmConfig()):
+        rope = build_deepseek_v4_rope(
+            cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
+            max_position_embeddings=cfg.max_position_embeddings, compress_ratio=2,
+        )  # fmt: skip
+    cos_sin = rope.cos_sin_cache.to(device=device, dtype=torch.float32)
+    wqkv, wqkv_s = _mxfp8(1792, HIDDEN, g, device)
+    wq_b, wq_b_s = _mxfp8(H * HEAD_DIM, Q_RANK, gs, device)
+    wo_a, wo_a_s = _mxfp8(G * O_RANK, H // G * HEAD_DIM, gs, device)
+    wo_b, wo_b_s = _mxfp8(HIDDEN, G * O_RANK, gs, device)
+    q_norm, kv_norm = (1 + f32(Q_RANK, s=0.1)).to(bf), (1 + f32(HEAD_DIM, s=0.1)).to(bf)
+    mix = (2 + HC) * HC
+    hc = [
+        (f32(mix, HC * HIDDEN, s=0.01), f32(3, s=0.5).abs() + 0.5, f32(mix, s=0.1),
+         (1 + f32(HIDDEN, s=0.1)).to(bf))
+        for _ in range(2)
+    ]  # fmt: skip
+    e, sh = moe.experts.routed_experts, moe.shared_experts
+    mw = MonoLayerWeights(
+        attn=AttnWeights(
+            layer_id=21, wqkv=wqkv, wqkv_scale=wqkv_s, q_norm=q_norm,
+            kv_norm=kv_norm, wq_b=wq_b, wq_b_scale=wq_b_s, wo_a=wo_a,
+            wo_a_scale=wo_a_s, wo_b=wo_b, wo_b_scale=wo_b_s,
+            attn_sink=f32(H, gen=gs), cos_sin=cos_sin, ratio=2,
+        ),
+        hc_attn_fn=hc[0][0], hc_attn_scale=hc[0][1], hc_attn_base=hc[0][2],
+        attn_norm=hc[0][3], hc_ffn_fn=hc[1][0], hc_ffn_scale=hc[1][1],
+        hc_ffn_base=hc[1][2], ffn_norm=hc[1][3],
+        gate_w=moe.gate.weight, bias=moe.gate.e_score_correction_bias,
+        w13=e.w13_weight, w13_s=e.w13_weight_scale, w2=e.w2_weight,
+        w2_s=e.w2_weight_scale, sgu=sh.gate_up_proj.weight,
+        sgu_s=sh.gate_up_proj.weight_scale.view(torch.uint8),
+        sw2=sh.down_proj.weight, sw2_s=sh.down_proj.weight_scale.view(torch.uint8),
+    )  # fmt: skip
+    group = get_tp_group().cpu_group
+    tuned = DSV41MonoLayer(tp, rank, group, device)
+    generic = DSV41MonoLayer(tp, rank, group, device, generic=True)
+
+    def run(runner, s, ins, fold: bool, index: bool) -> dict:
+        swa, topk = s["swa_cache"].clone(), s["topk"]
+        select = None
+        if index:
+            # an index source: its top-k written between the kernels, as
+            # vLLM's indexer would
+            topk = torch.full_like(s["topk"], -1)
+            select = lambda normed, qr: topk.copy_(s["topk"])  # noqa: E731
+        outs = runner.forward(
+            mw, *ins, s["positions"], s["slot_mapping"], swa, s["swa_indices"],
+            s["swa_lens"], s["token_to_req"], topk_indices=topk,
+            comp_cache=s["comp_cache"], comp_block_table=s["comp_block_table"],
+            fold=fold, select=select,
+        )  # fmt: skip
+        torch.accelerator.synchronize()
+        M = s["M"]
+        is_tuned = runner.build_key(M, 2).tuned
+        off = scratch_layout(M, tp, tuned=is_tuned)["normed"][0]
+        normed = runner.scratch(M, is_tuned)[off : off + M * HIDDEN * 2]
+        k1 = dict(
+            res_mid=runner.res_mid[:M], post_a=runner.post_a[:M],
+            comb_a=runner.comb_a[:M], pre_a=runner.pre_a[:M], swa_cache=swa,
+        )  # fmt: skip
+        if index:
+            k1.update(normed=runner.normed[:M], qr=runner.qr[:M])
+        k2 = dict(enumerate(outs), ffn_in=normed)
+        return {
+            "k1": {k: t.clone() for k, t in k1.items()},
+            "k2": {k: t.clone() for k, t in k2.items()},
+        }
+
+    for M in (1, 6, 12, 18, 30, 36, 48):
+        assert tuned.build_key(M, 2).tuned and not generic.build_key(M, 2).tuned
+        R, T = (M // 6, 6) if M % 6 == 0 else (M, 1)
+        s = _decode_step(2, R, T, kv_norm, cos_sin, seed=100 + M)
+        gi = torch.Generator().manual_seed(11 + M)
+        res0 = torch.randn(M, HC, HIDDEN, generator=gi)
+        res0 = (res0 * torch.rsqrt(res0.pow(2).mean(-1, keepdim=True))).to(bf)
+        comb0 = torch.rand(M, HC, HC, generator=gi) + 0.1
+        comb0 = comb0 / comb0.sum(-1, keepdim=True)
+        ins = [
+            (torch.randn(M, HIDDEN, generator=gi) * 0.5).to(bf),
+            res0,
+            torch.sigmoid(torch.randn(M, HC, 1, generator=gi)) * 2,
+            comb0,
+            torch.sigmoid(torch.randn(M, HC, generator=gi)) + 1e-6,
+        ]
+        ins = [t.to(device) for t in ins]
+        for fold in (True, False):
+            for index in (False, True):
+                tag = f"{M} rows, fold={fold}, index={index}"
+                got = run(tuned, s, ins, fold, index)
+                want = run(generic, s, ins, fold, index)
+                parts = ["k1", "k2"]
+                if index and M <= 18:
+                    # an index source's K2 is not reproducible run to run at
+                    # these widths, generic builds included: its combine can
+                    # read klen before the key table publishes it (#61482)
+                    parts = ["k1"]
+                for part in parts:
+                    bad = [
+                        k
+                        for k, t in got[part].items()
+                        if not torch.equal(t, want[part][k])
+                    ]
+                    assert not bad, f"{tag}: {part} outputs {bad} differ"
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+def test_mono_tuned_builds_match_generic(monkeypatch: pytest.MonkeyPatch):
+    # the tuned builds exist at TP2 only
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    pytest.importorskip("flydsl")
+    multi_process_parallel(monkeypatch, 2, 1, _mono_tuned)
 
 
 # ---------------------------------------------------------------- gfx942

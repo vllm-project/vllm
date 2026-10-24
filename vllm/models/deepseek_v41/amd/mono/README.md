@@ -27,6 +27,17 @@ new, reading vLLM's KV records and weights as loaded.
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
   DSpark tokens), TP2 / TP4, `fp8_ds_mla` KV records (ROCm), text tokens (the
   routing bias is `e_score_correction_bias`).
+- Tuned builds (`MonoBuild.tuned`): the target's compress-ratio-2 layers at
+  TP2 on gfx950 compile paths tuned for those step widths -- replicated ready
+  flags, 3 + 1 packed all-reduce units, LDS-staged and split down tiles,
+  two-task shared units, L2 warm-ups of the next stage's weights, and the
+  like. They compute the same values bit for bit as the generic code, which
+  every other build (ratio 0 / 1, TP4, the DSpark draft, gfx942, the FFN
+  launch) compiles unchanged. Their scratch and peer regions are laid out
+  differently, so a tuned build has a scratch and a peer range of its own.
+  `MonoBuild.generic` (a `DSV41MonoLayer(generic=True)` runner) compiles the
+  generic code for those layers too: the reference that
+  `test_mono_tuned_builds_match_generic` compares them with, bit for bit.
 - Contract: a drop-in for `DeepseekV4DecoderLayer.forward`:
   in  `x` (the previous FFN output, reduced, bf16 [M, 5120]), `residual`
       (bf16 [M, 4, 5120]), `post_mix` [M, 4, 1], `res_mix` [M, 4, 4],

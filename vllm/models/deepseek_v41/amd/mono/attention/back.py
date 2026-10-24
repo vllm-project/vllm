@@ -34,12 +34,18 @@ from flydsl.expr.typing import T, as_ir_value
 
 from ..common.arch import GFX942
 from ..common.gfx942 import fp8x2_f32, ocp_to_fnuz
+from ..stages.moe_shape import MoeBuild, route_shape
+from ..stages.seam import COLS as SEAM_COLS
+from ..stages.seam import K_MIX as SEAM_K_MIX
+from ..stages.seam import MIX as SEAM_MIX
+from ..stages.seam import SLICES as SEAM_SLICES
 from .device import (
     BLOCKS,
     CM_DEV,
     THREADS,
     WAVES,
     Mailbox,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -67,18 +73,24 @@ from .device import (
 )
 from .gemv import RED, gemv_loads, gemv_mfmas, lds_row, row_sum, rows_loads, rows_store
 from .plan import (
+    ARDY_COPIES,
+    CRDY_COPIES,
     DATA,
     HALF,
     HEAD_DIM,
     HEAD_TILE,
+    HIDDEN,
     KEYS,
     NOPE,
     ROPE,
     ROWS,
+    TILE,
     WOA_ROWS,
     Dims,
+    ardy_tiles,
     back_scratch,
     cdiv,
+    flag_stride,
     front_end,
     tile_rows,
     token_tiles,
@@ -104,6 +116,7 @@ class BackBuild:
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
 
 
 def plus(t0, v):
@@ -145,6 +158,16 @@ def publish(c, region, i):
     gpu.barrier()
     if c["tid"] == 0:
         c["mb"].put(region, i, fx.Int32(1))
+
+
+@traced
+def publish_copies(c, region, i, copies, stride):
+    """``publish`` into each of the flag's ``copies`` (copy j at pair j stride +
+    i: thread j stores it)."""
+    rocdl.s_waitcnt(vmcnt=0)
+    gpu.barrier()
+    if c["tid"] < copies:
+        c["mb"].put(region, c["tid"] * stride + i, fx.Int32(1))
 
 
 @traced
@@ -478,7 +501,12 @@ def stage_split(c, unit):
         stamp(c, 6)
         # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
         # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line)
+        # bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned: each
+        # store fills whole 64 B sectors of the head's 128 B (no partial-sector
+        # writes): store j, lane g takes dims 32 j + 8 g .. from lane
+        # 2 j + g // 2 of its row (its words 4 (g % 2) ..)
+        if const_expr(c["tuned"]):
+            odd = (g % 2) == 1
         for ht2 in range_constexpr(d.head_tiles):
             hh = ht2 * HEAD_TILE + r16
             words = []
@@ -488,14 +516,33 @@ def stage_split(c, unit):
                 )
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
-            for hlf in range_constexpr(2):
-                bo.buffer_store(
-                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                    rsrc(c["part"]),
-                    off + 4 * hlf,
-                    cache_modifier=CM_DEV,
-                )
+            if const_expr(c["tuned"]):
+                row = ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase
+                for j in range_constexpr(2):
+                    src = r16 + 16 * (2 * j + g // 2)
+                    out = [
+                        odd.select(
+                            lane_gather(words[4 + e], src), lane_gather(words[e], src)
+                        )
+                        for e in range(4)
+                    ]
+                    bo.buffer_store(
+                        fx.Vector.from_elements(out, fx.Int32),
+                        rsrc(c["part"]),
+                        (row + 32 * j + 8 * g) // 2,
+                        cache_modifier=CM_DEV,
+                    )
+            else:
+                off = (
+                    ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g
+                ) // 2
+                for hlf in range_constexpr(2):
+                    bo.buffer_store(
+                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
+                        rsrc(c["part"]),
+                        off + 4 * hlf,
+                        cache_modifier=CM_DEV,
+                    )
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -599,18 +646,25 @@ def stage_combine(c, unit):
             t * (d.q_rows // 32) + (h * HEAD_DIM + d0) // 32,
             cache_modifier=CM_DEV,
         )
-    publish(c, c["crdy"], t * hg_n + hg)
+    if const_expr(c["tuned"]):
+        publish_copies(c, c["crdy"], t * hg_n + hg, CRDY_COPIES, flag_stride(s * hg_n))
+    else:
+        publish(c, c["crdy"], t * hg_n + hg)
 
 
 # ---------------------------------------------------------------- wo_a / wo_b
 
 
 @traced
-def stage_woa(c, task, ops, t0, n):
-    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B."""
+def stage_woa(c, task, ops, t0, n, settle=False):
+    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B
+    (``settle``: the next token tile's rows are in flight -- landed before this
+    tile's stores, so its LDS store need not wait behind them)."""
     tid, red, d, lane = c["tid"], c["red"], c["d"], c["lane"]
     split = WOA_SPLIT_K
     gemv_mfmas(c, d.group_k, c["xl"], c["xsl"], red, ops, split, tiled=True, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     mine = tid < WOA_ROWS * n
     tl = fx.min(tid // WOA_ROWS, n - 1)
@@ -659,18 +713,44 @@ def _wob_store(a, t, col, v0, v1):
 
 
 @traced
-def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
+def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False, settle=False):
     """Rows 16 task .. (and 16 task2 .., ``has2``) of wo_b -> bf16 -> out, or
-    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair."""
+    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair;
+    a tuned mono layer's (``c["wob_unit_out"]``) with each unit of three
+    (``settle``: the next token tile's rows, in flight, landed before the
+    stores -- else its LDS store waits behind the peer pushes' round trip)."""
     tid, red = c["tid"], c["red"]
     o_rows = c["d"].o_rows
     a = c["args"]
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red, ops, rows=n)
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red + RED, ops2, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(mark):
         stamp(c, 15)
     per = ROWS * n // 2  # bf16 pairs a task
+    unit_out = c.get("wob_unit_out")
+    if const_expr(unit_out is not None):
+        # a task's 8 n words in units of three (token-major), a thread a unit
+        # (``seam.attn_unit``), one 16 B store a unit and rank
+        units = cdiv(per, 3)
+        ku = tid // units
+        if (tid < 2 * units) & ((ku == 0) | has2):
+            j = tid % units
+            rk = red + ku * RED
+            words = []
+            for q in range_constexpr(3):
+                # a last unit's spare slot repeats its last word (never read)
+                f = fx.min(j * 3 + q, per - 1)
+                rp = f % (ROWS // 2)
+                tl = f // (ROWS // 2)
+                v0 = row_sum(rk, 2 * rp, tl)
+                v1 = row_sum(rk, 2 * rp + 1, tl)
+                words.append(bf16_pair(v0, v1).bitcast(fx.Int32))
+            unit_out((ku == 0).select(task, task2), t0 // TILE, units, j, words)
+        gpu.barrier()
+        return
     k = tid // per
     emit = c.get("wob_out") or (lambda t, col, v0, v1: _wob_store(a, t, col, v0, v1))
     if (tid < 2 * per) & ((k == 0) | has2):
@@ -684,6 +764,128 @@ def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
         v1 = row_sum(rk, 2 * rp + 1, tl)
         emit(t, col, v0, v1)
     gpu.barrier()
+
+
+# ---------------------------------------------------------------- touch
+
+XCDS = 8  # a CTA's L2 is its XCD's: CTA b runs on XCD b % 8
+LINE = 64  # bytes a touch load (one dword) pulls into L2 / MALL
+GATE_ROW = HIDDEN * 2  # the router's bf16 gate weight row, bytes
+GATE_PART = GATE_ROW // 4  # a router task's K part of a row (PARTS = 4)
+SH_ROW = HIDDEN  # a shared gate_up e4m3 row, bytes
+SH_SROW = HIDDEN // 32  # its E8M0 scale row (32 rows a scale row), bytes
+HC_SEGS = SEAM_MIX * 4  # a slice task's hc_fn rows: (projection, stream) x 32 f32
+
+
+def touch_plan(key):
+    """The L2 warm-up, right after their wo_b, by the CTAs the FFN seam leaves
+    idle (past its slice, gate and norm tasks), of the cold weights the FFN
+    seam and the MoE's first stages read next: a CTA's job is the lines one
+    consumer CTA reads -- a slice task's hc_fn columns, a norm task's norm
+    weight, a router task's gate_w rows (16 x a K part), a shared unit's sgu
+    rows (16 gate + 16 up) and scales -- taken by an idle CTA on its XCD. None:
+    a build without it (not tuned) or a shape it skips."""
+    if not key.tuned:
+        return None
+    s = key.tokens
+    lo = SEAM_SLICES + 2 * s  # the FFN seam's CTAs: slices, then gates, norms
+    if BLOCKS - lo < XCDS:
+        return None
+    rs = route_shape(MoeBuild(tokens=s, tp=key.tp))
+    if rs.router_groups[0] != 1 or len(token_tiles(s)) != 1:
+        return None
+    assert rs.router0 + rs.router_tasks <= BLOCKS
+    assert rs.shared0 + rs.shared_units <= BLOCKS
+    jobs = BLOCKS // XCDS  # consumer CTAs an XCD
+    return {
+        "lo": lo,
+        "iters": cdiv(jobs, (BLOCKS - lo) // XCDS),
+        "jobs": jobs,
+        "norm0": SEAM_SLICES + s,
+        "router0": rs.router0,
+        "router_tasks": rs.router_tasks,
+        "shared0": rs.shared0,
+        "shared_units": rs.shared_units,
+        "sh_inter": rs.dims.sh_inter,
+    }
+
+
+def _touch(base, byte, live):
+    """One dword at ``byte`` of ``base`` (``live`` false: masked, no traffic)."""
+    nb = live.select(fx.Int64(0xFFFFFFFF), fx.Int64(0))
+    return fx.Int32(bo.buffer_load(rsrc(base, nb), byte // 4, vec_width=1, dtype=T.i32))
+
+
+@traced
+def stage_touch(c, key, plan):
+    """``touch_plan``'s jobs on this CTA (an idle one, k-th of the K on its
+    XCD): consumer CTAs b = XCD + 8 (k + K i). The loaded words are folded and
+    discarded: no value of the layer depends on them."""
+    tid, bid = c["tid"], c["bid"]
+    a = c["args"]
+    lo, sh, s = plan["lo"], plan["sh_inter"], key.tokens
+    if bid >= lo:
+        r = bid % XCDS
+        lo_r = lo + (r - lo % XCDS + XCDS) % XCDS
+        k = (bid - lo_r) // XCDS
+        kk = (BLOCKS - 1 - lo_r) // XCDS + 1
+        acc = fx.Int32(0)
+        g_lines = ROWS * GATE_PART // LINE  # 640
+        s_lines = ROWS * SH_ROW // LINE  # 1280
+        for i in range_constexpr(plan["iters"]):
+            m = k + kk * i
+            live = m < plan["jobs"]
+            b = r + XCDS * fx.min(m, plan["jobs"] - 1)
+            # a slice task's hc_fn: (projection j, stream o) rows of 32 f32
+            q = fx.min(tid // 2, HC_SEGS - 1)
+            hbyte = ((q // 4) * SEAM_K_MIX + (q % 4) * HIDDEN + b * SEAM_COLS) * 4 + (
+                tid % 2
+            ) * LINE
+            acc = acc ^ _touch(
+                a["hc_fn"], hbyte, live & (b < SEAM_SLICES) & (tid < 2 * HC_SEGS)
+            )
+            # a norm task's norm weight (bf16 [HIDDEN])
+            nt = b - plan["norm0"]
+            acc = acc ^ _touch(
+                a["ffn_w"],
+                fx.min(tid, HIDDEN * 2 // LINE - 1) * LINE,
+                live & (nt >= 0) & (nt < s) & (tid < HIDDEN * 2 // LINE),
+            )
+            # a router task's gate_w rows
+            task = b - plan["router0"]
+            is_r = live & (task >= 0) & (task < plan["router_tasks"])
+            task = fx.min(fx.max(task, 0), plan["router_tasks"] - 1)
+            for qq in range_constexpr(cdiv(g_lines, THREADS)):
+                ln = fx.min(tid + THREADS * qq, g_lines - 1)
+                lv = is_r & ((tid + THREADS * qq) < g_lines)
+                row = (task // 4) * ROWS + ln // (GATE_PART // LINE)
+                byte = (
+                    row * GATE_ROW
+                    + (task % 4) * GATE_PART
+                    + (ln % (GATE_PART // LINE)) * LINE
+                )
+                acc = acc ^ _touch(a["gate_w"], byte, lv)
+            # a shared unit's gate and up rows, their scale rows
+            u = b - plan["shared0"]
+            is_s = live & (u >= 0) & (u < plan["shared_units"])
+            u = fx.min(fx.max(u, 0), plan["shared_units"] - 1)
+            for half in range_constexpr(2):
+                row0 = half * sh + u * ROWS
+                for qq in range_constexpr(cdiv(s_lines, THREADS)):
+                    ln = fx.min(tid + THREADS * qq, s_lines - 1)
+                    lv = is_s & ((tid + THREADS * qq) < s_lines)
+                    byte = (row0 + ln // (SH_ROW // LINE)) * SH_ROW + (
+                        ln % (SH_ROW // LINE)
+                    ) * LINE
+                    acc = acc ^ _touch(a["sgu"], byte, lv)
+            hs = fx.min(tid // 3, 1)
+            sbyte = ((hs * sh + u * ROWS) // 32) * SH_SROW + (tid % 3) * LINE
+            acc = acc ^ _touch(
+                a["sgu_s"],
+                fx.min(sbyte, (2 * sh // 32) * SH_SROW - 4),
+                is_s & (tid < 6),
+            )
+        _ = fresh(acc)
 
 
 # ---------------------------------------------------------------- kernel
@@ -753,6 +955,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "xsl": gml.xsl.ptr,
         "d": d,
         "ratio": key.ratio,
+        "tuned": key.tuned,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
@@ -820,6 +1023,12 @@ def run_back(c, key, bid):
     tiles = token_tiles(s)
     _, n_split, n_comb, COMB0, WOA0, WOB0, early_wob = back_plan(key)
     stamp(c, 0)
+    if const_expr(c["tuned"]):
+        # wo_a's task ahead of the attention stages (no loads: the order the
+        # tuned builds' code was validated in)
+        woa_task = first_task(bid, WOA0)
+        has_woa = woa_task < woa_tasks
+        woa_t = fx.min(woa_task, woa_tasks - 1)
     for unit in range(first_task(bid, 0), n_split, BLOCKS):
         stage_split(c, unit)
     stamp(c, 1)
@@ -829,9 +1038,10 @@ def run_back(c, key, bid):
     stamp(c, 2)
     # the GEMV weights, every CTA right after its attention work: its wo_a
     # task (if any), then its one or two wo_b tasks
-    woa_task = first_task(bid, WOA0)
-    has_woa = woa_task < woa_tasks
-    woa_t = fx.min(woa_task, woa_tasks - 1)
+    if const_expr(not c["tuned"]):
+        woa_task = first_task(bid, WOA0)
+        has_woa = woa_task < woa_tasks
+        woa_t = fx.min(woa_task, woa_tasks - 1)
     ops = gemv_loads(
         c,
         a["woa"],
@@ -858,10 +1068,24 @@ def run_back(c, key, bid):
         rocdl.s_waitcnt(vmcnt=0)
         gpu.barrier()
     stamp(c, 8)
-    # wo_a: every token tile of its group's XO rows, the next tile's in flight
+    # wo_a: every token tile of its group's XO rows, the next tile's in flight.
+    # Tuned at some widths (``plan.ardy_tiles``): a tile once its own tokens'
+    # XO is in, its ready flags published at its end, wo_b taking a tile once
+    # every wo_a task published it.
+    ntiles = ardy_tiles(s, c["tuned"])
+    per_tile = ntiles > 1
     if has_woa:
         grp = woa_t // (woa_tasks // groups)
-        await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
+        if const_expr(c["tuned"]):
+            ccopy = bid % CRDY_COPIES * flag_stride(s * (heads // COMB_HEADS))
+            await_flags(
+                c,
+                c["crdy"],
+                tiles[0][1] if const_expr(per_tile) else s,
+                lambda u: ccopy + u * (heads // COMB_HEADS) + grp,
+            )
+        else:
+            await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
         stamp(c, 9)
         xo = (
             c["xo"],
@@ -873,21 +1097,52 @@ def run_back(c, key, bid):
             grp * group_k // 32,
             group_k // 32,
         )
-        regs = rows_loads(c, *xo, *tiles[0])
-        for ti in range_constexpr(len(tiles)):
-            t0, n = tiles[ti]
-            rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
-            if const_expr(ti + 1 < len(tiles)):
-                regs = rows_loads(c, *xo, *tiles[ti + 1])
-            stage_woa(c, woa_t, ops, t0, n)
-        stamp(c, 10)
-        publish(c, c["ardy"], woa_t)
+        if const_expr(per_tile):
+            for ti in range_constexpr(len(tiles)):
+                t0, n = tiles[ti]
+                if const_expr(ti > 0):
+                    await_flags(
+                        c,
+                        c["crdy"],
+                        n,
+                        lambda u, t0=t0: ccopy + (t0 + u) * (heads // COMB_HEADS) + grp,
+                    )
+                regs = rows_loads(c, *xo, t0, n)
+                rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
+                stage_woa(c, woa_t, ops, t0, n)
+                publish_copies(
+                    c,
+                    c["ardy"],
+                    ti * woa_tasks + woa_t,
+                    ARDY_COPIES,
+                    woa_tasks * ntiles,
+                )
+            stamp(c, 10)
+        else:
+            regs = rows_loads(c, *xo, *tiles[0])
+            for ti in range_constexpr(len(tiles)):
+                t0, n = tiles[ti]
+                rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
+                if const_expr(ti + 1 < len(tiles)):
+                    regs = rows_loads(c, *xo, *tiles[ti + 1])
+                stage_woa(
+                    c, woa_t, ops, t0, n, settle=c["tuned"] and ti + 1 < len(tiles)
+                )
+            stamp(c, 10)
+            if const_expr(c["tuned"]):
+                publish_copies(c, c["ardy"], woa_t, ARDY_COPIES, woa_tasks)
+            else:
+                publish(c, c["ardy"], woa_t)
     stamp(c, 3)
     # wo_b
     if const_expr(not early_wob):
         ops1, ops2 = wob_weights()
     stamp(c, 11)
-    await_flags(c, c["ardy"], woa_tasks, lambda u: u)
+    if const_expr(c["tuned"]):
+        acopy = bid % ARDY_COPIES * woa_tasks * ntiles
+        await_flags(c, c["ardy"], woa_tasks, lambda u: acopy + u)
+    else:
+        await_flags(c, c["ardy"], woa_tasks, lambda u: u)
     stamp(c, 12)
     x8b = (
         c["x8b"],
@@ -902,10 +1157,15 @@ def run_back(c, key, bid):
     regs = rows_loads(c, *x8b, *tiles[0])
     for ti in range_constexpr(len(tiles)):
         t0, n = tiles[ti]
+        if const_expr(per_tile and ti > 0):
+            await_flags(
+                c, c["ardy"], woa_tasks, lambda u, ti=ti: acopy + ti * woa_tasks + u
+            )
+            regs = rows_loads(c, *x8b, t0, n)
         rows_store(c, regs, o_rows // 4, o_rows // 32, c["xl"], c["xsl"], n)
         if const_expr(ti == 0):
             stamp(c, 14)
-        if const_expr(ti + 1 < len(tiles)):
+        if const_expr(ti + 1 < len(tiles) and not per_tile):
             regs = rows_loads(c, *x8b, *tiles[ti + 1])
         stage_wob(
             c,
@@ -917,7 +1177,11 @@ def run_back(c, key, bid):
             t0,
             n,
             mark=ti == 0,
+            settle=c["tuned"] and ti + 1 < len(tiles) and not per_tile,
         )
         if const_expr(ti == 0):
             stamp(c, 13)
     stamp(c, 4)
+    tplan = touch_plan(key)
+    if const_expr(tplan is not None and "gate_w" in a):
+        stage_touch(c, key, tplan)

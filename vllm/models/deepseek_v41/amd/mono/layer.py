@@ -34,13 +34,22 @@ from .attention.device import (
     memrealtime,
     rsrc,
 )
-from .attention.plan import HIDDEN, WINDOW, Dims, back_scratch, front_scratch
+from .attention.plan import (
+    HIDDEN,
+    WINDOW,
+    XRDY_COPIES,
+    Dims,
+    back_scratch,
+    flag_stride,
+    front_scratch,
+)
+from .common.arch import GFX942
 from .common.mx import clamp_fp8
-from .common.ops import butterfly, fp8_pack4, peer_bases, traced
-from .common.plan import WAVES, first_task, key_tuple
+from .common.ops import bf16_pair, butterfly, fp8_pack4, peer_bases, traced
+from .common.plan import first_task, key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
-from .stages import moe, seam
+from .stages import moe, prefetch, seam
 from .stages.dims import Dims as StageDims
 from .stages.moe_shape import EXPERTS, SORT_NETS, TOPK, MoeBuild, route_shape
 
@@ -59,6 +68,8 @@ COUNTERS = ("ugq", "dq")
 # lines of their own the MoE's counters
 EPOCH_COUNTERS = -(-(mb_back.EPOCH_MARKS + BLOCKS) // 64) * 64
 EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
+# tuned: step widths whose router polls x as pairs (``run_ffn``)
+ROUTER_X_PAIRS = 16
 # A timeline build of K2 stamps the clock into one record of K2_POINTS i64 a
 # CTA. The attention back uses points 0 .. BACK_POINTS - 1. The FFN seam's
 # three task loops (push, reduce and slice, then gate, then norm) end at the
@@ -89,6 +100,25 @@ class MonoBuild:
     topk: int = TOPK
     ug_groups: int = 2
     swa_width: int = WINDOW
+    # compile the generic code where the tuned paths would apply: the
+    # reference that the tests compare the tuned builds with
+    generic: bool = False
+
+    @property
+    def tuned(self) -> bool:
+        """A target layer of compress ratio 2 at TP2 on gfx950: the builds whose
+        step-width tuned paths are on (bit-exact against the generic ones).
+        Every other build compiles the generic code. A tuned build lays out its
+        scratch and peer regions its own way, so the runner gives it a scratch
+        and a peer range of their own."""
+        return (
+            not GFX942
+            and not self.generic
+            and self.tp == 2
+            and self.ratio == 2
+            and (self.experts, self.topk, self.ug_groups, self.swa_width)
+            == (EXPERTS, TOPK, 2, WINDOW)
+        )
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
@@ -98,6 +128,7 @@ def _moe_key(key: MonoBuild) -> MoeBuild:
         topk=key.topk,
         tp=key.tp,
         ug_groups=key.ug_groups,
+        tuned=key.tuned,
     )
 
 
@@ -113,7 +144,7 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned
     )
 
 
@@ -132,11 +163,16 @@ def _symbol_params(key: MonoBuild) -> dict:
 
 
 def _back_key(key: MonoBuild):
-    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline, key.tuned)
 
 
 def scratch_layout(
-    s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK, ug_groups: int = 2
+    s: int,
+    tp: int,
+    experts: int = EXPERTS,
+    topk: int = TOPK,
+    ug_groups: int = 2,
+    tuned: bool = False,
 ) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
@@ -145,7 +181,9 @@ def scratch_layout(
     which a poll may take for a current tag. The MoE's counters, whose slots
     outlive a step width, are in the epoch buffer. The MoE regions follow the
     runner's routing and FP4 groups of an ug task: with one group a task (the
-    DSpark draft's runner) the ug flags take twice the room of two groups."""
+    DSpark draft's runner) the ug flags take twice the room of two groups.
+    ``tuned``: a tuned build's layout (``MonoBuild.tuned``), in a scratch of its
+    own."""
     d = Dims(tp)
     out: dict = {}
     off = 0
@@ -159,17 +197,21 @@ def scratch_layout(
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
 
-    place(front_scratch(s, d))
+    place(front_scratch(s, d, tuned))
     place(seam.scratch_layout(s))
-    place(back_scratch(s, d, start=0))
-    regions = moe.scratch_layout(
-        _moe_key(MonoBuild(s, tp, 1, experts=experts, topk=topk, ug_groups=ug_groups))
-    ).items()
+    place(back_scratch(s, d, start=0, tuned=tuned))
+    mkey = MoeBuild(
+        tokens=s, experts=experts, topk=topk, tp=tp, ug_groups=ug_groups, tuned=tuned
+    )
+    regions = moe.scratch_layout(mkey).items()
     mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
     place({"normed": (0, s * HIDDEN * 2), "xrdy_moe": (s * HIDDEN * 2 + 256, s * 8)})
     place({"krdy": (0, s * 8)})
+    if tuned:
+        # the normed rows again as tagged bf16 pairs: the router polls its x
+        place({"normed_mb": (0, s * HIDDEN // 2 * 8)})
     return out
 
 
@@ -179,8 +221,9 @@ def scratch_bytes(
     experts: int = EXPERTS,
     topk: int = TOPK,
     ug_groups: int = 2,
+    tuned: bool = False,
 ) -> int:
-    layout = scratch_layout(s, tp, experts, topk, ug_groups)
+    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned)
     return max(o + n for o, n in layout.values())
 
 
@@ -226,7 +269,12 @@ def publish_x8(c, t):
     """Token t's two XRDY flags (one a wqkv K half) once its X8 / X8S landed."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
-    if c["tid"] < 2:
+    if const_expr(c["tuned"]):
+        # every copy (``plan.XRDY_COPIES``): thread 2 j + h copy j's flag of half h
+        if c["tid"] < 2 * XRDY_COPIES:
+            at = c["tid"] // 2 * flag_stride(2 * c["S"]) + 2 * t + c["tid"] % 2
+            c["mb"].put(c["xrdy"], at, fx.Int32(1))
+    elif c["tid"] < 2:
         c["mb"].put(c["xrdy"], 2 * t + c["tid"], fx.Int32(1))
     gpu.barrier()
 
@@ -234,18 +282,24 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
     GATE0 = SLICES + s
+    n_wqkv = mb_front.WQKV_TASKS * mb_front.WQKV_KPARTS
+    if key.tuned and n_wqkv + 2 * s <= BLOCKS:
+        # the gates on CTAs without a wqkv part (past the front's key-table /
+        # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
+        GATE0 = n_wqkv + s
     assert GATE0 + s <= BLOCKS
+    rl_row, fl_row = _seam_rows(key.tuned)
 
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
-        rl: fx.Array[fx.Float32, s * seam.KT, 16]
-        fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
+        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
+        rl: fx.Array[fx.Float32, s * rl_row, 16]
+        fl: fx.Array[fx.Float32, seam.MIX * fl_row, 16]
 
     @fx.union
     class K1Lds:
@@ -340,7 +394,7 @@ def build_mono_k1(key: MonoBuild):
             "klen": klen,
             "qr_out": qr_out,
         }
-        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp))}
+        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned)}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
         c["index"] = key.index
         amb = Mailbox(tag)
@@ -375,6 +429,9 @@ def build_mono_k1(key: MonoBuild):
             },
             "d": StageDims(tp),
             "fold": key.fold,
+            "tuned": key.tuned,
+            "rl_row": rl_row,
+            "fl_row": fl_row,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -382,26 +439,60 @@ def build_mono_k1(key: MonoBuild):
             c["tl"], c["tl_points"] = tl, mb_front.FRONT_POINTS
 
         def seam_slice():
-            for task in range(first_task(bid, 0), SLICES, BLOCKS):
-                seam.stage_slice(ca, task)
+            for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
+                if const_expr(key.tuned and key.fold):
+                    # the fold and the slice fused, a thread's columns in
+                    # registers throughout
+                    seam.stage_reduce_slice(ca, task, reduce=False)
+                else:
+                    seam.stage_slice(ca, task)
             gpu.barrier()
 
         def store(*v):
             store_x8(c, *v)
             if const_expr(key.index):
-                store_normed(normed_out, *v)
+                store_normed(normed_out, *v, wide=key.tuned)
 
         def seam_rest():
-            for t in range(first_task(bid, NORM0), s, BLOCKS):
+            for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
                 seam.stage_norm(ca, t, store)
                 publish_x8(c, t)
-            for t in range(first_task(bid, GATE0), s, BLOCKS):
-                seam.stage_gate(ca, t)
+            if const_expr(not key.tuned):
+                for t in range(first_task(bid, GATE0), s, BLOCKS):
+                    seam.stage_gate(ca, t)
             gpu.barrier()
 
-        mb_front.run_front(
-            c, fkey, bid, x8_given=True, before_wqkv=seam_slice, after_wqkv=seam_rest
-        )
+        def seam_gates(sel):
+            # tuned: the gates' outputs are K2's, so past the CTA's wqkv part
+            # (and its key-table task), not between the partials' inputs and
+            # the wqkv
+            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
+                if sel:
+                    seam.stage_gate(ca, t)
+            gpu.barrier()
+
+        if const_expr(key.tuned):
+            mb_front.run_front(
+                c,
+                fkey,
+                bid,
+                x8_given=True,
+                before_wqkv=seam_slice,
+                after_wqkv=seam_rest,
+                past_wqkv=seam_gates,
+                # the q / kv norms past the CTAs without a wqkv part: on the
+                # norms' CTAs, whose wqkv parts end first (their rows land first)
+                qkv_wrap0=NORM0,
+            )
+        else:
+            mb_front.run_front(
+                c,
+                fkey,
+                bid,
+                x8_given=True,
+                before_wqkv=seam_slice,
+                after_wqkv=seam_rest,
+            )
 
     @flyc.jit
     def launch(
@@ -498,10 +589,29 @@ def build_mono_k1(key: MonoBuild):
 
 
 @traced
-def store_normed(normed, t, col, ys, live):
+def store_normed(normed, t, col, ys, live, cb=None, wide=False):
     """The FFN seam's norm output -> the MoE input row (bf16, device scope:
-    this launch reads it)."""
-    if live:
+    this launch reads it). ``wide``: the 8 values as one 16-byte store (a store
+    each kept the publish's drain behind 24 of them). With the MoE context
+    ``cb``, the same bf16 values as tagged pairs too (``cb["xmb"]``: the
+    router's x, polled; ``wide`` only)."""
+    if const_expr(wide):  # noqa: SIM102 (a build-time and a run-time test)
+        if live:
+            if const_expr(cb is not None):
+                for h in range_constexpr(2):
+                    cb["put_bf"](
+                        cb["xmb"], t * HIDDEN + col + 4 * h, ys[4 * h : 4 * h + 4]
+                    )
+            words = [
+                bf16_pair(ys[2 * j], ys[2 * j + 1]).bitcast(fx.Int32) for j in range(4)
+            ]
+            bo.buffer_store(
+                fx.Vector.from_elements(words, fx.Int32),
+                rsrc(normed),
+                (t * HIDDEN + col) // 2,
+                cache_modifier=CM_DEV,
+            )
+    elif live:
         for j in range_constexpr(8):
             bo.buffer_store(
                 ys[j].to(fx.BFloat16),
@@ -511,12 +621,21 @@ def store_normed(normed, t, col, ys, live):
             )
 
 
-def _seam_lds(s):
+def _seam_rows(tuned):
+    """The seam's LDS row strides of ``rl`` / ``fl`` (tuned: padded,
+    ``seam.RL_ROW``)."""
+    return (seam.RL_ROW, seam.FL_ROW) if tuned else (seam.KT, seam.KT)
+
+
+def _seam_lds(s, tuned=False):
+    rl_row, fl_row = _seam_rows(tuned)
+
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
-        rl: fx.Array[fx.Float32, s * seam.KT, 16]
-        fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
+        # a token tile's mix partials, tuned every tile's (``seam.slice_mix_all``)
+        red: fx.Array[fx.Float32, seam.red_words(s, tuned), 16]
+        rl: fx.Array[fx.Float32, s * rl_row, 16]
+        fl: fx.Array[fx.Float32, seam.MIX * fl_row, 16]
         pl: fx.Array[fx.Float32, s * seam.COLS, 16]
 
     return SeamLds
@@ -538,7 +657,7 @@ def run_ffn(
     # the target's runner, also for a gfx942 draft layer, so it reads the
     # target's layout.
     if const_expr(part is None):
-        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     else:
         layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
@@ -590,10 +709,15 @@ def run_ffn(
         "fl": sl.fl.ptr,
         "red": sl.red.ptr,
         "pend_lds": sl.pl.ptr,
+        "tuned": key.tuned,
+        "rl_row": _seam_rows(key.tuned)[0],
+        "fl_row": _seam_rows(key.tuned)[1],
         "put": amb.put,
         "put_bf": amb.put_bf,
         "put_words": amb.put_words,
         "poll": amb.poll,
+        "poll_units": amb.poll_units,
+        "put_unit": amb.put_unit,
         "peer_addr": lambda p: bases[p],
         "rank": rank,
         "sym": own,
@@ -613,6 +737,11 @@ def run_ffn(
         assert size <= layout[region][1], (region, size, layout[region][1])
     mlayout = {n: layout[n] for n in mregions}
     mlayout["xrdy"] = layout["xrdy_moe"]
+    # tuned, one token tile: the router polls the normed rows' pairs (``xmb``);
+    # past it (token groups, a router CTA's x in several tiles) the flag and loads
+    x_pairs = key.tuned and s <= ROUTER_X_PAIRS
+    if const_expr(x_pairs):
+        mlayout["xmb"] = layout["normed_mb"]
     margs = moe.moe_args(
         normed,
         a["gate_w"],
@@ -631,6 +760,10 @@ def run_ffn(
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
+    if const_expr(key.tuned):
+        # the MoE's waits on a run of flags (the router's on every token's
+        # row): spread over a wave's lanes, one round trip
+        cb["poll"] = amb.poll_wave
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
@@ -638,18 +771,52 @@ def run_ffn(
     # attention, so it stamps its own start here.
     if const_expr(part is not None):
         mark(0)
-    for task in range(first_task(bid, 0), SLICES, BLOCKS):
-        if const_expr(part is not None):
-            seam.stage_push(ca, task, part)
-        seam.stage_reduce(ca, task)
-        seam.stage_slice(ca, task)
-    mark(K2_SEAM_POINT)
-    for t in range(first_task(bid, GATE0), s, BLOCKS):
-        seam.stage_gate(ca, t)
-    mark(K2_SEAM_POINT + 1)
-    for t in range(first_task(bid, NORM0), s, BLOCKS):
-        seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
-        publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+    if const_expr(key.tuned):
+        # the slices' reduce and slice fused (a thread's columns in registers
+        # throughout), then the norms (the MoE waits on them), then the gates:
+        # their outputs are the layer's, nothing in this launch waits on them.
+        # Past one router group (every CTA from the xq's on a router task)
+        # they run on the route CTAs past the route (``moe.run_moe``'s
+        # ``after_route``): idle until the router's logits land, where in
+        # front of the route they held it up.
+        # Past one token tile the shared expert's rows go into their XCDs' L2
+        # on the CTAs the seam leaves idle (``prefetch``).
+        tplan = prefetch.shared_touch_plan(s, SLICES, rs)
+        if const_expr(tplan is not None):  # noqa: SIM102
+            if (bid >= SLICES) & ((bid < NORM0) | (bid >= NORM0 + s)):
+                prefetch.stage_shared_touch(tid, bid, a["sgu"], a["sgu_s"], tplan)
+        for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
+            seam.stage_norm(
+                ca,
+                t,
+                lambda *v: store_normed(normed, *v, cb if x_pairs else None, wide=True),
+                tail_barrier=False,
+            )
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+        mark(K2_SEAM_POINT + 1)
+        if const_expr(rs.router_groups[0] > 1):
+            cb["after_route"] = lambda t: seam.stage_gate(ca, t)
+        else:
+            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
+                seam.stage_gate(ca, t)
+    else:
+        for task in range(first_task(bid, 0), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce(ca, task)
+            seam.stage_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, GATE0), s, BLOCKS):
+            seam.stage_gate(ca, t)
+        mark(K2_SEAM_POINT + 1)
+        for t in range(first_task(bid, NORM0), s, BLOCKS):
+            seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
     gpu.barrier()
     mark(K2_SEAM_POINT + 2)
 
@@ -671,7 +838,7 @@ def run_ffn(
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
@@ -681,7 +848,8 @@ def build_mono_k2(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
-    SeamLds = _seam_lds(s)
+    assert not key.tuned or seam.attn_units_fit(s, tp)
+    SeamLds = _seam_lds(s, key.tuned)
 
     @fx.union
     class K2Lds:
@@ -787,8 +955,16 @@ def build_mono_k2(key: MonoBuild):
             "out": 0,
             "out_stride": 0,
             "zrec": zrec,
+            # the FFN half's first weights (``back.stage_touch``)
+            "gate_w": gate_w,
+            "sgu": sgu,
+            "sgu_s": sgu_s,
+            "hc_fn": hc_fn,
+            "ffn_w": ffn_w,
         }
-        blayout = {n: layout[n] for n in back_scratch(s, Dims(tp), start=0)}
+        blayout = {
+            n: layout[n] for n in back_scratch(s, Dims(tp), start=0, tuned=key.tuned)
+        }
         views = {"split": lds.split.peek(), "gemv": lds.gemv.peek()}
         c = mb_back.back_context(bkey, views, bargs, scratch, tag, blayout)
         amb = Mailbox(tag)
@@ -799,7 +975,17 @@ def build_mono_k2(key: MonoBuild):
                 dst = preg(bases[p], 0, "attn")
                 amb.put_bf(dst, 2 * seam.attn_region_pair(rank, t, s, col), [v0, v1])
 
-        c["wob_out"] = push
+        def push_unit(wt, tile, units, j, words):
+            # tuned: this rank's unit of bf16 partial words to every rank's
+            # ATTN region (``seam.attn_unit``)
+            u = seam.attn_unit(rank, tile, units, wt, j, tp)
+            for p in range_constexpr(tp):
+                amb.put_unit(preg(bases[p], 0, "attn"), u, words)
+
+        if const_expr(key.tuned):
+            c["wob_unit_out"] = push_unit
+        else:
+            c["wob_out"] = push
         if const_expr(key.timeline):
             c["tl"], c["tl_points"] = tl, K2_POINTS
         mb_back.epoch_begin(c, epoch, ep)
@@ -827,7 +1013,7 @@ def build_mono_k2(key: MonoBuild):
                 },
             }
             c["krdy"] = sreg(scratch, layout["krdy"][0], "krdy")
-            for t in range(first_task(bid, BLOCKS - s), s, BLOCKS):
+            for t in range(first_task(bid, BLOCKS - s, key.tuned), s, BLOCKS):
                 mb_front.stage_kt(ckt, t)
                 mb_back.publish(c, c["krdy"], t)
         mb_back.run_back(c, bkey, bid)

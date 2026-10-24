@@ -17,6 +17,7 @@ from flydsl.expr.typing import T
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_DEV,
     CM_SYS,
+    ballot,
     bf16_pair,
     rsrc,
     traced,
@@ -162,6 +163,117 @@ class Mailbox:
             outs.append([v[e + 2 * q] for q in range(n)])
             e += 2 * n
         return outs
+
+    def put_unit(self, a, u, words):
+        """16 B unit ``u`` := (3 raw 32-bit words, tag), one 16 B store (the
+        tuned builds' attention all-reduce, ``seam.attn_unit``): a
+        quarter of the bytes are tags, not half (``put_words``' pairs). A
+        consumer's 16 B load sees the unit whole (``poll_units``)."""
+        vals = [fx.Int32(w) for w in words] + [self.tag]
+        bo.buffer_store(
+            fx.Vector.from_elements(vals, fx.Int32),
+            rsrc(a.value),
+            u * 4,
+            cache_modifier=_SCOPE_CM[a.space],
+        )
+
+    def poll_units(self, specs, batch=POLL_MAX):
+        """Batched poll of 16 B units ``specs`` = [(Addr, unit index)], all of one
+        space (``put_unit``): re-loaded together while any tag is stale. Returns
+        each unit's 3 value words."""
+        if const_expr(len(specs) == 0):
+            return []
+        if const_expr(len(specs) > batch):
+            return self.poll_units(specs[:batch], batch) + self.poll_units(
+                specs[batch:], batch
+            )
+        spaces = {a.space for a, _ in specs}
+        assert len(spaces) == 1, f"one poll batch spans {spaces}"
+        cm = _SCOPE_CM[spaces.pop()]
+        bases = [a.value for a, _ in specs]
+        tag = self.tag
+
+        def load_all():
+            words = []
+            for b, (_, u) in zip(bases, specs):
+                w = fx.Vector(
+                    bo.buffer_load(
+                        rsrc(b),
+                        fx.Int32(u) * 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                        cache_modifier=cm,
+                    )
+                )
+                words += [w[e] for e in range(4)]
+            return fx.Vector.from_elements(words, fx.Int32)
+
+        def pending(v):
+            bad = v[3] != tag
+            for e in range_constexpr(7, 4 * len(specs), 4):
+                bad = bad | (v[e] != tag)
+            return bad
+
+        v = _spin(load_all, pending)
+        return [[v[4 * k + q] for q in range(3)] for k in range(len(specs))]
+
+    def poll_wave(self, specs, batch=POLL_MAX):
+        """``poll`` for a caller whose every wave runs whole (no lane masked off),
+        the tuned builds' MoE (``layer.run_ffn``):
+        a batch of pairs of one region at constant, evenly spaced indices (a
+        CTA's wait on a run of flags) is spread over the lanes, lane l polling
+        pair l, and taken back by ``readlane`` -- one round trip for up to 64
+        pairs instead of one a ``batch``. Any other batch: ``poll``."""
+        if const_expr(not _lane_spread(specs)):
+            return self.poll(specs, batch)
+        a, i0, n = specs[0]
+        m = len(specs)
+        step = specs[1][1] - i0
+        cm = _SCOPE_CM[a.space]
+        lane = fx.thread_idx.x % 64
+        at = fx.Int32(i0) + fx.min(lane, m - 1) * step
+        tag = self.tag
+        r = rsrc(a.value)
+
+        def load_all():
+            return fx.Vector(
+                bo.buffer_load(
+                    r, at * 2, vec_width=2 * n, dtype=T.i32, cache_modifier=cm
+                )
+            )
+
+        def pending(v):
+            bad = v[1] != tag
+            for e in range_constexpr(3, 2 * n, 2):
+                bad = bad | (v[e] != tag)
+            return ballot(bad) != fx.Int64(0)
+
+        v = _spin(load_all, pending)
+        return [
+            [
+                fx.Int32(
+                    rocdl.readlane(
+                        T.i32, fx.Int32(v[2 * q]).ir_value(), fx.Int32(k).ir_value()
+                    )
+                )
+                for q in range(n)
+            ]
+            for k in range(m)
+        ]
+
+
+def _lane_spread(specs):
+    """``poll_wave``'s batches: 2 .. 64 pairs of one region, the same width,
+    at Python-int indices in arithmetic progression."""
+    if len(specs) < 2 or len(specs) > 64:
+        return False
+    a0, i0, n0 = specs[0]
+    if not all(isinstance(i, int) for _, i, _ in specs):
+        return False
+    step = specs[1][1] - i0
+    return all(
+        a is a0 and n == n0 and i == i0 + k * step for k, (a, i, n) in enumerate(specs)
+    )
 
 
 @traced
