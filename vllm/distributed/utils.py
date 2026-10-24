@@ -296,7 +296,10 @@ class StatelessProcessGroup:
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
         self.expire_data()
-        key = f"send_to/{dst}/{self.send_dst_counter[dst]}"
+        # Include both endpoints. Without the source rank, simultaneous sends
+        # from different ranks to the same destination overwrite one another
+        # because every sender starts its destination-local counter at zero.
+        key = f"send_from/{self.rank}/to/{dst}/{self.send_dst_counter[dst]}"
         self.store.set(key, pickle.dumps(obj))
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
@@ -315,7 +318,9 @@ class StatelessProcessGroup:
     def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
         obj = pickle.loads(
-            self.store.get(f"send_to/{self.rank}/{self.recv_src_counter[src]}")
+            self.store.get(
+                f"send_from/{src}/to/{self.rank}/{self.recv_src_counter[src]}"
+            )
         )
         self.recv_src_counter[src] += 1
         return obj
