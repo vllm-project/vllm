@@ -79,8 +79,10 @@ def tp1_cpu(tmp_path, default_vllm_config):
         destroy_distributed_environment()
 
 
-@pytest.mark.parametrize("sequence", [2, 8])
-def test_relative_attention_matches_reference(tp1_cpu, sequence: int) -> None:
+@pytest.mark.parametrize("sequence", [2, 8, 130])
+def test_relative_attention_matches_reference(
+    tp1_cpu, monkeypatch, sequence: int
+) -> None:
     torch.manual_seed(7)
     batch, heads, model_dim = 2, 4, 32
     optimized = RelPosMultiHeadAttention(heads, model_dim)
@@ -95,17 +97,77 @@ def test_relative_attention_matches_reference(tp1_cpu, sequence: int) -> None:
     key = torch.randn(batch, sequence, model_dim)
     value = torch.randn(batch, sequence, model_dim)
     pos_emb = torch.randn(1, 2 * sequence - 1, model_dim)
+    # Key mask only. Queries past input_lengths still attend to valid keys.
+    valid_keys = max(sequence - 5, 1)
     mask = torch.ones(batch, 1, sequence, dtype=torch.bool)
-    mask[:, :, -1] = False
+    mask[:, :, valid_keys:] = False
 
     expected_output, expected_attention = reference(
         query, key, value, pos_emb, mask=mask
     )
-    output, attention = optimized(query, key, value, pos_emb, mask=mask)
+    original = torch.matmul
+    tiles = {"n": 0}
+
+    def tracked(left, right, *args, **kwargs):
+        if torch.is_tensor(left) and left.dim() == 4:
+            query_tile = left.size(-2)
+            if query_tile > 128:
+                raise RuntimeError(f"score tile has {query_tile} queries")
+            tiles["n"] += 1
+        return original(left, right, *args, **kwargs)
+
+    fill_values: list[float] = []
+    original_fill = torch.Tensor.masked_fill
+
+    def tracked_fill(tensor, mask, value):
+        if isinstance(value, (int, float)):
+            fill_values.append(float(value))
+        return original_fill(tensor, mask, value)
+
+    monkeypatch.setattr(torch, "matmul", tracked)
+    monkeypatch.setattr(torch.Tensor, "masked_fill", tracked_fill)
+    output, attention = optimized(
+        query, key, value, pos_emb, mask=mask, need_weights=True
+    )
 
     torch.testing.assert_close(output, expected_output)
     torch.testing.assert_close(attention, expected_attention)
     assert output.shape == (batch, sequence, model_dim)
     assert attention.shape == (batch, heads, sequence, sequence)
+    assert torch.count_nonzero(attention[..., valid_keys:]) == 0
+    kept = attention[..., :valid_keys].sum(dim=-1)
+    torch.testing.assert_close(kept, torch.ones_like(kept))
+    assert float("-inf") in fill_values
+    assert 0.0 in fill_values
+    assert tiles["n"] >= 1
     assert output.is_contiguous()
     assert attention.is_contiguous()
+
+
+def test_relative_attention_skips_weight_matrix(tp1_cpu) -> None:
+    torch.manual_seed(3)
+    batch, heads, model_dim, sequence = 2, 4, 32, 6
+    optimized = RelPosMultiHeadAttention(heads, model_dim)
+    query = torch.randn(batch, sequence, model_dim)
+    pos_emb = torch.randn(1, 2 * sequence - 1, model_dim)
+    output, attention = optimized(
+        query, query, query, pos_emb, mask=None, need_weights=False
+    )
+    assert attention is None
+    assert output.shape == (batch, sequence, model_dim)
+
+
+def test_firered_fully_masked_keys_are_zero(tp1_cpu) -> None:
+    torch.manual_seed(5)
+    batch, heads, model_dim, sequence = 2, 4, 32, 6
+    optimized = RelPosMultiHeadAttention(heads, model_dim)
+    query = torch.randn(batch, sequence, model_dim)
+    pos_emb = torch.randn(1, 2 * sequence - 1, model_dim)
+    mask = torch.zeros(batch, 1, sequence, dtype=torch.bool)
+    output, attention = optimized(
+        query, query, query, pos_emb, mask=mask, need_weights=True
+    )
+    assert attention is not None
+    assert torch.isfinite(attention).all()
+    assert torch.count_nonzero(attention) == 0
+    assert torch.isfinite(output).all()

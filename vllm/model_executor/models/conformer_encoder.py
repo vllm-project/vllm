@@ -12,6 +12,39 @@ from torch import nn
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+# Query tiles stay at this length so a conformer block never materializes T×T.
+_REL_POS_QUERY_CHUNK = 128
+
+
+def rel_pos_chunk_scores(
+    q_with_bias_u: torch.Tensor,
+    q_with_bias_v: torch.Tensor,
+    key: torch.Tensor,
+    pos: torch.Tensor,
+    scale: float,
+    row_start: int,
+    row_end: int,
+) -> torch.Tensor:
+    """Relative scores for absolute query rows ``[row_start, row_end)``.
+
+    ``bd[r, j] = raw[r, pos_len - key_len - i + j]`` with ``i = row_start + r``.
+    Scale is applied once to ``ac + bd``.
+    """
+    chunk = row_end - row_start
+    if chunk > _REL_POS_QUERY_CHUNK:
+        raise RuntimeError(f"relative score tile has {chunk} queries")
+    ac = torch.matmul(q_with_bias_u[:, :, row_start:row_end], key.transpose(-2, -1))
+    raw = torch.matmul(q_with_bias_v[:, :, row_start:row_end], pos.transpose(-2, -1))
+    key_len = key.size(-2)
+    rows = torch.arange(row_start, row_end, device=raw.device)
+    cols = torch.arange(key_len, device=raw.device)
+    index = (raw.size(-1) - key_len - rows).view(chunk, 1) + cols.view(1, key_len)
+    index = index.view(1, 1, chunk, key_len).expand(
+        raw.shape[0], raw.shape[1], chunk, key_len
+    )
+    bd = raw.gather(-1, index)
+    return (ac + bd) * scale
+
 
 class Conv2dSubsampling(nn.Module):
     def __init__(self, idim: int, d_model: int, out_channels: int = 32):
@@ -192,7 +225,8 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         v: torch.Tensor,
         pos_emb: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        need_weights: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         sz_b, len_q = q.size(0), q.size(1)
         residual = q
         q, k, v = self.forward_qkv(q, k, v)
@@ -205,24 +239,31 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
         q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
 
-        matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
-        matrix_bd = self._rel_shift(matrix_bd)
-
-        batch_size, num_heads, query_len, key_len = matrix_bd.shape
-        attn_scores = torch.baddbmm(
-            matrix_bd.reshape(-1, query_len, key_len),
-            q_with_bias_u.reshape(-1, query_len, self.d_k),
-            k.transpose(-2, -1).reshape(-1, self.d_k, key_len),
-            beta=self.scale,
-            alpha=self.scale,
-        ).view(
-            batch_size,
-            num_heads,
-            query_len,
-            key_len,
-        )
-
-        output, attn = self.forward_attention(attn_scores, v, mask=mask)
+        query_len = q_with_bias_u.size(-2)
+        contexts: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        for row_start in range(0, query_len, _REL_POS_QUERY_CHUNK):
+            row_end = min(row_start + _REL_POS_QUERY_CHUNK, query_len)
+            scores = rel_pos_chunk_scores(
+                q_with_bias_u,
+                q_with_bias_v,
+                k,
+                p,
+                self.scale,
+                row_start,
+                row_end,
+            )
+            # Key mask only: padded queries still attend to valid keys.
+            # Fill is -inf, then softmax, then zero.
+            context, probs = self.forward_attention(scores, v, mask=mask)
+            contexts.append(context)
+            if need_weights:
+                weights.append(probs)
+        if contexts:
+            output = torch.cat(contexts, dim=2)
+        else:
+            output = v.new_zeros(v.shape[0], v.shape[1], 0, v.shape[-1])
+        attn = torch.cat(weights, dim=2) if weights else None
         output = self.forward_output(output, residual, sz_b, len_q)
         return output, attn
 
