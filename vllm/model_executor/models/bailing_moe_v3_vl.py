@@ -212,7 +212,8 @@ class BailingMoeV3VisionTransformer(Qwen3_VisionTransformer):
         # Honor whole-tower exclusions before the parent creates linear layers.
         if (
             isinstance(quant_config, Fp8Config)
-            and prefix in quant_config.ignored_layers
+            and quant_config.strip_model_root_prefix(prefix)
+            in quant_config.ignored_layers
         ):
             quant_config = None
 
@@ -252,7 +253,8 @@ class BailingMoeV3VLProjector(nn.Module):
         super().__init__()
         if (
             isinstance(quant_config, Fp8Config)
-            and prefix in quant_config.ignored_layers
+            and quant_config.strip_model_root_prefix(prefix)
+            in quant_config.ignored_layers
         ):
             quant_config = None
 

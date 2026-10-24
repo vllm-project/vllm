@@ -194,6 +194,7 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             )
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        prefix = quant_config.strip_model_root_prefix(prefix)
         if isinstance(quant_config, ModelOptQuantConfigBase):
             if quant_config.is_layer_excluded(prefix):
                 return Qwen4ExpPLEUnquantizedEmbeddingMethod()
