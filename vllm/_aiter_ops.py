@@ -638,6 +638,17 @@ def _rocm_aiter_fused_topk_impl(
     return fused_topk(x, router_logits, top_k, gate_up)
 
 
+def _rocm_aiter_topk_plain_impl(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_values: torch.Tensor,
+    k: int,
+) -> None:
+    from aiter.ops.topk_plain import topk_plain
+
+    topk_plain(x, topk_ids, topk_values, k, True)
+
+
 def _rocm_aiter_fused_topk_fake(
     x: torch.Tensor,
     router_logits: torch.Tensor,
@@ -2922,6 +2933,48 @@ class rocm_aiter_ops:
         return True
 
     @staticmethod
+    @functools.cache
+    def _has_multi_block_safe_topk_plain() -> bool:
+        """Older aiter topk_plain returns duplicate fp16/bf16 indices once a row
+        spans several blocks. The fix shipped with
+        topk_plain_merge_workspace_size, so probe for that."""
+        try:
+            from aiter.ops import topk_plain
+        except ImportError:
+            return False
+        return hasattr(topk_plain, "topk_plain_merge_workspace_size")
+
+    @classmethod
+    @if_aiter_supported
+    def is_vocab_top_k_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._has_multi_block_safe_topk_plain()
+
+    @staticmethod
+    def supports_vocab_top_k(x: torch.Tensor, k: int) -> bool:
+        """Shapes where topk_plain beats torch.topk: a wide last axis and a
+        small k. Above k=128, fp32 rows of up to 8192 come back unsorted."""
+        return (
+            x.dim() == 2
+            and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and x.is_contiguous()
+            and 0 < k <= 128
+            and x.shape[-1] >= 4096
+        )
+
+    @staticmethod
+    def vocab_top_k(x: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Largest k along the last axis, sorted descending, with int32 indices.
+
+        Ties may pick any of the tied indices, and the pick may change with the
+        number of rows.
+        """
+        values = torch.empty((x.shape[0], k), dtype=x.dtype, device=x.device)
+        ids = torch.empty((x.shape[0], k), dtype=torch.int32, device=x.device)
+        if x.shape[0] > 0:
+            torch.ops.vllm.rocm_aiter_topk_plain(x, ids, values, k)
+        return values, ids
+
+    @staticmethod
     def dsv4_indexer_prefers_native_top_k(
         *,
         num_rows: int,
@@ -3064,6 +3117,13 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_fused_topk_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_fused_topk_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_topk_plain",
+                op_func=_rocm_aiter_topk_plain_impl,
+                mutates_args=["topk_ids", "topk_values"],
                 dispatch_key=current_platform.dispatch_key,
             )
 
