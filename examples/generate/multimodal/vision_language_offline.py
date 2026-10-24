@@ -2312,6 +2312,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "minicpmv2_5_vl",
     "minicpmv2_6_vl",
     "minicpmv4_vl",
+    "paddleocr_vl",
 ]
 
 
