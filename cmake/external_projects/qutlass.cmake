@@ -51,6 +51,13 @@ endif()
 if(NOT qutlass_SOURCE_DIR)
   message(FATAL_ERROR "[QUTLASS] source directory could not be resolved.")
 endif()
+
+if(NOT EXISTS "${qutlass_SOURCE_DIR}/qutlass/csrc/include/registration.h")
+  message(FATAL_ERROR
+    "[QUTLASS] Stable ABI support was not found in the Qutlass source. "
+    "Please update your Qutlass package.")
+endif()
+
 message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -142,9 +149,9 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
 
   target_compile_definitions(_qutlass_C PRIVATE
     QUTLASS_MINIMAL_BUILD=1
-    QUTLASS_DISABLE_PYBIND=1
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1
+    TORCH_TARGET_VERSION=0x020B000000000000ULL
     USE_CUDA)
 
   set_property(SOURCE ${QUTLASS_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
