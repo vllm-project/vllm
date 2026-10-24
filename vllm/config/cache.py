@@ -61,6 +61,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "mxfp4_mla",
 ]
 
 # Mutable mirror of the CacheDType Literal. Custom dtypes registered by
