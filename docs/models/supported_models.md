@@ -670,6 +670,16 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     meta-actions, pass the id of `<|traj_future_start|>` in `stop_token_ids`.
 
 !!! note
+    For `DiffusionGemmaForBlockDiffusion` with
+    `use_bidirectional_attention="vision"`, image tokens attend bidirectionally
+    within each image block on sliding-attention layers. Full-attention layers
+    retain causal prompt attention.
+
+    With vision-prefix masking enabled, FULL CUDA graph support is limited to
+    uniform decode batches. Prefill and mixed batches use eager or piecewise
+    execution instead.
+
+!!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
     corresponding modality is enabled via `--limit-mm-per-prompt`. Video inputs are
     decoded into frames and audio, so they require both towers. The checkpoint also
