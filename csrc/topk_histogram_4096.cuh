@@ -5,9 +5,11 @@
 #ifndef TOPK_HISTOGRAM_4096_CUH_
 #define TOPK_HISTOGRAM_4096_CUH_
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <type_traits>
 
 namespace vllm {
 namespace topk_histogram_4096 {
@@ -64,6 +66,34 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
   v1 = __uint_as_float(r1);
   v2 = __uint_as_float(r2);
   v3 = __uint_as_float(r3);
+}
+
+// Scores are FP32 or BF16; BF16 widens exactly, so both select the same top-k.
+__device__ __forceinline__ float to_float(float x) { return x; }
+__device__ __forceinline__ float to_float(__nv_bfloat16 x) {
+  return __bfloat162float(x);
+}
+
+// Loads four consecutive scores (16B-aligned for FP32, 8B for BF16) as FP32.
+__device__ __forceinline__ float4 load_score4(const float* ptr) {
+  return *reinterpret_cast<const float4*>(ptr);
+}
+__device__ __forceinline__ float4 load_score4(const __nv_bfloat16* ptr) {
+  const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
+  // A BF16 value is the top half of the FP32 with the same value.
+  return make_float4(
+      __uint_as_float(raw.x << 16), __uint_as_float(raw.x & 0xFFFF0000u),
+      __uint_as_float(raw.y << 16), __uint_as_float(raw.y & 0xFFFF0000u));
+}
+
+// Loads two consecutive scores (8B-aligned for FP32, 4B for BF16) as FP32.
+__device__ __forceinline__ float2 load_score2(const float* ptr) {
+  return *reinterpret_cast<const float2*>(ptr);
+}
+__device__ __forceinline__ float2 load_score2(const __nv_bfloat16* ptr) {
+  const uint32_t raw = *reinterpret_cast<const uint32_t*>(ptr);
+  return make_float2(__uint_as_float(raw << 16),
+                     __uint_as_float(raw & 0xFFFF0000u));
 }
 
 // converts the float32 score to a 32-bit ordered unsigned integer — the full
@@ -333,9 +363,9 @@ struct Histogram4096Smem {
 
 // Defined in topk_histogram_4096_overflow.cuh. Only kFp32Rescan instantiations
 // call it, and their callers include that header.
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize, typename InT>
 __device__ __noinline__ void exact_topk_rescan_cold(
-    const float* __restrict__ scores, int32_t* __restrict__ output,
+    const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem);
 
 enum class OverflowRecovery { kDisabled, kFp32Rescan };
@@ -343,10 +373,13 @@ enum class OverflowRecovery { kDisabled, kFp32Rescan };
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
           bool UsePredicatedLoads = false,
-          OverflowRecovery Recovery = OverflowRecovery::kDisabled>
-__device__ void histogram_4096_topk(const float* __restrict__ scores,
+          OverflowRecovery Recovery = OverflowRecovery::kDisabled,
+          typename InT = float>
+__device__ void histogram_4096_topk(const InT* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
+  static_assert(std::is_same_v<InT, float> || !UsePredicatedLoads,
+                "predicated loads read FP32 scores");
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
   constexpr uint32_t ITEMS_PER_THREAD = HIST_BINS / kBlockSize;
   static_assert(HIST_BINS >= kBlockSize,
@@ -381,7 +414,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
         if (row_aligned && base + 3 < length) {
-          vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+          vecs[v] = load_score4(scores + base);
         } else {
           load_float4_predicated(scores + base, static_cast<int>(base),
                                  static_cast<int>(length), vecs[v].x, vecs[v].y,
@@ -394,7 +427,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
-        vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+        vecs[v] = load_score4(scores + base);
       }
     }
   }
