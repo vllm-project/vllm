@@ -240,6 +240,32 @@ vllm run-batch \
 
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
 
+### Resume an interrupted batch
+
+Pass `--resume` with the same input file, local output file, and model settings
+to continue an interrupted run:
+
+```bash
+vllm run-batch -i requests.jsonl -o responses.jsonl --model <model> --resume
+```
+
+Successful responses (HTTP 200 with no error) are matched by `custom_id` and
+skipped. Missing or failed requests run again, with their new responses appended
+to the output. Existing failure records remain, so an ID can have multiple
+attempts; use its successful response when reading the results. Input IDs must be
+unique. Successful output IDs absent from the input are rejected before loading
+the model.
+
+A final line interrupted during writing is discarded before appending. Malformed
+complete lines and invalid response records cause an error instead. When every
+request already succeeded, no model is loaded. A missing output file starts a
+new batch.
+
+Resume supports regular local output files only, and only one process should
+write to the file at a time. Keep the input requests and model settings unchanged:
+`custom_id` matching does not detect changed prompts or sampling parameters.
+Without `--resume`, the output file is overwritten as before.
+
 ## preload
 
 Launch weight cache daemons (one per GPU) that hold the post-quantized,
