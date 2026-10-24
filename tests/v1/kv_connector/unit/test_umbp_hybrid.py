@@ -277,7 +277,17 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
         scheduler.close()
 
 
-def test_external_chunked_local_hit_preserves_absolute_positions():
+@pytest.mark.parametrize("lookup_async", [False, True])
+@pytest.mark.parametrize("chunk_object_resident", [False, True])
+def test_external_chunked_local_hit_preserves_absolute_positions(
+    chunk_object_resident, lookup_async
+):
+    """A chunked-local hit is claimed only through resident absolute chunks.
+
+    With a 16-token local prefix, claiming token 80 needs the group-1 object
+    for tokens 64-79. When it is missing, the safe boundary is the token-64
+    chunk start, so 48 external tokens are claimed and nothing loads it.
+    """
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
     config.kv_cache_groups.append(
@@ -294,14 +304,17 @@ def test_external_chunked_local_hit_preserves_absolute_positions():
     )
     codec = BlockIdentityCodec(UMBPNamespace("absolute-chunk"))
     hashes = [b"a", b"b", b"c", b"d", b"e"]
-    handle = _SchedulerHandle(
-        {
-            codec.key(block_hash, group_id): True
-            for group_id in (0, 1)
-            for block_hash in hashes[1:]
-        }
+    hits = {
+        codec.key(block_hash, group_id): True
+        for group_id in (0, 1)
+        for block_hash in hashes[1:]
+    }
+    if not chunk_object_resident:
+        del hits[codec.key(b"e", 1)]
+    handle = _SchedulerHandle(hits)
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"lookup_async": lookup_async}), config, handle, codec
     )
-    scheduler = UMBPStoreConnectorScheduler(_vllm_config({}), config, handle, codec)
     pool = BlockPool(8, True, 16)
     for group_id in (0, 1):
         identity = make_block_hash_with_group_id(hashes[0], group_id)
@@ -313,22 +326,26 @@ def test_external_chunked_local_hit_preserves_absolute_positions():
         block_hashes=hashes,
         block_ids=([1, 2, 3, 4, 5], [0, 0, 0, 0, 6]),
     )
+    external_tokens = 64 if chunk_object_resident else 48
     try:
-        assert scheduler.get_num_new_matched_tokens(request, 16) == (64, True)
+        result = scheduler.get_num_new_matched_tokens(request, 16)
+        deadline = time.monotonic() + 5
+        while result[0] is None and time.monotonic() < deadline:
+            time.sleep(0.001)
+            result = scheduler.get_num_new_matched_tokens(request, 16)
+        assert result == (external_tokens, True)
         scheduler.update_state_after_alloc(
             request,
             SimpleNamespace(get_block_ids=lambda group_ids: request.block_ids),
-            64,
+            external_tokens,
         )
         plans = scheduler._pending_loads[request.request_id]
-        assert [(plan.group_id, plan.block_id) for plan in plans] == [
-            (0, 2),
-            (0, 3),
-            (0, 4),
-            (0, 5),
-            (1, 6),
-        ]
-        assert plans[-1].key == codec.key(b"e", 1)
+        expected = [(0, 2), (0, 3), (0, 4)]
+        if chunk_object_resident:
+            expected += [(0, 5), (1, 6)]
+        assert [(plan.group_id, plan.block_id) for plan in plans] == expected
+        loaded_keys = [plan.key for plan in plans]
+        assert (codec.key(b"e", 1) in loaded_keys) == chunk_object_resident
     finally:
         scheduler.close()
 
