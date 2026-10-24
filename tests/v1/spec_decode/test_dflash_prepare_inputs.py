@@ -10,6 +10,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as speculator_module
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
@@ -20,6 +21,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _force_fastpaths_supported(monkeypatch):
+    # The draft-prepare fastpaths are ROCm-gated in the speculator; these
+    # tests pin their contracts on any GPU.
+    monkeypatch.setattr(
+        speculator_module, "_draft_prepare_fastpaths_supported", lambda: True
+    )
+
+
 def _run_prepare(
     *,
     target_positions: list[int],
@@ -28,11 +38,19 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    draft_kv_cache_group_ids: list[int] | None = None,
 ):
+    # With draft_kv_cache_group_ids the speculator prepares inputs once per
+    # draft KV group: the returned all_query_slot_mappings /
+    # all_context_slot_mappings carry one row per group (plus any rows for
+    # group ids below the first draft group, which nothing may write), and
+    # query_slot_mapping / context_slot_mapping are the first group's rows.
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
     max_num_tokens = 16
     num_speculative_steps = 3
+    group_ids = [0] if draft_kv_cache_group_ids is None else draft_kv_cache_group_ids
+    n_rows = max(group_ids) + 1
 
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
@@ -53,13 +71,13 @@ def _run_prepare(
         idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
     )
     query_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+        (n_rows, max_num_tokens), -2, dtype=torch.int64, device=device
     )
     context_positions = torch.full(
         (max_num_tokens,), -1, dtype=torch.int64, device=device
     )
     context_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+        (len(group_ids), max_num_tokens), -2, dtype=torch.int64, device=device
     )
     sample_indices = torch.full(
         (max_num_reqs * num_speculative_steps,),
@@ -87,7 +105,7 @@ def _run_prepare(
     draft = SimpleNamespace(
         input_buffers=input_buffers,
         context_positions=context_positions,
-        _context_slot_mappings=context_slot_mapping.unsqueeze(0),
+        _context_slot_mappings=context_slot_mapping,
         sample_indices=sample_indices,
         sample_pos=sample_pos,
         sample_idx_mapping=sample_idx_mapping,
@@ -99,13 +117,13 @@ def _run_prepare(
         dp_size=1,
         dp_rank=0,
         pcp_manager=None,
-        draft_kv_cache_group_id=0,
-        draft_kv_cache_group_ids=[0],
+        draft_kv_cache_group_id=group_ids[0],
+        draft_kv_cache_group_ids=group_ids,
         _layer_group_idx=None,
         block_tables=SimpleNamespace(
-            slot_mappings=query_slot_mapping.unsqueeze(0),
-            input_block_tables=[block_table],
-            block_sizes=[4],
+            slot_mappings=query_slot_mapping,
+            input_block_tables=[block_table] * n_rows,
+            block_sizes=[4] * n_rows,
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
@@ -143,9 +161,11 @@ def _run_prepare(
     torch.accelerator.synchronize()
     return SimpleNamespace(
         input_buffers=input_buffers,
-        query_slot_mapping=query_slot_mapping.cpu(),
+        query_slot_mapping=query_slot_mapping[group_ids[0]].cpu(),
+        all_query_slot_mappings=query_slot_mapping.cpu(),
         context_positions=context_positions.cpu(),
-        context_slot_mapping=context_slot_mapping.cpu(),
+        context_slot_mapping=context_slot_mapping[0].cpu(),
+        all_context_slot_mappings=context_slot_mapping.cpu(),
         sample_indices=sample_indices.cpu(),
         sample_pos=sample_pos.cpu(),
         sample_idx_mapping=sample_idx_mapping.cpu(),
@@ -154,10 +174,20 @@ def _run_prepare(
     )
 
 
+@pytest.mark.parametrize(
+    "pad_fix",
+    [pytest.param(True, id="pad-fix-on"), pytest.param(False, id="pad-fix-off")],
+)
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
-def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size):
+def test_prepare_dflash_inputs_excludes_rejected_context_suffix(
+    cp_rank, cp_size, pad_fix, monkeypatch
+):
     # Positions 10/11 use physical block 7. Rejected positions 12/13 would use
     # block 8, but must be PAD context rather than contaminating draft KV.
+    if pad_fix:
+        monkeypatch.delenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "1")
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
@@ -181,10 +211,100 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
     assert not out.input_buffers.is_padding[:3].any()
-    assert out.input_buffers.is_padding[3:].all()
-    assert (out.input_buffers.input_ids[3:] == 0).all()
-    assert (out.input_buffers.positions[3:] == 0).all()
-    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
+    # Pad-tail contract: with the fix the tail is one parallel launch
+    # bounded by the draft replay read range [q_pad_start, HWM) = [3, 12);
+    # the stock in-kernel tail pads the full [3, 16) buffer.
+    pad_end = 12 if pad_fix else 16
+    assert out.input_buffers.is_padding[3:pad_end].all()
+    assert (out.input_buffers.input_ids[3:pad_end] == 0).all()
+    assert (out.input_buffers.positions[3:pad_end] == 0).all()
+    assert (out.query_slot_mapping[3:pad_end] == PAD_SLOT_ID).all()
+    if pad_fix:
+        assert not out.input_buffers.is_padding[12:].any()
+        assert (out.input_buffers.input_ids[12:] == -1).all()
+        assert (out.input_buffers.positions[12:] == -1).all()
+        assert (out.query_slot_mapping[12:] == -2).all()
+
+
+def test_prepare_dflash_inputs_two_draft_groups_dedup_and_pad(monkeypatch):
+    # Draft KV groups at non-zero ids with a non-draft row 0 in between: the
+    # dedup must keep the shared outputs identical to the per-group
+    # recompute, and the parallel pad launch must touch only the draft
+    # group rows over [q_pad_start, HWM) -- never row 0.
+    outs = {}
+    for dedup_on in (True, False):
+        if dedup_on:
+            monkeypatch.delenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", raising=False)
+            monkeypatch.delenv(
+                "VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False
+            )
+        else:
+            monkeypatch.setenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", "1")
+            monkeypatch.setenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "1")
+        outs[dedup_on] = _run_prepare(
+            target_positions=[10, 11, 12, 13],
+            block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+            cp_interleave=2,
+            draft_dcp_size=1,
+            draft_kv_cache_group_ids=[1, 2],
+        )
+    on, off = outs[True], outs[False]
+    # Shared outputs stay bit-identical to the per-group recompute over the
+    # replay read range [0, HWM) (the pad fix intentionally leaves [12, 16)
+    # untouched; the single-group test pins that contract).
+    for field in ("input_ids", "positions", "is_padding"):
+        assert torch.equal(
+            getattr(on.input_buffers, field)[:12],
+            getattr(off.input_buffers, field)[:12],
+        )
+    for field in (
+        "context_positions",
+        "sample_indices",
+        "sample_pos",
+        "sample_idx_mapping",
+    ):
+        assert torch.equal(getattr(on, field), getattr(off, field))
+    assert torch.equal(
+        on.all_query_slot_mappings[:, :12], off.all_query_slot_mappings[:, :12]
+    )
+    assert torch.equal(on.all_context_slot_mappings, off.all_context_slot_mappings)
+    # Same exact contract as the single-group case, on every group row.
+    assert on.input_buffers.input_ids[:3].cpu().tolist() == [99, 123, 123]
+    assert on.context_slot_mapping[:4].tolist() == [30, 31, PAD_SLOT_ID, PAD_SLOT_ID]
+    for row in (1, 2):
+        assert on.all_query_slot_mappings[row][:3].tolist() == [32, 33, 34]
+        assert (on.all_query_slot_mappings[row][3:12] == PAD_SLOT_ID).all()
+        assert (on.all_query_slot_mappings[row][12:] == -2).all()
+    # The stock arm recomputes per group and pads the full tail on both rows.
+    for row in (1, 2):
+        assert off.all_query_slot_mappings[row][:3].tolist() == [32, 33, 34]
+        assert (off.all_query_slot_mappings[row][3:16] == PAD_SLOT_ID).all()
+    # Row 0 (not a draft group) is never written by either arm.
+    assert (on.all_query_slot_mappings[0] == -2).all()
+    assert (off.all_query_slot_mappings[0] == -2).all()
+
+
+def test_draft_prepare_fastpaths_off_platform_keeps_stock_paths(monkeypatch):
+    # Non-ROCm platforms keep the stock paths: every draft group call
+    # recomputes the shared outputs and pads the full in-kernel tail.
+    monkeypatch.setattr(
+        speculator_module, "_draft_prepare_fastpaths_supported", lambda: False
+    )
+    monkeypatch.delenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", raising=False)
+    monkeypatch.delenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False)
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        cp_interleave=2,
+        draft_dcp_size=1,
+        draft_kv_cache_group_ids=[1, 2],
+    )
+    assert out.input_buffers.input_ids[:3].cpu().tolist() == [99, 123, 123]
+    assert out.input_buffers.is_padding[3:16].all()
+    for row in (1, 2):
+        assert out.all_query_slot_mappings[row][:3].tolist() == [32, 33, 34]
+        assert (out.all_query_slot_mappings[row][3:16] == PAD_SLOT_ID).all()
+    assert (out.all_query_slot_mappings[0] == -2).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():

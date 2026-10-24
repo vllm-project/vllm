@@ -10,6 +10,7 @@ To implement non-causal attention, we leverage the sparse attention implementati
 include the future query tokens in the top-k indices for each query token.
 """
 
+import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -225,6 +226,13 @@ class DSparkDeepseekV4Model(nn.Module):
         return hidden_states
 
 
+def _draft_ctxkv_dummyq_disabled() -> bool:
+    """VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1 restores the stock dummy-Q
+    insert (read per call, so eager in-process A/B works; under CUDA graphs
+    the choice is baked at capture)."""
+    return os.environ.get("VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ", "0") == "1"
+
+
 def _insert_context_kv(
     attn: nn.Module,
     kv: torch.Tensor,
@@ -233,15 +241,39 @@ def _insert_context_kv(
 ) -> None:
     """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
 
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+    Uses the shared ``fused_deepseek_v4_kv_rope_insert`` with zero query
+    heads (context tokens have no query) -- the same call
+    ``nvidia/dspark.py`` makes here. With zero query heads the op schedules
+    only the KV branch, preserving its RoPE rounding and quantization, so
+    the dummy-Q allocation, its zero-fill and the quantized dummy-Q write
+    disappear with the cache contents identical by construction. The stock
+    dummy-Q dispatch below stays reachable through
+    ``VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1`` for A/B measurement.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
     n_ctx = kv.shape[0]
+    if not _draft_ctxkv_dummyq_disabled():
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+            kv,
+            swa_cache,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            block_size,
+            attn._flashinfer_fp8_kv_scale
+            if cache_dtype == torch.float8_e4m3fn
+            else None,
+            attn.kv_mxfp8,
+        )
+        logger.warning_once(
+            "draft context-KV dummy-Q removal engaged (KV-only "
+            "fused_deepseek_v4_kv_rope_insert; disable var "
+            "VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ)"
+        )
+        return
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
