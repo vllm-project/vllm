@@ -57,6 +57,7 @@ message ServerInfo {
   string proto_version = 12;
   // Full-attention block size in tokens after initialization; absent if unavailable.
   optional uint64 effective_attention_block_size = 14;
+  bool supports_prefill_progress = 15;
 }
 
 message RlCapabilities {

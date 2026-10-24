@@ -349,6 +349,7 @@ async fn harmony_assistant_event_stream(
                 })
                 .await;
             }
+            DecodedTextEvent::PrefillProgress(_) => {}
             DecodedTextEvent::TextDelta {
                 decoded: _, // harmony takes raw token IDs as input, so we ignore decoded text here
                 sampled:

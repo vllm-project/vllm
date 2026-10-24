@@ -66,6 +66,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -8373,3 +8374,101 @@ def test_drafts_unused_with_async_placeholders():
     (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
     request.num_output_placeholders = 2
     assert not scheduler._drafts_unused(request, 17, 3)
+
+
+def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
+    request = Request(
+        "progress",
+        list(range(100)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    stats = PrefillStats()
+    stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=20,
+        num_external_cached_tokens=0,
+    )
+
+    prefill = Scheduler._make_prefill_progress(request, stats, False, None, 0.0)
+    assert prefill is not None
+    assert prefill.total_compute_tokens == 80
+    assert prefill.remaining_compute_tokens == 80
+
+    decode = Scheduler._make_prefill_progress(request, None, True, None, 0.01)
+    assert decode is not None
+    assert decode.phase == 4  # DECODE
+    assert decode.total_compute_tokens == 80
+    assert decode.remaining_compute_tokens == 0
+
+    request.num_computed_tokens = 60
+    aborted = Scheduler._make_prefill_progress(
+        request, None, False, FinishReason.ABORT, 0.02
+    )
+    assert aborted is not None
+    assert aborted.remaining_compute_tokens == 40
+
+
+def test_prefill_progress_coalesces_work_but_never_delays_load_corrections():
+    request = Request(
+        "progress",
+        list(range(10_000)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    first = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
+    assert first is not None
+    request.num_computed_tokens = 100
+    assert Scheduler._make_prefill_progress(request, None, False, None, 0.05) is None
+    request.num_computed_tokens = 50
+    assert Scheduler._make_prefill_progress(request, None, False, None, 0.25) is None
+    request.num_computed_tokens = 200
+    update = Scheduler._make_prefill_progress(request, None, False, None, 0.25)
+    assert update is not None
+    assert (update.sequence, update.remaining_compute_tokens) == (2, 9800)
+
+    request.num_computed_tokens = 0
+    correction = Scheduler._make_prefill_progress(request, None, False, None, 0.26)
+    assert correction is not None
+    assert correction.remaining_compute_tokens == 10_000
+    stats = PrefillStats()
+    stats.set(
+        num_prompt_tokens=10_000,
+        num_local_cached_tokens=100,
+        num_external_cached_tokens=0,
+    )
+    accounting = Scheduler._make_prefill_progress(request, stats, False, None, 0.265)
+    assert accounting is not None
+    assert accounting.remaining_compute_tokens == 9900
+    assert accounting.cache_accounting_final
+    decode = Scheduler._make_prefill_progress(request, None, True, None, 0.27)
+    assert decode is not None
+    assert decode.remaining_compute_tokens == 0
+    failed = Scheduler._make_prefill_progress(
+        request, None, False, FinishReason.ERROR, 0.28
+    )
+    assert failed is not None
+    assert failed.phase == 7  # FAILED
+
+
+def test_prefill_progress_volume_is_bounded_by_work_instead_of_chunk_count():
+    request = Request(
+        "progress",
+        list(range(10_000)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    snapshots = []
+    for completed in range(10_001):
+        request.num_computed_tokens = completed
+        progress = Scheduler._make_prefill_progress(
+            request, None, False, None, completed * 0.001
+        )
+        if progress is not None:
+            snapshots.append(progress)
+    assert 2 <= len(snapshots) <= 101
+    assert snapshots[-1].remaining_compute_tokens == 0
+    assert [p.sequence for p in snapshots] == list(range(1, len(snapshots) + 1))

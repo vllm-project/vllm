@@ -580,6 +580,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
+        prefill_progress: None,
         timestamps: Default::default(),
     };
 

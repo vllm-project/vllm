@@ -8,7 +8,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::output::{PrefillProgress, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
@@ -87,6 +87,8 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
+    /// Worker-reported progress for the request's prefill work.
+    PrefillProgress(Box<PrefillProgress>),
     /// Decoded text and sampled metadata observed during one output update.
     ///
     /// `decoded` follows the decoder clock. It may be empty while tokens remain
@@ -173,6 +175,10 @@ pub async fn decoded_text_event_stream(
             .await;
         };
         let decoder = decoder.as_mut().unwrap();
+
+        if let Some(progress) = output.prefill_progress {
+            y.yield_ok(DecodedTextEvent::PrefillProgress(progress)).await;
+        }
 
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
@@ -325,7 +331,9 @@ pub async fn decoded_text_event_stream(
             return Ok(());
         }
 
-        if intermediate {
+        if intermediate
+            && (!decoded.text.is_empty() || !new_token_ids.is_empty() || decoded_logprobs.is_some())
+        {
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {

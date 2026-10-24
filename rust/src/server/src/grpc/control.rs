@@ -219,6 +219,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             rl_capabilities: Some(self.rl_capabilities()),
             proto_version: pb::VERSION.to_string(),
             effective_attention_block_size: self.client().effective_attention_block_size(),
+            supports_prefill_progress: true,
         }))
     }
 
