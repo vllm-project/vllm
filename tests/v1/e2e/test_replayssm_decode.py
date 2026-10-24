@@ -580,6 +580,8 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     mamba_ssm_cache_dtype="float16",
                     mamba_cache_mode="align",
                     enable_prefix_caching=True,
+                    # Retain decode checkpoints for the same-history probe.
+                    prefix_cache_retention_interval=None,
                     enable_chunked_prefill=True,
                     enable_mamba_cache_stochastic_rounding=True,
                     mamba_cache_philox_rounds=5,
@@ -593,6 +595,7 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     config = llm.llm_engine.vllm_config
                     assert config.use_v2_model_runner is use_v2
                     assert config.scheduler_config.async_scheduling is async_scheduling
+                    assert config.cache_config.prefix_cache_retention_interval is None
                     (block_size,) = runner.collective_rpc(_stress_mamba_block_size)
                     stress_outputs[use_replayssm], history = _generate_with_preemption(
                         llm, block_size
