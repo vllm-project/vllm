@@ -860,25 +860,19 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
-        self._store_handler = SingleDirectionOffloadingHandler(
+        make_handler = functools.partial(
+            SingleDirectionOffloadingHandler,
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
-            gpu_to_cpu=True,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
         )
-
-        self._load_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
-            blocks_per_chunk=blocks_per_chunk,
-            layer_refs_per_group=kv_caches.group_data_refs,
-            gpu_to_cpu=False,
-            canonical_layout=canonical_layout,
-            host_memory_is_pinned=host_memory_is_pinned,
-        )
+        self._store_handler = make_handler(gpu_to_cpu=True)
+        self._load_handler = make_handler(gpu_to_cpu=False)
+        # Own stream, so sync loads do not queue behind async loads.
+        self._sync_load_handler = make_handler(gpu_to_cpu=False)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
@@ -892,12 +886,22 @@ class CPUOffloadingWorker(OffloadingWorker):
         """Async CPU -> GPU."""
         return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
 
+    def submit_sync_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        return self._sync_load_handler.transfer_async(job_id, src_spec, dst_spec)
+
     def get_finished(self) -> list[TransferResult]:
-        return self._store_handler.get_finished() + self._load_handler.get_finished()
+        return (
+            self._store_handler.get_finished()
+            + self._load_handler.get_finished()
+            + self._sync_load_handler.get_finished()
+        )
 
     def wait(self, job_ids: set[int]) -> None:
         self._store_handler.wait(job_ids)
         self._load_handler.wait(job_ids)
+        self._sync_load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
         handler_failed = False
@@ -907,11 +911,12 @@ class CPUOffloadingWorker(OffloadingWorker):
             logger.exception("Failed to shut down store offloading handler")
             handler_failed = True
 
-        try:
-            self._load_handler.shutdown()
-        except Exception:
-            logger.exception("Failed to shut down load offloading handler")
-            handler_failed = True
+        for handler in (self._load_handler, self._sync_load_handler):
+            try:
+                handler.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down load offloading handler")
+                handler_failed = True
 
         if self._mmap_region is not None:
             if handler_failed:

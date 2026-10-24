@@ -131,6 +131,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         tokens_per_hash=8,
         blocks_per_chunk=4,
         offload_prompt_only=True,
+        extra_config={},
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
@@ -224,9 +225,10 @@ def _make_partial_tail_scheduler(
 def _make_partial_tail_request(
     scheduler: OffloadingConnectorScheduler,
     kv_transfer_params: dict[str, Any] | None = None,
+    request_id: str = "req",
 ) -> MagicMock:
     request = MagicMock()
-    request.request_id = "req"
+    request.request_id = request_id
     request.kv_transfer_params = kv_transfer_params
     request.kv_hints = None
     request.num_prompt_tokens = 30
@@ -474,6 +476,56 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_sync_partial_tail_load_targets_hashed_blocks():
+    """A sync load's blocks are hashed at allocation; the partial-tail load
+    must still target them, matching the async case."""
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=1 << 40)
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (28, False)
+    assert "req" in scheduler._current_batch_sync_loads
+    assert req_status.partial_tail_boundary == 28
+
+    full_blocks = [KVCacheBlock(31), KVCacheBlock(32)]
+    mamba_blocks = [KVCacheBlock(0, is_null=True), KVCacheBlock(41)]
+    for i, block in enumerate(full_blocks + mamba_blocks[1:]):
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(bytes([i])), 0))
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks((full_blocks, mamba_blocks)),
+        num_external_tokens=28,
+    )
+    [load_job] = scheduler._current_batch_load_jobs.values()
+    assert load_job.sync
+    dst_spec = load_job.dst_spec
+    assert isinstance(dst_spec, GPULoadStoreSpec)
+    assert dst_spec.block_ids.tolist() == [31, 32, 41]
+    assert dst_spec.group_sizes == [2, 1]
+    assert dst_spec.block_indices == [0, 1]
+    # Sync-load keys are not held back for other requests.
+    assert not scheduler._chunks_being_loaded
+
+
+def test_sync_load_budget_is_shared_per_step():
+    """Sync loads share one per-step byte budget: a hit that does not fit
+    stays async."""
+    scheduler = _make_partial_tail_scheduler()
+    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
+    assert hit_bytes > 0
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_partial_tail_request(scheduler, request_id="a")
+    second = _make_partial_tail_request(scheduler, request_id="b")
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
+    assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
+    assert scheduler._current_batch_sync_loads == {"a"}
 
 
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
@@ -1426,6 +1478,85 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     )
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_small_hit_loads_synchronously(request_runner, async_scheduling: bool):
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+    # Budget for exactly one chunk per step.
+    config = runner.connector_scheduler.config
+    runner.connector_scheduler.config = config._replace(
+        sync_load_budget_bytes=tokens_per_chunk * config.kv_bytes_per_token
+    )
+
+    def store_all():
+        runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 0
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+    def store_none():
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output([])
+        )
+
+    matched: list[tuple[int | None, bool]] = []
+    get_num_new_matched_tokens = runner.connector_scheduler.get_num_new_matched_tokens
+
+    def record_matched(*args, **kwargs):
+        result = get_num_new_matched_tokens(*args, **kwargs)
+        matched.append(result)
+        return result
+
+    runner.connector_scheduler.get_num_new_matched_tokens = record_matched
+
+    # Offload one chunk, then drop it from the GPU prefix cache.
+    store_all()
+    runner.new_request(token_ids=[0] * tokens_per_chunk + [1])
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    runner.scheduler.reset_prefix_cache()
+
+    # A one-chunk hit fits the budget and loads in the same step. The mock worker
+    # records the worker's wait on it as a flush.
+    store_none()
+    matched.clear()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.new_request(token_ids=[0] * tokens_per_chunk + [1] * tokens_per_chunk)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+    )
+    assert matched == [(tokens_per_chunk, False)]
+
+    # Offload two chunks, then drop them from the GPU prefix cache.
+    store_all()
+    runner.new_request(token_ids=[2] * tokens_per_chunk * 2 + [3])
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=tuple(range(6)))
+    runner.scheduler.reset_prefix_cache()
+
+    # A two-chunk hit exceeds the budget and stays an async load.
+    store_none()
+    matched.clear()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.new_request(token_ids=[2] * tokens_per_chunk * 2 + [3] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=tuple(range(6)))
+    assert matched[0] == (tokens_per_chunk * 2, True)
+
+    # A hit covering the whole prompt stays async: nothing would be left to compute.
+    matched.clear()
+    runner.new_request(token_ids=[0] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(0, 1, 2))
+    assert matched[0] == (tokens_per_chunk, True)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
