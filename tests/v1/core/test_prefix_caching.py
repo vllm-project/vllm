@@ -21,6 +21,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -913,15 +914,12 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-@pytest.mark.parametrize("host_num_blocks,admitted", [(5, False), (6, True)])
-def test_hisparse_async_admission_requires_full_prompt_host_pages(
-    host_num_blocks, admitted, tmp_path
-):
-    """An async load is admitted only if its whole prompt's host pages fit.
-
-    The in-flight prefill's host page is not free, so the waiting request's
-    four prompt pages need six host blocks including the null block.
-    """
+def _make_hisparse_scheduler(
+    tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
+) -> tuple[Scheduler, KVCacheManager]:
+    """A scheduler over a HiSparse manager whose async mock connector matches
+    ``matched_tokens``, forwarding allocations to a HiSparseConnector beside it
+    as MultiConnector does."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -931,73 +929,114 @@ def test_hisparse_async_admission_requires_full_prompt_host_pages(
         model=str(tmp_path),
         skip_tokenizer_init=True,
         max_model_len=128,
-        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
+        **kwargs,
     )
     manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     assert scheduler.scheduler_reserve_full_isl
-    inflight = make_request(
-        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    hisparse = HiSparseConnector(
+        scheduler.vllm_config, KVConnectorRole.SCHEDULER, manager.kv_cache_config
     )
-    scheduler.add_request(inflight)
-    scheduler.schedule()
-    assert inflight in scheduler._inflight_prefills
+    hisparse.bind_kv_cache_manager(manager)
+    mock_update = scheduler.connector.update_state_after_alloc
 
+    def update_state_after_alloc(request, blocks, num_external_tokens):
+        mock_update(request, blocks, num_external_tokens)
+        hisparse.update_state_after_alloc(request, blocks, 0)
+
+    scheduler.connector.update_state_after_alloc = update_state_after_alloc
+    return scheduler, manager
+
+
+def _add_hisparse_request(
+    scheduler: Scheduler, request_id: str, num_pages: int, offset: int = 0
+) -> Request:
     request = make_request(
-        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+        request_id,
+        list(range(offset, offset + num_pages * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
     )
     scheduler.add_request(request)
     scheduler.schedule()
+    return request
 
+
+@pytest.mark.parametrize("host_num_blocks,admitted", [(7, False), (8, True)])
+def test_hisparse_async_admission_requires_full_prompt_host_pages(
+    host_num_blocks, admitted, tmp_path
+):
+    """An async load is admitted only if its whole prompt's host pages fit.
+
+    The in-flight prefill's three prompt pages stay reserved, so the waiting
+    request's four prompt pages need eight host blocks including the null block.
+    """
+    scheduler, manager = _make_hisparse_scheduler(
+        tmp_path, host_num_blocks, HISPARSE_BLOCK_SIZE
+    )
+    inflight = _add_hisparse_request(scheduler, "inflight", 3)
+    assert inflight in scheduler._inflight_prefills
+
+    request = _add_hisparse_request(scheduler, "waiting", 4)
     assert (request in scheduler._inflight_prefills) == admitted
     assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
 
 
-def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path):
+@pytest.mark.parametrize(
+    "host_num_blocks,first_pages,matched_tokens,num_speculative_tokens",
+    [
+        # Once first imports one page, three are free: enough for second's
+        # prompt but not beside first's remaining three.
+        (5, 4, HISPARSE_BLOCK_SIZE, None),
+        # Both prompts are fully imported; first's draft tokens need a fourth
+        # page on resume.
+        (7, 3, 3 * HISPARSE_BLOCK_SIZE - 1, 4),
+    ],
+)
+def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(
+    tmp_path, host_num_blocks, first_pages, matched_tokens, num_speculative_tokens
+):
     """Admitted async loads must not strand each other on host capacity.
 
     Waiting requests keep their blocks and are never preempted, so two imports
-    that each hold a host page while together needing more than the pool has
-    left would never be scheduled again. HiSparse relies on full-ISL admission:
-    a load is admitted only if its whole prompt's host pages fit, so the newest
-    admitted load can always finish and free host blocks for the others.
+    that each hold host pages while together needing more than the pool has
+    left would never be scheduled again. A load is admitted only if its whole
+    sequence, including the spec decode step, fits beside the pages earlier
+    imports still need.
     """
-    from .utils import create_scheduler, mock_kv
-
-    (tmp_path / "config.json").write_text(
-        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    scheduler, _ = _make_hisparse_scheduler(
+        tmp_path,
+        host_num_blocks,
+        matched_tokens,
+        num_speculative_tokens=num_speculative_tokens,
     )
-    scheduler = create_scheduler(
-        model=str(tmp_path),
-        skip_tokenizer_init=True,
-        max_model_len=128,
-        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
-    )
-    # One null block plus three usable host blocks.
-    manager = make_hisparse_kv_cache_manager(32, 4)
-    scheduler.kv_cache_manager = manager
-    scheduler.kv_cache_config = manager.kv_cache_config
-    assert scheduler.scheduler_reserve_full_isl
-    first = make_request(
-        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    second = make_request(
-        "second",
-        list(range(1000, 1000 + 3 * HISPARSE_BLOCK_SIZE)),
-        HISPARSE_BLOCK_SIZE,
-        sha256,
-    )
-    for request in (first, second):
-        scheduler.add_request(request)
-        scheduler.schedule()
+    _add_hisparse_request(scheduler, "first", first_pages)
+    _add_hisparse_request(scheduler, "second", 3, offset=1000)
     admitted = {r.request_id for r in scheduler._inflight_prefills}
+    assert admitted == {"first"}
 
     scheduler.finished_recving_kv_req_ids.update(admitted)
-    num_scheduled_tokens = 0
-    for _ in range(4):
-        num_scheduled_tokens += scheduler.schedule().total_num_scheduled_tokens
-    assert num_scheduled_tokens > 0
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get("first", 0) > 0
+
+
+def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
+    """Like the GPU pool's, the host reservation only gates async loads; a
+    local admission runs and can be preempted, so it cannot strand an import."""
+    # Seven usable host blocks: the import holds one and reserves five, leaving
+    # one, so gating the local request's two pages on the reservation fails.
+    scheduler, _ = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
+    _add_hisparse_request(scheduler, "import", 6)
+    match_external = scheduler.connector.get_num_new_matched_tokens
+    scheduler.connector.get_num_new_matched_tokens = lambda request, num_computed: (
+        (0, False)
+        if request.request_id == "local"
+        else match_external(request, num_computed)
+    )
+    local = _add_hisparse_request(scheduler, "local", 2, offset=1000)
+    assert local in scheduler.running
 
 
 @pytest.mark.parametrize(

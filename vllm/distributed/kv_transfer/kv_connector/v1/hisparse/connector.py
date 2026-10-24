@@ -98,15 +98,18 @@ class HiSparseConnectorScheduler:
         *,
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
+        import_step_tokens: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+        self.import_step_tokens = import_step_tokens
         self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
+        coordinator.import_step_tokens = self.import_step_tokens
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
         if self.coordinator is None:
@@ -244,6 +247,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     and speculative_config is not None
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
+                import_step_tokens=(
+                    1
+                    + vllm_config.num_speculative_tokens
+                    + vllm_config.num_lookahead_tokens
+                    if vllm_config.num_speculative_tokens
+                    else 0
+                ),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(
@@ -387,6 +397,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests[request.request_id] = request
+        assert self.connector_scheduler.coordinator is not None
+        self.connector_scheduler.coordinator.reserve_import(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

@@ -2271,6 +2271,11 @@ class HiSparseSourceManager(FullAttentionManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
+        assert self.coordinator is not None
+        available = self.block_pool.get_num_free_blocks()
+        if apply_admission_cap and total_computed_tokens > num_local_computed_tokens:
+            num_tokens += self.coordinator.import_step_tokens
+            available -= self.coordinator.reserved_import_pages(request_id)
         required = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -2281,8 +2286,7 @@ class HiSparseSourceManager(FullAttentionManager):
         )
         # Host blocks come from a private pool, so they never count against
         # the GPU pool. Use the same admission sentinel as Mamba instead.
-        if required > self.block_pool.get_num_free_blocks():
-            assert self.coordinator is not None
+        if required > available:
             assert self.coordinator.gpu_pool is not None
             return self.coordinator.gpu_pool.num_gpu_blocks + 1
         return 0

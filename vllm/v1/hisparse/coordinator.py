@@ -107,6 +107,8 @@ class HiSparseCoordinator:
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        # Spec decode step tokens an import needs beyond its sequence.
+        self.import_step_tokens = 0
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
@@ -173,6 +175,10 @@ class HiSparseCoordinator:
         self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
+        # request -> full-sequence host pages of an admitted import. A waiting
+        # import holds host pages and is never preempted, so the rest stays
+        # reserved against later admissions.
+        self._import_pages: dict[str, int] = {}
         # Requests whose resident pages were all non-null when last scanned.
         # Pages only become null at admission or import (before the first
         # scan) and when the pool reuses an unpinned page (_lose_page).
@@ -541,6 +547,25 @@ class HiSparseCoordinator:
         self._resident_requests.discard(request_id)
         self._pending_imports[request_id] = num_tokens
 
+    def reserve_import(self, request: Request) -> None:
+        """Reserve the full sequence's host pages of a just-admitted import."""
+        if request.request_id in self._pending_imports:
+            assert self.host_manager is not None
+            self._import_pages[request.request_id] = cdiv(
+                min(request.num_tokens, self.max_model_len) + self.import_step_tokens,
+                self.host_manager.block_size,
+            )
+
+    def reserved_import_pages(self, request_id: str) -> int:
+        """Host pages other admitted imports still need for their sequence."""
+        assert self.host_manager is not None
+        req_to_blocks = self.host_manager.req_to_blocks
+        return sum(
+            max(pages - len(req_to_blocks.get(other_id, ())), 0)
+            for other_id, pages in self._import_pages.items()
+            if other_id != request_id
+        )
+
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
@@ -853,6 +878,7 @@ class HiSparseCoordinator:
         """Detach the request; its clean pages stay readable copies in the pool."""
         self._resident_requests.discard(request_id)
         self._pending_imports.pop(request_id, None)
+        self._import_pages.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
