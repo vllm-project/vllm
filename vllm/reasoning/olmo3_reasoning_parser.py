@@ -22,56 +22,6 @@ class Olmo3ReasoningState(enum.Enum):
     CONTENT = 2
 
 
-@dt.dataclass(frozen=True)
-class Indices:
-    start: int
-    end: int
-
-    def __len__(self):
-        return self.end - self.start
-
-
-def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
-    """Find the longest overlap where the end of string a matches the start
-    of string b.
-
-    Args:
-        a: First string
-        b: Second string
-
-    Returns:
-        Tuple of IndicesTuples representing the overlapping portions in each
-        string, or a tuple of None if no overlap exists
-
-    """
-    # swap so a is always the shorter string
-    a, b, swap = (a, b, False) if len(a) < len(b) else (b, a, True)
-
-    # first check: is a fully contained in b?
-    if a in b:
-        ind_a = Indices(0, len(a))
-        ind_b = Indices(b.index(a), b.index(a) + len(a))
-        return (ind_b, ind_a) if swap else (ind_a, ind_b)
-
-    # second check: does the end of a overlap with the
-    #               beginning of b?
-    for i in range(len(a) - 1, 0, -1):
-        if a[-i:] == b[:i]:
-            ind_a = Indices(len(a) - i, len(a))
-            ind_b = Indices(0, i)
-            return (ind_b, ind_a) if swap else (ind_a, ind_b)
-
-    # third check: does the beginning of a overlap with
-    #              the end of b?
-    for i in range(len(a) - 1, 0, -1):
-        if b[-i:] == a[:i]:
-            ind_a = Indices(0, i)
-            ind_b = Indices(len(b) - i, len(b))
-            return (ind_b, ind_a) if swap else (ind_a, ind_b)
-
-    return None, None
-
-
 @dt.dataclass
 class Olmo3ReasoningBuffer:
     think_start: str = "<think>"
@@ -136,54 +86,56 @@ class Olmo3ReasoningBuffer:
         # is the length of the text buffer
         return len(self.buffer)
 
+    def _tail_awaiting_marker(self) -> bool:
+        # Hold only while the buffer's tail can still grow into a marker: a
+        # suffix that is a proper prefix of think_start/think_end. A delta
+        # that merely occurs inside a marker ("think", "in", ">") cannot
+        # become one unless the text before it already ends with the right
+        # characters, so holding it would only delay output.
+        for marker in (self.think_start, self.think_end):
+            if marker in self.buffer:
+                # a completed marker in the buffer is processed, not held
+                continue
+            limit = min(len(self.buffer), len(marker) - 1)
+            for k in range(1, limit + 1):
+                if marker.startswith(self.buffer[-k:]):
+                    return True
+        return False
+
     def add_text(self, delta_text: str) -> DeltaMessage | None:
         # we start by adding the delta text to the buffer
         self.buffer += delta_text
 
-        # setting this to empty before starting
-        delta_message: DeltaMessage | None = None
-
-        # we start by computing the overlap between the delta_text
-        # and start/end of think tokens.
-        _, overlap_think_start = string_overlap(delta_text, self.think_start)
-        _, overlap_think_end = string_overlap(delta_text, self.think_end)
-
-        partial_overlap_start = overlap_think_start is not None and len(
-            overlap_think_start
-        ) < len(self.think_start)
-        partial_overlap_end = overlap_think_end is not None and len(
-            overlap_think_end
-        ) < len(self.think_end)
-
-        if (
-            partial_overlap_start
-            and self.think_start in self.buffer
-            and not partial_overlap_end
-        ):
-            # we can only process the buffer if partial overlap
-            # is the last part of think token (thus causing
-            # text_buffer to contain the start of think token)
-            # and there are no partial overlaps with end think
-            delta_message = self.process_buffer()
-
-        elif partial_overlap_end and self.think_end in self.buffer:
-            # same as before (partial overlap only allowed)
-            # if the buffer contains the end think token,
-            # but we don't have to check for partial overlap
-            # with start think token because they are handled
-            # by the previous condition
-            delta_message = self.process_buffer()
-
-        elif partial_overlap_start or partial_overlap_end:
-            # in general, if there are overlaps, we don't
-            # process the buffer because we want to wait until
-            # the think token is fully completed.
+        if self._tail_awaiting_marker():
+            # the tail can still complete into a marker with the next
+            # deltas, so wait for them
             return None
-        else:
-            # we process the buffer as normal
-            delta_message = self.process_buffer()
 
-        return delta_message
+        # otherwise process the buffer as normal
+        return self.process_buffer()
+
+    def drain(self) -> DeltaMessage | None:
+        # Flush whatever the buffer still holds once the stream is over.
+        # A held tail can never complete into a marker anymore, so it is
+        # emitted as-is: reasoning while the reasoning block is still open,
+        # content once it closed, matching what earlier deltas streamed.
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        while len(self.buffer):
+            before = len(self.buffer)
+            delta_message = self.process_buffer()
+            if delta_message is not None:
+                if delta_message.reasoning:
+                    reasoning_parts.append(delta_message.reasoning)
+                if delta_message.content:
+                    content_parts.append(delta_message.content)
+            if len(self.buffer) == before:
+                break
+        reasoning = "".join(reasoning_parts) or None
+        content = "".join(content_parts) or None
+        if reasoning is None and content is None:
+            return None
+        return DeltaMessage(reasoning=reasoning, content=content)
 
 
 class Olmo3ReasoningParser(ReasoningParser):
@@ -315,3 +267,13 @@ class Olmo3ReasoningParser(ReasoningParser):
             delta_message = self.buffer.process_buffer()
 
         return delta_message
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Flush text the buffer still holds once the stream has ended.
+
+        The buffer holds a delta back while it can still grow into a
+        marker; when generation ends on such a delta the tail can never
+        complete, and without a flush it would be dropped. Called by the
+        serving layer from ``parse_delta(finished=True)``.
+        """
+        return self.buffer.drain()
