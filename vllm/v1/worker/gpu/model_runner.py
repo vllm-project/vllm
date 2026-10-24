@@ -2213,6 +2213,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            lora_load_event=self.take_lora_load_event(),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
@@ -2357,6 +2358,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            lora_load_event=self.take_lora_load_event(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

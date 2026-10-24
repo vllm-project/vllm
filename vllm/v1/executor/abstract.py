@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -377,6 +378,12 @@ class Executor(ABC):
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        """LoRA adapter cache changes since the last take, from the rank whose
+        ModelRunnerOutput the engine reads."""
+        events: list[LoRALoadEvent | None] = self.collective_rpc("take_lora_load_event")
+        return events[0]
 
     def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache in each worker."""

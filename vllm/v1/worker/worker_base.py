@@ -11,6 +11,7 @@ import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
@@ -205,6 +206,9 @@ class WorkerBase:
 
     def list_loras(self) -> set[int]:
         raise NotImplementedError
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        return None
 
     @property
     def vocab_size(self) -> int:

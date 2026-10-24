@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorProm,
 )
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
@@ -34,7 +35,7 @@ from vllm.v1.metrics.stats import (
     PromptTokenStats,
     SchedulerStats,
 )
-from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.metrics.utils import PromMetric, create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -78,6 +79,11 @@ class StatLoggerBase(ABC):
         pass
 
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
+        pass
+
+    def record_lora_load_event(  # noqa
+        self, event: LoRALoadEvent, engine_idx: int = 0
+    ):
         pass
 
 
@@ -1090,6 +1096,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Gauge | None = None
+        self.gauge_lora_adapter_loaded: Gauge | None = None
+        self.histogram_lora_load_seconds: dict[int, Histogram] = {}
+        self.histogram_lora_activate_seconds: dict[int, Histogram] = {}
+        self.gauge_lora_gpu_adapters: dict[int, PromMetric] = {}
+        self.gauge_lora_cpu_adapters: dict[int, PromMetric] = {}
+        # Label tuples emitted by the last load event, per engine, so series
+        # for evicted adapters can be removed.
+        self._lora_loaded_series: dict[
+            int, set[tuple[str, str, str, str, str, str]]
+        ] = {}
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
                 logger.warning(
@@ -1102,7 +1118,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.max_lora = vllm_config.lora_config.max_loras
             self.gauge_lora_info = self._gauge_cls(
                 name="vllm:lora_requests_info",
-                documentation="Running stats on lora requests.",
+                documentation=(
+                    "Running stats on lora requests. "
+                    "DEPRECATED: encodes adapter names into comma-separated "
+                    "label values; superseded by vllm:lora_adapter_loaded, "
+                    "vllm:num_gpu_loaded_lora_adapters and "
+                    "vllm:num_cpu_loaded_lora_adapters."
+                ),
                 multiprocess_mode="sum",
                 labelnames=[
                     self.labelname_max_lora,
@@ -1110,6 +1132,123 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_running_lora_adapters,
                 ],
             )
+
+            gauge_lora_gpu_adapters = self._gauge_cls(
+                name="vllm:num_gpu_loaded_lora_adapters",
+                documentation="Number of LoRA adapters loaded into GPU slots.",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_lora_gpu_adapters = create_metric_per_engine(
+                gauge_lora_gpu_adapters, per_engine_labelvalues
+            )
+
+            gauge_lora_cpu_adapters = self._gauge_cls(
+                name="vllm:num_cpu_loaded_lora_adapters",
+                documentation=(
+                    "Number of LoRA adapters resident in the worker's CPU "
+                    "cache (superset of the GPU-loaded set)."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_lora_cpu_adapters = create_metric_per_engine(
+                gauge_lora_cpu_adapters, per_engine_labelvalues
+            )
+
+            gauge_lora_gpu_slots = self._gauge_cls(
+                name="vllm:max_gpu_lora_adapters",
+                documentation="Number of GPU LoRA slots (max_loras).",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            for gauge in create_metric_per_engine(
+                gauge_lora_gpu_slots, per_engine_labelvalues
+            ).values():
+                gauge.set(vllm_config.lora_config.max_loras)
+
+            gauge_lora_cpu_slots = self._gauge_cls(
+                name="vllm:max_cpu_lora_adapters",
+                documentation="Number of CPU cache LoRA slots (max_cpu_loras).",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            for gauge in create_metric_per_engine(
+                gauge_lora_cpu_slots, per_engine_labelvalues
+            ).values():
+                gauge.set(vllm_config.lora_config.max_cpu_loras)
+
+            self.gauge_lora_adapter_loaded = self._gauge_cls(
+                name="vllm:lora_adapter_loaded",
+                documentation=(
+                    "Whether a LoRA adapter is loaded in the worker's adapter "
+                    "caches. The series exists (value 1) while the adapter is "
+                    "resident; 'level' is 'gpu' when the adapter is active in "
+                    "a GPU slot and 'cpu' when it is only in the host cache. "
+                    "'rank' is the adapter's LoRA rank."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["adapter_name", "level", "pinned", "rank"],
+            )
+
+            histogram_lora_load_seconds = self._histogram_cls(
+                name="vllm:lora_adapter_load_seconds",
+                documentation=(
+                    "Histogram of LoRA adapter transition time in seconds. "
+                    "'transition' is 'load' for a read from disk into the "
+                    "CPU cache and 'activate' for a move from the CPU cache "
+                    "into a GPU slot."
+                ),
+                buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+                labelnames=labelnames + ["transition"],
+            )
+            self.histogram_lora_load_seconds = {
+                idx: histogram_lora_load_seconds.labels(*labelvalues, "load")
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.histogram_lora_activate_seconds = {
+                idx: histogram_lora_load_seconds.labels(*labelvalues, "activate")
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+
+    def record_lora_load_event(self, event: LoRALoadEvent, engine_idx: int = 0):
+        if self.gauge_lora_adapter_loaded is None:
+            return
+        for timing in event.loads:
+            histograms = (
+                self.histogram_lora_load_seconds
+                if timing.transition == "load"
+                else self.histogram_lora_activate_seconds
+            )
+            histograms[engine_idx].observe(timing.seconds)
+        self.gauge_lora_gpu_adapters[engine_idx].set(len(event.gpu_adapters))
+        self.gauge_lora_cpu_adapters[engine_idx].set(len(event.cpu_adapters))
+
+        model_name, engine_label = self.per_engine_labelvalues[engine_idx]
+        gpu_adapters = set(event.gpu_adapters)
+        pinned_adapters = set(event.pinned_adapters)
+        new_series = {
+            (
+                str(model_name),
+                str(engine_label),
+                adapter_name,
+                "gpu" if adapter_name in gpu_adapters else "cpu",
+                str(adapter_name in pinned_adapters).lower(),
+                str(event.ranks.get(adapter_name, 0)),
+            )
+            for adapter_name in event.cpu_adapters
+        }
+        prev_series = self._lora_loaded_series.get(engine_idx, set())
+        for labels in prev_series - new_series:
+            # Zero before removing: under prometheus multiprocess mode
+            # remove() only deletes the in-process child while the
+            # mmap-backed sample keeps its last value, and the Ray backend
+            # cannot delete series at all.
+            self.gauge_lora_adapter_loaded.labels(*labels).set(0)
+            self.gauge_lora_adapter_loaded.remove(*labels)
+        for labels in new_series:
+            self.gauge_lora_adapter_loaded.labels(*labels).set(1)
+        self._lora_loaded_series[engine_idx] = new_series
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
@@ -1443,6 +1582,10 @@ class StatLoggerManager:
         """Record one frontend admission rejection on aggregate loggers."""
         for stat_logger in self.stat_loggers:
             stat_logger.record_admission_rejection(reason)
+
+    def record_lora_load_event(self, event: LoRALoadEvent, engine_idx: int = 0):
+        for stat_logger in self.stat_loggers:
+            stat_logger.record_lora_load_event(event, engine_idx)
 
     def log(self):
         for logger in self.stat_loggers:
