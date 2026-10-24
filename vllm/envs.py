@@ -614,6 +614,35 @@ def _resolve_rust_cli_path() -> str | None:
     return raw
 
 
+def _vllm_rocm_use_aiter_enabled() -> bool:
+    """Resolve ``VLLM_ROCM_USE_AITER``.
+
+    An explicit ``0`` or ``1`` always wins. When the variable is unset, AITER
+    is on only if the package is installed and the GPU is CDNA3 or newer
+    (MI300, MI355). NVIDIA, MI250, and machines without AITER keep the
+    existing path, so recipes no longer need to export ``=1`` on supported
+    GPUs. ``=0`` remains the opt-out.
+    """
+    raw = os.environ.get("VLLM_ROCM_USE_AITER")
+    if raw is not None:
+        return raw.lower() in ("true", "1")
+    try:
+        from importlib.util import find_spec
+
+        if find_spec("aiter") is None:
+            return False
+        # rocm.py reads this flag while it is still importing. Bail out
+        # instead of re-entering a half-initialized platform module.
+        rocm = sys.modules.get("vllm.platforms.rocm")
+        if rocm is not None and not hasattr(rocm, "get_cdna_version"):
+            return False
+        from vllm.platforms.rocm import get_cdna_version
+
+        return get_cdna_version() > 2
+    except Exception:
+        return False
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
@@ -1256,9 +1285,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
-    "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
-    ),
+    # Explicit 0/1 wins. Unset defaults on for CDNA3+ with AITER installed.
+    "VLLM_ROCM_USE_AITER": _vllm_rocm_use_aiter_enabled,
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (

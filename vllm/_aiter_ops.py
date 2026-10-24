@@ -2118,6 +2118,7 @@ class rocm_aiter_ops:
 
     Environment Variables:
         VLLM_ROCM_USE_AITER: Main toggle for all AITER operations.
+            Unset defaults on for CDNA3+ when AITER is installed. ``0`` opts out.
         VLLM_ROCM_USE_AITER_LINEAR: Controls GEMM and quantization ops.
         VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
         VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
@@ -2409,11 +2410,13 @@ class rocm_aiter_ops:
         from aiter.mla import mla_decode_fwd
 
         if "causal" not in inspect.signature(mla_decode_fwd).parameters:
-            raise RuntimeError(
-                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
-                "The installed aiter is causal-only; upgrade aiter rather than "
-                "falling back to another MLA backend."
+            # Default-on must not abort backend selection. Callers treat False
+            # as "not supported" and keep TRITON_MLA.
+            logger.warning_once(
+                "Installed AITER mla_decode_fwd has no causal argument; "
+                "ROCM_AITER_MLA non-causal decode is disabled."
             )
+            return False
         return True
 
     @classmethod

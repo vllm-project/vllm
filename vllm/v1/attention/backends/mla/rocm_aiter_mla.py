@@ -528,10 +528,15 @@ class AiterMLABackend(MLACommonBackend):
         # AITER v0.1.21.post2 still exports that argument on gfx942, whose ASM
         # manifest has no non-causal decode kernels. Selecting this backend
         # there reaches `cannot get heuristic kernel!` instead of TRITON_MLA.
-        return bool(
-            rocm_aiter_ops.mla_decode_supports_non_causal()
-            and _aiter_mla_non_causal_asm_kernels()
-        )
+        try:
+            return bool(
+                rocm_aiter_ops.mla_decode_supports_non_causal()
+                and _aiter_mla_non_causal_asm_kernels()
+            )
+        except Exception:
+            # A broken or partial AITER install must not fail backend
+            # selection; the caller falls through to TRITON_MLA.
+            return False
 
     @classmethod
     def validate_configuration(
