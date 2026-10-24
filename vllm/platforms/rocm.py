@@ -1001,8 +1001,11 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """Query if the set of gpus are fully connected by xgmi (1 hop)."""
+        """Query if the set of gpus are fully connected: by xgmi (1 hop), or,
+        on RDNA4 (which has no xgmi), by PCIe peer-to-peer between every pair."""
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
+        if on_rdna4():
+            return cls._is_pcie_p2p_connected(handles)
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
@@ -1014,6 +1017,31 @@ class RocmPlatform(Platform):
                     except AmdSmiException as error:
                         logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
                         return False
+        return True
+
+    @staticmethod
+    def _is_pcie_p2p_connected(handles: list) -> bool:
+        """Whether every pair of GPUs can access each other over PCIe
+        peer-to-peer. Must be called inside an amdsmi context."""
+        try:
+            from amdsmi import AmdSmiLinkType, amdsmi_is_P2P_accessible
+        except ImportError as error:
+            logger.warning("AMD PCIe peer-to-peer detection unavailable: %r", error)
+            return False
+        for i, handle in enumerate(handles):
+            for peer_handle in handles[i + 1 :]:
+                try:
+                    link_type = amdsmi_topo_get_link_type(handle, peer_handle)
+                    pcie = AmdSmiLinkType.AMDSMI_LINK_TYPE_PCIE
+                    if link_type["type"] != pcie or not amdsmi_is_P2P_accessible(
+                        handle, peer_handle
+                    ):
+                        return False
+                except AmdSmiException as error:
+                    logger.error(
+                        "AMD PCIe peer-to-peer detection failed.", exc_info=error
+                    )
+                    return False
         return True
 
     @classmethod
@@ -1224,8 +1252,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
+        # MI300 series over xgmi, RDNA4 over PCIe peer-to-peer.
+        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"]) or on_rdna4()
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
