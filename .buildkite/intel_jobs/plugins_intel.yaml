@@ -1,0 +1,29 @@
+group: Plugins Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: ":intel: (BMG) BitsAndBytes Plugin (2 GPUs)"
+  key: bitsandbytes-plugin-2-intel-gpus
+  timeout_in_minutes: 30
+  device: intel_gpu
+  num_devices: 2
+  optional: true
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/bitsandbytes
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install --no-deps bitsandbytes\>=0.48.1 vllm-bnb-plugin\>=0.0.1 &&
+    cd tests &&
+    pytest -v -s plugins_tests/bitsandbytes -m distributed(num_gpus=2)'
