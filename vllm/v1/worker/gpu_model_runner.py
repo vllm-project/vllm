@@ -2394,7 +2394,11 @@ class GPUModelRunner(
                 :num_reqs_padded
             ]
 
-        if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
+        if (
+            logits_indices is not None
+            and self.cache_config.kv_sharing_fast_prefill
+            and max_query_len > 1
+        ):
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
@@ -2409,6 +2413,7 @@ class GPUModelRunner(
         cached_attn_metadata: dict[
             tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
         ] = {}
+        same_group_decode_cache: dict[tuple[int, KVCacheSpec], AttentionMetadata] = {}
 
         def _build_attn_group_metadata(
             kv_cache_gid: int,
@@ -2422,6 +2427,17 @@ class GPUModelRunner(
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
             cache_key = (kv_cache_spec, type(builder))
+
+            group_decode_key = (
+                kv_cache_gid,
+                kv_cache_spec,
+            )
+            is_kv_sharing_decode = (
+                not for_cudagraph_capture
+                and common_attn_metadata.logits_indices_padded is None
+                and self.cache_config.kv_sharing_fast_prefill
+                and ubid is None
+            )
 
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
@@ -2447,6 +2463,8 @@ class GPUModelRunner(
                 attn_metadata_i = attn_group.build_metadata_for_cudagraph_capture(
                     common_attn_metadata, ubid or 0
                 )
+            elif is_kv_sharing_decode and group_decode_key in same_group_decode_cache:
+                attn_metadata_i = same_group_decode_cache[group_decode_key]
             elif (
                 cache_key in cached_attn_metadata
                 and builder.supports_update_block_table
@@ -2458,6 +2476,8 @@ class GPUModelRunner(
                     ),
                     common_attn_metadata.slot_mapping,
                 )
+                if is_kv_sharing_decode:
+                    same_group_decode_cache[group_decode_key] = attn_metadata_i
             else:
                 attn_metadata_i = attn_group.build_metadata(
                     common_attn_metadata,
@@ -2466,6 +2486,8 @@ class GPUModelRunner(
                 )
                 if builder.supports_update_block_table:
                     cached_attn_metadata[cache_key] = attn_metadata_i
+                if is_kv_sharing_decode:
+                    same_group_decode_cache[group_decode_key] = attn_metadata_i
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
