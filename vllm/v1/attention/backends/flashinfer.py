@@ -564,11 +564,19 @@ class FlashInferBackend(AttentionBackend):
         # picks a large kernel block we cannot serve.
         use_large_pages = False
         vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None and vllm_config.model_config is not None:
+        if kv_cache_spec is not None:
+            assert isinstance(kv_cache_spec, AttentionSpec)
+            num_qo_heads = kv_cache_spec.num_query_heads
+            num_kv_heads = kv_cache_spec.num_kv_heads
+        elif vllm_config is not None and vllm_config.model_config is not None:
             pc = vllm_config.parallel_config
             mc = vllm_config.model_config
             num_qo_heads = mc.get_num_attention_heads(pc)
             num_kv_heads = mc.get_num_kv_heads(pc)
+        else:
+            num_qo_heads = None
+            num_kv_heads = 0
+        if num_qo_heads is not None and vllm_config is not None:
             use_large_pages = (
                 num_kv_heads > 0
                 and num_qo_heads // num_kv_heads > 1

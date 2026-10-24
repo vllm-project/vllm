@@ -233,3 +233,77 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.num_heads_q == 16
     assert builder.num_heads_kv == 2
     assert builder.headdim == 64
+
+
+@pytest.mark.parametrize("sliding_window", [None, 4096])
+def test_attention_cache_spec_carries_layer_query_heads(sliding_window):
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    layer = SimpleNamespace(
+        attn_type=AttentionType.DECODER,
+        num_heads=40,
+        num_kv_heads=40,
+        head_size=128,
+        head_size_v=128,
+        kv_cache_dtype="auto",
+        kv_cache_torch_dtype=torch.bfloat16,
+        sliding_window=sliding_window,
+        attn_backend=SimpleNamespace(
+            is_mla=lambda: False,
+            customize_spec=lambda spec: spec,
+            get_supported_kernel_block_sizes=lambda spec: [16, 32, 64],
+        ),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=512, skip_page_size_padded=None)
+    )
+    spec = Attention.get_kv_cache_spec(layer, config)
+    assert isinstance(spec, AttentionSpec)
+    assert spec.num_query_heads == 40
+    assert spec.num_kv_heads == 40
+
+
+@pytest.mark.parametrize("has_config", [False, True])
+@pytest.mark.parametrize(
+    "num_query_heads,num_kv_heads,expected",
+    [(40, 40, 64), (10, 10, 64), (4, 4, 64), (24, 4, 512), (8, 4, 512), (None, 4, 64)],
+)
+def test_flashinfer_kernel_pages_use_layer_heads(
+    monkeypatch, num_query_heads, num_kv_heads, expected, has_config
+):
+    pytest.importorskip("flashinfer")
+    import vllm.v1.attention.backends.flashinfer as backend
+    from vllm.v1.worker.utils import select_common_block_size
+
+    config = SimpleNamespace(
+        parallel_config=object(),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 24,
+            get_num_kv_heads=lambda _: 4,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "get_current_vllm_config_or_none",
+        lambda: config if has_config else None,
+    )
+    if not has_config:
+        expected = 64
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability_family", lambda _: True
+    )
+    monkeypatch.setattr(backend, "can_use_trtllm_attention", lambda *a, **kw: True)
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    spec = FullAttentionSpec(
+        block_size=512,
+        head_size=128,
+        dtype=torch.bfloat16,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+    )
+    assert (
+        select_common_block_size(512, [backend.FlashInferBackend], [spec]) == expected
+    )

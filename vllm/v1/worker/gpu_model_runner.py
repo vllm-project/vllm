@@ -6679,6 +6679,10 @@ class GPUModelRunner(
                 # fallback can never spuriously merge them with attention
                 # layers.
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
+                if isinstance(layer_kv_cache_spec, AttentionSpec):
+                    layer_kv_cache_spec = replace(
+                        layer_kv_cache_spec, num_query_heads=num_heads_q or None
+                    )
                 key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend, layer_kv_cache_spec, num_heads_q

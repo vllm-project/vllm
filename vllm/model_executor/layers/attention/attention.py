@@ -630,7 +630,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # bytes per block. Otherwise (page_size_padded is None) take the
             # primary block size when the backend can run it unsplit: if this
             # page does not divide the primary page, ``unify`` then pads it
-            # (padded pages cannot be split) instead of scaling a small block
+            # instead of scaling a small block
             # to a size coprime with the primary one, which inflates the
             # scheduler LCM (e.g. a 1024 B/token SWA draft next to a 1152
             # B/token MLA target: 1728 vs 1536 gives LCM 13824). Backends that
@@ -642,6 +642,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 SlidingWindowSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
+                    num_query_heads=self.num_heads,
                     head_size=self.head_size,
                     head_size_v=self.head_size_v,
                     dtype=self.kv_cache_torch_dtype,
@@ -661,6 +662,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
@@ -672,6 +674,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,

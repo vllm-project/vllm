@@ -568,6 +568,39 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     assert cache_config.block_size == block_size
 
 
+@pytest.mark.parametrize("draft_kv_heads", [2, 16])
+def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
+    """An EAGLE drafter with more KV per token than the target sets the largest
+    attention page. Sized for the target alone, the block makes that page several
+    Mamba pages, and the planner pads every Mamba page up to it."""
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    draft = SimpleNamespace(
+        use_mla=False,
+        get_num_kv_heads=lambda parallel_config: draft_kv_heads,
+        get_head_size=lambda: 128,
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=draft, draft_parallel_config=None, num_speculative_tokens=3
+    )
+    cache_config = vllm_config.cache_config
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+
+    model_config = vllm_config.model_config
+    target_page = (
+        cache_config.block_size
+        * FullAttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=model_config.dtype,
+        ).page_size_bytes
+    )
+    draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
+    assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
+
+
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     # XPU's GDN rounding runs after super()'s check, so it must check again.
     try:
