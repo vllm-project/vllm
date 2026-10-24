@@ -8,7 +8,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    moe_padding_mask,
+)
 
 
 def _quantize_input(
@@ -78,6 +81,16 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
             a1 = a1 * topk_weights.to(a1.dtype)
+
+        if (
+            quant_config.quant_dtype is not None
+            and quant_config.a1_scale is None
+            and quant_config.block_shape is None
+            and not quant_config.per_act_token_quant
+        ):
+            is_padding = moe_padding_mask(a1.shape[0])
+            if is_padding is not None:
+                a1 = a1.masked_fill(is_padding.unsqueeze(1), 0)
 
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
 
