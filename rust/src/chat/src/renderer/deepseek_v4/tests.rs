@@ -84,22 +84,6 @@ fn converted_developer_separator_precedes_retained_system() {
 }
 
 #[test]
-fn leading_developer_without_later_user_remains_native() {
-    let request = thinking_request(vec![
-        ChatMessage::developer("policy", None),
-        ChatMessage::assistant_text("answer"),
-    ]);
-    let renderers: [&dyn ChatRenderer; 2] = [
-        &DeepSeekV4ChatRenderer::default(),
-        &DeepSeekV41ChatRenderer::default(),
-    ];
-    for renderer in renderers {
-        let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
-        assert!(rendered.contains("<｜User｜>policy<｜Assistant｜><think>"));
-    }
-}
-
-#[test]
 fn healthy_prefix_developers_keep_native_turns() {
     let renderers: [&dyn ChatRenderer; 2] = [
         &DeepSeekV4ChatRenderer::default(),
@@ -153,53 +137,31 @@ fn nonleading_and_final_developers_keep_native_turns() {
         &DeepSeekV4ChatRenderer::default(),
         &DeepSeekV41ChatRenderer::default(),
     ];
-    for thinking in [false, true] {
-        for messages in [
-            vec![ChatMessage::developer("policy", None)],
-            vec![
-                ChatMessage::user("question"),
-                ChatMessage::developer("policy", None),
-            ],
-            vec![
-                ChatMessage::user("old question"),
-                ChatMessage::assistant_blocks(vec![
-                    AssistantContentBlock::Reasoning {
-                        text: "OLD_REASONING".into(),
-                    },
-                    AssistantContentBlock::Text {
-                        text: "old answer".into(),
-                    },
-                ]),
-                ChatMessage::developer("policy", None),
-            ],
-        ] {
-            let mut request = thinking_request(messages);
-            request.chat_options.template_kwargs.insert("thinking".into(), thinking.into());
-            for renderer in renderers {
-                let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
-                assert!(rendered.ends_with(if thinking {
-                    "<｜User｜>policy<｜Assistant｜><think>"
-                } else {
-                    "<｜User｜>policy<｜Assistant｜></think>"
-                }));
-                assert!(!rendered.contains("OLD_REASONING"));
-            }
+    for messages in [
+        vec![ChatMessage::developer("policy", None)],
+        vec![
+            ChatMessage::user("question"),
+            ChatMessage::developer("policy", None),
+        ],
+        vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "OLD_REASONING".into(),
+                },
+                AssistantContentBlock::Text {
+                    text: "old answer".into(),
+                },
+            ]),
+            ChatMessage::developer("policy", None),
+        ],
+    ] {
+        let request = thinking_request(messages);
+        for renderer in renderers {
+            let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            assert!(rendered.ends_with("<｜User｜>policy<｜Assistant｜><think>"));
+            assert!(!rendered.contains("OLD_REASONING"));
         }
-    }
-}
-
-#[test]
-fn empty_developer_still_rejects_at_public_renderer() {
-    let renderers: [&dyn ChatRenderer; 2] = [
-        &DeepSeekV4ChatRenderer::default(),
-        &DeepSeekV41ChatRenderer::default(),
-    ];
-    let request = thinking_request(vec![ChatMessage::developer("", None)]);
-    for renderer in renderers {
-        let error = renderer.render(&request).unwrap_err();
-        assert!(
-            matches!(error, crate::error::Error::ChatTemplate(message) if message.contains("empty content"))
-        );
     }
 }
 

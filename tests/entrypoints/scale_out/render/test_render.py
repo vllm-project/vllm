@@ -435,6 +435,40 @@ async def client(server):
         yield http_client
 
 
+@pytest.fixture(scope="module")
+def deepseek_v4_server():
+    args = ["--tokenizer-mode", "deepseek_v4"]
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_responses_render_keeps_leading_developer_with_reasoning(
+    deepseek_v4_server,
+):
+    """DeepSeek V4 thinking cleanup must not drop leading developer instructions."""
+    token_ids = {}
+    async with httpx.AsyncClient(
+        base_url=deepseek_v4_server.url_for(""), timeout=30.0
+    ) as http_client:
+        for role in ("developer", "system"):
+            response = await http_client.post(
+                "/v1/responses/render",
+                json={
+                    "model": MODEL_NAME,
+                    "input": [
+                        {"role": role, "content": "Answer with the code cobalt."},
+                        {"role": "user", "content": "OK."},
+                    ],
+                    "reasoning": {"effort": "high"},
+                },
+            )
+            assert response.status_code == 200, response.text
+            token_ids[role] = response.json()["token_ids"]
+
+    assert token_ids["developer"] == token_ids["system"]
+
+
 @pytest.mark.asyncio
 async def test_responses_render_basic(client):
     response = await client.post(
