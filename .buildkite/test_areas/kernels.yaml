@@ -38,6 +38,8 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - vllm/model_executor/layers/rotary_embedding/fused_vision_qk_rope.py
+  - vllm/model_executor/models/qwen2_5_vl.py
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
