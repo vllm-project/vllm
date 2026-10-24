@@ -57,13 +57,13 @@ class TestAsyncLookupManager:
     def test_found_key_returns_true(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         assert mgr.lookup(_key(1), _ctx()) is None
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.PENDING
+        assert mgr._current_state_by_key[_key(1)].phase is LookupPhase.PENDING
         mgr.flush()
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.IN_FLIGHT
+        assert mgr._current_state_by_key[_key(1)].phase is LookupPhase.IN_FLIGHT
         mgr._results_ready.wait()
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), _ctx()) is True
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.RESOLVED
+        assert mgr._current_state_by_key[_key(1)].phase is LookupPhase.RESOLVED
         mgr.shutdown()
 
     def test_not_found_key_returns_false(self):
@@ -99,7 +99,7 @@ class TestAsyncLookupManager:
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), ctx) is True
         mgr.cleanup("req_a")
-        assert _key(1) not in mgr._lookup_state
+        assert _key(1) not in mgr._current_state_by_key
         mgr.shutdown()
 
     def test_cleanup_preserves_shared_entries(self):
@@ -115,9 +115,9 @@ class TestAsyncLookupManager:
         mgr.lookup(_key(1), ctx_a)
         mgr.cleanup("req_a")
         # Key still present because req_b still references it
-        assert _key(1) in mgr._lookup_state
+        assert _key(1) in mgr._current_state_by_key
         mgr.cleanup("req_b")
-        assert _key(1) not in mgr._lookup_state
+        assert _key(1) not in mgr._current_state_by_key
         mgr.shutdown()
 
     def test_cleanup_reuses_in_flight_probe(self, monkeypatch: pytest.MonkeyPatch):
@@ -140,10 +140,10 @@ class TestAsyncLookupManager:
             assert mgr.lookup(key, _ctx("req_a")) is None
             mgr.flush()
             assert probe_started.wait(timeout=5)
-            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
+            assert mgr._current_state_by_key[key].phase is LookupPhase.IN_FLIGHT
             mgr.cleanup("req_a")
             assert mgr.lookup(key, ctx_b) is None
-            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
+            assert mgr._current_state_by_key[key].phase is LookupPhase.IN_FLIGHT
             mgr.flush()
 
             release_probe.set()
@@ -157,6 +157,45 @@ class TestAsyncLookupManager:
         assert mgr.batch_lookup_calls == 1
         assert replacement_result is True
 
+    @pytest.mark.parametrize("miss_source", ["probe", "mark_miss"])
+    def test_new_request_reprobes_cached_miss(self, miss_source: str):
+        """Another instance may write a block to a shared tier after it missed,
+        so a new request re-probes instead of inheriting the cached miss. The
+        earlier request keeps its own verdict, so a failed load's corrected miss
+        cannot flip back to a hit (failed-load livelock, #49176)."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        ctx_a = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        if miss_source == "mark_miss":
+            mgr._existing.add(key)
+        try:
+            assert mgr.lookup(key, ctx_a) is None
+            mgr.flush()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            if miss_source == "mark_miss":
+                assert mgr.lookup(key, ctx_a) is True
+                mgr.mark_miss([key])
+            else:
+                mgr._existing.add(key)
+            assert mgr.lookup(key, ctx_a) is False
+
+            assert mgr.lookup(key, ctx_b) is None
+            mgr.flush()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            assert mgr.lookup(key, ctx_b) is True
+            assert mgr.lookup(key, ctx_a) is False
+            assert mgr.batch_lookup_calls == 2
+
+            mgr.cleanup("req_a")
+            assert mgr._current_state_by_key[key].result is True
+            mgr.cleanup("req_b")
+            assert key not in mgr._current_state_by_key
+        finally:
+            mgr.shutdown()
+
     @pytest.mark.parametrize(
         "reclaim_at_shutdown", [False, True], ids=["flush", "shutdown"]
     )
@@ -168,18 +207,18 @@ class TestAsyncLookupManager:
             mgr.lookup(key, _ctx("req_a"))
             mgr.flush()
             mgr.cleanup("req_a")
-            assert key in mgr._lookup_state
-            assert not mgr._req_keys
+            assert key in mgr._current_state_by_key
+            assert not mgr._request_states
 
             if not reclaim_at_shutdown:
                 batch = mgr._pending_results.get(timeout=5)
                 mgr._pending_results.put(batch)
                 mgr.flush()
-                assert key not in mgr._lookup_state
+                assert key not in mgr._current_state_by_key
         finally:
             mgr.shutdown()
 
-        assert not mgr._lookup_state
+        assert not mgr._current_state_by_key
         assert mgr._pending_results.empty()
 
     def test_stale_result_ignored_after_cleanup_and_key_reuse(self):
@@ -188,11 +227,11 @@ class TestAsyncLookupManager:
         ctx_a = _ctx("req_a")
         ctx_b = _ctx("req_b")
         assert mgr.lookup(key, ctx_a) is None
-        stale_generation = mgr._lookup_state[key].generation
+        stale_generation = mgr._current_state_by_key[key].generation
         mgr.cleanup("req_a")
 
         assert mgr.lookup(key, ctx_b) is None
-        generation = mgr._lookup_state[key].generation
+        generation = mgr._current_state_by_key[key].generation
         assert generation != stale_generation
 
         mgr.flush()
@@ -237,7 +276,7 @@ class TestAsyncLookupManager:
         mgr._results_ready.clear()
         mgr.lookup(_key(1), ctx)
         mgr.cleanup("nonexistent")
-        assert _key(1) in mgr._lookup_state
+        assert _key(1) in mgr._current_state_by_key
         mgr.shutdown()
 
     def test_multiple_flushes_across_steps(self):
@@ -274,8 +313,8 @@ class TestAsyncLookupManager:
         tier calls mark_miss(), flipping the cached True to False; every
         subsequent lookup then returns False (MISS) directly, WITHOUT enqueuing
         a fresh batch_lookup — that is what makes the request unable to loop.
-        The entry is retained (as False) not dropped, so cleanup()'s reverse
-        index stays consistent; an unknown key is a no-op."""
+        The entry is retained (as False) not dropped, so cleanup()'s
+        per-request states stay consistent; an unknown key is a no-op."""
         mgr = InMemoryLookupManager(existing_keys={_key(1), _key(2)})
         ctx = _ctx("reqA")
         assert mgr.lookup(_key(1), ctx) is None
@@ -287,7 +326,7 @@ class TestAsyncLookupManager:
 
         # An unknown key must not raise or plant an entry.
         mgr.mark_miss([_key(99)])
-        assert _key(99) not in mgr._lookup_state
+        assert _key(99) not in mgr._current_state_by_key
 
         # The block is still "present" per the backing set, so a re-probe would
         # wrongly return True again — the verdict must be served from cache as
@@ -299,15 +338,14 @@ class TestAsyncLookupManager:
         assert mgr._lookup_queue.empty()  # nothing posted to the worker
         assert mgr.lookup(_key(1), ctx) is False
 
-        # Entry retained (now False) with reverse index intact, so cleanup()
-        # (which direct-indexes _lookup_state per reverse-index key) tears down
-        # both structures without raising.
-        assert mgr._lookup_state[_key(1)].result is False
-        assert _key(1) in mgr._req_keys["reqA"]
+        # Entry retained (now False) with the request's state intact, so
+        # cleanup() tears down both structures without raising.
+        assert mgr._current_state_by_key[_key(1)].result is False
+        assert _key(1) in mgr._request_states["reqA"]
         mgr.cleanup("reqA")
-        assert _key(1) not in mgr._lookup_state
-        assert _key(2) not in mgr._lookup_state
-        assert "reqA" not in mgr._req_keys
+        assert _key(1) not in mgr._current_state_by_key
+        assert _key(2) not in mgr._current_state_by_key
+        assert "reqA" not in mgr._request_states
         mgr.shutdown()
 
     @pytest.mark.parametrize("flushed", [True, False], ids=["in_flight", "pending"])
@@ -326,7 +364,7 @@ class TestAsyncLookupManager:
             mgr._results_ready.clear()
             assert mgr.lookup(_key(1), _ctx("A")) is True
             mgr.cleanup("A")
-            assert _key(1) not in mgr._lookup_state
+            assert _key(1) not in mgr._current_state_by_key
 
             assert mgr.lookup(_key(1), _ctx("B")) is None
             if flushed:
@@ -334,7 +372,7 @@ class TestAsyncLookupManager:
                 mgr._results_ready.wait()
                 mgr._results_ready.clear()
             expected = LookupPhase.IN_FLIGHT if flushed else LookupPhase.PENDING
-            assert mgr._lookup_state[_key(1)].phase is expected
+            assert mgr._current_state_by_key[_key(1)].phase is expected
 
             mgr.mark_miss([_key(1)])
             if not flushed:
@@ -366,7 +404,7 @@ class TestAsyncLookupManager:
 
         # (b) A stray/duplicate result for the now-decided key violates the
         # enqueue-once invariant and must trip the assert.
-        generation = mgr._lookup_state[_key(1)].generation
+        generation = mgr._current_state_by_key[_key(1)].generation
         mgr._pending_results.put([(_key(1), generation, True)])
         with pytest.raises(AssertionError):
             mgr.drain_results()
