@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from concurrent.futures import Executor, Future
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import Mock
@@ -207,6 +208,18 @@ def test_late_chunk_ranges_reject_missing_or_invalid_offsets(offsets):
         build_late_chunking_metadata("abc", 2, offsets, 2)
 
 
+class _InlineExecutor(Executor):
+    """Executor that runs on the calling thread, for deterministic tests."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        future: Future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001
+            future.set_exception(exc)
+        return future
+
+
 def _mock_chunk_llm(processor, outputs):
     llm = mock.Mock(spec=PoolingOfflineMixin)
     llm.pooling_task = "token_embed"
@@ -214,7 +227,7 @@ def _mock_chunk_llm(processor, outputs):
     llm.encode = PoolingOfflineMixin.encode.__get__(llm)
     llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
     llm.pooling_io_processors = {"token_embed": processor}
-    llm._executor = SimpleNamespace(map=map)
+    llm._executor = _InlineExecutor()
     llm.llm_engine = mock.Mock()
     llm.llm_engine.vllm_config.scheduler_config.max_num_seqs = 2
     llm.llm_engine.has_unfinished_requests.return_value = False
