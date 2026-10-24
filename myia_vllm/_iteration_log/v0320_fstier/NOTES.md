@@ -1821,3 +1821,53 @@ plus la télémétrie 1/min. Indicateurs, par levier :
   calculés, âge du plus vieux fichier du tier ;
 - KV : nombre de requêtes en cours quand il y a une file, préemptions, VRAM GPU 0 en charge
   (alerte > 23 000 MiB ; rollback `GPU_UTIL_SWIFT15=0.70` en cas de dépassement).
+
+## 24/10 22:41Z — première mesure « après » : brouillée par le froid post-restart, verdict reporté
+
+Fenêtres de même durée (~71 min) : AVANT = 20:04→21:16Z (post-Q32, gpu-util 0,70, tier disque
+96 GiB) ; APRÈS = 21:30→22:41Z (0,73, 250 GiB). Compteurs `/metrics` des deux générations de
+moteur (`.tmp/cmp_after.py`), télémétrie 1/min (`.tmp/telem_win.py`, `.tmp/telem_sat.py`).
+
+| | AVANT | APRÈS | Écart |
+|---|---|---|---|
+| génération (tok/s) | 59,2 | 49,5 | −16 % |
+| requêtes servies (/min) | 4,16 | 3,03 | −27 % |
+| tokens de prompt calculés (tok/s) | 659 | 758 | +15 % |
+| part du prompt calculée / RAM / GPU / disque | 7,5 / 60,9 / 26,5 / 5,2 % | 13,1 / 54,8 / 28,5 / 4,4 % | |
+| tokens calculés par requête (moyenne) | ~9 500 | ~15 000 | +58 % |
+| requêtes à 20-50K tokens calculés | 16 | 51 | |
+| requêtes à > 100K tokens calculés | 7 | 6 | |
+| file > 120 s | 3,0 % | 0,5 % | mieux |
+| TTFT > 120 s | 8,0 % | 21,4 % | pire |
+| préemptions | 3 | 3 | = |
+| décodage par flux, minutes sans file | 19,8 tok/s | 24,4 (2ᵉ moitié) | pas de ralentissement moteur |
+
+Lecture :
+- **L'attente en file a baissé ; c'est le prefill qui s'est allongé.** TTFT moins file = temps de
+  prefill, et les requêtes recalculent en moyenne 58 % de tokens de plus.
+- **Le surcroît de prefill décroît dans l'heure qui suit le restart** (log moteur, prefill calculé
+  par tranche de 10 min) : 21:3x 846 · 21:4x 737 · 21:5x 841 · 22:0x 921 · 22:1x 1 054 · 22:2x
+  734 · 22:3x 491 · 22:4x 313 tok/s ; la génération remonte en même temps (22:3x 79, 22:4x 70
+  tok/s, au-dessus de la moyenne AVANT). Télémétrie : minutes avec file 76 % sur 21:30→22:05,
+  50 % sur 22:05→22:41 (AVANT 52 %), longueur moyenne de file 1,91 puis 0,86 (AVANT 1,19), minutes
+  figées 13 % puis 6 % (AVANT 9 %).
+- **Cause supposée, cohérente avec les mesures mais non prouvée** : le restart vide le cache GPU
+  **et** le tier RAM (24 GiB, recréé à vide au boot). Seuls les blocs déjà descendus sur disque
+  survivent, si bien que les conversations actives repaient leur fin de contexte (les 20-50K
+  derniers tokens). **Un restart coûte donc environ une heure de prefill supplémentaire, pas
+  seulement les 3-4 min de boot** : à peser dans toute décision de restart.
+- Le décodage par flux n'est pas plus lent (24,4 contre 19,8 tok/s/flux hors file) : rien
+  n'indique de pagination GPU 0 à 0,73. VRAM GPU 0 en charge 22 323 MiB (seuil 23 000).
+- Le gain attendu de la rétention disque (conversations reprises après 1,6 h) n'est pas encore
+  observable : plus vieux bloc du tier 2,9 h à 22:41Z (contre 1,6 h avant), tier 129 GiB, 0
+  suppression au passage de 22:20Z (cap 250 GiB).
+
+**Verdict reporté** au cycle suivant (fenêtre 22:41→00:41Z, sans effet de restart), avec la table
+`[ttft]` du hub (claudish, 22:00→23:30Z, plus la tranche post-Q32 seule 20:05→21:25Z). Comme la
+demande baisse la nuit, comparer d'abord les indicateurs normalisés (file, minutes figées, tokens
+calculés par requête, décodage par flux) plutôt que les volumes.
+
+Autres relevés du cycle : condensation RSM en repli cloud à 20:38Z et 21:48Z (timeout primaire
+90 s pendant les pointes, repli nominal) ; `108.165.33.236` toujours 401-only (clé VL morte, suivi
+au census) ; `92.184.141.43` = même clé et même client (`OpenAI/JS 4.104.0`) que po-2027 en
+`92.184.141.186` → rotation d'IP mobile, pas d'alerte.
