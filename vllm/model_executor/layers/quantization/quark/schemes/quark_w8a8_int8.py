@@ -85,10 +85,10 @@ class QuarkW8A8Int8(QuarkScheme):
                 loaded_weight = loaded_weight.unsqueeze(-1)
             return weight_loader(param, loaded_weight, *args, **kwargs)
 
+        assert self.activation_quant_key is not None
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.qscheme == "per_channel"),
-            is_static_input_scheme=(self.is_static_input_scheme is True),
-            input_symmetric=(self.input_symmetric is True),
+            weight_quant_key=self.weight_quant_key,
+            activation_quant_key=self.activation_quant_key,
             module_name=self.__class__.__name__,
             is_fused_module=len(output_partition_sizes) > 1,
         )

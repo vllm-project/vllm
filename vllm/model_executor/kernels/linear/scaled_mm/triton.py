@@ -55,7 +55,8 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
+        weight_group_shape = self.config.weight_quant_key.scale.group_shape
+        if is_fused_module and not weight_group_shape.is_per_channel():
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -64,7 +65,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         )
 
         # INPUT SCALE
-        if self.config.is_static_input_scheme:
+        if self.config.activation_quant_key.scale.static:
             assert i_s is not None
 
             if self.config.input_symmetric:
@@ -109,7 +110,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             weight = getattr(layer, w_q_name)
             # weight is already transposed to [K, N], sum over K (dim=0)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
-            if self.config.is_static_input_scheme:
+            if self.config.activation_quant_key.scale.static:
                 # Fold azp into azp_adj for the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
             setattr(

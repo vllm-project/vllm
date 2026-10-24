@@ -846,16 +846,15 @@ def fp8_scaled_mm_is_batch_invariant(
 
 
 def init_int8_linear_kernel(
-    is_channelwise: bool,
-    is_static_input_scheme: bool,
-    input_symmetric: bool,
+    weight_quant_key: QuantKey,
+    activation_quant_key: QuantKey,
     module_name: str,
     is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=is_channelwise,
-        is_static_input_scheme=is_static_input_scheme,
-        input_symmetric=input_symmetric,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        input_symmetric=activation_quant_key.symmetric,
         is_fused_module=is_fused_module,
     )
 

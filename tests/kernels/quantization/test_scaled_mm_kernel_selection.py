@@ -32,6 +32,10 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
 
@@ -146,28 +150,28 @@ def test_aiter_kernel_implements_is_supported():
 
 
 @pytest.mark.parametrize(
-    ("is_static_input_scheme", "is_channelwise", "is_fused_module", "expected"),
+    ("activation_quant_key", "weight_quant_key", "is_fused_module", "expected"),
     [
         # per-tensor activations x per-tensor weights
-        (True, False, False, False),
+        (kInt8StaticTensorSym, kInt8StaticTensorSym, False, False),
         # per-tensor activations x per-channel weights
-        (True, False, True, False),
-        (True, True, False, False),
-        (True, True, True, False),
+        (kInt8StaticTensorSym, kInt8StaticTensorSym, True, False),
+        (kInt8StaticTensorSym, kInt8StaticChannelSym, False, False),
+        (kInt8StaticTensorSym, kInt8StaticChannelSym, True, False),
         # per-token activations x per-tensor weights
-        (False, False, False, False),
+        (kInt8DynamicTokenSym, kInt8StaticTensorSym, False, False),
         # per-token activations x per-channel weights
-        (False, False, True, True),
-        (False, True, False, True),
-        (False, True, True, True),
+        (kInt8DynamicTokenSym, kInt8StaticTensorSym, True, True),
+        (kInt8DynamicTokenSym, kInt8StaticChannelSym, False, True),
+        (kInt8DynamicTokenSym, kInt8StaticChannelSym, True, True),
     ],
 )
 def test_aiter_int8_kernel_can_implement_scale_layouts(
-    is_static_input_scheme, is_channelwise, is_fused_module, expected
+    activation_quant_key, weight_quant_key, is_fused_module, expected
 ):
     config = Int8ScaledMMLinearLayerConfig(
-        is_static_input_scheme=is_static_input_scheme,
-        is_channelwise=is_channelwise,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
         input_symmetric=True,
         is_fused_module=is_fused_module,
     )
@@ -269,13 +273,13 @@ def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=False,
-            is_static_input_scheme=True,
+            weight_quant_key=kInt8StaticTensorSym,
+            activation_quant_key=kInt8StaticTensorSym,
             input_symmetric=True,
         ),
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=True,
-            is_static_input_scheme=False,
+            weight_quant_key=kInt8StaticChannelSym,
+            activation_quant_key=kInt8DynamicTokenAsym,
             input_symmetric=False,
         ),
     ]
@@ -305,8 +309,8 @@ def test_cpu_sgl_int8_linear_accepts_3d_input():
         torch.randn(N, dtype=torch.bfloat16), requires_grad=False
     )
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=True,
-        is_static_input_scheme=False,
+        weight_quant_key=kInt8StaticChannelSym,
+        activation_quant_key=kInt8DynamicTokenSym,
         input_symmetric=True,
     )
     kernel = CPUInt8ScaledMMLinearKernel(
@@ -353,7 +357,9 @@ def test_register_oot_linear_kernel(platform_mock):
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTInt8ScaledMMLinearKernel, PlatformEnum.OOT, "int8")
 
-    kernel = init_int8_linear_kernel(True, True, True, "module")
+    kernel = init_int8_linear_kernel(
+        kInt8StaticTensorSym, kInt8StaticTensorSym, "module"
+    )
 
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
