@@ -242,10 +242,7 @@ See [vllm run-batch](./run-batch.md) for the full reference of all available arg
 
 ## preload
 
-Launch weight cache daemons (one per GPU) that hold the post-quantized,
-TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
-over a Unix domain socket. Restarting engines then map the weights via
-zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+Launch weight cache daemons, one per GPU, that hold the post-quantized, TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines over a Unix domain socket. A restarting engine maps the weights instead of loading them from disk.
 
 ```bash
 # Launch one daemon per GPU
@@ -256,16 +253,15 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
     --load-format ipc_cache
 ```
 
-The daemon accepts the standard engine arguments (model, dtype, quantization,
-tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
-directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
-`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
-multi-node and speculative-decoding setups. Tensor, expert and data
-parallelism are supported; pipeline parallelism is rejected at launch.
+The daemon accepts the standard engine arguments, which must match the engine's, plus:
 
-See [Preload](../features/preload.md) for how it works, cache modes, and
-limitations, and [vllm preload](./preload.md) for the full reference of all
-available arguments.
+- `--weight-cache-socket-dir` sets the directory holding the per-GPU Unix sockets. It is required when the daemon and the engine run in different containers.
+- `--weight-cache-health-port` and `--weight-cache-health-host` expose a `/health` readiness endpoint for Docker health checks and Kubernetes probes.
+- `--weight-cache-master-port` and `--weight-cache-draft-master-port` set the daemons' own rendezvous ports in multi-node setups.
+
+Tensor, pipeline, expert and data parallelism are supported. On Hopper and newer GPUs with FlashInfer installed, the daemons also run the FlashInfer autotune pass before they report ready. Pass `--disable-flashinfer-autotune` to skip it.
+
+See [Preload](../features/preload.md) for how it works, cache modes, Docker and Kubernetes deployment, and troubleshooting, and [vllm preload](./preload.md) for the full reference of all available arguments.
 
 ## More Help
 
