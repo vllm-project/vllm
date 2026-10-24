@@ -690,6 +690,49 @@ statuts **200 × 495**, **400 × 3**, **401 × 20**.
 possible but not blocking ». Périmètre RSM, non bloquant, à relayer si ça se
 répète — ce n'est pas un cron vLLM.
 
+## 24/10 02:41Z — ★ PREMIÈRE UTILISATION DU PLAFOND BUSY (10/10 → restart) et le tier atteint 96 GiB
+
+**La porte v6 a utilisé son plafond anti-dérive pour la première fois.**
+Streak 8/10 → 9/10 → **10/10** de 02:05:08 à 02:09:08, puis
+`RESTARTING (BUSY ceiling 10 reached ~5min — anti-drift fallback)`.
+Le moteur a reçu **5 minutes pleines** de sursis pendant qu'il servait ~0,6
+tok/s — puis le watchdog a arbitré le restart.
+
+**État du moteur dans la fenêtre** (journaux `loggers.py`, 10 s) : KV
+**80-97 %**, génération **0,3-1,2 tok/s**, prefill ~0 avec **un burst de
+21 518 tok/s à 02:08:58** (re-prefill), **4-5 requêtes `Deferred`** et 5-8 en
+attente. C'est le mode saturation/famine documenté — le moteur vit mais ne
+sert plus. Le restart était l'arbitrage prévu.
+
+**Les 5 × 500 du census (02:10:29-32) sont une CONSÉQUENCE du restart, pas sa
+cause** : `EngineDeadError` remonte par `serving.py:929` pendant l'arrêt de
+l'ancien process — 4 requêtes hub (Bun, corps 227-632 K) perdues en vol + la
+sonde du watchdog elle-même (166 o, `curl`). C'est le coût client-visible
+connu d'un restart, concentré sur sa frontière.
+
+**Après restart** (boot 02:10:33, sain) : cache préfixe **remis à zéro** —
+hit 5,5 % (848 K/15,3 M) en reconstruction, KV 88,5 %, 8 préemptions. Deux
+`fail 1/2` isolés à 02:25 et 02:28, tous deux `RECOVERED`. C'est le prix
+documenté : le restart qui efface le KV déclenche la vague de re-prefill.
+
+**Le tier a atteint le nouveau plafond** : passage de 02:20:02Z avec
+`total 109,1 GiB`, `over 13,1`, **536 fichiers supprimés**, 0 erreur. La
+croissance mesurée est **~21 GiB/h** (66,5 → 109,1 en 2 h), plus rapide que
+l'estimation initiale (15,7). À ce rythme, le cycle purge est ~4-5 h contre
+~90 min à 48 GiB : le facteur d'amélioration tient (~3×), la purge n'est pas
+éliminée. `/dev/shm` monté 8,1 → 17 G (26 %, sous le seuil 45 G) — le tier
+RAM y vit.
+
+**Census 2 h** : `200 × 454`, `400 × 1`, `401 × 16`, `500 × 5` (frontière du
+restart). **nbaudit** `ok:true` (02:06:08Z). **Condensation** : clients
+primaire et repli reconstruits à 00:55-00:56Z, nominal ensuite.
+**Commit hôte 78,0 %** (marge 87,7 GB), G: 85 %, disque invité 73 %
+(264 GB), VRAM 21 495 / 20 650 MiB.
+
+**Vigie** : `IdentityManager` « concurrent instance possible for myia-ai-01 »
+récidive (01:38:29Z, 02:31:20Z) — 4 occurrences en 2 h. Périmètre RSM : à
+relayer au propriétaire si ça continue, ce n'est pas un cron vLLM.
+
 **Leçons d'instrument** (deux erreurs corrigées avant publication) :
 - moyenner un ratio de cache sur des fenêtres à 16 tokens de prompt donne
   53 % de « cache » là où la vraie valeur est 92 % — un dénominateur
