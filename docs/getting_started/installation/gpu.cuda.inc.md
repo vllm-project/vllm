@@ -136,9 +136,9 @@ Wheels are published an hour or two after a commit lands on `main`. If the wheel
 your merge-base with upstream `main` is not available yet, the installer uses the
 nearest older commit that has one, searching up to 20 commits back. It stops with an
 error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
-`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
-merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
-a guarantee of binary compatibility.
+`vllm/_custom_ops.py`, the `[build-system]` table in `pyproject.toml`) changed
+between that commit and your merge-base, and warns if `rust/` or `setup.py` did.
+This is a source-level check, not a guarantee of binary compatibility.
 
 Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
 `VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
