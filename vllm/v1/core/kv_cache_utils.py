@@ -22,7 +22,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.utils.hashing import xxhash, xxhash_cbor
+from vllm.utils.hashing import sha256_int32, xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -707,7 +707,7 @@ def to_event_extra_keys(
 def hash_block_tokens(
     hash_function: Callable[[Any], bytes],
     parent_block_hash: BlockHash | None,
-    curr_block_token_ids: Sequence[int],
+    curr_block_token_ids: Sequence[int] | memoryview,
     extra_keys: tuple[Any, ...] | None = None,
 ) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
@@ -720,7 +720,8 @@ def hash_block_tokens(
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
-            block. The current block is assumed to be full.
+            block. The current block is assumed to be full. A memoryview of
+            int32 token ids is passed through as is (``sha256_int32`` only).
         extra_keys: Extra keys for the block.
 
     Returns:
@@ -731,9 +732,10 @@ def hash_block_tokens(
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
-    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
+    if not isinstance(curr_block_token_ids, memoryview):
+        curr_block_token_ids = tuple(curr_block_token_ids)
     return BlockHash(
-        hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))
+        hash_function((parent_block_hash, curr_block_token_ids, extra_keys))
     )
 
 
@@ -962,6 +964,8 @@ def get_request_block_hasher(
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
     """
+    # sha256_int32 hashes slices of the request's int32 token buffer in place.
+    hash_token_buffer = caching_hash_fn is sha256_int32
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
@@ -986,6 +990,12 @@ def get_request_block_hasher(
             request.block_hashes[-1] if request.block_hashes else None
         )
         new_block_hashes: list[BlockHash] = []
+        token_ids: Sequence[int] | memoryview = (
+            # TokenBuffer is an int32 array, type-checked as a list.
+            memoryview(request._all_token_ids)  # type: ignore[arg-type]
+            if hash_token_buffer
+            else request.all_token_ids
+        )
         while True:
             end_token_idx = start_token_idx + hash_block_size
             if end_token_idx > num_tokens:
@@ -998,15 +1008,20 @@ def get_request_block_hasher(
             )
 
             # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
             block_hash = hash_block_tokens(
-                caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
+                caching_hash_fn,
+                prev_block_hash_value,
+                token_ids[start_token_idx:end_token_idx],
+                extra_keys,
             )
 
             new_block_hashes.append(block_hash)
             start_token_idx += hash_block_size
             prev_block_hash_value = block_hash
 
+        # The buffer cannot grow while exported.
+        if isinstance(token_ids, memoryview):
+            token_ids.release()
         return new_block_hashes
 
     return request_block_hasher

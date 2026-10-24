@@ -5,7 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 import numpy as np
@@ -117,7 +117,12 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: list[int] | None
+    if TYPE_CHECKING:
+        prompt_token_ids: list[int] | None
+    else:
+        # Also little-endian int32 bytes from vllm-rs, which only the engine core
+        # receives; Request turns them into a TokenBuffer.
+        prompt_token_ids: list[int] | bytes | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
