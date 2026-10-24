@@ -1125,6 +1125,10 @@ class EngineCore:
                 request.mm_features
             )
 
+        watermark_config = self.vllm_config.watermark_config
+        if watermark_config and watermark_config.enforce and request.sampling_params:
+            request.sampling_params.watermarking = True
+
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
