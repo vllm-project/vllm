@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -229,6 +230,7 @@ class Scheduler(SchedulerInterface):
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
+        self._cache_connector_load_state = False
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -368,6 +370,9 @@ class Scheduler(SchedulerInterface):
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+            self._cache_connector_load_state = (
+                self._resolve_cache_connector_load_state()
+            )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -3306,6 +3311,28 @@ class Scheduler(SchedulerInterface):
         request.replay_start = num_hit_tokens - num_replay_tokens
         return num_replay_tokens
 
+    def _resolve_cache_connector_load_state(self) -> bool:
+        """Whether to retain the Mamba state each connector load ends on.
+
+        Sparse prefix-cache retention keeps a Mamba state only at proven reuse
+        points, so a loaded state is dropped unless it happens to be one. A
+        connector that ends its loads on ``get_reusable_load_rule`` would
+        then reload a state that never becomes hittable; retain it instead.
+        ``VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE=0`` turns this off.
+        """
+        assert self.connector is not None
+        negotiated = (
+            self.connector.ends_loads_on_reusable_boundary
+            and self.kv_cache_manager.get_reusable_load_rule() is not None
+        )
+        killed = not envs.VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE
+        if negotiated:
+            logger.info(
+                "Retain the Mamba state at connector load ends: %s",
+                "off (VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE=0)" if killed else "on",
+            )
+        return negotiated and not killed
+
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.
 
@@ -3338,6 +3365,8 @@ class Scheduler(SchedulerInterface):
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
+            if self._cache_connector_load_state:
+                request.connector_load_boundary = request.num_computed_tokens
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)

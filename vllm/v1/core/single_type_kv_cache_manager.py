@@ -517,6 +517,8 @@ class SingleTypeKVCacheManager(ABC):
                 reachable_boundaries.append(
                     request.shared_prefix_boundary - self.block_size
                 )
+        if request.connector_load_boundary:
+            reachable_boundaries.append(request.connector_load_boundary)
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,

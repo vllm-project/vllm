@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.request import Request
 
@@ -350,6 +351,40 @@ class KVCacheCoordinator(ABC):
         # Only cache tokens with finalized KV. The last num_reprefillable_tokens
         # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+
+    def get_reusable_load_rule(self) -> tuple[int, int] | None:
+        """Where an external load must end so that its state stays hittable.
+
+        A load ends on an align-mode Mamba state. Under the EAGLE block drop a
+        later request whose prefix match ends at ``n`` resumes from the
+        prefill checkpoint below it (``get_mamba_prefill_checkpoint_position``),
+        never from a state at the match end.
+
+        Returns:
+            ``(granularity_tokens, drop_tokens)`` such that that checkpoint is
+            ``max(n // granularity_tokens * granularity_tokens - drop_tokens,
+            0)``, or None when every load end is reusable (no cached
+            align-mode Mamba group under the EAGLE block drop).
+
+        """
+        alignments = {
+            manager.cache_hit_alignment_tokens
+            for manager in self.single_type_managers
+            if isinstance(manager, MambaManager)
+            and manager.enable_caching
+            and manager.mamba_cache_mode == "align"
+            and manager.drop_eagle_checkpoint_block
+        }
+        if not alignments:
+            return None
+        # Every manager aligns hits to the scheduler block size.
+        assert len(alignments) == 1, alignments
+        granularity = alignments.pop()
+        aligned = 2 * granularity
+        drop = aligned - get_mamba_prefill_checkpoint_position(
+            aligned, granularity, drop_eagle_block=True
+        )
+        return granularity, drop
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.

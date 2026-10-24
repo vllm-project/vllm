@@ -164,6 +164,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
+    VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE: bool = True
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
@@ -1449,6 +1450,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
+    # If set to "0", do not retain the align-mode Mamba state a KV connector
+    # load ends on when the connector ends its loads on the reusable boundary
+    # (KVConnectorBase_V1.ends_loads_on_reusable_boundary).
+    "VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE": lambda: (
+        os.getenv("VLLM_MAMBA_CACHE_CONNECTOR_LOAD_STATE", "1") != "0"
+    ),
     # If set, use the Rust frontend binary instead of the Python API server
     # process(es).
     "VLLM_USE_RUST_FRONTEND": lambda: bool(
