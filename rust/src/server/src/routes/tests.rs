@@ -8750,6 +8750,34 @@ async fn detokenize_decodes_known_token_ids() {
     assert_eq!(json["prompt"], "Hello");
 }
 
+/// A token ID at or above the tokenizer's vocabulary size is a client error
+/// and must return 400, not 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn detokenize_out_of_range_token_id_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "tokens": [72, UNKNOWN_DECODE_TOKEN_ID, 108],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&UNKNOWN_DECODE_TOKEN_ID.to_string()),
+        "error message should name the bad token id"
+    );
+}
+
 /// `continue_final_message` without a trailing assistant message must 400.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]

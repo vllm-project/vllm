@@ -131,6 +131,22 @@ pub async fn detokenize(
         return error.into_response();
     }
     let tokenizer = state.chat.text().tokenizer();
+    // Validate token IDs before decode. `TokenizerError` is a flat string with
+    // no `is_request_validation_error()` method, so we cannot distinguish client
+    // vs. server fault after the fact. Checking up front lets us return 400 for
+    // clearly invalid IDs without misclassifying backend failures as client errors.
+    //
+    // `vocab_size()` returns `usize::MAX` for backends that cannot report it; on
+    // 64-bit targets every `u32` is below that bound, so validation is skipped
+    // automatically for those backends.
+    let vocab_size = tokenizer.vocab_size();
+    if let Some(&bad_id) = body.tokens.iter().find(|&&id| id as usize >= vocab_size) {
+        return ApiError::invalid_request(
+            format!("token id {bad_id} is out of range for vocabulary size {vocab_size}"),
+            None,
+        )
+        .into_response();
+    }
     match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
         Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
         Err(e) => server_error!("detokenize failed: {}", e.to_report_string()).into_response(),
@@ -139,9 +155,10 @@ pub async fn detokenize(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
     use super::tokenize_request_id;
+    use crate::error::ApiError;
 
     #[test]
     fn tokenize_request_id_prefers_x_request_id_header() {
@@ -156,5 +173,23 @@ mod tests {
         let id = tokenize_request_id(&headers);
         assert!(id.starts_with("tokenize-"));
         assert_ne!(id, "tokenize-");
+    }
+
+    /// Out-of-vocabulary token IDs produce a 400 rather than a 500, since the
+    /// error is caused by client-supplied data.
+    #[test]
+    fn out_of_range_token_id_produces_invalid_request() {
+        let vocab_size: usize = 1000;
+        let tokens: Vec<u32> = vec![1, 500, 1000, 2]; // 1000 == vocab_size, out of range
+        let bad_id = tokens.iter().find(|&&id| id as usize >= vocab_size).copied();
+        assert_eq!(bad_id, Some(1000u32));
+        let error = ApiError::invalid_request(
+            format!("token id {} is out of range for vocabulary size {}", bad_id.unwrap(), vocab_size),
+            None,
+        );
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        let response = error.to_error_response();
+        assert_eq!(response.error.error_type, "BadRequestError");
+        assert!(response.error.message.contains("1000"));
     }
 }
