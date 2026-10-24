@@ -1071,6 +1071,70 @@ def _warn_if_unannotated_eagle_mamba(
     )
 
 
+def _retain_eagle_hit_blocks_below_window(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Retain the whole blocks an EAGLE sliding-window cache hit scans.
+
+    An EAGLE group's hit needs ``cdiv(sliding_window - 1, block_size) + 1``
+    contiguous cached blocks ending at a block boundary (see
+    ``SlidingWindowManager._contiguous_blocks_for_hit``), one more than the
+    window spans. Widen ``extra_retained_tokens`` so that run stays allocated
+    below the window for every prompt length; otherwise a KV connector import
+    lands and hashes one block too few and no later request can hit. Mirrors
+    the coordinator: every group is an EAGLE group when none is flagged.
+    Packed groups widen each per-layer spec, which the scheduler unwraps.
+    Engines without a KV transfer connector never import blocks, so they keep
+    the unwidened window.
+
+    Args:
+        vllm_config: Config supplying the speculative method and KV transfer
+            connector, if any.
+        kv_cache_groups: Groups to update in place.
+
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle_block_drop():
+        return
+    transfer_config = vllm_config.kv_transfer_config
+    if transfer_config is None or not transfer_config.is_kv_transfer_instance:
+        return
+
+    def widen(spec: KVCacheSpec) -> KVCacheSpec:
+        assert isinstance(spec, SlidingWindowSpec)
+        hit_blocks = cdiv(spec.sliding_window - 1, spec.block_size) + 1
+        return replace(
+            spec,
+            extra_retained_tokens=spec.extra_retained_tokens
+            + hit_blocks * spec.block_size
+            - (spec.sliding_window - 1),
+        )
+
+    annotated = any(group.is_eagle_group for group in kv_cache_groups)
+    for group in kv_cache_groups:
+        spec = group.kv_cache_spec
+        if (
+            not spec.prefix_cacheable
+            or (annotated and not group.is_eagle_group)
+            or not all(
+                isinstance(layer_spec, SlidingWindowSpec)
+                for layer_spec in iter_layer_specs(spec)
+            )
+        ):
+            continue
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            group.kv_cache_spec = replace(
+                spec,
+                kv_cache_specs={
+                    name: widen(layer_spec)
+                    for name, layer_spec in spec.kv_cache_specs.items()
+                },
+            )
+        else:
+            group.kv_cache_spec = widen(spec)
+
+
 def _largest_divisor_at_most(value: int, limit: int) -> int:
     for candidate in range(min(value, limit), 0, -1):
         if value % candidate == 0:
@@ -1537,6 +1601,7 @@ def get_kv_cache_configs(
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
+    _retain_eagle_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
