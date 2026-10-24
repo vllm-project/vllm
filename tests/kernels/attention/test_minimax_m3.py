@@ -835,7 +835,10 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
 )
 @pytest.mark.parametrize("topk", [16])
 @pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
-def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
+@pytest.mark.parametrize("prefill_kv_split", [False, True])
+def test_msa_indexer_impl_matches_triton(
+    topk, index_dtype, prefill_kv_split, monkeypatch
+):
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -865,6 +868,7 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     vllm_config.model_config.hf_config.sparse_attention_config = {
         "sparse_num_index_heads": num_idx_heads
     }
+    vllm_config.attention_config.minimax_m3_indexer_prefill_kv_split = prefill_kv_split
 
     # Decode-first mixed batch: 2 decode reqs (q_len 1) then 2 prefill reqs. Long
     # prefixes so every token sees > TOPK causal blocks (non-trivial selection).
@@ -939,6 +943,9 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
         msa_impl.index_cache.prefix: msa_builder.build(0, common),
         triton_impl.index_cache.prefix: triton_builder.build(0, common),
     }
+    # The prefill side (2 requests, ~2.7k context, 4 heads) splits when enabled.
+    msa_prefill_plan = attn_metadata[msa_impl.index_cache.prefix].prefill_msa.plan
+    assert (msa_prefill_plan["num_kv_splits"] > 1) == prefill_kv_split
     with set_forward_context(attn_metadata, vllm_config):
         msa_decode, msa_prefill = msa_impl(index_q)
         tri_decode, tri_prefill = triton_impl(index_q)
