@@ -57,6 +57,7 @@ from openai.types.responses import (
     response_function_web_search,
     response_output_text,
     response_text_delta_event,
+    response_text_done_event,
 )
 from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
@@ -149,6 +150,7 @@ def is_mcp_tool_by_namespace(
 def emit_text_delta_events(
     delta: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for text content delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -193,8 +195,7 @@ def emit_text_delta_events(
             output_index=state.current_output_index,
             item_id=state.current_item_id,
             delta=delta,
-            # TODO, use logprobs from ctx.last_request_output
-            logprobs=[],
+            logprobs=_to_stream_logprobs(logprobs or []),
         )
     )
     return events
@@ -384,12 +385,14 @@ def emit_code_interpreter_delta_events(
 def emit_text_output_done_events(
     text: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
     text_content = ResponseOutputText(
         type="output_text",
         text=text,
         annotations=[],
+        logprobs=logprobs,
     )
     events: list[StreamingResponsesResponse] = []
     events.append(
@@ -399,7 +402,10 @@ def emit_text_output_done_events(
             output_index=state.current_output_index,
             content_index=state.current_content_index,
             text=text,
-            logprobs=[],
+            logprobs=[
+                response_text_done_event.Logprob(**lp.model_dump())
+                for lp in _to_stream_logprobs(logprobs or [])
+            ],
             item_id=state.current_item_id,
         )
     )
@@ -569,6 +575,7 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -585,7 +592,7 @@ def emit_content_delta_events(
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_delta_events(delta, state)
+        return emit_text_delta_events(delta, state, logprobs)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
@@ -607,6 +614,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -638,7 +646,7 @@ def emit_previous_item_done_events(
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        return emit_text_output_done_events(text, state, logprobs)
     return []
 
 

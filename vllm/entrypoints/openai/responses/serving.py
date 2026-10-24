@@ -6,6 +6,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from functools import partial
 from http import HTTPStatus
 from typing import Any, Final, cast
 
@@ -33,6 +34,7 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -254,13 +256,6 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-                param="logprobs",
-            )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -467,6 +462,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                     function_tool_names,
                     response_parser=response_parser,
                     request=request,
+                    logprobs_processor=(
+                        partial(
+                            self._create_response_logprobs,
+                            tokenizer=tokenizer,
+                            top_logprobs=request.top_logprobs,
+                        )
+                        if request.is_include_output_logprobs()
+                        else None
+                    ),
                 )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -805,6 +809,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     incomplete=(
                         i == len(harmony_msgs) - 1 and context.last_append_flush_status
                     ),
+                    logprobs=context.message_logprobs.get(id(msg)),
                 )
                 if next_streamed is not None and next_streamed[0] is msg:
                     reuse_streamed_item_ids(items, next_streamed[1])
@@ -944,6 +949,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     self.response_store[response.id] = response
         return response
 
+    def _response_token_bytes(self, token_id: int, text: str) -> list[int]:
+        if self.use_harmony and not self.return_tokens_as_token_ids:
+            text = get_encoding().decode([token_id], errors="surrogateescape")
+            return list(text.encode("utf-8", errors="surrogateescape"))
+        return list(text.encode("utf-8", errors="replace"))
+
     def _topk_logprobs(
         self,
         logprobs: dict[int, SampleLogprob],
@@ -965,7 +976,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 LogprobTopLogprob(
                     token=text,
                     logprob=max(_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._response_token_bytes(token_id, text),
                 )
             )
         return out
@@ -995,7 +1006,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 Logprob(
                     token=text,
                     logprob=max(token_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._response_token_bytes(token_id, text),
                     top_logprobs=(
                         self._topk_logprobs(
                             logprob, top_logprobs=top_logprobs, tokenizer=tokenizer
@@ -1300,6 +1311,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        pending_logprobs: list[Logprob] = []
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1307,18 +1319,25 @@ class OpenAIServingResponses(GenerateBaseServing):
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            for segment in ctx.last_append_segments:
+            for segment, logprobs in zip(
+                ctx.last_append_segments, ctx.last_append_logprobs
+            ):
+                pending_logprobs.extend(logprobs)
                 if segment.delta:
                     for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
+                        segment, state, ctx.function_tool_names, pending_logprobs
                     ):
                         yield _increment_sequence_number_and_return(event)
+                    pending_logprobs = []
 
                 elif completed_message := segment.completed_message:
                     done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
+                        completed_message,
+                        state,
+                        ctx.function_tool_names,
+                        ctx.message_logprobs.get(id(completed_message)),
                     ):
                         if isinstance(event, ResponseOutputItemDoneEvent):
                             done_items.append(event.item)
@@ -1334,6 +1353,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         (completed_message, done_items)
                     )
                     state.reset_for_new_item()
+                    pending_logprobs = []
 
     async def responses_stream_generator(
         self,

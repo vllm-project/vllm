@@ -26,6 +26,7 @@ from openai.types.responses import (
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
+from openai.types.responses.response_output_text import Logprob as ResponseLogprob
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
     LocalShell,
@@ -35,6 +36,7 @@ from openai.types.responses.tool import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 from pydantic import ValidationError
+from transformers import AutoTokenizer
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -45,6 +47,7 @@ from vllm.entrypoints.generate.base.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -66,6 +69,8 @@ from vllm.entrypoints.openai.responses.serving import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+    emit_content_delta_events,
+    emit_previous_item_done_events,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
@@ -2516,3 +2521,146 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+@pytest.fixture(scope="module")
+def harmony_logprobs_tokenizer():
+    return AutoTokenizer.from_pretrained("openai/gpt-oss-20b")
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+@pytest.mark.parametrize("end_token", ["<|return|>", ""])
+def test_harmony_logprobs_follow_content_tokens(
+    harmony_logprobs_tokenizer, chunk_size, end_token
+):
+    """Headers, reasoning and tool arguments must not shift output-text scores.
+
+    Single-token chunks also split UTF-8 characters over several appends.
+    """
+    encoding = get_encoding()
+
+    def convert(token_ids, logprobs):
+        return [
+            ResponseLogprob(
+                token=str(token_id),
+                logprob=logprobs[i][token_id].logprob,
+                bytes=[],
+                top_logprobs=[],
+            )
+            for i, token_id in enumerate(token_ids)
+        ]
+
+    context = HarmonyContext(
+        [],
+        [],
+        frozenset({"weather"}),
+        HarmonyParser(harmony_logprobs_tokenizer),
+        logprobs_processor=convert,
+    )
+    parts = [
+        ("<|channel|>analysis<|message|>", False),
+        ("Private thought", False),
+        ("<|end|><|start|>assistant<|channel|>commentary<|message|>", False),
+        ("Checking the weather.", True),
+        (
+            (
+                "<|end|><|start|>assistant to=functions.weather"
+                "<|channel|>commentary<|message|>"
+            ),
+            False,
+        ),
+        ('{"city":"Paris"}', False),
+        ("<|call|>", False),
+    ]
+    final_parts = [
+        ("<|channel|>final<|message|>", False),
+        ("你好 𝄞🫠 Sunny.", True),
+        (end_token, False),
+    ]
+    expected = []
+    position = 0
+    deltas: list[ResponseLogprob] = []
+    for turn in (parts, final_parts):
+        tokens = []
+        for text, visible in turn:
+            ids = encoding.encode(text, allowed_special="all")
+            if visible:
+                expected.append(
+                    [(str(t), -float(position + i + 1)) for i, t in enumerate(ids)]
+                )
+            tokens.extend(ids)
+            position += len(ids)
+        turn_start = position - len(tokens)
+        for start in range(0, len(tokens), chunk_size):
+            ids = tokens[start : start + chunk_size]
+            finished = start + chunk_size >= len(tokens)
+            output = RequestOutput(
+                request_id="req",
+                prompt=None,
+                prompt_token_ids=[7, 8],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=ids,
+                        cumulative_logprob=None,
+                        logprobs=[
+                            {t: SampleLogprob(-float(turn_start + start + i + 1))}
+                            for i, t in enumerate(ids)
+                        ],
+                        finish_reason="stop" if finished else None,
+                    )
+                ],
+                finished=finished,
+            )
+            context.append_output(output)
+            deltas.extend(lp for group in context.last_append_logprobs for lp in group)
+        if turn is parts:
+            context.append_tool_output(
+                [OpenAIHarmonyMessage.from_role_and_content(Role.TOOL, "sunny")]
+            )
+
+    scores = [
+        [(lp.token, lp.logprob) for lp in context.message_logprobs[id(msg)]]
+        for msg in context.messages
+        if msg.recipient is None and msg.channel in ("final", "commentary")
+    ]
+    assert scores == expected
+    assert [(lp.token, lp.logprob) for lp in deltas] == [
+        item for group in expected for item in group
+    ]
+
+
+def test_harmony_text_delta_preserves_buffered_token_logprobs():
+    logprobs = [
+        ResponseLogprob(
+            token=f"token-{i}",
+            logprob=-float(i),
+            bytes=[i],
+            top_logprobs=[],
+        )
+        for i in range(3)
+    ]
+    state = StreamingState()
+    delta_event = next(
+        event
+        for event in emit_content_delta_events(
+            Segment("final", None, "🌍"), state, logprobs=logprobs
+        )
+        if event.type == "response.output_text.delta"
+    )
+    assert [lp.token for lp in delta_event.logprobs] == [lp.token for lp in logprobs]
+
+    message = _harmony_msg("final", "🌍")
+    done_events = emit_previous_item_done_events(message, state, logprobs=logprobs)
+    done_event = next(
+        event for event in done_events if event.type == "response.output_text.done"
+    )
+    assert [lp.token for lp in done_event.logprobs] == [lp.token for lp in logprobs]
+    item_done = next(
+        event for event in done_events if event.type == "response.output_item.done"
+    )
+    assert [lp.token for lp in item_done.item.content[0].logprobs] == [
+        lp.token for lp in logprobs
+    ]
