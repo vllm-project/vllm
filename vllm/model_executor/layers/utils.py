@@ -331,6 +331,32 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
+    return _rocm_unquantized_gemm(x, weight, bias)
+
+
+def _aiter_tuned_gemm_libtype(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> str:
+    from aiter.tuned_gemm import get_GEMM_A16W16_config
+
+    return get_GEMM_A16W16_config(
+        M=x.numel() // x.size(-1),
+        N=weight.shape[0],
+        K=weight.shape[1],
+        bias=bias is not None,
+        dtype=str(x.dtype),
+        otype=str(x.dtype),
+        bpreshuffle=getattr(weight, "is_shuffled", False) is True,
+    )["libtype"]
+
+
+def _rocm_unquantized_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    skip_reduce: bool = False,
+) -> torch.Tensor:
+    """With skip_reduce, a split-K AITER Triton GEMM returns its fp32 partials."""
     if envs.VLLM_BATCH_INVARIANT:
         from vllm.model_executor.determinism.batch_invariant import (
             linear_batch_invariant,
@@ -374,7 +400,7 @@ def rocm_unquantized_gemm_impl(
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
-        return gemm_a16w16(x, weight, bias)
+        return gemm_a16w16(x, weight, bias, skip_reduce=skip_reduce)
 
     skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -423,6 +449,13 @@ def rocm_unquantized_gemm_impl(
     if rocm_aiter_ops.is_tgemm_enabled():
         from aiter.tuned_gemm import tgemm
 
+        if skip_reduce and _aiter_tuned_gemm_libtype(x, weight, bias) == "triton":
+            # Same kernel and config the tuned dispatch runs, minus its reduce.
+            from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+            return gemm_a16w16(
+                x.reshape(-1, x.size(-1)), weight, bias, dtype=x.dtype, skip_reduce=True
+            )
         return tgemm.mm(x, weight, bias)
 
     return torch.nn.functional.linear(x, weight, bias)

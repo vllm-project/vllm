@@ -1704,6 +1704,43 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _rocm_aiter_gemm_add_rmsnorm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    variance_epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.normalization.fused_reduce_add_rmsnorm import (
+        fused_reduce_add_rmsnorm,
+    )
+
+    from vllm.model_executor.layers.utils import _rocm_unquantized_gemm
+
+    # A 3D result from a 2D input is the split-K partials, reduced by the norm kernel.
+    y = _rocm_unquantized_gemm(x.reshape(-1, x.size(-1)), weight, skip_reduce=True)
+    out, residual_out = fused_reduce_add_rmsnorm(
+        y,
+        residual.reshape(-1, residual.size(-1)),
+        norm_weight,
+        variance_epsilon,
+        gemma_norm=gemma_norm,
+    )
+    return out.view(residual.shape), residual_out.view(residual.shape)
+
+
+def _rocm_aiter_gemm_add_rmsnorm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    variance_epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(residual), torch.empty_like(residual)
+
+
 def _fused_mla_dual_rms_norm_impl(
     x1: torch.Tensor,
     x1_weight: torch.Tensor,
@@ -3187,6 +3224,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gemm_add_rmsnorm",
+                op_func=_rocm_aiter_gemm_add_rmsnorm_impl,
+                fake_impl=_rocm_aiter_gemm_add_rmsnorm_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
@@ -3328,6 +3372,19 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
+
+    @staticmethod
+    @functools.cache
+    def is_fused_reduce_add_rmsnorm_supported() -> bool:
+        try:
+            import aiter.ops.triton.normalization.fused_reduce_add_rmsnorm  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @staticmethod
+    def get_gemm_add_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_gemm_add_rmsnorm.default
 
     @staticmethod
     def get_triton_rotary_embedding_op() -> OpOverload:
