@@ -683,6 +683,35 @@ def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch):
     assert fake_logger.warning.call_count == 3
 
 
+def test_alternating_failure_logs_at_most_one_traceback(monkeypatch):
+    """A fault that alternates with successes must not log a traceback per
+    failure.
+
+    The failure run restarts on every success, so keying the traceback off the
+    run's first round would emit one per failing round at the default interval.
+    """
+    manager, tier = _make_manager()
+    fake_logger = MagicMock()
+    monkeypatch.setattr(tiering_manager, "logger", fake_logger)
+    manager._stop_tier_poll_thread()
+    calls = {"n": 0}
+
+    def alternating(parent):
+        calls["n"] += 1
+        if calls["n"] % 2:
+            raise RuntimeError("intermittent")
+
+    tier.on_serve = alternating
+    stop = _RecordingStop(6)
+    manager._tier_poll_stop = stop
+    try:
+        manager._tier_poll_loop()
+    finally:
+        manager.shutdown()
+    assert calls["n"] == 6
+    assert fake_logger.exception.call_count == 1
+
+
 def test_lock_releases_on_error(manager_and_tier):
     """Leaving a with-block on an exception must not leak the lock."""
     manager, _ = manager_and_tier

@@ -86,8 +86,8 @@ _TIER_POLL_BACK_OFF_AFTER_S = 30.0
 # and the configured tier_poll_interval_s, so backing off never polls faster
 # than the configured interval.
 _TIER_POLL_BACKOFF_S = 1.0
-# Minimum spacing between the one-line summaries that follow the first
-# traceback of a failing run, so a permanent fault cannot flood the log.
+# Minimum spacing between the reports logged for failing rounds, so neither a
+# permanent fault nor one that alternates with successes can flood the log.
 _TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 # How long shutdown() waits for the thread to finish its round.
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
@@ -377,24 +377,26 @@ class TieringOffloadingManager(OffloadingManager):
                 # Never let a round kill the thread silently: it keeps
                 # retrying (backing off after sustained failure) so a peer is
                 # still served while the engine is idle, when no step runs.
-                # One full traceback per failure run, then a periodic one-line
-                # summary, so a permanent fault cannot flood the log.
+                # At most one report per error-log interval, so a fault that
+                # alternates with successes cannot log a traceback every round.
+                # The first failure of a run gets the traceback, later ones a
+                # one-line summary; a failure inside the interval logs nothing.
                 now = time.monotonic()
                 if failing_since is None:
                     failing_since = now
                 failures += 1
-                if failures == 1:
+                if now - last_error_log >= _TIER_POLL_ERROR_LOG_INTERVAL_S:
                     last_error_log = now
-                    logger.exception("KV offload tier-poll round failed")
-                elif now - last_error_log >= _TIER_POLL_ERROR_LOG_INTERVAL_S:
-                    last_error_log = now
-                    logger.warning(
-                        "KV offload tier-poll thread has failed %d consecutive "
-                        "rounds (%.0fs); still retrying so peers are served "
-                        "while the engine is idle.",
-                        failures,
-                        now - failing_since,
-                    )
+                    if failures == 1:
+                        logger.exception("KV offload tier-poll round failed")
+                    else:
+                        logger.warning(
+                            "KV offload tier-poll thread has failed %d "
+                            "consecutive rounds (%.0fs); still retrying so "
+                            "peers are served while the engine is idle.",
+                            failures,
+                            now - failing_since,
+                        )
             finally:
                 self._lock.release()
             if (
