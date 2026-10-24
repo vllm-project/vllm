@@ -437,6 +437,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
         ZentorchExpertsInt4,
     )
+    from vllm.model_executor.layers.fused_moe.oracle.base import (
+        make_fused_moe_experts,
+    )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
@@ -471,17 +474,11 @@ def make_wna16_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
     logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
-    extra_args: dict[str, Any] = {}
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        extra_args["max_num_tokens"] = max_num_tokens
-        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        **extra_args,
+    experts = make_fused_moe_experts(
+        prepare_finalize,
+        experts_cls,
+        moe_config,
+        moe_quant_config,
     )
 
     return mk.FusedMoEKernel(
