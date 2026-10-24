@@ -8,7 +8,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere", "/dumper")
+GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 
 
 class AuthenticationMiddleware:

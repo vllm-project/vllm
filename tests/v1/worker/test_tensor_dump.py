@@ -7,6 +7,7 @@ import torch
 from pydantic import TypeAdapter
 
 from vllm.config import TensorDumpConfig
+from vllm.distributed import parallel_state
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.tensor_dump import TensorDumper, dump
@@ -215,42 +216,61 @@ def test_unsupported_execution_rejected(tmp_path, use_v2, eager, ubatching):
     VllmConfig._validate_tensor_dump(config)
 
 
-def test_runtime_control_validation_and_auth(tmp_path):
+@pytest.mark.parametrize("expert_parallel", [False, True])
+def test_batch_records_parallel_groups(tmp_path, batch, monkeypatch, expert_parallel):
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    expected = {}
+    for name, ranks in {
+        "tp": [2, 3],
+        "pp": [1, 3],
+        "dp": [3],
+        "dcp": [3],
+        "pcp": [3],
+        "ep": [2, 3],
+    }.items():
+        group = SimpleNamespace(rank_in_group=ranks.index(3), ranks=ranks)
+        monkeypatch.setattr(
+            parallel_state, f"get_{name}_group", lambda group=group: group
+        )
+        expected[name] = {"rank": group.rank_in_group, "ranks": ranks}
+    if not expert_parallel:
+
+        def missing_ep():
+            raise AssertionError("expert parallel group is not initialized")
+
+        monkeypatch.setattr(parallel_state, "get_ep_group", missing_ep)
+        del expected["ep"]
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    with dumper.capture(batch):
+        pass
+    assert records(dumper)[0]["value"]["parallel_groups"] == expected
+
+
+def test_runtime_control_uses_existing_rpc(tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from vllm.entrypoints.serve.dev.rpc.api_router import attach_router
     from vllm.entrypoints.serve.middleware.authenticate import AuthenticationMiddleware
-    from vllm.entrypoints.serve.tensor_dump.api_router import attach_router
 
     app = FastAPI()
     app.add_middleware(AuthenticationMiddleware, tokens=["test-key"])
-    app.state.args = SimpleNamespace(tensor_dump_config=TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    app.state.engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            side_effect=lambda **kwargs: [dumper.control(*kwargs["args"])]
+        )
+    )
     attach_router(app)
     headers = {"Authorization": "Bearer test-key"}
-    assert TestClient(app).post("/dumper/get_state", headers=headers).status_code == 404
-    app.state.args.tensor_dump_config.output_dir = str(tmp_path)
-    app.state.engine_client = SimpleNamespace(
-        collective_rpc=AsyncMock(return_value=[{"step": 0}])
-    )
-    attach_router(app)
     client = TestClient(app)
-    assert client.post("/dumper/get_state").status_code == 401
-    assert client.post("/dumper/configure", headers=headers).status_code == 422
-    assert (
-        client.post(
-            "/dumper/configure", headers=headers, json={"max_steps": 0}
-        ).status_code
-        == 422
+    assert client.post("/dumper/get_state", headers=headers).status_code == 404
+    result = client.post(
+        "/collective_rpc",
+        json={"method": "dumper_control", "args": ["configure", {"enabled": False}]},
     )
-    assert (
-        client.post(
-            "/dumper/configure", headers=headers, json={"output_dir": "/other"}
-        ).status_code
-        == 422
-    )
-    result = client.post("/dumper/configure", headers=headers, json={"enabled": False})
     assert result.status_code == 200
-    assert result.json() == [{"step": 0}]
+    assert result.json()["results"][0]["config"]["enabled"] is False
     args = app.state.engine_client.collective_rpc.call_args
-    assert args.args == ("dumper_control",)
+    assert args.kwargs["method"] == "dumper_control"
     assert args.kwargs["args"][1]["enabled"] is False

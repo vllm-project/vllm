@@ -22,5 +22,5 @@ class TensorDumpConfig(TensorDumpOptions):
     """Configuration for eager Model Runner V2 tensor dumping."""
 
     output_dir: str | None = Field(default=None, min_length=1)
-    """Directory for worker dumps. None disables dumping and its control routes.
+    """Directory for worker dumps. None disables dumping.
     This path is local to each worker and cannot be changed at runtime."""

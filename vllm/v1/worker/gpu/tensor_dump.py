@@ -1,7 +1,7 @@
 import os
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -13,6 +13,7 @@ import torch
 from torch.utils._pytree import tree_map_only
 
 from vllm.config.tensor_dump import TensorDumpConfig, TensorDumpOptions
+from vllm.distributed import parallel_state
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -39,6 +40,24 @@ def _tensors(value: Any, path: str = "") -> Iterator[tuple[str, torch.Tensor]]:
         items = value.items() if isinstance(value, dict) else enumerate(value)
         for key, item in items:
             yield from _tensors(item, f"{path}.{key}")
+
+
+def _parallel_groups() -> dict:
+    if not parallel_state.model_parallel_is_initialized():
+        return {}
+    groups = {
+        "tp": parallel_state.get_tp_group(),
+        "pp": parallel_state.get_pp_group(),
+        "dp": parallel_state.get_dp_group(),
+        "dcp": parallel_state.get_dcp_group(),
+        "pcp": parallel_state.get_pcp_group(),
+    }
+    with suppress(AssertionError):
+        groups["ep"] = parallel_state.get_ep_group()
+    return {
+        name: {"rank": group.rank_in_group, "ranks": group.ranks}
+        for name, group in groups.items()
+    }
 
 
 class TensorDumper:
@@ -91,6 +110,7 @@ class TensorDumper:
             self._save(
                 "batch",
                 {
+                    "parallel_groups": _parallel_groups(),
                     "request_ids": list(batch.req_ids),
                     "input_ids": batch.input_ids[: batch.num_tokens],
                     "positions": batch.positions[: batch.num_tokens],

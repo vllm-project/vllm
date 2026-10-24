@@ -14,7 +14,7 @@ vllm serve MODEL --enforce-eager \
 
 Like `--profiler-config`, `--tensor-dump-config` accepts a JSON object or individual
 keys such as `--tensor-dump-config.max_steps 2`. Setting `output_dir` opts workers
-into dumping and enables the serving control routes. The configuration travels
+into dumping. The configuration travels
 with `VllmConfig` to workers, including Ray workers; no dumper environment variables
 are required. The directory is local to each worker, so use a shared filesystem
 if dumps from multiple nodes should be collected in one place.
@@ -55,6 +55,11 @@ copies; later in-place operations cannot change them.
 
 Every captured step also writes a `batch` record with request IDs, input IDs,
 positions, sequence lengths, query boundaries and real/padded token counts.
+`parallel_groups` records each TP, PP, DP, DCP and PCP group's local rank and
+ordered global ranks, plus the EP group when initialized. These describe process
+groups, not tensor partition dimensions; an EP group can exist without expert
+parallel execution being enabled. Uninitialized groups in standalone use produce
+an empty mapping.
 Module tensors retain their original shapes; padding and parallel shards are
 not automatically trimmed or gathered. Use the batch record and deployment
 topology when comparing runs.
@@ -76,25 +81,29 @@ dump("attention.q", query)
 
 This uses the same filters and limits. Calls outside an active capture do nothing.
 
-The serving API exposes `POST /dumper/configure`, `/dumper/get_state` and
-`/dumper/reset` only when the directory is set at startup. Configure accepts the
+No dedicated HTTP endpoint is added. Offline callers can use
+`llm.collective_rpc("dumper_control", args=("get_state",))` and the existing
+Python development `/collective_rpc` endpoint supports the same worker method.
+HTTP access requires `VLLM_SERVER_DEV_MODE=1`; this enables other development
+endpoints too. This development endpoint is not protected by `--api-key` in this
+baseline; bind to loopback or isolate access in a trusted debugging environment.
+Configure accepts the
 capture fields above, excluding `output_dir`, and replaces the capture options;
 omitted fields use their defaults. Reset restarts the step budget while keeping step numbers increasing
 and retaining the configuration, hooks and existing files. It does not overwrite
 earlier dumps. Responses contain
 worker states; with data-parallel serving, the existing collective RPC returns
 states from the first engine. Configure/reset still reach the engines served by
-that client. These routes use the API server's authentication when an API key is
-configured; without an API key they are unauthenticated. The output directory
-cannot be changed remotely. Runtime control is available on the Python frontend.
+that client. The output directory cannot be changed through `dumper_control`.
+Runtime HTTP control is available on the Python frontend.
 
 ```bash
-curl -X POST http://localhost:8000/dumper/configure \
-  -H 'Authorization: Bearer YOUR_API_KEY' \
+curl -X POST http://localhost:8000/collective_rpc \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"patterns":["*self_attn*"],"max_steps":2}'
-curl -X POST http://localhost:8000/dumper/reset \
-  -H 'Authorization: Bearer YOUR_API_KEY'
+  -d '{"method":"dumper_control","args":["configure",{"enabled":true,"patterns":["*self_attn*"],"max_steps":2}]}'
+curl -X POST http://localhost:8000/collective_rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"method":"dumper_control","args":["reset"]}'
 ```
 
 Capture synchronizes device-to-host copies and writes files synchronously, so use
