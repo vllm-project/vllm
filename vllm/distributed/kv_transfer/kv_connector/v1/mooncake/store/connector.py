@@ -217,6 +217,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ============================================================
 
+    def on_preschedule_request(self, request: Request) -> object | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.start_lookup_prefetch(request)
+
     def get_num_new_matched_tokens(
         self,
         request: Request,
@@ -269,6 +273,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.cancel_lookup_prefetch(request)
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         return False, None
