@@ -36,7 +36,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
-from vllm.tool_parsers.muse_tool_parser import MuseToolParser
+from vllm.tool_parsers.muse_tool_parser import (
+    _NAME_RE,
+    _PARAM_RE,
+    MuseToolParser,
+)
 
 R: MuseReasoningParser
 T: MuseToolParser
@@ -98,6 +102,90 @@ def _call(name):
 
 
 # ---------------------------------------------------------------- tool calls
+
+
+def test_attribute_scan_stops_at_the_tag_boundary():
+    """A repeated open tag must not restart the attribute search per tag.
+
+    The attribute runs in ``_NAME_RE`` and ``_PARAM_RE`` were ``[^>]*?``, so
+    output that opens tags without ever closing one retried the ``name="..."``
+    search from every ``<atem:invoke`` position, each retry scanning to the end
+    of the block: 13 KB cost 0.48 s and 52 KB cost 7.9 s, on the event loop.
+    ``[^<>]`` stops every attempt at the next ``<``, which makes the match
+    independent of what follows the opening tag -- asserted directly, since a
+    wall-clock bound would depend on the runner.
+    """
+    # One open tag does carry the attribute; two or more must not, at any
+    # distance, so the scan cost cannot grow with the number of tags.
+    assert _NAME_RE.match('<atem:invoke name="f"') is not None
+    for n in (2, 10, 100, 1000):
+        assert _NAME_RE.match("<atem:invoke " * n + 'name="f"') is None
+        assert (
+            _PARAM_RE.match("<atem:parameter " * n + 'name="k">v</atem:parameter>')
+            is None
+        )
+
+    # The real entry point, on the shape that used to cost seconds.
+    raw = (
+        "<|start|>assistant to=weather.get<|message|>"
+        + "<atem:invoke " * 4000
+        + "</atem:invoke><|eot|>"
+    )
+    assert not MuseToolParser.extract_tool_calls(T, raw, _NO_REQ).tools_called
+
+
+def test_streaming_parses_once_per_completed_invoke(monkeypatch):
+    """Streaming must not re-parse the whole text on every delta.
+
+    ``extract_tool_calls_streaming`` ran ``_parse_tool_calls(current_text)`` for
+    each delta, so _INVOKE_RE -- which the attribute fix above leaves alone --
+    rescanned the whole output every time: O(n) per delta and O(n^2) over the
+    message: 26 KB in 4-char deltas took 5-19 s, depending on the runner.
+    A call can only appear on the
+    delta that completes an ``</atem:invoke>``, so only those deltas parse.
+    Counted rather than timed, so the bound holds on any runner (cf. #62027).
+    """
+    tail = (
+        "<|start|>assistant to=read.read<|message|><atem:function_calls>\n"
+        '<atem:invoke name="read.read">\n'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+    # Bound before patching, so `real` keeps the original implementation and
+    # already carries `cls`; the wrapper drops the one it is handed.
+    real = MuseToolParser._parse_tool_calls
+    parses = 0
+
+    def counting(cls, *args, **kwargs):
+        nonlocal parses
+        parses += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(MuseToolParser, "_parse_tool_calls", classmethod(counting))
+
+    # `pad` lengthens the reasoning that precedes the call, so the delta count
+    # grows while the number of completed invokes stays at one.
+    for pad in (0, 500, 5000):
+        for chunk in (1, 4, 17):
+            raw = " to=self<|message|>" + "." * pad + "<|eom|>" + tail
+            parses = 0
+            parser = MuseToolParser(object())
+            names, prev, i = [], "", 0
+            while i < len(raw):
+                cur = raw[: i + chunk]
+                delta = MuseToolParser.extract_tool_calls_streaming(
+                    parser, prev, cur, cur[len(prev) :], [], [], [], _fake_req()
+                )
+                if delta is not None and delta.tool_calls:
+                    names += [_fn_of(tc)[0] for tc in delta.tool_calls]
+                prev = cur
+                i += chunk
+            deltas = len(raw) // chunk + 1
+            assert names == ["read.read"], f"pad={pad} chunk={chunk}: {names}"
+            assert parses == 1, (
+                f"pad={pad} chunk={chunk}: parsed {parses}x over {deltas} deltas"
+            )
 
 
 def test_single_tool_call_after_reasoning():

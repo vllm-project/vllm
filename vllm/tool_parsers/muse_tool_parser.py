@@ -91,9 +91,15 @@ _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
 # --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
-_NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
+# `[^<>]` and not `[^>]` for the attribute runs: a tag's attributes cannot
+# contain either bracket, and stopping at `<` keeps the scan linear. With
+# `[^>]`, model output that repeats an opening tag without ever closing it --
+# `"<atem:invoke " * n` -- retries the attribute search from every one of those
+# n positions, and each retry runs to the end of the text, so the cost grows
+# with the square of the output length (52 KB took 7.5 s).
+_NAME_RE = re.compile(r'<atem:invoke\b[^<>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(
-    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
+    r'<atem:parameter\b[^<>]*?\bname="(?P<key>[^"]+)"[^<>]*?>(?P<value>.*?)</atem:parameter>',
     re.DOTALL,
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
@@ -487,8 +493,24 @@ class MuseToolParser(ToolParser):
 
         try:
             registered = self._registered_names(request)
-            calls = self._parse_tool_calls(
-                current_text, registered, self._string_parameters(request)
+            # A call can only become visible on the delta that completes an
+            # `</atem:invoke>`, but _parse_tool_calls rescans the whole text --
+            # including _INVOKE_RE, which this fix leaves alone -- so running it
+            # on every delta costs O(n) per delta and O(n^2) over the message
+            # (26 KB in 4-char deltas: 5-19 s, depending on the runner).
+            # Parse only when the closing tag
+            # lands inside this delta. The window starts len(close)-1 characters
+            # before the delta so a tag split across deltas is still seen, once,
+            # on the delta that finishes it. At handover previous_text is "" and
+            # this is the whole text -- the full scan that case still needs.
+            close = "</atem:invoke>"
+            tail = current_text[max(0, len(previous_text) - len(close) + 1) :]
+            calls = (
+                self._parse_tool_calls(
+                    current_text, registered, self._string_parameters(request)
+                )
+                if close in tail
+                else []
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
@@ -524,7 +546,10 @@ class MuseToolParser(ToolParser):
 
             self._streamed_content_len = len(content)
             self._streamed_reasoning_len = len(reasoning)
-            self._emitted_tool_calls = len(calls)
+            # `calls` is empty on every delta that completes no invoke, so this
+            # cursor must never walk back: it is what stops an already-emitted
+            # call from being streamed a second time on a later delta.
+            self._emitted_tool_calls = max(self._emitted_tool_calls, len(calls))
 
             message = DeltaMessage()
             if content_delta:
