@@ -11,7 +11,6 @@ from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -88,32 +87,26 @@ class LoRAConfig:
     base classification head size."""
 
     def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.enable_tower_connector_lora)
-        factors.append(self.enable_mixed_moe_lora_format)
-        factors.append(self.enable_moe_shared_loras)
-        factors.append(self.max_lora_cls_labels)
-        # target_modules affects which modules get LoRA applied
-        factors.append(
-            tuple(sorted(self.target_modules)) if self.target_modules else None
-        )
+        from vllm.config.utils import get_hash_factors, hash_factors
 
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            "max_cpu_loras",
+            "default_mm_loras",
+            "specialize_active_lora",
+            # Hashed below in sorted order so that module order does not matter.
+            "target_modules",
+        }
+        factors = get_hash_factors(self, ignored_factors)
+        factors["target_modules"] = (
+            sorted(self.target_modules) if self.target_modules else None
+        )
+        return hash_factors(factors)
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
