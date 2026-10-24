@@ -1046,6 +1046,8 @@ class RoutedExperts(PluggableLayer):
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
                         continue
+                    if param_name.endswith(self.quant_method.ignored_weight_suffixes):
+                        continue
                     raise AttributeError(
                         f"Layer {self.layer_name} has no parameter {param_name!r} "
                         f"for checkpoint weight {qual_name!r}"
