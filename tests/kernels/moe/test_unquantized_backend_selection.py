@@ -637,3 +637,107 @@ def test_quantization_only_backend_falls_back_to_auto(moe_backend):
     assert select_unquantized_moe_backend(
         moe_config=moe_config
     ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
+
+
+def test_select_lora_explicit_triton_with_trtllm_available():
+    """Even when TRT-LLM is supported, explicit --moe-backend triton must
+    select Triton rather than TRT-LLM."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            side_effect=lambda cap: cap == 100,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe.has_flashinfer_trtllm_fused_moe",
+            return_value=True,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128, intermediate_size=256, in_dtype=torch.bfloat16
+        )
+        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.is_lora_enabled = True
+        moe_config.moe_backend = "triton"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls.__name__ == "TritonExperts"
+
+
+def test_select_lora_fully_sharded_falls_back_to_triton():
+    """When TRT-LLM is available, --fully-sharded-loras should fall back
+    to Triton under auto selection."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            side_effect=lambda cap: cap == 100,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe.has_flashinfer_trtllm_fused_moe",
+            return_value=True,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128, intermediate_size=256, in_dtype=torch.bfloat16
+        )
+        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.is_lora_enabled = True
+        moe_config.fully_sharded_loras = True
+        moe_config.moe_backend = "auto"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls.__name__ == "TritonExperts"
+
+
+def test_select_lora_explicit_trtllm_with_fully_sharded_raises():
+    """Explicit --moe-backend flashinfer_trtllm with --fully-sharded-loras
+    should raise ValueError because TRT-LLM LoRA path does not support
+    fully-sharded LoRAs."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            side_effect=lambda cap: cap == 100,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe.has_flashinfer_trtllm_fused_moe",
+            return_value=True,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128, intermediate_size=256, in_dtype=torch.bfloat16
+        )
+        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.is_lora_enabled = True
+        moe_config.fully_sharded_loras = True
+        moe_config.moe_backend = "flashinfer_trtllm"
+
+        with pytest.raises(ValueError, match="fully_sharded_loras"):
+            select_unquantized_moe_backend(moe_config=moe_config)
