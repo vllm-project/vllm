@@ -360,6 +360,21 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
+    "dots_ocr": VitCudagraphTestConfig(
+        model="rednote-hilab/dots.ocr",
+        modalities=["image"],
+        image_prompt=(
+            "<|user|><|img|><|imgpad|><|endofimg|>"
+            "What is in this image?<|endofuser|><|assistant|>"
+        ),
+        marks=[pytest.mark.core_model],
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+        },
+    ),
     "deepseek_vl2": VitCudagraphTestConfig(
         model="deepseek-ai/deepseek-vl2-tiny",
         modalities=["image"],
