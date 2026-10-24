@@ -1431,3 +1431,126 @@ demande de réclamation est postée sur global.
 - `/dev/shm` purgé de 8,1 Go d'orphelins de la génération morte (17G → 8,0G).
 - Condensation en repli cloud pendant la saturation (disjoncteur), comme prévu.
 - nbaudit ok (vague 2 Image/). G: 85 %, écriture OK.
+
+## Cycle 24/10 16:41Z — 2ᵉ crash du même bug amont, redémarrage à tort par le watchdog (corrigé, v6.2), 56 % de renvois identiques
+
+**Deux redémarrages depuis le cycle de 14:41Z.**
+
+1. **15:18:04Z : redémarrage déclenché à tort par le watchdog v6.1.** Il était en BUSY
+   depuis 14 cycles (le dernier, 15:16:04, montrait `p 6167402->6528046`). Au cycle
+   suivant, la lecture de `/metrics` a dépassé son `--max-time 5`. `read_counters` a alors
+   imprimé `0 0` : awk termine sur des variables vides, que `%d` rend à 0. Ce `0 0`
+   ressemblait à des compteurs plats, donc à un vrai blocage, d'où le `docker restart`
+   d'un moteur qui travaillait. Les 11 requêtes en vol ont reçu un 500 (10 du hub + la
+   sonde), et les caches GPU et RAM ont été vidés.
+   C'est un trou dans la mise en œuvre de Q29=b : le repli « métriques illisibles →
+   redémarrage » datait de la conception v6, avant b. À 16:47Z, `/metrics` répond en
+   8-10 ms : la lenteur était passagère, liée à la charge.
+2. **15:35:33Z : 2ᵉ crash `AssertionError: Chunk … not found in cache`**, avec une trace
+   identique à 14:32:09Z (`scheduler.py:1289` → `offloading/scheduler.py:1256` →
+   `tiering/manager.py:588` → `cpu/manager.py:221`). Juste avant :
+   `Running 4, Waiting 7, Deferred 5, KV fetch: 1 waiting to start`.
+   Docker a relancé le moteur (RC 0→1 ; le `docker restart` de 15:18 avait remis RC à 0).
+   Container StartedAt 15:35:37Z, serveur prêt à 15:37:47Z, soit ~2 min 15 s sans service
+   et 6 × 500 (5 du hub + la sonde).
+   Le crash survient 15 min après le redémarrage de 15:18. Un cache vidé déclenche une
+   ruée de promotions fs→RAM, exactement les conditions de la course. Le lien de cause
+   est SUPPOSÉ, pas mesuré.
+
+**Watchdog v6.2** (`medium-swift15-27b-fstier.yml`) :
+- `read_counters` passe à `--max-time 15` et imprime `-1 -1` quand les deux compteurs ne
+  peuvent pas être lus.
+- Au 2ᵉ échec de décodage, une lecture illisible (maintenant, ou au snapshot du 1ᵉʳ
+  échec) donne `WEDGE-UNKNOWN` : pas de redémarrage, le snapshot est repris dès qu'une
+  lecture redevient valide.
+- Redémarrage seulement après 3 cycles illisibles de suite (~6 min, décodage toujours en
+  échec, `METRICS_KO_MAX=3`), ou sur compteurs plats comme avant.
+- Le message de redémarrage dit désormais laquelle des deux causes l'a déclenché.
+
+Validation :
+- Script extrait du yml (`$$`→`$`), `sh -n` OK.
+- Banc `.tmp/wd_sim2.sh` (faux `curl`/`docker`/`sleep`), 5 modes :
+
+  | Mode | Comportement observé |
+  |---|---|
+  | compteurs qui avancent | BUSY, aucun appel docker |
+  | compteurs plats | `docker restart` |
+  | `/metrics` toujours KO | UNKNOWN 1/3, 2/3, restart au 3ᵉ |
+  | KO une seule fois au 2/2 | UNKNOWN puis BUSY |
+  | snapshot KO au 1/2 | UNKNOWN puis BUSY |
+
+- `docker compose config -q` OK ; le dry-run ne recrée que le watchdog.
+
+Déploiement : `up -d --no-deps watchdog-swift15-27b` à 16:44:48Z. StartedAt moteur
+inchangé (15:35:37.876Z avant et après), RC=1 inchangé. Première sonde à 16:44:54 :
+`OK decode=200`.
+
+**Amont.** #62615 (« Pin batch lookup HITs before secondary-tier promotions ») écrit
+« Only in P2P discovery mode ». Lu dans le code v0.32.0 du conteneur :
+- `offloading/scheduler.py` (L687 parcours préfixe, L724 parcours fenêtre glissante)
+  appelle `manager.lookup(key)` clé par clé ;
+- un HIT secondaire passe par `_initiate_promotion()` → `primary_tier.prepare_write([key])`,
+  qui peut évincer un bloc primaire non épinglé déjà compté HIT par le même parcours ;
+- `prepare_load()` asserte ensuite sur ce bloc.
+
+C'est la forme exacte de leur cas d'échec, sur le chemin scheduler. Point de données
+posté : [vllm#62615 c.6386878540](https://github.com/vllm-project/vllm/pull/62615#issuecomment-6386878540).
+Il demande d'appliquer le même ordre (`probe_batch` → épinglage → `promote_batch`) au
+parcours du scheduler. `kv_load_failure_policy=recompute` ne couvre pas ce cas : l'assert
+part du scheduler, avant tout chargement.
+
+**Q30.** Le seuil « 2ᵉ crash en 7 jours » est franchi en 63 min : la recommandation passe
+à (b), tier RAM 8 → 24 GiB, effet non mesuré. Un contexte de 200 K tokens fait ~4,6 GiB à
+~23 Ko/token (mesure fs du 20/10, nvfp4). 8 GiB en tiennent moins de deux, 24 GiB environ
+cinq. Décision utilisateur, rien d'appliqué.
+
+**La saturation s'auto-entretient par les renvois.** Mesure depuis le boot 15:37:47Z, à
+~16:50Z (72 min) :
+- Hub (`Bun/1.3.14`) : **72 soumissions pour 32 corps distincts, soit 40 renvois
+  identiques (56 %)**. Signature : taille + 200 derniers octets de tête et de queue.
+- Copies par corps : 20 corps en 1 exemplaire, puis 4×2, 2×3, 1×4, 1×5, 2×6, 1×7, et
+  **un corps soumis 10 fois**. Les 32 corps distincts font tous plus de 100 Ko.
+- Écart entre copies (fin d'échange à fin d'échange) : médiane 198 s, p90 603 s, max
+  681 s ; 10 copies à moins de 60 s de la précédente.
+- Moteur : `request_success_total` donne 24 `stop` + 18 `length` (les sondes de 24 tokens
+  finissent en `length`), tous clients confondus. Le census, lui, compte 72 + 11 + 43
+  réponses 200.
+- **Un 200 du census ne veut donc pas dire « servi »** : un flux SSE envoie son en-tête
+  200 avant le premier token, et un abandon par déconnexion n'entre pas dans les
+  compteurs de fin (PR #172).
+- Mécanisme côté hub (réponse claudish 14:50Z, `proxy-server.ts:1778`, épinglé W16) :
+  - une déconnexion client avant le premier octet est indétectable ;
+  - le seul plafond en amont est le watchdog du premier événement, à 300 s ;
+  - le client renvoie, et la requête renvoyée repart en fin de file.
+- Débit moteur pendant ce temps : génération ~1 t/s la plupart des intervalles de 10 s,
+  avec 4-7 requêtes en cours et 3-7 en attente. Les étapes sont dominées par des
+  morceaux de prefill de 8 192 tokens, à ~1,5 K t/s sur le dense 27B. Pics de 40-113 t/s
+  quand aucun prefill n'est en vol.
+- Relayé à claudish pour l'issue d'admission en tokens.
+
+**Census 2 h** : 240 requêtes (~2/min, contre 3,6/min au cycle précédent).
+- Statuts : 219 × 200, 17 × 500 (11 à 15:18:32-34Z, redémarrage watchdog ; 6 à
+  15:35:33-34Z, crash), 4 × 401 (`108.165.33.236`, clé VL morte), **0 × 400**.
+- Clés : `be312daf7c1c` (MEDIUM) ×236, `1f7f6080cb65` (VL morte) ×4.
+- IP en 7 h :
+  - aucune IP nouvelle avec des 200 ;
+  - `66.249.79.32` (plage Googlebot) : 1 requête, 0 × 200 ;
+  - `212.133.41.47` : toujours 3 requêtes au total, aucune depuis 13:21Z (Q31).
+
+**Q31.** 4 sièges se sont exclus par mesure de leur sortie WAN : po-2024, po-2025, po-2028
+(`90.65.170.144`) et web1 (`37.187.180.135`, VPS OVH). Aucune réclamation.
+po-2025 signale aussi, côté hub, des requêtes `swift-1.5-27b` avec l'UA
+`open-code-review/v1.12.13` depuis `4.150.181.241` (plage Azure FR, peut-être un runner
+CI). Invisible côté moteur (sortie hairpin du hub) ; c'est au census par clé de claudish
+de le trancher.
+
+**Cache.** Depuis le boot : hit préfixe GPU 17,7 %, externe 41,4 % (log moteur 16:48Z).
+Préemptions : 35 depuis 15:37Z. KV 72-99 %.
+
+**Hôte et santé** :
+- Commit 68,7 % (marge 124 Go). VRAM 21 779 / 20 976 MiB, 1,2 GiB sous l'alerte.
+- `/dev/shm` purgé : 8 orphelins des deux générations mortes, dont 2 × 8 GiB de mmap du
+  tier (24G → 8,1G).
+- Pruneur 16:20Z : 97,6 GiB pour un cap de 96, 67 fichiers supprimés, 0 erreur.
+- Condensation en repli cloud de 15:21 à 15:31Z, pendant les redémarrages (prévu).
+- nbaudit ok (vague 2 Image/). G: 85 %, écriture OK. Prouveur : aucune passe.
