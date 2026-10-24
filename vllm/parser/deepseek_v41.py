@@ -19,6 +19,9 @@ DSML_INVOKE_PREFIX = '<｜DSML｜ invoke name="'
 DSML_INVOKE_END = "</｜DSML｜ invoke>"
 DSML_PARAM_START = "<｜DSML｜ parameter"
 DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
+# Turn markers, so a prompt-closed reasoning block is only honored in the
+# current turn (continue_final_message, or a template that skips thinking).
+DEEPSEEK_TURN_BOUNDARY_TOKENS = frozenset({"<｜User｜>", "<｜Assistant｜>"})
 
 _PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
 
@@ -37,6 +40,7 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
     return replace(
         config,
         name="deepseek_v41",
+        turn_boundary_tokens=DEEPSEEK_TURN_BOUNDARY_TOKENS,
         terminals={**config.terminals, **terminal_overrides},
         token_id_terminals={
             key: terminal_overrides.get(key, value)
