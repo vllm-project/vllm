@@ -25,12 +25,22 @@ from vllm.model_executor.kernels.linear import (
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
+    choose_scaled_mm_linear_kernel,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+    MarlinFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
@@ -376,3 +386,82 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+def _fp8_config(
+    *,
+    activation_quant_key,
+    weight_quant_key,
+) -> FP8ScaledMMLinearLayerConfig:
+    return FP8ScaledMMLinearLayerConfig(
+        activation_quant_key=activation_quant_key,
+        weight_quant_key=weight_quant_key,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(128, 128),
+    )
+
+
+def test_marlin_fp8_rejects_per_token_activation():
+    """Marlin is W8A16 weight-only and must not claim PTPC configs."""
+    ok, reason = MarlinFP8ScaledMMLinearKernel.can_implement(
+        _fp8_config(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticChannelSym,
+        )
+    )
+    assert not ok
+    assert reason is not None
+    assert "per-token" in reason
+    assert "W8A16" in reason
+
+
+def test_marlin_fp8_accepts_per_tensor_activation():
+    """Weight-only Marlin remains available for per-tensor activation FP8."""
+    ok, reason = MarlinFP8ScaledMMLinearKernel.can_implement(
+        _fp8_config(
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+        )
+    )
+    assert ok, reason
+
+
+@patch.object(MarlinFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_choose_scaled_mm_surfaces_marlin_per_token_rejection(
+    platform_mock, _marlin_supported
+):
+    """When no earlier kernel can implement PTPC, the chooser must raise with
+    Marlin's rejection reason instead of silently selecting Marlin.
+    """
+    platform_mock._enum = PlatformEnum.CUDA
+
+    class _RejectingKernel(MarlinFP8ScaledMMLinearKernel):
+        @classmethod
+        def is_supported(cls, compute_capability=None):
+            return True, None
+
+        @classmethod
+        def can_implement(cls, c):
+            return False, "mocked earlier rejection"
+
+    possible = {
+        PlatformEnum.CUDA: [_RejectingKernel, MarlinFP8ScaledMMLinearKernel],
+    }
+    config = _fp8_config(
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_quant_key=kFp8StaticChannelSym,
+    )
+
+    with pytest.raises(ValueError, match="Reasons:") as exc_info:
+        choose_scaled_mm_linear_kernel(
+            config,
+            possible,
+            quantization="fp8_w8a8",
+        )
+
+    message = str(exc_info.value)
+    assert "mocked earlier rejection" in message
+    assert "MarlinFP8ScaledMMLinearKernel" in message
+    assert "per-token" in message

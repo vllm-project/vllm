@@ -69,3 +69,54 @@ def test_scaled_fp8_quant_per_channel_shape() -> None:
     assert y.dtype == current_platform.fp8_dtype()
     assert s.shape == (96, 1)
     assert s.dtype == torch.float32
+
+
+def test_fp8_ptpc_create_weights_surfaces_kernel_rejection_reasons(
+    monkeypatch,
+) -> None:
+    """PTPC create_weights must fail before weight allocation and include the
+    chooser's per-kernel rejection reasons (issue #61316).
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.online import fp8 as fp8_mod
+
+    layer = MagicMock()
+    layer._parameters = {}
+
+    def _raise_chooser_error(**kwargs):
+        raise ValueError(
+            "Failed to find a kernel that can implement the "
+            "ScaledMM linear layer. Reasons: \n"
+            "CutlassFP8ScaledMMLinearKernel CUTLASS FP8 kernels not "
+            "available.\n"
+            "MarlinFP8ScaledMMLinearKernel is W8A16 weight-only and "
+            "cannot honor per-token activation quantization."
+        )
+
+    monkeypatch.setattr(fp8_mod, "init_fp8_linear_kernel", _raise_chooser_error)
+
+    model_config = MagicMock()
+    model_config.dtype = torch.bfloat16
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+
+    with set_current_vllm_config(vllm_config):
+        method = Fp8PtpcOnlineLinearMethod()
+        with pytest.raises(ValueError, match='quantization="fp8_per_channel"') as ei:
+            method.create_weights(
+                layer,
+                input_size_per_partition=128,
+                output_partition_sizes=[256],
+                input_size=128,
+                output_size=256,
+                params_dtype=torch.bfloat16,
+            )
+
+    message = str(ei.value)
+    assert "Reasons:" in message
+    assert "MarlinFP8ScaledMMLinearKernel" in message
+    assert "per-token" in message
+    # Must fail before OnlineLinearBase allocates the meta weight.
+    layer.register_parameter.assert_not_called()

@@ -46,6 +46,14 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        # Marlin FP8 is W8A16 weight-only: it dequantizes weights and runs in
+        # higher precision, so it cannot honor per-token activation FP8.
+        if c.activation_quant_key.scale.group_shape.is_per_token():
+            return (
+                False,
+                "is W8A16 weight-only and cannot honor per-token "
+                "activation quantization",
+            )
         return True, None
 
     def __init__(
