@@ -487,3 +487,67 @@ récupérables.
 que le MoE remplacé le 25/09 (1,5 K vs 5,4-8,3 K tok/s). Aucun réglage de
 cache ne compense ça. Si la réactivité prime sur la qualité, `medium-qwen36-stock-tq.yml`
 reste le rollback armé.
+
+## 24/10 00:20Z — PRUNEUR INTELLIGENT : le crochet existe, il est MORT ; le bon est `lookup()`
+
+Constat juste du user : le pruneur actuel est un bricolage (mtime + plafond,
+sans rétroaction du moteur). Il ordonne la suppression par **date d'écriture**
+alors que la valeur d'un bloc vient de sa **réutilisation**.
+
+**Ce que le framework vLLM 0.32.0 semblait offrir.** `SecondaryTierManager`
+déclare `touch(keys, req_context)` — « Mark chunks as recently used for
+eviction policy » — et `TieringOffloadingManager.touch`
+(`tiering/manager.py:591-601`) le relaie au tier primaire **et à chaque tier
+secondaire**. `FileSystemTierManager` ne le surcharge pas : il hérite du no-op
+et **jette** donc le signal. Une première version du module a été écrite sur ce
+crochet.
+
+**⚠️ Ce crochet est mort dans v0.32.0.** Un grep complet du paquet installé ne
+trouve **aucun appelant** de `touch` du manager d'offload : les seuls `.touch(`
+du code sont le *GPU block pool*, les adaptateurs LoRA, le connecteur mooncake
+et `simple_kv_offload` — quatre mécanismes sans rapport. Un tier câblé sur
+`touch` aurait été un **no-op silencieux qui a l'air installé**. C'est la
+deuxième fois que « vérifier l'organe à la source » paie : la docstring décrit
+l'intention, pas le code. Module initial supprimé, non commité.
+
+**Le crochet vivant est `lookup()`.** `tiering/manager.py:454` appelle
+`tier.lookup(key, req_context)` pour chaque tier secondaire, **par clé**, et
+chronomètre l'appel ; `FileSystemTierManager.lookup` (`fs/manager.py:216`)
+rend `HIT` / `MISS` / `RETRY`. Un `HIT` signifie exactement « ce bloc est dans
+le tier et va être réutilisé ».
+
+**Module livré** : `myia_vllm/kv_tier/lru_fs_tier.py`, classe `TouchOnHitFsTier`,
+sous-classe de `FileSystemTierManager` qui surcharge `lookup()` et fait un
+`os.utime()` sur les **HIT** uniquement. Le pruneur externe, inchangé, devient
+alors un **LRU sur les lectures**. Ni journal, ni index : la récence vit dans
+les métadonnées du système de fichiers, donc elle survit aux redémarrages du
+process et de l'hôte. Interrupteur `MYIA_FS_TOUCH=0` pour revenir au
+comportement amont sans toucher à la config.
+
+**Pourquoi LRU est la bonne politique pour un arbre de préfixes** : les blocs
+sont chaînés par hash, donc une conversation est une chaîne de fichiers.
+Supprimer une racine partagée invalide tous ses descendants ; supprimer une
+feuille n'invalide qu'une queue. Sous LRU-par-usage, les racines partagées sont
+touchées à **chaque** tour de chaque conversation qui les utilise — elles sont
+donc les blocs les plus récents du tier. La politique protège exactement ce
+dont la perte coûte le plus cher, sans modéliser l'arbre.
+
+**Vérifications faites sans redémarrer le moteur** (le module n'est pas encore
+chargé en prod) :
+- sous-classe correcte, `lookup` bien surchargé ;
+- HIT → mtime remonté, **MISS → mtime inchangé** (témoin négatif), RETRY
+  propagé ; compteurs `ok=1 miss=0 err=0` ;
+- `SecondaryTierFactory.get_tier_class({'type':'TouchOnHitFsTier',
+  'module_path':'lru_fs_tier'})` résout bien la classe (import hors-arbre,
+  `importlib.import_module` + `getattr`, `assert issubclass`).
+
+**Déploiement (NON appliqué — exige un redémarrage du moteur, donc GO user)** :
+1. bind `./myia_vllm/kv_tier:/opt/kv_tier:ro` + `PYTHONPATH=/opt/kv_tier` ;
+2. dans `kv_connector_extra_config.secondary_tiers[0]`, remplacer
+   `"type":"fs"` par `"type":"TouchOnHitFsTier","module_path":"lru_fs_tier"` ;
+3. redémarrer (~2 min) ; vérifier au boot que `FileSystemTierManager` est
+   instancié via `TouchOnHitFsTier` et que les mtimes des blocs bougent alors
+   que le moteur sert.
+
+**Ce que ça ne règle pas** : le débit de prefill. Un LRU parfait évite de
+recalculer ce qui était encore chaud, il n'accélère pas ce qui est froid.
