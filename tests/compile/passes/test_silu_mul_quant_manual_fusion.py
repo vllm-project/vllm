@@ -8,6 +8,8 @@ Tests all fusion paths in _FUSED_ACT_QUANT:
 - kNvfp4Dynamic: CUDA SM100+ only
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -15,6 +17,7 @@ import vllm.envs as envs
 from tests.utils import TestFP8Layer
 from vllm.config import (
     CompilationConfig,
+    KernelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -71,6 +74,76 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="Static FP8 CUTLASS requires CUDA SM89+",
+)
+@torch.inference_mode()
+def test_qwen_moe_mlp_manual_fusion(dist_init):
+    from compressed_tensors.quantization import QuantizationArgs
+
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+    from vllm.utils.torch_utils import set_random_seed
+
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(torch.bfloat16)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none"]),
+        kernel_config=KernelConfig(linear_backend="cutlass"),
+    )
+    config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    quant_args = QuantizationArgs(num_bits=8, type="float", strategy="tensor")
+    quant_config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": {
+                "weights": quant_args,
+                "input_activations": quant_args,
+                "format": "float-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="float-quantized",
+    )
+
+    with set_current_vllm_config(config):
+        expert_gate = ReplicatedLinear(128, 1, bias=False)
+        mlp = Qwen2MoeMLP(
+            hidden_size=128,
+            intermediate_size=256,
+            hidden_act="silu",
+            quant_config=quant_config,
+            reduce_results=False,
+            expert_gate=expert_gate,
+        )
+        for linear in (mlp.gate_up_proj, mlp.down_proj):
+            linear.weight.copy_(
+                torch.randn(linear.weight.shape).to(linear.weight.dtype)
+            )
+            linear.weight_scale.fill_(0.05)
+            linear.input_scale.fill_(0.01)
+            linear.quant_method.process_weights_after_loading(linear)
+        torch.nn.init.normal_(expert_gate.weight, std=0.05)
+
+        x = torch.randn(17, 128)
+        gate_up, _ = mlp.gate_up_proj(x)
+        expected, _ = mlp.down_proj(mlp.act_fn(gate_up))
+        expected = torch.sigmoid(expert_gate(x)[0]) * expected
+
+        down_inputs = []
+        with mlp.down_proj.register_forward_pre_hook(
+            lambda _module, args: down_inputs.append(args[0])
+        ):
+            actual = mlp(x)
+
+        assert isinstance(down_inputs[0], QuantizedActivation)
+        torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
