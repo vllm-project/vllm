@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -49,6 +50,7 @@ def _make_vllm_config(
 ) -> VllmConfig:
     config = MagicMock()
     config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = "LBNHC"
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
@@ -147,12 +149,13 @@ def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
     )
 
 
-def _full_attention_spec(block_size: int = 16) -> FullAttentionSpec:
+def _full_attention_spec(block_size: int = 16, **kwargs: Any) -> FullAttentionSpec:
     return FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=4,
         head_size=128,
         dtype=torch.float32,
+        **kwargs,
     )
 
 
@@ -161,6 +164,7 @@ def _mla_spec(
     head_size: int = 512,
     dtype: torch.dtype = torch.float32,
     tokens_per_state: int = 1,
+    **kwargs: Any,
 ) -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=block_size,
@@ -169,6 +173,7 @@ def _mla_spec(
         head_size=head_size,
         dtype=dtype,
         tokens_per_state=tokens_per_state,
+        **kwargs,
     )
 
 
@@ -282,7 +287,7 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = True,
+    v2: bool = False,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
@@ -1153,6 +1158,23 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups, v2=False)
 
 
+_PTH = KVQuantMode.FP8_PER_TOKEN_HEAD
+_SWA_SPEC = SlidingWindowSpec(
+    block_size=16,
+    num_kv_heads=4,
+    head_size=128,
+    dtype=torch.float32,
+    sliding_window=128,
+)
+_SWA_MLA_SPEC = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=576,
+    dtype=torch.float32,
+    sliding_window=128,
+)
+
+
 @pytest.mark.parametrize(
     ("kv_cache_groups", "certified"),
     [
@@ -1172,71 +1194,88 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             id="uniform-mla-wrapper",
         ),
         pytest.param(
-            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            [_uniform_group(_mla_spec(head_size=576), _SWA_MLA_SPEC)],
             False,
             id="uniform-uncertifiable-inner",
+        ),
+        pytest.param(
+            _groups(_full_attention_spec(kv_quant_mode=_PTH)),
+            True,
+            id="per-token-head-gqa",
+        ),
+        pytest.param(
+            _groups(_mla_spec(head_size=576, kv_quant_mode=_PTH)),
+            False,
+            id="per-token-head-mla",
+        ),
+        pytest.param(
+            _groups(_mla_spec(tokens_per_state=2)), False, id="compressed-mla"
         ),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
-    """The canonical layout certifies portability group by group; none of
-    these shapes are portable in the direct layout."""
-    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
+    """Canonical portability is certified group by group."""
+    assert not _parallelism_agnostic(kv_cache_groups)
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
 @pytest.mark.parametrize(
-    ("spec"),
+    "spec",
     [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
     ids=["swa", "compressed-mla"],
 )
 def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
-    def _get_offloading_config(canonical: bool):
+    def get_config(canonical: bool):
         config = _make_vllm_config(
             tensor_parallel_size=2,
             extra_config={"canonical_layout": True} if canonical else None,
         )
         config.model_config.use_mla = True
-
-        PAGE = spec.page_size_bytes
+        page = spec.page_size_bytes
         kv_config = KVCacheConfig(
             num_blocks=4,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=PAGE * 4,
+                    size=page * 4,
                     layers=["layer"],
-                    layer_stride=PAGE * 4,
-                    block_stride=PAGE,
+                    layer_stride=page * 4,
+                    block_stride=page,
                 )
             ],
-            kv_cache_groups=[
-                KVCacheGroupSpec(["layer"], spec),
-            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
         )
-
         kv_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_config.kv_cache_groups,
             config.parallel_config.tensor_parallel_size,
             config.parallel_config.decode_context_parallel_size,
         )
-
         return build_offloading_config(config, kv_config)
 
-    offload_config = _get_offloading_config(canonical=False)
-    assert offload_config.replicated_layout
-    assert not offload_config.parallel.is_parallelism_agnostic
-
-    canon_offload_config = _get_offloading_config(canonical=True)
-    assert not canon_offload_config.replicated_layout
-    assert not canon_offload_config.parallel.is_parallelism_agnostic
+    direct = get_config(canonical=False)
+    assert direct.replicated_layout
+    assert not direct.parallel.is_parallelism_agnostic
+    canonical = get_config(canonical=True)
+    assert not canonical.replicated_layout
+    assert not canonical.parallel.is_parallelism_agnostic
 
 
 def test_canonical_layout_certifies_v2_model_runner():
-    """Canonical bytes are certified per layer against live tensor strides at
-    registration, so the static gate must not depend on the model-runner
-    version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
-    assert _parallelism_agnostic(groups, canonical=True)
+    assert _parallelism_agnostic(groups, v2=True) is False
+    assert _parallelism_agnostic(groups, canonical=True, v2=True)
+
+
+def test_canonical_format_resolved_at_config_build():
+    """Resolve canonical ids before consumers run outside the config context."""
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    config.cache_config.kv_cache_layout = "LBNHC"
+    kv_cache_config = _make_mla_kv_cache_config()
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.canonical_format is not None
+    assert offloading_config.canonical_format.startswith("v1-")
+    assert offloading_config.kv_cache_layout == "LBNHC"
+    no_canonical = build_offloading_config(_make_vllm_config(), kv_cache_config)
+    assert no_canonical.canonical_format is None
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
