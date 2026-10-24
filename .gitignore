@@ -251,3 +251,9 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# Written by .buildkite/scripts/rocm/build.sh
+/.git_archival.txt
+/.rocm-version/
+/.rocm-wheel/
+/.rocm-kernel-map/

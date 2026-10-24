@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Select the AITER nightly wheel for a vLLM ROCm image.
 
-aiter-nightly-overlay.sh runs this inside the stock ci_base, so it reads that
-image's ROCm, torch and Python. It prints the wheel's URL, then the Buildkite
-annotation naming it.
+docker/Dockerfile.rocm runs this in the test image's AITER nightly step, so it
+reads that image's ROCm, torch and Python. It prints the wheel's URL, then the
+Buildkite annotation naming it.
 """
 
 import argparse
@@ -235,7 +235,7 @@ def _today() -> datetime.date:
     return datetime.datetime.now(datetime.UTC).date()
 
 
-# Not 1 or 2, which Buildkite retries; see aiter-nightly-overlay.sh.
+# Its own status for "no wheel for this image"; Dockerfile.rocm fails the step on it.
 EXIT_NO_WHEEL = 10
 
 
