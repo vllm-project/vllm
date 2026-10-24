@@ -10,6 +10,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -69,6 +70,59 @@ class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 metadata_list.append(metadata1.aggregate(metadata2))
 
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
+
+
+class MultiKVConnectorKVEvents(KVConnectorKVEvents):
+    """KV cache events reported by each sub-connector of a MultiConnector.
+
+    ``events[i]`` holds what the i-th sub-connector returned (or None), so the
+    scheduler can hand each sub-connector back the container type it produced.
+    Events are only ever merged per connector, never across connectors.
+    """
+
+    def __init__(self, events: Iterable[KVConnectorKVEvents | None]) -> None:
+        self.events: list[KVConnectorKVEvents | None] = list(events)
+
+    def _present(self) -> list[KVConnectorKVEvents]:
+        return [e for e in self.events if e is not None]
+
+    def add_events(self, events: list["KVCacheEvent"]) -> None:
+        raise TypeError(
+            "MultiKVConnectorKVEvents holds events per connector; "
+            "add events to the per-connector containers instead."
+        )
+
+    def aggregate(self) -> "MultiKVConnectorKVEvents":
+        for e in self._present():
+            e.aggregate()
+        return self
+
+    def aggregate_worker(self, other: KVConnectorKVEvents) -> KVConnectorKVEvents:
+        assert isinstance(other, MultiKVConnectorKVEvents)
+        assert len(self.events) == len(other.events)
+        for i, (mine, theirs) in enumerate(zip(self.events, other.events)):
+            if theirs is None:
+                continue
+            # A connector's container counts only the workers that reported it.
+            self.events[i] = theirs if mine is None else mine.aggregate_worker(theirs)
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        for e in self._present():
+            e.increment_workers(count)
+
+    def get_all_events(self) -> list["KVCacheEvent"]:
+        return [event for e in self._present() for event in e.get_all_events()]
+
+    def get_number_of_workers(self) -> int:
+        return max((e.get_number_of_workers() for e in self._present()), default=0)
+
+    def clear_events(self) -> None:
+        for e in self._present():
+            e.clear_events()
+
+    def __repr__(self) -> str:
+        return f"<MultiKVConnectorKVEvents events={self.events}>"
 
 
 @dataclass
@@ -435,11 +489,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             return None
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
-    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
-    # method for the MultiConnector. It should be able to get events from
-    # multiple connectors, handling the case where only a subset of the
-    # requested connectors implements the 'get_kv_connector_kv_cache_events'
-    # WIP: https://github.com/vllm-project/vllm/pull/31811
+    def get_kv_connector_kv_cache_events(self) -> KVConnectorKVEvents | None:
+        # Ask every sub-connector, even after one returns None: connectors such
+        # as MooncakeStoreConnector buffer worker-side events until this call
+        # drains them, so a skipped connector would grow its buffer forever.
+        events = [c.get_kv_connector_kv_cache_events() for c in self._connectors]
+        if all(e is None for e in events):
+            return None
+        return MultiKVConnectorKVEvents(events)
 
     # ==============================
     # Scheduler-side methods
@@ -519,6 +576,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
             multi_connector_worker_meta = connector_output.kv_connector_worker_meta
 
+        kv_cache_events = connector_output.kv_cache_events
+        multi_kv_cache_events = (
+            kv_cache_events
+            if isinstance(kv_cache_events, MultiKVConnectorKVEvents)
+            else None
+        )
+
         try:
             for i, c in enumerate(self._connectors):
                 if multi_connector_worker_meta is not None:
@@ -526,10 +590,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     connector_output.kv_connector_worker_meta = (
                         multi_connector_worker_meta.metadata[i]
                     )
+                if multi_kv_cache_events is not None:
+                    # set the connector-specific kv cache events
+                    connector_output.kv_cache_events = multi_kv_cache_events.events[i]
                 c.update_connector_output(connector_output)
         finally:
-            # restore kv_connector_worker_meta
+            # restore kv_connector_worker_meta and kv_cache_events
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
+            connector_output.kv_cache_events = kv_cache_events
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata from sub-connectors.
