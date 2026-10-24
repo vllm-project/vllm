@@ -14,6 +14,8 @@ from typing import Literal
 
 import pytest
 import torch
+from torch.autograd import DeviceType
+from torch.profiler import ProfilerActivity, profile
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -36,7 +38,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -310,20 +312,27 @@ if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
         BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 
-def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+def _bare_mla_layer(
+    monkeypatch,
+    kv_b_weight: torch.Tensor,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+) -> MLAAttention:
+    """An MLAAttention with only the state process_weights_after_loading and
+    _v_up_proj use, around an unquantized kv_b_proj weight [N*(P+V), L]."""
     layer = MLAAttention.__new__(MLAAttention)
     torch.nn.Module.__init__(layer)
-    layer.kv_lora_rank = 2
-    layer.num_heads = 2
-    layer.qk_nope_head_dim = 3
-    layer.v_head_dim = 4
+    layer.kv_lora_rank = kv_b_weight.shape[1]
+    layer.num_heads = num_heads
+    layer.qk_nope_head_dim = qk_nope_head_dim
+    layer.v_head_dim = v_head_dim
     layer.kv_b_proj = torch.nn.Module()
-    layer.kv_b_proj.weight = torch.nn.Parameter(
-        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
-    )
+    layer.kv_b_proj.weight = torch.nn.Parameter(kv_b_weight)
     layer.kv_b_proj.quant_method = None
     layer.is_aiter_triton_fp4_bmm_enabled = False
     layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_aiter_triton_bf16_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
     layer.quant_config = None
@@ -332,6 +341,17 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+    return layer
+
+
+def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+    layer = _bare_mla_layer(
+        monkeypatch,
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2),
+        num_heads=2,
+        qk_nope_head_dim=3,
+        v_head_dim=4,
     )
 
     with torch.no_grad():
@@ -350,6 +370,60 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [32, 100])
+def test_mla_v_up_proj_runs_tuned_aiter_triton_bf16_bmm(monkeypatch, num_tokens):
+    """A W_UV shape with a tuned AITER Triton bf16 BMM config runs on that
+    kernel and matches the torch.bmm path it replaces."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    # AITER ships tuned gfx942/gfx950 configs for N=1024, K=4096 (up to 1024
+    # tokens); real MLA W_UV shapes have none in CI.
+    num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank = 4, 128, 1024, 4096
+    assert rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+        num_heads, num_tokens, v_head_dim, kv_lora_rank
+    ), "AITER has no tuned BATCHED_GEMM-A16W16 N=1024 K=4096 config; pick another"
+
+    set_random_seed(0)
+    kv_b_weight = 0.02 * torch.randn(
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    layer = _bare_mla_layer(
+        monkeypatch, kv_b_weight, num_heads, qk_nope_head_dim, v_head_dim
+    )
+    with torch.no_grad():
+        layer.process_weights_after_loading(torch.bfloat16)
+    x = torch.randn(
+        num_tokens, num_heads * kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+    )
+
+    outs, kernels = {}, {}
+    for use_triton in (False, True):
+        layer.is_aiter_triton_bf16_bmm_enabled = use_triton
+        out = torch.full(
+            (num_tokens, num_heads * v_head_dim),
+            float("nan"),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            layer._v_up_proj(x, out)
+            torch.accelerator.synchronize()
+        kernels[use_triton] = [
+            e.name for e in prof.events() if e.device_type == DeviceType.CUDA
+        ]
+        outs[use_triton] = out
+
+    assert any("batched_gemm_bf16" in k for k in kernels[True]), kernels[True]
+    assert not any("batched_gemm_bf16" in k for k in kernels[False]), kernels[False]
+    torch.testing.assert_close(outs[True], outs[False])
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.

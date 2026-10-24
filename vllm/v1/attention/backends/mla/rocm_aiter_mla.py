@@ -1040,12 +1040,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
-        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
-        # is the same head-count predicate the decode path uses.
+        # are replicate-padded up to one in _mla_fp8_prefill_attn.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -2045,6 +2044,19 @@ class AiterMLAHelper:
         )
 
     @staticmethod
+    def is_valid_fp8_prefill_num_heads(num_heads: int) -> bool:
+        """Whether the FP8 PS asm prefill should run at ``num_heads`` per rank.
+
+        Rejects counts that padding to the kernel width would at least double
+        (1-8 heads). At 8 heads (Kimi-K2.x at TP8) the doubled kernel plus its
+        reduce is slower than bf16 flash attention, so those counts keep the
+        bf16 prefill.
+        """
+        return AiterMLAHelper.is_valid_num_heads(
+            num_heads
+        ) and 2 * num_heads > AiterMLAHelper.get_fp8_prefill_num_heads(num_heads)
+
+    @staticmethod
     def has_fp8_non_causal_qlen2_kernel(num_heads: int) -> bool:
         """Whether fp8 (num_heads, qlen=2) folds onto a non-causal ASM kernel.
 
@@ -2299,7 +2311,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         self._fused_prefill_qkv = False
         if self._fp8_prefill_enabled:
