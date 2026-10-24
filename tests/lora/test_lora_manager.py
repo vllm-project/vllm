@@ -926,6 +926,61 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     assert punica_wrapper.device == device
 
 
+def _lru_lora_manager(
+    dummy_model, device, tmp_path, max_cpu_loras: int = 3, max_loras: int = 2
+) -> tuple[LRUCacheWorkerLoRAManager, str]:
+    """An LRU worker LoRA manager over dummy_model, and the path of a rank-8
+    adapter for it."""
+    lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16),
+        lora_config=LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=max_cpu_loras,
+            max_loras=max_loras,
+            lora_dtype=DEFAULT_DTYPE,
+        ),
+    )
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.create_lora_manager(dummy_model, vllm_config)
+    return manager, lora_files
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_activates_in_id_order(
+    dist_init, dummy_model, device, tmp_path
+):
+    """A batch's adapters are activated in lora_int_id order, whatever the
+    iteration order of the request set."""
+    manager, lora_files = _lru_lora_manager(
+        dummy_model, device, tmp_path, max_cpu_loras=4, max_loras=4
+    )
+
+    # Names whose set order disagrees with id order, so the test cannot pass
+    # by luck of the hash seed.
+    suffix = 0
+    while True:
+        batch = {LoRARequest(f"adapter-{i}-{suffix}", i, lora_files) for i in (1, 2, 3)}
+        if [r.lora_int_id for r in batch] != [1, 2, 3]:
+            break
+        suffix += 1
+
+    manager.set_active_adapters(batch, None)
+
+    adapter_manager = manager._adapter_manager
+    assert list(adapter_manager._registered_adapters.order) == [1, 2, 3]
+    assert list(adapter_manager._active_adapters.order) == [1, 2, 3]
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
     # Should remove every LoRA not specified in the request.
