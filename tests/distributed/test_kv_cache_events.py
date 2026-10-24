@@ -6,7 +6,11 @@ from typing import Any
 import msgspec
 import pytest
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_events import (
+    BlockRemoved,
+    BlockStored,
+    ZmqEventPublisher,
+)
 
 # Minimal ExternalBlockHash for testing (bytes are a valid ExternalBlockHash).
 _FAKE_HASH: bytes = b"\xab" * 32
@@ -248,3 +252,41 @@ def test_block_stored_session_id_is_wire_compatible():
     assert (
         msgspec.msgpack.decode(new_payload, type=_PreSessionBlockStored).medium == "GPU"
     )
+
+
+# ---------------------------------------------------------------------------
+# ZmqEventPublisher.offset_endpoint_port / _is_bind_endpoint agreement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "rank", "expected"),
+    [
+        # ipc:// endpoints are bind endpoints per `_is_bind_endpoint`, so each
+        # DP rank needs its own socket path rather than a port offset.
+        ("ipc:///tmp/kve.ipc", 0, "ipc:///tmp/kve.ipc"),
+        ("ipc:///tmp/kve.ipc", 1, "ipc:///tmp/kve.ipc_dp1"),
+        ("ipc:///tmp/kve.ipc", 3, "ipc:///tmp/kve.ipc_dp3"),
+        # inproc keeps its own branch; "ipc" is a substring of "inproc".
+        ("inproc://kve", 2, "inproc://kve_dp2"),
+        ("tcp://127.0.0.1:5557", 2, "tcp://127.0.0.1:5559"),
+        ("tcp://127.0.0.1:0", 2, "tcp://127.0.0.1:0"),
+    ],
+)
+def test_offset_endpoint_port(endpoint, rank, expected):
+    assert ZmqEventPublisher.offset_endpoint_port(endpoint, rank) == expected
+
+
+def test_bind_endpoint_and_offset_agree_on_ipc():
+    """Whatever `_is_bind_endpoint` accepts must also be offset-able, otherwise a
+    supported configuration crashes for every rank above 0."""
+    endpoint = "ipc:///tmp/kve.ipc"
+    assert ZmqEventPublisher._is_bind_endpoint(endpoint) is True
+    assert (
+        ZmqEventPublisher.offset_endpoint_port(endpoint, 1) == "ipc:///tmp/kve.ipc_dp1"
+    )
+
+
+def test_offset_endpoint_port_unsupported_scheme_still_raises():
+    with pytest.raises(ValueError):
+        ZmqEventPublisher.offset_endpoint_port("unix:///tmp/kve", 1)
