@@ -3,6 +3,7 @@
 
 """Tests for tensor IPC queue functionality."""
 
+import logging
 import multiprocessing as mp
 import time
 from dataclasses import dataclass
@@ -1039,3 +1040,51 @@ def test_tensor_cleanup_after_decode():
     sender = receiver._tensor_buffers[sender_id]
     tensors = sender.tensors.get(message_id, {})
     assert tensor_id not in tensors, "Tensor should be removed from buffer"
+
+
+def test_stale_message_discard_reports_tensor_count(caplog_vllm):
+    """Advancing to a newer message drops stale tensors and logs how many.
+
+    The warning is emitted from a path that only runs when a sender skips
+    ahead, so a malformed format call there stays invisible until it fires in
+    production. Formatting each record guards the placeholders themselves.
+    """
+    tensor_queue = _MP_CTX.Queue()
+
+    sender_id = "stale_sender"
+    stale_tensors = [torch.randn(2, 3), torch.randn(4, 5)]
+    current_tensor = torch.randn(6, 7)
+
+    # Message 1 is never consumed; requesting message 2 must discard it.
+    for message_id, tensor_id, tensor in [
+        (1, 0, stale_tensors[0]),
+        (1, 1, stale_tensors[1]),
+        (2, 0, current_tensor),
+    ]:
+        tensor_queue.put(
+            TensorIpcData(
+                sender_id=sender_id,
+                message_id=message_id,
+                tensor_id=tensor_id,
+                tensor=tensor,
+            )
+        )
+
+    receiver = TensorIpcReceiver(tensor_queue)
+
+    with caplog_vllm.at_level(logging.WARNING):
+        result = receiver(
+            "float32",
+            current_tensor.shape,
+            {"sender_id": sender_id, "message_id": 2, "tensor_id": 0},
+        )
+
+    assert torch.equal(result, current_tensor)
+
+    sender = receiver._tensor_buffers[sender_id]
+    assert 1 not in sender.tensors, "Stale message should be dropped from the buffer"
+    assert sender.current_message_id == 2
+
+    # getMessage() raises if the args do not match the format placeholders.
+    messages = [record.getMessage() for record in caplog_vllm.records]
+    assert f"Discarding 2 stale tensors from sender {sender_id}" in messages
