@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -18,9 +19,29 @@ class MockModelConfig:
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
+    enable_trace_replay: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
+
+
+def _validate_sampling_mask_params(params: SamplingParams) -> None:
+    """Run admission validation for return_sampling_mask with verify stubbed."""
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(return_sampling_mask=True),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            _check_supports_watermarking=lambda params: False,
+        ),
+        resolve_watermarking=lambda params: False,
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+    )
+    with patch.object(SamplingParams, "verify"):
+        InputProcessor._validate_params(processor, params, ("generate",))
 
 
 @pytest.mark.parametrize(
@@ -280,3 +301,24 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.cpu_test
+def test_return_sampling_mask_reports_all_unmet_preconditions():
+    """Both temperature and top_k failures are listed in one ValueError (#61318)."""
+    with pytest.raises(ValueError, match=r"(?s)temperature > 0.*top_k > 0"):
+        _validate_sampling_mask_params(SamplingParams(temperature=0.0, max_tokens=16))
+
+
+@pytest.mark.cpu_test
+def test_return_sampling_mask_reports_top_k_alone():
+    with pytest.raises(ValueError, match=r"top_k > 0") as exc_info:
+        _validate_sampling_mask_params(SamplingParams(temperature=0.7, max_tokens=16))
+    assert "temperature > 0" not in str(exc_info.value)
+
+
+@pytest.mark.cpu_test
+def test_return_sampling_mask_accepts_valid_params():
+    _validate_sampling_mask_params(
+        SamplingParams(temperature=0.7, top_k=50, max_tokens=16)
+    )

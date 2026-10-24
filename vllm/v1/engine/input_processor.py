@@ -190,15 +190,19 @@ class InputProcessor:
                 )
 
             if self.model_config.return_sampling_mask:
+                unmet: list[str] = []
                 if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
-                    )
+                    unmet.append(f"temperature > 0 (currently {params.temperature})")
                 if params.top_k <= 0:
+                    unmet.append(
+                        f"top_k > 0 (currently {params.top_k}; needed to "
+                        "bound the sampling mask size, reduce transfer "
+                        "overhead, and avoid potential OOMs)"
+                    )
+                if unmet:
                     raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to "
-                        "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
+                        "return_sampling_mask=True requires sampling params "
+                        "to satisfy:\n  - " + "\n  - ".join(unmet)
                     )
             if params.thinking_token_budget is not None and (
                 self.vllm_config.reasoning_config is None

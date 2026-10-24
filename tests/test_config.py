@@ -243,6 +243,19 @@ def test_sampling_replay_config(config, message):
             VllmConfig._verify_sampling_replay_config(config)
 
 
+def test_sampling_replay_config_warns_about_request_preconditions(caplog, monkeypatch):
+    """Startup surfaces the per-request temperature/top_k contract (#61318)."""
+    import logging
+
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    with caplog.at_level(logging.WARNING, logger="vllm.config.vllm"):
+        VllmConfig._verify_sampling_replay_config(_sampling_replay_config())
+    assert any(
+        "temperature > 0" in record.getMessage() and "top_k > 0" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
