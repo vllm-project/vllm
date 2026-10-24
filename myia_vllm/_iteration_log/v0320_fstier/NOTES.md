@@ -1354,3 +1354,80 @@ envoyées sur un moteur saturé (Waiting 6-7), avec un client qui abandonne au b
 - Si des requêtes restent ~2 min dans le moteur après le départ du client, c'est que la
   connexion **hub → vLLM** est restée ouverte. La question passe donc côté hub : une
   déconnexion client y annule-t-elle la requête amont ?
+
+## Cycle 24/10 14:41Z — crash moteur 14:32:09Z sur un bug amont du tiering, IP fleet inconnue
+
+**Crash** : `AssertionError: Chunk … not found in cache` (`cpu/manager.py:221`
+`_prepare_load`), appelé par `scheduler.py:1289` → `update_state_after_alloc` →
+`tiering/manager.py:588 prepare_load` → tier primaire CPU. EngineCore mort
+(`EngineDeadError`), 16 requêtes en 500, Docker relance le conteneur (RC 0→1). Ce n'est
+pas le watchdog : il était au streak BUSY 8 avec des compteurs qui avançaient, et v6.1 ne
+redémarre plus dans ce cas. Ce n'est pas autoheal non plus : RC a monté, et le label
+autoheal=False est en place.
+
+**Mécanisme, côté amont** (PR vllm#60729, défaut n°2 « éviction après lookup ») :
+- `lookup()` déclare un bloc présent dans le tier RAM, mais ne l'épingle pas.
+- Dans la même passe du scheduler, une promotion depuis le tier fs (déclenchée par le
+  `lookup()` d'une autre requête) évince ce bloc pour faire de la place.
+- `prepare_load()` affirme alors que le bloc est présent, et l'assertion tue le moteur.
+
+Les conditions sont réunies ici : tier RAM primaire de 8 GiB toujours plein, beaucoup de
+hits fs (~50 % des tokens de prompt passent par `external_kv_transfer`), saturation.
+- Ce cas est rapporté par #60729 (deux fois en prod, tiering CPU + fs, v0.30.0) et par
+  #54914 (v0.28/v0.29). Ces rapports utilisaient tous DSpark ou MTP3.
+- La PR #62615 corrige le même ordre de lookup/épinglage/promotion, mais seulement pour le
+  chemin P2P.
+- Aucun correctif n'existe pour le chemin scheduler.
+- `kv_load_failure_policy=recompute` ne couvre pas ce cas, car l'assertion part avant
+  toute tâche de chargement.
+
+**TouchOnHitFsTier n'est pas en cause** : son `lookup()` rend le résultat du parent sans
+le modifier, et la trace passe par le tier primaire CPU. Les promotions, elles, sont le
+comportement normal du tiering amont avec n'importe quel tier secondaire.
+
+**Notre point de données, posté en amont** :
+[vllm#60729 c.6385564912](https://github.com/vllm-project/vllm/pull/60729#issuecomment-6385564912).
+C'est le premier rapport sans décodage spéculatif. Il écarte le défaut n°1 (couverture
+MTP) et pointe vers le n°2.
+
+**Coût de l'incident** :
+- ~2,5 min sans moteur : 14:32:09Z → première génération réussie à 14:34:40Z (compile
+  cache chaud, tier fs intact).
+- Caches GPU et RAM vidés. Dans les 10 premières minutes, 90 % des tokens de prompt sont
+  quand même servis depuis le cache : 41 % GPU, 49 % tiers externes.
+- Surcharge revenue dès 14:38Z. Le watchdog est en BUSY et ne redémarre pas, conformément
+  à Q29=b.
+- Premier crash de cette signature en ~3 jours de profil fs (déployé le 21/10 19:15Z).
+  `grep 'not found in cache'` sur le journal disponible ne trouve que ce crash.
+
+**Leviers** (décision utilisateur, registre Q30) :
+- (a) accepter et surveiller ;
+- (b) tier RAM primaire 8 → 24 GiB : moins d'évictions dans le primaire, donc une
+  probabilité plus faible, mais l'effet n'est pas mesuré ; coût ~16 Go de commit ;
+- (c) retirer le tier fs, ce qui supprime le déclencheur mais aussi le palier qui sert la
+  moitié du rattrapage.
+
+Un patch local du gestionnaire CPU est écarté : ce serait un arbre de patchs, contraire à
+la préférence stock/industriel.
+
+**IP inconnue avec des 200 : `212.133.41.47`** (13:01, 13:07, 13:21Z).
+- Trois requêtes `OpenAI/JS 4.104.0` avec la clé MEDIUM (empreinte census `be312daf7c1c`),
+  via l'URL publique.
+- Contenu : prompts de condensation RSM de nos propres dashboards (mentions ai-01 et
+  po-2024).
+- RDAP RIPE : `212.133.41.0/24` = DXC TECHNOLOGY, FR (enregistré via Level3).
+Lecture : une instance RSM de la flotte qui sort par un réseau d'entreprise. Ce n'est pas
+une intrusion, mais l'IP n'est réclamée par personne. Elle va au registre Q31 et une
+demande de réclamation est postée sur global.
+
+**Census 2 h** : 425 requêtes (~3,6/min).
+- Statuts : 390 × 200, 18 × 401, 16 × 500 (tous à 14:32:09, le crash), 1 × 400 (13:29:42Z,
+  fenêtre + 1, déjà relayé).
+- Corps : 256 entre 100 Ko et 1 Mo.
+- Sondes ZOLTRAAK (`116.202.50.2`) et sondeur `108.165.33.236` : 401 uniquement.
+
+**Hôte et santé** :
+- Commit 67,4 % (marge 129 Go). VRAM 20 934 / 19 990 MiB.
+- `/dev/shm` purgé de 8,1 Go d'orphelins de la génération morte (17G → 8,0G).
+- Condensation en repli cloud pendant la saturation (disjoncteur), comme prévu.
+- nbaudit ok (vague 2 Image/). G: 85 %, écriture OK.
