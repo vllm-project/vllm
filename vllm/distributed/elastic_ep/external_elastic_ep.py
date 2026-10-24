@@ -13,6 +13,7 @@ import msgspec
 import msgspec.msgpack
 import zmq
 
+from vllm.distributed.elastic_ep.bootstrap import ExternalElasticEPBootstrapServer
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine import (
@@ -80,6 +81,9 @@ class ExternalElasticEPScaleUpHandshakeServer:
     ) -> None:
         self.handshake_address = handshake_address
         self.expected_new_ranks = set(expected_new_ranks)
+        self.launch_bootstrap = ExternalElasticEPBootstrapServer(
+            bootstrap.new_data_parallel_size, expected_new_ranks, scale_up=True
+        )
         self.addresses = addresses
         self.bootstrap = bootstrap
         self.num_redundant_experts = num_redundant_experts
@@ -143,15 +147,32 @@ class ExternalElasticEPScaleUpHandshakeServer:
 
                     engine_identity, payload = handshake_socket.recv_multipart()
                     engine_rank = int.from_bytes(engine_identity, "little")
+                    message = msgspec.msgpack.decode(payload)
+                    if message["status"] == "BOOTSTRAP":
+                        self.launch_bootstrap.reply(
+                            handshake_socket, engine_identity, message
+                        )
+                        continue
                     if engine_rank not in self.expected_new_ranks:
                         raise RuntimeError(
                             "Received scale-up handshake from unexpected "
                             f"dp rank {engine_rank}"
                         )
 
-                    message = msgspec.msgpack.decode(payload)
                     status = message["status"]
                     if status == "HELLO":
+                        try:
+                            self.launch_bootstrap.validate(
+                                engine_rank, message.get("bootstrap")
+                            )
+                        except ValueError as error:
+                            handshake_socket.send_multipart(
+                                (
+                                    engine_identity,
+                                    msgspec.msgpack.encode({"error": str(error)}),
+                                )
+                            )
+                            continue
                         b = self.bootstrap
                         parallel_config: dict[str, int | str | list[int]] = {
                             "data_parallel_master_ip": b.new_data_parallel_master_ip,

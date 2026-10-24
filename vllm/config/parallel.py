@@ -386,6 +386,9 @@ class ParallelConfig:
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
 
+    _external_elastic_ep_bootstrap: tuple[str, str] | None = None
+    """Automatic launch's handshake token and process identity, not membership."""
+
     decode_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that shard the decode KV cache. DCP does not expand
     the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
@@ -926,6 +929,7 @@ class ParallelConfig:
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
             "_coord_store_port",
+            "_external_elastic_ep_bootstrap",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",

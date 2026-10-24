@@ -7,19 +7,30 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
+import zmq
 
 from tests.utils import RemoteOpenAIServer
+from vllm.distributed.elastic_ep.bootstrap import (
+    ExternalElasticEPBootstrapServer,
+    prepare_external_elastic_ep_launch,
+)
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
+    ExternalElasticEPScaleUpHandshakeMetadata,
+    ExternalElasticEPScaleUpHandshakeServer,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port, make_zmq_socket
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.engine.utils import EngineZmqAddresses
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -31,6 +42,234 @@ ELASTIC_EP_MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"enable_elastic_ep": False},
+        {"data_parallel_rank": None},
+        {"data_parallel_rank": -1},
+        {"data_parallel_rank": 4},
+        {"elastic_ep_initial_dp_size": 0},
+        {"elastic_ep_initial_dp_size": 1},
+        {"elastic_ep_initial_dp_size": 5},
+        {"data_parallel_hybrid_lb": True},
+        {"data_parallel_size_local": 2},
+        {"data_parallel_backend": "ray"},
+        {"data_parallel_rpc_port": 0},
+        {"data_parallel_rpc_port": 65536},
+    ],
+)
+def test_external_elastic_ep_auto_bootstrap_rejects_unsupported_launch(options):
+    arguments: dict[str, Any] = dict(
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
+        data_parallel_rank=0,
+        elastic_ep_max_dp_size=4,
+        enable_elastic_ep=True,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    arguments.update(options)
+    with pytest.raises(ValueError):
+        prepare_external_elastic_ep_launch(EngineArgs(**arguments))
+
+
+@pytest.mark.parametrize("scale_up", [False, True])
+def test_external_elastic_ep_bootstrap_binds_one_launch_to_one_handshake(scale_up):
+    first = ExternalElasticEPBootstrapServer(4, [2, 3], scale_up=scale_up)
+    launch = first.discover(2, "process-a")
+    assert launch.identity is not None
+    assert launch.scale_up == scale_up
+    assert first.discover(2, "process-a") == launch
+    first.validate(2, list(launch.identity))
+    with pytest.raises(ValueError, match="another launch"):
+        first.discover(2, "process-b")
+    with pytest.raises(ValueError, match="expected bootstrap"):
+        first.discover(1, "process-c")
+    with pytest.raises(ValueError, match="does not match"):
+        first.validate(2, None)
+
+    later = ExternalElasticEPBootstrapServer(4, [2, 3], scale_up=True)
+    with pytest.raises(ValueError, match="does not match"):
+        later.validate(2, list(launch.identity))
+    later.validate(3, None)  # Explicit legacy launches remain compatible.
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+@pytest.mark.parametrize(
+    "rank,target_size,initial_size", [(2, 3, 2), (2, 4, 2), (3, 4, 2), (2, 3, 4)]
+)
+def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
+    monkeypatch, rank, target_size, initial_size, enable_fault_tolerance
+):
+    """The active handshake resolves append startup, including retired initial ranks."""
+    port = get_open_port()
+    bootstrap = ReconfigureDistributedRequest(
+        new_data_parallel_size=target_size,
+        new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+        new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+        new_data_parallel_master_ip="127.0.0.1",
+        new_data_parallel_master_port=12345,
+        new_data_parallel_master_port_list=[12346],
+        coord_store_port=12347,
+    )
+    server = ExternalElasticEPScaleUpHandshakeServer(
+        handshake_address=f"tcp://127.0.0.1:{port}",
+        expected_new_ranks=list(range(2, target_size)),
+        addresses=EngineZmqAddresses(inputs=["tcp://127.0.0.1:12348"], outputs=[]),
+        bootstrap=bootstrap,
+        num_redundant_experts=0,
+        elastic_ep_max_dp_size=4,
+    )
+    monkeypatch.delenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", raising=False)
+    server.start()
+    try:
+        args = EngineArgs(
+            elastic_ep_auto_bootstrap=True,
+            elastic_ep_initial_dp_size=initial_size,
+            data_parallel_rank=rank,
+            data_parallel_address="127.0.0.1",
+            data_parallel_rpc_port=port,
+            elastic_ep_max_dp_size=4,
+            enable_elastic_ep=True,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            enable_fault_tolerance=enable_fault_tolerance,
+            all2all_backend=(
+                "nixl_ep" if enable_fault_tolerance else "allgather_reducescatter"
+            ),
+        )
+        launch = prepare_external_elastic_ep_launch(args)
+        assert args.elastic_ep_initial_dp_size == initial_size
+        assert launch.data_parallel_size == target_size
+        assert launch.scale_up
+        assert args.enable_fault_tolerance is enable_fault_tolerance
+        with (
+            zmq.Context() as ctx,
+            make_zmq_socket(
+                ctx,
+                server.handshake_address,
+                zmq.DEALER,
+                bind=False,
+                identity=rank.to_bytes(2, "little"),
+                linger=0,
+            ) as socket,
+        ):
+            assert launch.identity is not None
+            socket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "status": "HELLO",
+                        "bootstrap": ("stale", launch.identity[1]),
+                    }
+                )
+            )
+            assert socket.poll(5000)
+            assert "does not match" in msgspec.msgpack.decode(socket.recv())["error"]
+            server.raise_if_failed()
+            socket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "status": "HELLO",
+                        "bootstrap": launch.identity,
+                    }
+                )
+            )
+            assert socket.poll(5000)
+            metadata = msgspec.msgpack.decode(
+                socket.recv(), type=ExternalElasticEPScaleUpHandshakeMetadata
+            )
+            assert metadata.engine_metadata.addresses.inputs == [
+                "tcp://127.0.0.1:12348"
+            ]
+            assert (
+                metadata.engine_metadata.parallel_config["data_parallel_size"]
+                == target_size
+            )
+            socket.send(msgspec.msgpack.encode({"status": "READY"}))
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+def test_external_elastic_ep_auto_bootstrap_preserves_executor_launch_arguments(
+    enable_fault_tolerance,
+):
+    """Bootstrap selects DP startup, not the model executor's node geometry."""
+    args = EngineArgs(
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=0,
+        tensor_parallel_size=2,
+        nnodes=4,
+        node_rank=0,
+        distributed_executor_backend="mp",
+        elastic_ep_max_dp_size=4,
+        enable_elastic_ep=True,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        enable_fault_tolerance=enable_fault_tolerance,
+        all2all_backend=(
+            "nixl_ep" if enable_fault_tolerance else "allgather_reducescatter"
+        ),
+    )
+    launch = prepare_external_elastic_ep_launch(args)
+    assert not launch.scale_up
+    assert launch.data_parallel_size == 2
+    assert (args.nnodes, args.node_rank, args.tensor_parallel_size) == (4, 0, 2)
+    assert args.distributed_executor_backend == "mp"
+    assert args.enable_fault_tolerance is enable_fault_tolerance
+
+
+def test_external_elastic_ep_auto_bootstrap_preserves_initial_rank_connection(
+    monkeypatch,
+):
+    """Discovery must not compete with an EngineCore's ZMQ routing identity."""
+    port = get_open_port()
+    address = f"tcp://127.0.0.1:{port}"
+    rank_identity = (1).to_bytes(2, "little")
+    responder = ExternalElasticEPBootstrapServer(2, [0, 1], scale_up=False)
+    args = EngineArgs(
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
+        data_parallel_rank=1,
+        data_parallel_address="127.0.0.1",
+        data_parallel_rpc_port=port,
+        elastic_ep_max_dp_size=4,
+        enable_elastic_ep=True,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    monkeypatch.delenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", raising=False)
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", "5")
+    with (
+        zmq.Context() as ctx,
+        make_zmq_socket(ctx, address, zmq.ROUTER, bind=True, linger=0) as listener,
+        make_zmq_socket(
+            ctx, address, zmq.DEALER, bind=False, identity=rank_identity, linger=0
+        ) as engine,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        engine.send(b"engine-connected")
+        assert listener.poll(5000)
+        assert listener.recv_multipart() == [rank_identity, b"engine-connected"]
+        launch_request = executor.submit(prepare_external_elastic_ep_launch, args)
+        assert listener.poll(5000)
+        identity, payload = listener.recv_multipart()
+        assert identity != rank_identity
+        responder.reply(listener, identity, msgspec.msgpack.decode(payload))
+        launch = launch_request.result(timeout=5)
+        assert launch.data_parallel_size == 2
+        assert not launch.scale_up
+        assert launch.identity is not None
+        engine.send(msgspec.msgpack.encode({"bootstrap": launch.identity}))
+        assert listener.poll(5000)
+        identity, payload = listener.recv_multipart()
+        assert identity == rank_identity
+        responder.validate(1, msgspec.msgpack.decode(payload)["bootstrap"])
 
 
 class DictStore:
@@ -149,12 +388,14 @@ class ExternalLBServerManager:
         api_server_count: int,
         base_server_args: list,
         tp_size: int = TP_SIZE,
+        auto_bootstrap: bool = False,
     ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
+        self.auto_bootstrap = auto_bootstrap
         self.servers: list[tuple[RemoteOpenAIServer, list[str]]] = []
         self.server_threads: list[threading.Thread] = []
 
@@ -169,8 +410,6 @@ class ExternalLBServerManager:
         server_args = self.base_server_args.copy()
         server_args.extend(
             [
-                "--data-parallel-size",
-                str(dp_size),
                 "--data-parallel-rank",
                 str(rank),
                 "--data-parallel-size-local",
@@ -183,6 +422,17 @@ class ExternalLBServerManager:
                 str(self.api_server_count),
             ]
         )
+
+        if self.auto_bootstrap:
+            server_args.extend(
+                [
+                    "--elastic-ep-auto-bootstrap",
+                    "--elastic-ep-initial-dp-size",
+                    str(self.dp_size),
+                ]
+            )
+        else:
+            server_args.extend(["--data-parallel-size", str(dp_size)])
 
         env_dict = {
             "VLLM_SERVER_DEV_MODE": "1",
@@ -356,12 +606,18 @@ def _wait_for_scale_requests_to_start(
     os.getenv("VLLM_USE_RUST_FRONTEND") == "1",
     reason="Elastic EP scaling is not supported by the Rust frontend",
 )
-def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
+@pytest.mark.parametrize(
+    "auto_bootstrap,enable_fault_tolerance",
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_external_lb_elastic_ep_scale_up(
+    default_server_args, auto_bootstrap, enable_fault_tolerance
+) -> None:
     server_args = [
         *default_server_args,
         "--enable-expert-parallel",
         "--all2all-backend",
-        "allgather_reducescatter",
+        "nixl_ep" if enable_fault_tolerance else "allgather_reducescatter",
         "--attention-backend",
         "TRITON_MLA",
         "--enable-elastic-ep",
@@ -371,11 +627,14 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
         "--eplb-config",
         '{"communicator":"pynccl","num_redundant_experts":0,"use_async":false}',
     ]
+    if enable_fault_tolerance:
+        server_args.append("--enable-fault-tolerance")
     server_manager = ExternalLBServerManager(
         ELASTIC_EP_MODEL_NAME,
         dp_size=2,
         api_server_count=1,
         base_server_args=server_args,
+        auto_bootstrap=auto_bootstrap,
     )
 
     with server_manager:
@@ -388,17 +647,22 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
             _wait_for_scale_requests_to_start(scale_requests)
             server_manager.start_rank(
                 rank=2,
-                dp_size=3,
-                elastic_ep_scale_up_launch=True,
+                dp_size=None if auto_bootstrap else 3,
+                elastic_ep_scale_up_launch=not auto_bootstrap,
             )
 
             for request in scale_requests:
                 response = request.result(timeout=600)
                 assert response.status_code == 200, response.text
 
-        for server, _ in server_manager.servers:
+        for server, launch_args in server_manager.servers:
+            if auto_bootstrap:
+                assert "--data-parallel-size" not in launch_args
+                initial_size_index = launch_args.index("--elastic-ep-initial-dp-size")
+                assert launch_args[initial_size_index + 1] == "2"
             parallel_config = _get_parallel_config(server)
             assert parallel_config["data_parallel_size"] == 3
+            assert parallel_config["enable_fault_tolerance"] is enable_fault_tolerance
             assert parallel_config["eplb_config"]["num_redundant_experts"] == 32
             with server.get_client() as client:
                 completion = client.completions.create(

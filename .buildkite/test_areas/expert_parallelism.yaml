@@ -75,6 +75,10 @@ steps:
   - vllm/v1/executor/
   - vllm/compilation/
   - tests/distributed/
+  - tests/v1/distributed/test_external_lb_dp.py
+  - vllm/config/parallel.py
+  - vllm/v1/engine/
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
+  - VLLM_USE_RUST_FRONTEND=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k test_external_lb_elastic_ep_scale_up

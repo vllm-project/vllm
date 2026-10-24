@@ -1393,15 +1393,16 @@ class EngineCoreProc(EngineCore):
         parallel_config: ParallelConfig | None = None,
     ) -> EngineZmqAddresses:
         # Send registration message.
-        handshake_socket.send(
-            msgspec.msgpack.encode(
-                {
-                    "status": "HELLO",
-                    "local": local_client,
-                    "headless": headless,
-                }
-            )
-        )
+        hello: dict[str, Any] = {
+            "status": "HELLO",
+            "local": local_client,
+            "headless": headless,
+        }
+        if parallel_config is not None:
+            bootstrap = parallel_config._external_elastic_ep_bootstrap
+            if bootstrap is not None:
+                hello["bootstrap"] = bootstrap
+        handshake_socket.send(msgspec.msgpack.encode(hello))
 
         # Receive initialization message.
         logger.debug("Waiting for init message from front-end.")
@@ -1412,6 +1413,9 @@ class EngineCoreProc(EngineCore):
                 f"minutes"
             )
         init_bytes = handshake_socket.recv()
+        error = msgspec.msgpack.decode(init_bytes).get("error")
+        if error is not None:
+            raise RuntimeError(f"Engine bootstrap rejected: {error}")
         num_redundant_experts: int | None = None
         if (
             envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
