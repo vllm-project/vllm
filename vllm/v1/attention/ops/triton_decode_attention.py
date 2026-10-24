@@ -623,7 +623,12 @@ def _fwd_kernel_stage2(
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
 
-    result = acc / e_sum
+    # CUDA-graph decode pads inactive request slots with seq_len=0. Stage1
+    # writes nothing for those rows, so e_sum stays 0 and acc/e_sum is 0/0=NaN.
+    # Online FP8 MoE uses a per-tensor dynamic activation scale (amax over the
+    # whole batch), so a single pad NaN poisons every co-batched request
+    # (DeepSeek-V2-Lite TRITON_MLA + --quantization fp8, issue #57017).
+    result = tl.where(e_sum > 0, acc / e_sum, 0.0)
     if OUTPUT_FP16:
         result = result.to(tl.float16)
     tl.store(
@@ -631,6 +636,7 @@ def _fwd_kernel_stage2(
         result,
         mask=mask_d,
     )
+    # log(0) -> -inf; (-inf)+(-inf) is -inf (not NaN) for empty rows.
     lse_val = e_max + tl.log(e_sum)
     tl.store(
         lse + cur_batch * stride_lse_bs + cur_head,
