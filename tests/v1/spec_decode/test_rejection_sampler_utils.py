@@ -1182,6 +1182,9 @@ def test_verify_rejects_unproposed_drafts():
         ),
         use_fp64_gumbel=False,
         trace_replay_state=None,
+        logprobs_mode="raw_logprobs",
+        return_sampling_mask=False,
+        needs_only_temperature_scaling=lambda _: False,
         may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K

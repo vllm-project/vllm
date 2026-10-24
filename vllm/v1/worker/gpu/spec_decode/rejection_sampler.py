@@ -265,16 +265,29 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        processed_logits = self.sampler.apply_sampling_params(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            pos,
-            draft_sampled,
-            expanded_local_pos,
-            seq_lens_upper_bound_np,
+        # processed_logits doubles as the logprobs/sampling-mask source below,
+        # so the skip is only safe when nothing downstream needs it scaled.
+        needs_processed_logits = (
+            self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            or self.sampler.return_sampling_mask
         )
+        skip_scaling = (
+            not needs_processed_logits
+            and self.sampler.needs_only_temperature_scaling(idx_mapping_np)
+        )
+        if skip_scaling:
+            processed_logits = logits
+        else:
+            processed_logits = self.sampler.apply_sampling_params(
+                logits,
+                expanded_idx_mapping,
+                idx_mapping,
+                idx_mapping_np,
+                pos,
+                draft_sampled,
+                expanded_local_pos,
+                seq_lens_upper_bound_np,
+            )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -296,6 +309,7 @@ class RejectionSampler:
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
+            target_logits_pre_scaled=not skip_scaling,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
