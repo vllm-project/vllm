@@ -1,0 +1,100 @@
+{% if tools is not defined or tools is none %}
+    {{- '<|im_start|>tool_list\n<|im_end|>\n' }}
+{%- else %}
+    {{- '<|im_start|>tool_list\n[' }}
+    {%- for tool in tools %}
+        {{- '{"name": "' }}
+        {{- tool.function.name }}
+        {{- '", ' }}
+        {{- '"description": "' }}
+        {{- tool.function.description }}
+        {{- '"' }}
+        {%- if tool.function.parameters is defined %}
+            {{- ', "parameters": ' }}
+            {{- tool.function.parameters | tojson }}
+        {%- endif %}
+        {{- '}' }}
+        {%- if not loop.last %}
+            {{- ', ' }}
+        {%- endif %}
+    {%- endfor %}
+{{- ']<|im_end|>\n' }}
+{%- endif %}
+
+{%- set ns = namespace(is_searching=true, last_query_index=messages|length - 1) %}
+{%- for message in messages[::-1] %}
+    {%- set index = (messages|length - 1) - loop.index0 %}
+    {%- if ns.is_searching and (message.role == 'user' or message.role == 'tool') %}
+        {%- set ns.last_query_index = index %}
+        {%- set ns.is_searching = false %}
+    {%- endif %}
+{%- endfor %}
+
+{%- for message in messages %}
+    {%- if loop.index0 == 0 and message.role != 'system' %}
+        {{- '<|im_start|>system\n<|im_end|>\n' }}
+    {%- endif %}
+
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+
+    {%- set reasoning_content = '' %}
+    {%- if message.reasoning_content is defined and message.reasoning_content is not none %}
+        {%- set reasoning_content = message.reasoning_content %}    
+    {%- endif %}
+    {%- if message.role == "assistant" %}
+        {%- if loop.index0 > ns.last_query_index %}
+            {%- if reasoning_content %}
+                {{- '<|im_start|>assistant/think\n' + reasoning_content.strip('\n') + '<|im_end|>\n' }}
+            {%- endif %}
+        {%- endif %}
+
+        {%- if content %}
+            {{- '<|im_start|>assistant\n' + content.strip('\n') + '<|im_end|>' }}
+            {%- if message.tool_calls %}
+                {{- '\n' }}
+            {%- else %}
+                {{- '<|endofturn|>\n' }}
+            {%- endif %}
+        {%- endif %}
+
+        {%- if message.tool_calls %}
+            {{- '<|im_start|>assistant -> tool/function_call\n[' }}
+            {%- for tool_call in message.tool_calls %}
+                {%- if not loop.first %}
+                    {{- ', ' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}' }}
+                {%- endfor %}
+            {{- ']<|im_end|><|stop|>\n' }}
+
+        {%- endif %}
+    {%- elif message.role == "tool" %}
+        {{- '<|im_start|>tool/function_call\n' + content + '<|im_end|>\n' }}
+    {%- else %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {%- if force_reasoning is defined and force_reasoning is true %}
+        {{- '<|im_start|>assistant/think\n' }}
+    {%- elif skip_reasoning is defined and skip_reasoning is true %}
+        {{- '<|im_start|>assistant\n' }}
+    {%- else %}
+        {{- '<|im_start|>assistant' }}
+    {%- endif %}
+{%- endif %}
