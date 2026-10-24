@@ -209,6 +209,52 @@ def test_compile_sizes_produce_static_shapes(disable_vllm_compile_cache):
     )
 
 
+def scale_by_positions(x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    return x * (positions[0] + 2 * positions[1] + 3 * positions[2]).unsqueeze(-1)
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0, "positions": -1})
+class MRoPEPositionsModel(nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        return scale_by_positions(x, positions)
+
+
+def test_compile_sizes_keep_input_strides(disable_vllm_compile_cache):
+    """A compile_sizes graph must keep input strides that do not depend on
+    the size, like M-RoPE positions sliced from a persistent
+    (3, max_num_tokens + 1) buffer (issue #50046)."""
+    max_num_tokens = 8192
+    torch.set_default_device("cuda")
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=max_num_tokens,
+            max_model_len=max_num_tokens,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_sizes=[16],
+        ),
+    )
+    positions_buffer = torch.randint(0, 100, (3, max_num_tokens + 1))
+
+    with (
+        set_current_vllm_config(vllm_config),
+        torch.inference_mode(),
+        set_forward_context({}, vllm_config=vllm_config),
+    ):
+        model = MRoPEPositionsModel(vllm_config=vllm_config, prefix="").eval()
+        for num_tokens in [BATCH_SIZE, 16]:
+            x = torch.randn(num_tokens, MLP_SIZE)
+            positions = positions_buffer[:, :num_tokens]
+            torch.testing.assert_close(
+                model(x, positions), scale_by_positions(x, positions)
+            )
+
+
 def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
     # disable_vllm_compile_cache sets VLLM_DISABLE_COMPILE_CACHE=1 to force
     # multiple compilations by disabling vLLM's on-disk compile cache.
