@@ -125,10 +125,10 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 @pytest.mark.cpu_test
 def test_gemma4_attention_mapper() -> None:
     """Layers with a qkv_proj pack q/k/v; `attention_k_eq_v` full-attention
-    layers also load K as the V shard, and leave any v_proj such a checkpoint
-    ships unmapped so it fails the load rather than silently overwriting V;
-    KV-shared layers keep q_proj and drop the K/V tensors original checkpoints
-    still ship for them."""
+    layers pack into qkk_proj, also loading K as the V shard, and leave any
+    v_proj such a checkpoint ships unmapped so it fails the load rather than
+    silently overwriting V; KV-shared layers keep q_proj and drop the K/V
+    tensors original checkpoints still ship for them."""
     config = SimpleNamespace(
         num_hidden_layers=3,
         num_kv_shared_layers=1,
@@ -151,9 +151,9 @@ def test_gemma4_attention_mapper() -> None:
         ("model.layers.0.self_attn.qkv_proj.weight", "q"),
         ("model.layers.0.self_attn.qkv_proj.weight", "k"),
         ("model.layers.0.self_attn.k_norm.weight", None),
-        ("model.layers.1.self_attn.qkv_proj.weight", "q"),
-        ("model.layers.1.self_attn.qkv_proj.weight", "k"),
-        ("model.layers.1.self_attn.qkv_proj.weight", "v"),
+        ("model.layers.1.self_attn.qkk_proj.weight", "q"),
+        ("model.layers.1.self_attn.qkk_proj.weight", "k"),
+        ("model.layers.1.self_attn.qkk_proj.weight", "v"),
         ("model.layers.1.self_attn.k_norm.weight", None),
         ("model.layers.2.self_attn.q_proj.weight", None),
         ("model.layers.0.mlp.gate_up_proj.weight", 1),
