@@ -18,10 +18,13 @@ import hashlib
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from .arch import tiling as _tiling
+
 # ---------------------------------------------------------------- execution model
-BLOCKS = 256
-THREADS = 512
-WAVES = THREADS // 64
+# The grid width is the GPU's compute-unit count (one resident CTA each): 256 on
+# MI355X / MI350X / gfx942, 128 on MI350P. ``arch.tiling`` reads the runner's
+# env, else the GPU, so the host plan and the device modules pick the same one.
+BLOCKS, THREADS, WAVES = _tiling()
 
 
 def first_task(bid, base):
@@ -121,7 +124,9 @@ def source_digest(*paths: str) -> str:
 
 def key_tuple(key, sources: str) -> tuple:
     """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+    ("blocks", ``BLOCKS``) and ("sources", ``sources``): the grid width (so a
+    build for one compute-unit count never reads another's cache entry) and the
+    model's ``source_digest``."""
     out = []
     for f in fields(key):
         value = getattr(key, f.name)
@@ -131,5 +136,6 @@ def key_tuple(key, sources: str) -> tuple:
                 " a scalar to reach the JIT cache key"
             )
         out.append((f.name, value))
+    out.append(("blocks", BLOCKS))
     out.append(("sources", sources))
     return tuple(out)

@@ -396,7 +396,9 @@ def _config(monokernel=True, **parallel):
 
 def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL).
-    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
+    ``target`` is the architecture FlyDSL compiles for, by default the GPU's.
+    ``cus`` is the compute-unit count, which is also the grid width the runner
+    builds for (256 on MI355X / gfx942, 128 on MI350P)."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
@@ -405,8 +407,14 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     monkeypatch.setattr(md, "_compute_units", lambda: cus)
     gpu = "gfx942" if cdna == 3 else "gfx950"
     monkeypatch.setattr(md, "_gpu_arch", lambda: gpu)
+    from vllm.models.deepseek_v41.amd.mono.common import arch as real_arch
+
     arch = ModuleType("vllm.models.deepseek_v41.amd.mono.common.arch")
+    arch.MONO_BLOCKS_ENV = real_arch.MONO_BLOCKS_ENV  # type: ignore[attr-defined]
     arch.target_arch = lambda: target or gpu  # type: ignore[attr-defined]
+    # The real resolver, so the gate sees production's validated counts (256 on
+    # gfx942 / gfx950) and its actionable refusal for MI350P's 128.
+    arch.resolve_tiling = real_arch.resolve_tiling  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, arch.__name__, arch)
     # On gfx942, create builds the top-k extension with hipcc. These tests do
     # not need it, so they skip the build.
@@ -419,7 +427,7 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
     runner = ModuleType(name)
-    runner.BLOCKS = 256  # type: ignore[attr-defined]
+    runner.BLOCKS = cus  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)
 
 
@@ -476,19 +484,40 @@ def _other_backend():
         (dict(parallel=dict(enable_eplb=True)), "no expert"),
         (dict(a4w4=True), "A8W4"),
         (dict(layer=_other_backend), "AITER_MXFP4_BF16"),
-        (dict(cus=128), "256 compute units"),
+        (dict(cus=64), "64 compute units"),
     ],
     ids=["expert-parallel", "data-parallel", "eplb", "a4w4", "moe-backend", "cus"],
 )
 def test_opt_in_outside_the_kernels_moe_raises(monkeypatch, case, match):
     """The kernels read all 384 experts on each rank in AITER's A8W4 layout, with
-    all 256 CTAs resident: any other deployment is an error, not garbage."""
+    every CTA resident: any other deployment is an error, not garbage. A grid
+    wider than the compute units deadlocks, so an unvalidated count raises."""
     _deployment(monkeypatch, cus=case.get("cus", 256))
     if case.get("a4w4"):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
     layer = case.get("layer", _decoder_layer)()
     with pytest.raises(ValueError, match=match):
         md.MonoDecodeLayer.create(layer, _config(**case.get("parallel", {})))
+
+
+def test_opt_in_takes_the_256_cu_gfx950(monkeypatch):
+    """gfx950 at 256 CUs (MI355X, MI350X) builds the whole-layer kernels, the
+    runner's grid width tracking the count."""
+    import vllm.models.deepseek_v41.amd.mono.runner as runner
+
+    _deployment(monkeypatch, cdna=4, cus=256)
+    mono = md.MonoDecodeLayer.create(_decoder_layer(), _config())
+    assert mono is not None and not mono.ffn_only
+    assert runner.BLOCKS == 256
+
+
+def test_opt_in_on_mi350p_names_the_retune(monkeypatch):
+    """MI350P (gfx950, 128 CUs) has no built tiling yet: the opt-in refuses it
+    with the task-decomposition work it needs, rather than a grid that deadlocks
+    or a build that asserts."""
+    _deployment(monkeypatch, cdna=4, cus=128)
+    with pytest.raises(ValueError, match="MI350P.*DOWN_TASKS"):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
 @pytest.mark.parametrize("rows, runs", [(md.MAX_ROWS_GFX942, True), (48, False)])

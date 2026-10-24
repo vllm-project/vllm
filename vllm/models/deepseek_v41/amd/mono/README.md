@@ -57,11 +57,13 @@ new, reading vLLM's KV records and weights as loaded.
 
 ## Execution model and hand-offs
 
-- Grid = 256 CTAs (one a CU, all resident), 512 threads a CTA, LDS a per-stage
-  union. A stage is a task table: CTA `b` runs tasks `b, b + 256, ...`, stages
-  in order; a consumer only waits on earlier stages, so no deadlock while the
-  grid is resident. A GEMV task issues its weight loads before it polls its
-  activations.
+- Grid = BLOCKS CTAs (one a CU, all resident), 512 threads a CTA, LDS a per-stage
+  union. BLOCKS is the GPU's compute-unit count, 256 on MI355X / MI350X / gfx942
+  (MI300X, MI325X); `common/arch.py` picks it, and a count it has no built tiling
+  for (MI350P's 128) is refused. A stage is a task table: CTA `b` runs tasks
+  `b, b + BLOCKS, ...`, stages in order; a consumer only waits on earlier stages,
+  so no deadlock while the grid is resident. A GEMV task issues its weight loads
+  before it polls its activations.
 - In a launch: tagged pairs (value + tag in one 8 B store) or plain data +
   flags, at device scope. The tag is the launch pair's epoch (K1 `2e + 1`,
   K2 or the FFN launch `2e + 2`), a device word their CTA 0 moves on once every
