@@ -116,10 +116,12 @@ def test_find_matching_patterns_distinguishes_direct_and_shard_matches(
     assert should_ignore_layer(layer_name, patterns, fused_mapping)
 
 
-def test_should_ignore_layer_rejects_partially_matched_fused_layer():
+@pytest.mark.parametrize("dotted_mapping", [False, True])
+def test_should_ignore_layer_rejects_partially_matched_fused_layer(dotted_mapping):
     layer_name = "model.layers.0.self_attn.qkv_proj"
     patterns = [r"re:.*\.q_proj$"]
-    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    prefix = "self_attn." if dotted_mapping else ""
+    fused_mapping = {prefix + "qkv_proj": [prefix + f"{part}_proj" for part in "qkv"]}
 
     assert find_matching_patterns(layer_name, patterns, fused_mapping) == [
         {r"re:.*\.q_proj$"},
@@ -161,16 +163,67 @@ def test_ignore_and_targets_match_fused_regexes_identically(patterns):
     assert targets[matches[0]] == "fp8_per_block"
 
 
-def test_ignore_allows_individually_matched_fused_shards():
-    layer_name = "model.layers.0.self_attn.qkv_proj"
-    patterns = [
-        "model.layers.0.self_attn.q_proj",
-        "model.layers.0.self_attn.k_proj",
-        "model.layers.0.self_attn.v_proj",
-    ]
-    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-
+@pytest.mark.parametrize(
+    "layer_name,patterns,fused_mapping",
+    [
+        (
+            "model.layers.0.self_attn.qkv_proj",
+            [
+                "model.layers.0.self_attn.q_proj",
+                "model.layers.0.self_attn.k_proj",
+                "model.layers.0.self_attn.v_proj",
+            ],
+            {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+        ),
+        (
+            "visual.blocks.0.attn.qkv",
+            [
+                "visual.blocks.0.attn.q",
+                "visual.blocks.0.attn.k",
+                "visual.blocks.0.attn.v",
+            ],
+            {"attn.qkv": ["attn.q", "attn.k", "attn.v"]},
+        ),
+        (
+            "model.layers.0.self_attn.qkv_proj",
+            [
+                "model.layers.0.self_attn.q_proj",
+                "model.layers.0.self_attn.k_proj",
+                "model.layers.0.self_attn.v_proj",
+            ],
+            {
+                "self_attn.qkv_proj": [
+                    "self_attn.q_proj",
+                    "self_attn.k_proj",
+                    "self_attn.v_proj",
+                ]
+            },
+        ),
+    ],
+    ids=["single_component_fused_name", "qwen_style", "cohere_style"],
+)
+def test_ignore_allows_individually_matched_fused_shards(
+    layer_name, patterns, fused_mapping
+):
     assert should_ignore_layer(layer_name, patterns, fused_mapping)
+    assert quark_should_ignore_layer(layer_name, patterns, fused_mapping)
+    targets = {pattern: "fp8_per_block" for pattern in patterns}
+    assert _find_matching_targets(layer_name, targets, fused_mapping) == [patterns[0]]
+
+
+def test_fused_matching_requires_a_path_component_boundary():
+    fused_mapping = {"attn.qkv": ["attn.q", "attn.k", "attn.v"]}
+    assert find_matching_patterns(
+        "model.notattn.qkv", [r"re:.*\.[qkv]$"], fused_mapping
+    ) == [set()]
+
+
+def test_fused_matching_preserves_parent_components():
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    patterns = [f"qkv_proj.blocks.0.{part}_proj" for part in "qkv"]
+    assert find_matching_patterns(
+        "qkv_proj.blocks.0.qkv_proj", patterns, fused_mapping
+    ) == [{pattern} for pattern in patterns]
 
 
 @pytest.mark.parametrize(
