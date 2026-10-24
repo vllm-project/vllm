@@ -191,7 +191,7 @@ def is_shared_expert_quant_fse_compatible(
             '\'{"*shared_experts*": "mxfp4"}\'',
         )
 
-    if isinstance(quant_config, DeepseekV4FP8Config):
+    if isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config)):
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
 
