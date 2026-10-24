@@ -30,6 +30,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 
 def _prefer_narrow_kv_tile() -> bool:
@@ -247,6 +248,14 @@ def context_attention_fwd(
     BLOCK = get_block_size(q.dtype)
     if Lk >= 512:
         BLOCK = min(BLOCK, 32)
+    elif (
+        Lk >= 256
+        and current_platform.is_cuda()
+        and get_max_shared_memory_bytes() < 160 * 1024
+    ):
+        # 128-row tiles of 256-wide heads need 160KB of shared memory;
+        # 64-row ones need 72KB.
+        BLOCK = min(BLOCK, 64)
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
