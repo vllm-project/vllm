@@ -70,7 +70,6 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
 
         rendered = self._apply_chat_template(
             conversation=conversation,
-            messages=messages,
             **params.get_apply_chat_template_kwargs(),
         )
 
