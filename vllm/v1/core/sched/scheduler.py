@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -80,6 +80,14 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _FinishedInFlightKV:
+    """Released block IDs, kept until finished/preempted work returns."""
+
+    block_ids: tuple[int, ...]
+    num_in_flight_tokens: int
 
 
 class Scheduler(SchedulerInterface):
@@ -455,6 +463,7 @@ class Scheduler(SchedulerInterface):
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        self._finished_inflight_kv: dict[str, _FinishedInFlightKV] = {}
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -1046,6 +1055,12 @@ class Scheduler(SchedulerInterface):
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
+                    skip_request(request_queue)
+                    continue
+
+                if request_id in self._finished_inflight_kv:
+                    # A preempted load may still fail, even in drop-output mode.
+                    # Drain it before allocating a new generation of blocks.
                     skip_request(request_queue)
                     continue
 
@@ -1759,6 +1774,7 @@ class Scheduler(SchedulerInterface):
         )
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        self._track_inflight_kv(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -2246,6 +2262,9 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        # Records created in the loop already exclude this step from
+        # num_in_flight_tokens, so retire existing records first.
+        self._retire_finished_inflight_kv(num_scheduled_tokens)
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2923,11 +2942,39 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        self._track_inflight_kv(request)
+
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
 
         return kv_xfer_params, ec_xfer_params
+
+    def _track_inflight_kv(self, request: Request) -> None:
+        # A load failure can arrive after finishing or preempting its request.
+        if (
+            self.connector is not None
+            and request.num_in_flight_tokens > 0
+            and len(self.kv_cache_config.kv_cache_groups) == 1
+        ):
+            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+            if block_ids:
+                self._finished_inflight_kv[request.request_id] = _FinishedInFlightKV(
+                    block_ids=tuple(block_ids),
+                    num_in_flight_tokens=request.num_in_flight_tokens,
+                )
+
+    def _retire_finished_inflight_kv(
+        self, num_scheduled_tokens: dict[str, int]
+    ) -> None:
+        """Count each record down by this step's tokens; drop it once all arrive."""
+        if not self._finished_inflight_kv:
+            return
+        for request_id, record in list(self._finished_inflight_kv.items()):
+            record.num_in_flight_tokens -= num_scheduled_tokens.get(request_id, 0)
+            assert record.num_in_flight_tokens >= 0
+            if record.num_in_flight_tokens == 0:
+                del self._finished_inflight_kv[request_id]
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
@@ -3045,10 +3092,9 @@ class Scheduler(SchedulerInterface):
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
-            # Clear scheduled request ids cache. Since we are forcing preemption
-            # + resumption in the same step, we must act as if these requests were
-            # not scheduled in the prior step. They will be flushed from the
-            # persistent batch in the model runner.
+            # Clear scheduled request IDs so resumed requests are flushed from
+            # the model runner's persistent batch, even within the same step.
+            # Requests with retained in-flight KV records wait for them to drain.
             self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
@@ -3592,6 +3638,25 @@ class Scheduler(SchedulerInterface):
         total_failed_requests += len(sync_failed_req_ids)
         total_failed_tokens += num_failed_tokens
 
+        # Released blocks cannot be repaired in place under either policy.
+        # Scan every record. A request absent from this batch may have
+        # computed its suffix in a later batch using a block that failed here.
+        finished_blocks_to_evict: set[int] = set()
+        for req_id, record in self._finished_inflight_kv.items():
+            for idx, block_id in enumerate(record.block_ids):
+                if block_id in invalid_block_ids:
+                    finished_blocks_to_evict.update(record.block_ids[idx:])
+                    request = self.requests.get(req_id)
+                    if request is not None and not request.is_finished():
+                        # Preemption already reset its counters. Discard all
+                        # outstanding output computed from the rejected KV.
+                        request.drop_stale_output = True
+                        sync_failed_req_ids.add(req_id)
+                        total_failed_requests += 1
+                    break
+        if finished_blocks_to_evict:
+            self.kv_cache_manager.evict_blocks(finished_blocks_to_evict)
+
         if not total_failed_requests:
             return set()
 
@@ -3605,7 +3670,8 @@ class Scheduler(SchedulerInterface):
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
+                "(failure_policy=fail, %d tokens affected, excluding preempted "
+                "requests). Request IDs: %s",
                 total_failed_requests,
                 total_failed_tokens,
                 all_failed_req_ids,
@@ -3614,7 +3680,8 @@ class Scheduler(SchedulerInterface):
 
         logger.warning(
             "Recovered from KV load failure: "
-            "%d request(s) rescheduled (%d tokens affected).",
+            "%d request(s) rescheduled "
+            "(%d tokens affected, excluding preempted requests).",
             total_failed_requests,
             total_failed_tokens,
         )
