@@ -1,5 +1,8 @@
 # Features
 
+For an opt-in scheduler extension example, see
+[Adaptive token budgets](adaptive_budget.md).
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
