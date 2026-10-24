@@ -1045,19 +1045,12 @@ class VllmConfig:
         apply_recursive(self, defaults)
 
     def _looped_self_draft_needs_decode_graphs(self) -> bool:
-        """Validate the compile mode and check whether graph modes are restricted."""
+        """Whether self-drafting restricts graphs to FULL_DECODE_ONLY or NONE."""
         speculative = self.speculative_config
         if speculative is None or speculative.method != "looped_self_draft":
             return False
         mode = self.compilation_config.mode
-        if mode not in (CompilationMode.NONE, CompilationMode.VLLM_COMPILE):
-            raise ValueError(
-                "Looped self-drafting supports VLLM_COMPILE or NONE; "
-                "set --compilation-config '{\"mode\": 3}' or '{\"mode\": 0}'."
-            )
-        return (
-            speculative.reuse_draft_activations or mode == CompilationMode.VLLM_COMPILE
-        )
+        return speculative.reuse_draft_activations or mode != CompilationMode.NONE
 
     def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
         speculative_config = self.speculative_config

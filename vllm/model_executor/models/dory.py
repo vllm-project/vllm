@@ -506,6 +506,9 @@ class DoryForCausalLM(nn.Module):
     def get_looped_self_draft_model(self) -> nn.Module:
         return DoryDraftModel(self)
 
+    def get_compilation_modules(self) -> list[nn.Module]:
+        return list(self.backbone.stages.values()) or [self]
+
     def get_draft_attn_layer_names(self) -> list[str]:
         backbone = self.backbone
         names: list[str] = []

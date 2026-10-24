@@ -1488,6 +1488,15 @@ def supports_transcription(
 
 
 @runtime_checkable
+class SupportsCompilationModules(Protocol):
+    """Models with tensor-only regions separated by eager orchestration."""
+
+    def get_compilation_modules(self) -> list[nn.Module]:
+        """Return non-overlapping regions for stock torch.compile."""
+        ...
+
+
+@runtime_checkable
 class SupportsLoopedSelfDraft(Protocol):
     """Looped models that draft using their own weights and prefix KV caches.
 

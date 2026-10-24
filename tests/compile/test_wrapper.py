@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.wrapper import (
     TorchCompileWithNoGuardsWrapper,
     compile_model_with_stock_torch,
@@ -15,6 +16,7 @@ from vllm.compilation.wrapper import (
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    DeviceConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -121,7 +123,8 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         raise AssertionError("expected an exception to be raised")
 
 
-def test_compile_model_with_stock_torch(monkeypatch):
+@pytest.mark.parametrize("explicit_region", [False, True])
+def test_compile_model_with_stock_torch(monkeypatch, explicit_region):
     """The whole model is compiled in place with the configured backend."""
     graphs: list[torch.fx.GraphModule] = []
 
@@ -143,11 +146,13 @@ def test_compile_model_with_stock_torch(monkeypatch):
         def forward(self, x: torch.Tensor):
             return self.linear(x).relu()
 
-    vllm_config = VllmConfig()
+    vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     vllm_config.compilation_config = CompilationConfig(
         mode=CompilationMode.STOCK_TORCH_COMPILE
     )
     model = Model()
+    if explicit_region:
+        model.get_compilation_modules = lambda: [model]
     x = torch.randn(3, 4)
     expected = model(x)
 
@@ -157,6 +162,94 @@ def test_compile_model_with_stock_torch(monkeypatch):
     assert not graphs  # compilation is deferred to the first call
     torch.testing.assert_close(model(x), expected)
     assert len(graphs) == 1
+
+
+def test_stock_compile_decorated_model_without_regions(monkeypatch):
+    """Decorated models must opt in before changing the whole-model compile path."""
+    calls = []
+    backend = object()
+    monkeypatch.setattr(CompilationConfig, "init_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr(
+        torch.nn.Module, "compile", lambda self, **kw: calls.append((self, kw))
+    )
+
+    @support_torch_compile
+    class Model(torch.nn.Module):
+        def forward(self, x: torch.Tensor):
+            return x + 1
+
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE
+    )
+    with set_current_vllm_config(config):
+        model = Model()
+        forward = model.forward
+        compile_model_with_stock_torch(model, config)
+    assert calls == [(model, {"fullgraph": True, "backend": backend})]
+    assert model.forward == forward
+
+
+def test_stock_compile_regions_preserve_eager_control_and_guards(monkeypatch):
+    """Compile decorated regions without tracing orchestration or dropping guards."""
+    executed = []
+
+    def backend(graph, inputs):
+        def run(*args):
+            executed.append(graph)
+            return graph.forward(*args)
+
+        return run
+
+    monkeypatch.setattr(CompilationConfig, "init_backend", lambda *a, **kw: backend)
+
+    @support_torch_compile
+    class Stage(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.scale = scale
+
+        def forward(self, x: torch.Tensor):
+            return x * self.scale if x.shape[0] >= 4 else x + self.scale
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = Stage(2)
+            self.second = Stage(3)
+            self.use_second = False
+
+        def get_compilation_modules(self):
+            return [self.first, self.second]
+
+        @torch.compiler.disable
+        def forward(self, x):
+            x = self.first(x)
+            return self.second(x) if self.use_second else x
+
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE
+    )
+    torch._dynamo.reset()
+    with (
+        set_current_vllm_config(config),
+        torch._dynamo.config.patch(recompile_limit=1),
+    ):
+        model = Model()
+        with compilation_counter.expect(stock_torch_compile_count=2):
+            compile_model_with_stock_torch(model, config)
+        assert not executed
+        for size, use_second in [(4, False), (3, True), (8, True), (1, False)]:
+            model.use_second = use_second
+            x = torch.ones(size)
+            expected = x * 2 if size >= 4 else x + 2
+            if use_second:
+                expected = expected * 3 if size >= 4 else expected + 3
+            calls = len(executed)
+            torch.testing.assert_close(model(x), expected)
+            assert len(executed) - calls == 1 + use_second
+            assert torch._dynamo.config.recompile_limit == 1
 
 
 if __name__ == "__main__":

@@ -4276,6 +4276,11 @@ def looped_self_draft_vllm_config(looped_self_draft_target_config, monkeypatch):
         (0, True, None, "FULL_DECODE_ONLY"),
         (0, True, "PIECEWISE", "NONE"),
         (0, False, "FULL", "FULL"),
+        (1, True, None, "NONE"),
+        (1, True, "FULL", "NONE"),
+        (2, False, None, "FULL_DECODE_ONLY"),
+        (1, False, "NONE", "NONE"),
+        (2, True, "NONE", "NONE"),
     ],
 )
 def test_looped_self_draft_resolves_graph_mode_at_config_time(
@@ -4292,8 +4297,7 @@ def test_looped_self_draft_resolves_graph_mode_at_config_time(
     "mode,reuse,graph_mode,match",
     [
         (3, False, "FULL_AND_PIECEWISE", "FULL_DECODE_ONLY or NONE"),
-        (1, True, "NONE", "VLLM_COMPILE or NONE"),
-        (2, True, "NONE", "VLLM_COMPILE or NONE"),
+        (2, False, "FULL", "FULL_DECODE_ONLY or NONE"),
     ],
 )
 def test_looped_self_draft_rejects_unsupported_compilation_config(

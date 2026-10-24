@@ -54,11 +54,21 @@ def compile_model_with_stock_torch(
     model: torch.nn.Module, vllm_config: VllmConfig
 ) -> None:
     from vllm.env_override import _apply_constrain_to_fx_strides_patch
+    from vllm.model_executor.models.interfaces import SupportsCompilationModules
 
     _apply_constrain_to_fx_strides_patch()
     backend = vllm_config.compilation_config.init_backend(vllm_config)
-    compilation_counter.stock_torch_compile_count += 1
-    model.compile(fullgraph=True, backend=backend)
+    has_regions = isinstance(model, SupportsCompilationModules)
+    modules = model.get_compilation_modules() if has_regions else [model]
+    for module in modules:
+        compilation_counter.stock_torch_compile_count += 1
+        if has_regions and isinstance(module, TorchCompileWithNoGuardsWrapper):
+            # Decorated modules call forward directly, bypassing nn.Module.__call__.
+            module.forward = _compilation_context()(  # type: ignore[method-assign]
+                torch.compile(module.forward, fullgraph=True, backend=backend)
+            )
+        else:
+            module.compile(fullgraph=True, backend=backend)
 
 
 class TorchCompileWithNoGuardsWrapper:

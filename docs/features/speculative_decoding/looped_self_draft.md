@@ -26,6 +26,7 @@ For example, `num_draft_loops=2` and `num_shared_loops=1` run two draft loops bu
 
 - This method requires Model Runner V2. Dory requires `recurrent_kv_cache_mode="per_loop"` and tensor, pipeline, and prefill context parallel sizes of `1`.
 - `torch.compile` is on by default. vLLM selects `FULL_DECODE_ONLY` CUDA graphs automatically; an explicit graph mode must be `FULL_DECODE_ONLY` or `NONE` when compiling or reusing activations. Batches without reusable activations run without graph replay.
+- All compilation modes are supported: `0` (disabled), `1` (stock PyTorch), `2` (Dynamo trace once), and `3` (vLLM compilation, the default). Select one with `--compilation-config '{"mode": 1}'`. Mode `1` runs without CUDA graphs, following Model Runner V2's standard stock PyTorch behavior.
 - Set `--compilation-config '{"mode": 0}'` to disable compilation while retaining decode CUDA graphs with activation reuse, or use `--enforce-eager` to disable both. Optimization level `-O0` also leaves both disabled by default.
 - Prompt embeddings, microbatching, parallel drafting, adaptive verification, and dynamic speculation schedules are not supported.
 - Compiled and uncompiled execution need not be bitwise identical; floating-point differences can change outputs. See [Lossless guarantees of Speculative Decoding](README.md#lossless-guarantees-of-speculative-decoding).

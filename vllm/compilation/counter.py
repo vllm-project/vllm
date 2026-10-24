@@ -37,7 +37,7 @@ class CompilationCounter:
     num_aot_artifacts_saved: int = 0
     # The number of AOT compiled artifacts loaded from disk
     num_aot_artifacts_loaded: int = 0
-    # Number of times a model was loaded with CompilationMode.STOCK_TORCH_COMPILE
+    # Number of model regions prepared with CompilationMode.STOCK_TORCH_COMPILE
     stock_torch_compile_count: int = 0
 
     def clone(self) -> "CompilationCounter":
