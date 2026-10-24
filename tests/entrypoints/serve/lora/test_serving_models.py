@@ -10,7 +10,10 @@ from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
 from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -65,6 +68,18 @@ async def test_serving_model_name():
         lora_name="adapter", lora_path="/path/to/adapter2", lora_int_id=1
     )
     assert serving_models.model_name(request) == request.lora_name
+
+
+def test_is_base_model_accepts_published_root():
+    """/v1/models publishes model_path as root; a client may send it back."""
+    registry = OpenAIModelRegistry(
+        model_config=MagicMock(spec=ModelConfig),
+        base_model_paths=[BaseModelPath(name="served", model_path="/models/ckpt")],
+    )
+    assert registry.is_base_model("served")
+    assert registry.is_base_model("/models/ckpt")
+    assert not registry.is_base_model("ckpt")
+    assert not registry.is_base_model("other")
 
 
 @pytest.mark.asyncio
