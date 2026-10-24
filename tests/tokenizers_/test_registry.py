@@ -169,6 +169,47 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
             CONFIG_MAPPING._extra_content["qwen3_5_moe"] = registered_config
 
 
+def test_hub_tokenizer_snapshot_preserves_repo_id_for_auto_tokenizer(
+    tmp_path: Path, monkeypatch
+):
+    """AutoTokenizer needs the Hub ID to apply model-specific tokenizer rules."""
+    repo_id = "deepseek-ai/DeepSeek-Coder-33B-base"
+    snapshot_path = str(tmp_path / "snapshot")
+    config = SimpleNamespace(model_type="llama", _name_or_path=snapshot_path)
+    loaded_config_name = None
+
+    def fake_from_pretrained(path_or_repo_id: str, *args, **kwargs):
+        nonlocal loaded_config_name
+        loaded_config_name = kwargs["config"]._name_or_path
+        return SimpleNamespace(is_fast=True)
+
+    monkeypatch.setattr(registry, "get_config", lambda *a, **kw: config)
+    monkeypatch.setattr(
+        registry, "get_non_weight_snapshot_path", lambda *a, **kw: snapshot_path
+    )
+    monkeypatch.setattr(
+        "vllm.tokenizers.hf.get_sentence_transformer_tokenizer_config",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "vllm.tokenizers.hf.AutoTokenizer.from_pretrained",
+        fake_from_pretrained,
+    )
+    monkeypatch.setattr(
+        "vllm.tokenizers.hf.get_cached_tokenizer", lambda tokenizer: tokenizer
+    )
+    cached_get_tokenizer.cache_clear()
+    cached_resolve_tokenizer_args.cache_clear()
+    try:
+        tokenizer = get_tokenizer(repo_id, tokenizer_mode="hf")
+        assert tokenizer.is_fast is True
+        assert loaded_config_name == repo_id
+        assert config._name_or_path == snapshot_path
+    finally:
+        cached_get_tokenizer.cache_clear()
+        cached_resolve_tokenizer_args.cache_clear()
+
+
 @pytest.fixture
 def config_tokenizer_backend(monkeypatch):
     """Keep config helpers and dispatch real; replace Hub/backend loading."""
