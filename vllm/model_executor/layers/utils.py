@@ -395,7 +395,11 @@ def rocm_unquantized_gemm_impl(
         and weight_ok_for_wvsplitk
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
-        and 0 < n <= 5
+        and (
+            0 < n <= 5
+            # On gfx950 N=6 also beats hipBLASLt, but only on these shapes.
+            or (n == 6 and on_gfx950() and m > 1024 and 2048 <= k <= 8192)
+        )
     )
 
     use_llmm1 = (

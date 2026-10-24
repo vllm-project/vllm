@@ -316,6 +316,47 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.parametrize(
+    ("on_gfx950", "n", "m", "k", "expect_wvsplitk"),
+    [
+        (True, 5, 8192, 64, True),
+        # gfx950 also takes N=6 on wide outputs with a mid-sized K ...
+        (True, 6, 2048, 2048, True),
+        # ... but not on narrow outputs, short or long K, or N=7.
+        (True, 6, 1024, 2048, False),
+        (True, 6, 2048, 1536, False),
+        (True, 6, 2048, 8200, False),
+        (True, 7, 2048, 2048, False),
+        # Other gfx9 parts stop at N=5.
+        (False, 5, 8192, 64, True),
+        (False, 6, 2048, 2048, False),
+    ],
+)
+def test_rocm_unquantized_gemm_wvsplitk_batch_limit(
+    monkeypatch, on_gfx950, n, m, k, expect_wvsplitk
+):
+    x = torch.randn(n, k, dtype=torch.float16)
+    weight = torch.randn(m, k, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 256)
+
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    assert wvsplitk_mock.called == expect_wvsplitk
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x = torch.randn(1024, 16, dtype=torch.float16).t()
     weight = torch.randn(256, 1024, dtype=torch.float16)

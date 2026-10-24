@@ -78,6 +78,15 @@ bool on_gfx12() {
   return result;
 }
 
+bool on_gfx950() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx950") != std::string::npos;
+  }();
+  return result;
+}
+
 bool on_gfx1151() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
@@ -1239,19 +1248,22 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
-  {                                                       \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
-    if (_sYT <= 1)                                        \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if (_sYT <= 4 * 3)                               \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
-    else if (__N == 4)                                    \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
-    else                                                  \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
+// On gfx950, YTILE 3 and 4 are up to 4x slower than YTILE 2 for N >= 5 on
+// wide outputs (e.g. 386 vs 95 us at M=50016, K=6144, N=5).
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)       \
+  {                                                         \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);          \
+    if (_sYT <= 1)                                          \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)             \
+    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2) || \
+             (__N >= 5 && on_gfx950()))                     \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)             \
+    else if (_sYT <= 4 * 3)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)             \
+    else if (__N == 4)                                      \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)             \
+    else                                                    \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)             \
   }
 
 // WVSPLITK_CFG arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N).
@@ -1322,6 +1334,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
         break;
       case 5:
         WVSPLIT_TILE(sYT, 5)
+        break;
+      case 6:
+        WVSPLIT_TILE(sYT, 6)
         break;
       default:
         throw std::runtime_error(
