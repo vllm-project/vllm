@@ -12,6 +12,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -979,6 +980,10 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
+# A number literal at the very end of the text, which may still be growing.
+_TRAILING_NUMBER_RE = re.compile(r"(?<![\w.])\.?\d[\w.]*(?:[eE][+-])?$")
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -988,7 +993,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     Returns:
         A tuple of (completed_text, added_suffix) if the text can be
         made valid, or None if the text is too incomplete to complete
-        meaningfully (e.g. mid-parameter-name or mid-dict-key).
+        meaningfully (e.g. mid-parameter-name, mid-dict-key or mid-number).
 
     Raises:
         UnexpectedAstError: If mismatched brackets or parentheses
@@ -1018,6 +1023,12 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
             bracket_stack.append(char)
+
+    # A number still arriving can parse as a different value ("37." is 37.0,
+    # "1.5" before "e3"), and a streamed prefix can't be taken back.
+    in_string = bool(bracket_stack) and bracket_stack[-1] in {"'", '"'}
+    if not in_string and _TRAILING_NUMBER_RE.search(text):
+        return None
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
