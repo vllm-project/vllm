@@ -265,6 +265,28 @@ def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_draft_quant_exclusions_alias_fp8_ignored_layers():
+    """fp8 keeps exclusions in `ignored_layers`; they need the same global
+    aliases or a draft built above the target's layers never matches (#61003)."""
+    quant_config = SimpleNamespace(
+        ignored_layers=[
+            "layers.0.attention_conv.kernel_projection",
+            "layers.64.already_global",
+        ]
+    )
+
+    _add_global_draft_layer_exclusions(quant_config, 64, 5)
+
+    assert "layers.64.attention_conv.kernel_projection" in quant_config.ignored_layers
+    assert quant_config.ignored_layers.count("layers.64.already_global") == 1
+    # fp8 matches exactly, and the draft module tree is rooted at `model.`
+    assert (
+        "model.layers.64.attention_conv.kernel_projection"
+        in quant_config.ignored_layers
+    )
+    assert "model.layers.64.already_global" not in quant_config.ignored_layers
+
+
 def test_selector_edges_match_sequential_reference():
     torch.manual_seed(1)
     batch, steps, top_k, rank = 2, 4, 3, 5
