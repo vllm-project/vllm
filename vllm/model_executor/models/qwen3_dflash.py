@@ -3,6 +3,7 @@
 
 import io
 from collections.abc import Iterable
+from dataclasses import replace
 
 import regex as re
 import torch
@@ -37,7 +38,8 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, MultipleOf
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -81,6 +83,40 @@ def _add_global_draft_layer_exclusions(
         global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
         if global_exclusion != exclusion and global_exclusion not in exclusions:
             exclusions.append(global_exclusion)
+
+
+class _DFlashAttention(Attention):
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        target_page_size = vllm_config.cache_config.mamba_page_size_padded
+        if (
+            not isinstance(spec, FullAttentionSpec)
+            or not vllm_config.model_config.use_mla
+            or target_page_size is None
+            or spec.page_size_bytes <= target_page_size
+        ):
+            return spec
+
+        # MLA pages cannot be padded, so a larger draft page would force the
+        # hybrid MLA/linear-attention target pages to grow. Fit the draft block
+        # into the target page instead; the page is padded during unification.
+        page_size_per_token = spec.page_size_bytes // spec.block_size
+        supported_sizes = self.attn_backend.get_supported_kernel_block_sizes(spec)
+        for block_size in range(target_page_size // page_size_per_token, 0, -1):
+            if spec.block_size % block_size == 0 and (
+                not supported_sizes
+                or any(
+                    block_size % size.base == 0
+                    if isinstance(size, MultipleOf)
+                    else block_size == size
+                    for size in supported_sizes
+                )
+            ):
+                return replace(spec, block_size=block_size)
+        raise NotImplementedError(
+            f"{self.attn_backend.get_name()} has no kernel block size that fits "
+            f"the DFlash draft KV page into the {target_page_size}-byte target page."
+        )
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -255,7 +291,7 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.sliding_window = sliding_window
-        self.attn = Attention(
+        self.attn = _DFlashAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
