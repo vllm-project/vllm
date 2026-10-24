@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "deepseek_v4"
@@ -648,4 +653,198 @@ def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
 
     _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
 
+    assert messages == snapshot
+
+
+@pytest.fixture(params=[get_deepseek_v4_tokenizer, get_deepseek_v41_tokenizer])
+def policy_tokenizer(request):
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    )
+    return request.param(tokenizer)
+
+
+@pytest.mark.parametrize(
+    ("tools", "kwargs"),
+    [
+        (None, {}),
+        ([], {}),
+        (_request_tools(), {}),
+        (None, {"thinking": False}),
+        (None, {"drop_thinking": False}),
+        (None, {"reasoning_effort": "none"}),
+    ],
+    ids=["omitted", "empty", "tools", "chat", "keep-thinking", "no-reasoning"],
+)
+def test_leading_policy_developer_only_converts_when_dropped(
+    policy_tokenizer, tools, kwargs
+):
+    """Repair dropped instructions without changing healthy native prompts."""
+    messages = [
+        {"role": "developer", "content": "DEVELOPER_POLICY: answer briefly."},
+        {"role": "user", "content": "OK."},
+    ]
+    snapshot = copy.deepcopy(messages)
+    prompt = policy_tokenizer.apply_chat_template(
+        messages, tools=tools, tokenize=False, **kwargs
+    )
+    assert "DEVELOPER_POLICY: answer briefly." in prompt
+    drops_history = (
+        not tools
+        and kwargs.get("thinking", True)
+        and kwargs.get("drop_thinking", True)
+        and kwargs.get("reasoning_effort") != "none"
+    )
+    if drops_history:
+        expected = policy_tokenizer.apply_chat_template(
+            [{**messages[0], "role": "system"}, messages[1]],
+            tools=tools,
+            tokenize=False,
+            **kwargs,
+        )
+        assert prompt == expected
+    else:
+        assert "<｜User｜>DEVELOPER_POLICY: answer briefly." in prompt
+    assert messages == snapshot
+
+
+@pytest.mark.parametrize(
+    ("policy_tokenizer", "prefix", "separator"),
+    [
+        (get_deepseek_v4_tokenizer, "<｜begin▁of▁sentence｜>", "\n\n"),
+        (
+            get_deepseek_v41_tokenizer,
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 "
+            "(range 1-100, the higher the value, the more thorough the reasoning)\n\n",
+            "<｜System｜>",
+        ),
+    ],
+    indirect=["policy_tokenizer"],
+    ids=["v4", "v41"],
+)
+@pytest.mark.parametrize(
+    ("roles_and_text", "expected_body"),
+    [
+        (
+            [("developer", "P1"), ("developer", "P2"), ("user", "Q")],
+            "P1{separator}P2<｜User｜>Q<｜Assistant｜><think>",
+        ),
+        (
+            [("system", "SYS"), ("developer", "P1"), ("developer", "P2")],
+            "SYS{separator}P1<｜User｜>P2<｜Assistant｜><think>",
+        ),
+        (
+            [("developer", "P1"), ("system", "SYS"), ("user", "Q")],
+            "P1{separator}SYS<｜User｜>Q<｜Assistant｜><think>",
+        ),
+        (
+            [
+                ("system", "SYS"),
+                ("developer", "P1"),
+                ("developer", "P2"),
+                ("user", "Q"),
+            ],
+            "SYS{separator}P1{separator}P2<｜User｜>Q<｜Assistant｜><think>",
+        ),
+    ],
+    ids=["adjacent-developers", "native-tail", "following-system", "system-prefix"],
+)
+def test_leading_policy_prefix_is_preserved(
+    policy_tokenizer, prefix, separator, roles_and_text, expected_body
+):
+    messages = [{"role": role, "content": text} for role, text in roles_and_text]
+    snapshot = copy.deepcopy(messages)
+    prompt = policy_tokenizer.apply_chat_template(
+        messages, tokenize=False, reasoning_effort="low"
+    )
+    assert prompt == prefix + expected_body.format(separator=separator)
+    assert messages == snapshot
+
+
+def test_leading_current_developer_turn_keeps_native_format(policy_tokenizer):
+    prompt = policy_tokenizer.apply_chat_template(
+        [
+            {"role": "developer", "content": "Question."},
+            {
+                "role": "assistant",
+                "content": "Answer.",
+                "reasoning": "CURRENT_REASONING",
+            },
+        ],
+        tokenize=False,
+    )
+    assert (
+        "<｜User｜>Question.<｜Assistant｜><think>CURRENT_REASONING</think>Answer."
+        in prompt
+    )
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize(
+    "history",
+    [
+        [],
+        [{"role": "user", "content": "Question."}],
+        [
+            {"role": "user", "content": "Question."},
+            {"role": "assistant", "content": "Answer.", "reasoning": "OLD_REASONING"},
+        ],
+    ],
+    ids=["developer-only", "after-user", "after-assistant"],
+)
+def test_nonleading_or_final_developer_keeps_native_turn(
+    policy_tokenizer, history, thinking
+):
+    messages = [*history, {"role": "developer", "content": "Latest instruction."}]
+    snapshot = copy.deepcopy(messages)
+    prompt = policy_tokenizer.apply_chat_template(
+        messages, tokenize=False, thinking=thinking, reasoning_effort="low"
+    )
+    thinking_token = "<think>" if thinking else "</think>"
+    assert prompt.endswith(
+        f"<｜User｜>Latest instruction.<｜Assistant｜>{thinking_token}"
+    )
+    assert "OLD_REASONING" not in prompt
+    if thinking and history and history[-1].get("reasoning"):
+        untrimmed = policy_tokenizer.apply_chat_template(
+            messages, tokenize=False, thinking=True, drop_thinking=False
+        )
+        assert "OLD_REASONING" in untrimmed
+    assert messages == snapshot
+
+
+@pytest.mark.parametrize("content", ["", [{"type": "text", "text": ""}]])
+def test_leading_empty_developer_keeps_validation(policy_tokenizer, content):
+    with pytest.raises((ValueError, AssertionError), match="Invalid message"):
+        policy_tokenizer.apply_chat_template(
+            [
+                {"role": "developer", "content": content},
+                {"role": "user", "content": "Q"},
+            ],
+            tokenize=False,
+            thinking=False,
+        )
+
+
+@pytest.mark.parametrize("with_request_tools", [False, True])
+def test_policy_and_native_developers_keep_separate_tools(
+    policy_tokenizer, with_request_tools
+):
+    request_tools = _request_tools() if with_request_tools else None
+    if request_tools:
+        request_tools[0]["function"]["name"] = "request_tool"
+    messages = [
+        {"role": "developer", "content": "Tool context.", "tools": _request_tools()},
+        {"role": "developer", "content": "Policy instructions."},
+        {"role": "user", "content": "Weather?"},
+    ]
+    snapshot = copy.deepcopy(messages)
+    prompt = policy_tokenizer.apply_chat_template(
+        messages, tools=request_tools, tokenize=False
+    )
+    assert "<｜User｜>Policy instructions.<｜User｜>Weather?" in prompt
+    assert "<｜User｜>Tool context.\n\n## Tools" in prompt
+    assert '"name": "get_weather"' in prompt
+    if request_tools:
+        assert '"name": "request_tool"' in prompt
     assert messages == snapshot

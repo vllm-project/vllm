@@ -12,6 +12,7 @@ from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
     REASONING_EFFORT_MAPPINGS,
     encode_messages,
+    find_last_user_index,
 )
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
@@ -103,6 +104,18 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, "
                     "or an integer within [1, 100] in chat_template_kwargs"
                 )
+
+            if (
+                thinking
+                and kwargs.get("drop_thinking", True)
+                and not any(message.get("tools") for message in conversation)
+            ):
+                last_user_index = find_last_user_index(conversation)
+                for message in conversation[: max(last_user_index, 0)]:
+                    if message["role"] not in ("system", "developer"):
+                        break
+                    if message["role"] == "developer" and message.get("content"):
+                        message["role"] = "system"
 
             prompt = encode_messages(
                 conversation,
