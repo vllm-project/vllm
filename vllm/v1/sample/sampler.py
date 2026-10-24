@@ -20,6 +20,50 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 _SAMPLING_EPS = 1e-5
 
 
+def logits_may_be_masked(sampling_metadata: SamplingMetadata) -> bool:
+    """Whether an active constraint could leave every logit at -inf.
+
+    CPU-only eligibility check used to skip all-invalid-row detection for the
+    common batch that has no token-masking constraint. It is conservative:
+    custom logits processors, whose per-request state is not exposed, are
+    assumed capable of masking tokens.
+    """
+    if sampling_metadata.allowed_token_ids_mask is not None:
+        return True
+    if sampling_metadata.bad_words_token_ids:
+        return True
+    holder = sampling_metadata.thinking_budget_state_holder
+    if holder is not None and holder.has_tracked_requests():
+        return True
+    for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+        # MinTokens and LogitBias expose their per-request state; any other
+        # (custom) processor is assumed able to mask tokens.
+        min_toks = getattr(processor, "min_toks", None)
+        biases = getattr(processor, "biases", None)
+        if min_toks or biases or (min_toks is None and biases is None):
+            return True
+    return False
+
+
+def neutralize_no_valid_token_rows(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor | None:
+    """Make all-(-inf) rows safe for the sampling kernels.
+
+    Runs only when a masking constraint is active, and never reads a device
+    value back to the host, so it adds no GPU<->CPU synchronization. An
+    all-(-inf) row is given a single finite token (index 0); its sampled token
+    is discarded by the scheduler. Returns the per-row invalid mask, or None
+    when detection was skipped.
+    """
+    if not logits_may_be_masked(sampling_metadata):
+        return None
+    no_valid_token_mask = torch.isneginf(logits.amax(dim=-1))
+    logits[no_valid_token_mask, 0] = 0.0
+    return no_valid_token_mask
+
+
 def mixed_sample_eligible(sm: SamplingMetadata, predict_bonus_token: bool) -> bool:
     """Whether the fused aiter sample-from-raw-logits kernel can be used."""
     if not rocm_aiter_ops.is_enabled():
@@ -160,6 +204,12 @@ class Sampler(nn.Module):
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
         )
+
+        # Neutralize rows where every logit is -inf after logit processors
+        # (e.g. an allowed_token_ids + bad_words contradiction). The sampled
+        # token is discarded before it can become request output.
+        no_valid_token_mask = neutralize_no_valid_token_rows(logits, sampling_metadata)
+
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
@@ -207,6 +257,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
         return sampler_output
 
