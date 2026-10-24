@@ -313,9 +313,12 @@ def test_sparse_autotune_respects_cache_selection(
     runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    runner.vllm_config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[])
+    runner.uniform_decode_query_len = runner.decode_query_len = 1
     worker = SimpleNamespace(
         model_runner=runner,
         vllm_config=runner.vllm_config,
+        scheduler_config=runner.scheduler_config,
         execute_model=Mock(),
         sample_tokens=Mock(),
     )
@@ -361,6 +364,15 @@ def test_sparse_autotune_respects_cache_selection(
     )
     monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
 
+    @contextmanager
+    def scoped(tune_context):
+        # Stand in for one sparse MLA call inside the scope.
+        with tune_context():
+            pass
+        yield
+
+    monkeypatch.setattr(sparse, "autotune_sparse_mla_only", scoped)
+
     def mixed_warmup(*args, mixed_step_context=None, **kwargs):
         context = (
             mixed_step_context if mixed_step_context is not None else nullcontext()
@@ -383,11 +395,14 @@ def test_sparse_autotune_respects_cache_selection(
     else:
         managed.assert_not_called()
         reload.assert_not_called()
-        assert legacy.call_count == (1 if rank == 0 else 0)
+        assert legacy.call_count == 1  # every rank tunes its sparse calls
         world.broadcast_object.assert_called_once_with(
             b"cached" if rank == 0 else None, src=0
         )
-        tuner.load_configs.assert_called_once_with(str(cache_path))
+        # The leader also preloads its cache file before the scoped warmup.
+        assert tuner.load_configs.call_args_list == (2 if rank == 0 else 1) * [
+            call(str(cache_path))
+        ]
     assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 
