@@ -3357,8 +3357,9 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
+        if self.kv_transfer_config is None or (
+            not self.kv_transfer_config.has_connector("NixlConnector")
+            and not self.kv_transfer_config.has_connector("MooncakeConnector")
         ):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
@@ -3396,7 +3397,15 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        mooncake_pd_active = (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("MooncakeConnector")
+        )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            and not nixl_pd_active
+            and not mooncake_pd_active
+        ):
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
