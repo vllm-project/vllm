@@ -205,6 +205,128 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
         flashinfer_sampler_supported()
 
 
+def test_flashinfer_sampling_jit_warmup_is_scheduled_once_per_device(monkeypatch):
+    from concurrent.futures import Future
+
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class ImmediateExecutor:
+        def __init__(self):
+            self.submitted_devices = []
+
+        def submit(self, fn, device_index):
+            self.submitted_devices.append(device_index)
+            future: Future[None] = Future()
+            future.set_result(None)
+            return future
+
+    executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_FLASHINFER_SAMPLING_MODULE_EXECUTOR",
+        executor,
+    )
+    monkeypatch.setattr(topk_topp_sampler, "_flashinfer_sampling_module_futures", {})
+    monkeypatch.setattr(
+        topk_topp_sampler, "_flashinfer_sampling_module_ready_devices", set()
+    )
+
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=0)
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=0)
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=1)
+    topk_topp_sampler.wait_for_flashinfer_sampling_module_warmup(device_index=0)
+    topk_topp_sampler.wait_for_flashinfer_sampling_module_warmup(device_index=1)
+
+    assert executor.submitted_devices == [0, 1]
+    assert topk_topp_sampler._flashinfer_sampling_module_ready_devices == {0, 1}
+
+
+def test_flashinfer_sampling_jit_warmup_waits_for_completion(monkeypatch):
+    from concurrent.futures import Future
+    from threading import Event, Thread
+
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    wait_entered = Event()
+
+    class PendingFuture(Future):
+        def result(self, timeout=None):
+            wait_entered.set()
+            return super().result(timeout)
+
+    future = PendingFuture()
+
+    class PendingExecutor:
+        def submit(self, fn, device_index):
+            return future
+
+    monkeypatch.setattr(
+        topk_topp_sampler, "_FLASHINFER_SAMPLING_MODULE_EXECUTOR", PendingExecutor()
+    )
+    monkeypatch.setattr(topk_topp_sampler, "_flashinfer_sampling_module_futures", {})
+    monkeypatch.setattr(
+        topk_topp_sampler, "_flashinfer_sampling_module_ready_devices", set()
+    )
+
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=0)
+    waiter = Thread(
+        target=topk_topp_sampler.wait_for_flashinfer_sampling_module_warmup,
+        args=(0,),
+        daemon=True,
+    )
+    waiter.start()
+
+    assert wait_entered.wait(timeout=5)
+    assert 0 not in topk_topp_sampler._flashinfer_sampling_module_ready_devices
+    assert waiter.is_alive()
+
+    future.set_result(None)
+    waiter.join(timeout=5)
+
+    assert not waiter.is_alive()
+    assert topk_topp_sampler._flashinfer_sampling_module_ready_devices == {0}
+
+
+def test_flashinfer_sampling_jit_failure_propagates_and_can_retry(monkeypatch):
+    from concurrent.futures import Future
+
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class RetryExecutor:
+        def __init__(self):
+            self.futures = []
+
+        def submit(self, fn, device_index):
+            future: Future[None] = Future()
+            self.futures.append(future)
+            return future
+
+    executor = RetryExecutor()
+    monkeypatch.setattr(
+        topk_topp_sampler, "_FLASHINFER_SAMPLING_MODULE_EXECUTOR", executor
+    )
+    monkeypatch.setattr(topk_topp_sampler, "_flashinfer_sampling_module_futures", {})
+    monkeypatch.setattr(
+        topk_topp_sampler, "_flashinfer_sampling_module_ready_devices", set()
+    )
+
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=0)
+    executor.futures[0].set_exception(RuntimeError("jit failed"))
+
+    with pytest.raises(RuntimeError, match="jit failed"):
+        topk_topp_sampler.wait_for_flashinfer_sampling_module_warmup(device_index=0)
+
+    assert not topk_topp_sampler._flashinfer_sampling_module_ready_devices
+    assert not topk_topp_sampler._flashinfer_sampling_module_futures
+
+    topk_topp_sampler.start_flashinfer_sampling_module_warmup(device_index=0)
+    executor.futures[1].set_result(None)
+    topk_topp_sampler.wait_for_flashinfer_sampling_module_warmup(device_index=0)
+
+    assert len(executor.futures) == 2
+    assert topk_topp_sampler._flashinfer_sampling_module_ready_devices == {0}
+
+
 # =============================================================================
 # Triton kernel tests
 # =============================================================================

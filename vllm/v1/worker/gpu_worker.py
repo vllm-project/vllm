@@ -1099,6 +1099,14 @@ class Worker(WorkerBase):
 
             trigger_inductor_lazy_init(self.device)
 
+        from vllm.v1.sample.ops.topk_topp_sampler import (
+            wait_for_flashinfer_sampling_module_warmup,
+        )
+
+        wait_for_flashinfer_sampling_module_warmup(
+            torch.accelerator.current_device_index()
+        )
+
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
