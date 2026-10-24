@@ -144,6 +144,28 @@ GDN_BUILD_TEST_CASES = {
         expected_num_prefill_tokens=1,
         expected_num_spec_decodes=1,
     ),
+    # Spec decodes lead two chunked prefills (the V2 runner's order)
+    "chunked_prefills_after_spec_decodes": GDNBuildTestCase(
+        seq_lens=[90, 40, 200, 64],
+        query_lens=[3, 3, 7, 5],
+        num_decode_draft_tokens=[2, 2, -1, -1],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=2,
+        expected_num_prefill_tokens=12,
+        expected_num_spec_decodes=2,
+    ),
+    # A prefill ahead of the spec decodes takes the row-index path
+    "prefill_ahead_of_spec_decodes": GDNBuildTestCase(
+        seq_lens=[120, 70, 71],
+        query_lens=[6, 3, 3],
+        num_decode_draft_tokens=[-1, 2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=1,
+        expected_num_prefill_tokens=6,
+        expected_num_spec_decodes=2,
+    ),
 }
 
 
@@ -246,6 +268,7 @@ def test_update_block_table_matches_build(
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
         "prefill_state_indices",
+        "prefill_state_indices_i64",
     )
     source_indices = [getattr(source, f) for f in fields]
     source_indices = [t if t is None else t.clone() for t in source_indices]
@@ -300,6 +323,76 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+@pytest.mark.parametrize(
+    "query_lens,num_decode_draft_tokens,expect_slices",
+    [
+        pytest.param([3, 3, 50, 1], [2, 2, -1, -1], True, id="spec_first"),
+        pytest.param([3, 3, 50, 0], [2, 2, -1, -1], True, id="spec_first_padded"),
+        pytest.param([50, 1, 3, 3], [-1, -1, 2, 2], True, id="non_spec_first"),
+        pytest.param([3, 50, 3, 1], [2, -1, 2, -1], False, id="interleaved"),
+        pytest.param([3, 3], [2, 2], False, id="pure_spec"),
+        pytest.param([1, 1, 40, 7], None, False, id="prefill_and_decode"),
+    ],
+)
+def test_mixed_batch_token_slices(
+    query_lens: list[int],
+    num_decode_draft_tokens: list[int] | None,
+    expect_slices: bool,
+):
+    """The forward slices the spec/non-spec tokens only when the builder
+    reports two contiguous blocks, and the slices must then select exactly the
+    tokens the gather indices select. The per-step int64/inverted copies of the
+    prefill inputs must match the tensors they stand in for."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=[q + 20 for q in query_lens], query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens)
+
+    assert (meta.spec_token_start is not None) == expect_slices
+    assert (meta.non_spec_token_start is not None) == expect_slices
+    if expect_slices:
+        assert meta.spec_token_start is not None
+        assert meta.non_spec_token_start is not None
+        assert meta.spec_token_indx is not None
+        assert meta.non_spec_token_indx is not None
+        num_non_spec_tokens = meta.num_prefill_tokens + meta.num_decode_tokens
+        spec_rows = torch.arange(
+            meta.spec_token_start,
+            meta.spec_token_start + meta.num_spec_decode_tokens,
+        )
+        non_spec_rows = torch.arange(
+            meta.non_spec_token_start,
+            meta.non_spec_token_start + num_non_spec_tokens,
+        )
+        assert torch.equal(meta.spec_token_indx.cpu(), spec_rows)
+        assert torch.equal(meta.non_spec_token_indx.cpu(), non_spec_rows)
+        # Both layouts (slices when the spec rows lead, row indices otherwise)
+        # give each group's cumulative query lengths.
+        assert num_decode_draft_tokens is not None
+        lens = torch.tensor(query_lens, dtype=torch.int32)
+        spec_mask = torch.tensor(num_decode_draft_tokens) >= 0
+        for loc, group_lens in (
+            (meta.spec_query_start_loc, lens[spec_mask]),
+            (meta.non_spec_query_start_loc, lens[~spec_mask]),
+        ):
+            assert loc is not None
+            expected = torch.zeros(len(group_lens) + 1, dtype=torch.int32)
+            torch.cumsum(group_lens, dim=0, out=expected[1:])
+            assert torch.equal(loc.cpu(), expected)
+
+    if meta.num_prefills > 0:
+        assert meta.prefill_state_indices is not None
+        assert meta.prefill_has_initial_state is not None
+        assert meta.prefill_state_indices_i64 is not None
+        assert meta.prefill_no_initial_state is not None
+        assert meta.prefill_state_indices_i64.dtype == torch.int64
+        assert torch.equal(
+            meta.prefill_state_indices_i64, meta.prefill_state_indices.long()
+        )
+        assert torch.equal(
+            meta.prefill_no_initial_state, ~meta.prefill_has_initial_state
+        )
 
 
 def _build_non_spec(
