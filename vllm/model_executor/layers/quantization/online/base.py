@@ -33,6 +33,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -94,6 +97,9 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
+
+# Online linear methods validated with `QuantSpec.hadamard_size`.
+_ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
@@ -261,6 +267,17 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
+        # TODO: InputHadamardLinearMethod is format-agnostic; allow the
+        # remaining linear methods and MoE once validated.
+        if (
+            spec.hadamard_size is not None
+            and cls not in _ONLINE_HADAMARD_LINEAR_METHODS
+        ):
+            raise NotImplementedError(
+                f"hadamard_size is not yet supported for online {cls.__name__}; "
+                "supported: "
+                f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
+            )
         return cls
 
     def resolve_quant_method_cls(
@@ -391,7 +408,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
         if resolved is not None:
-            source, quant_key_str, target_pattern, _, quant_method_cls = resolved
+            source, quant_key_str, target_pattern, quant_spec, quant_method_cls = (
+                resolved
+            )
             self.quantized_layers[prefix] = (
                 source.value,
                 quant_key_str,
@@ -402,6 +421,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return quant_method_cls(moe=layer.moe_config)
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
+            if quant_spec.hadamard_size is not None:
+                return InputHadamardLinearMethod(
+                    quant_method_cls(), quant_spec.hadamard_size, rotate_weight=True
+                )
             return quant_method_cls()
 
         if isinstance(layer, LinearBase):
