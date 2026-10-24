@@ -1118,10 +1118,6 @@ class SamplingParams(
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
-        if speculative_config is not None:
-            raise ValueError(
-                "trace_decode_token_ids is not supported with speculative decoding."
-            )
         if self.structured_outputs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with structured outputs."
