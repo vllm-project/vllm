@@ -35,17 +35,35 @@ class UMBPWorkerHandle(Protocol):
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start loading the requested plans."""
 
+    def load_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Optionally load logical blocks; None requests ordinary materialization."""
+        return None
+
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start storing the requested plans."""
 
+    def store_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Optionally store logical blocks; None requests ordinary materialization."""
+        return None
+
     def wait(self, job: TransferJobState) -> TransferJobState:
-        """Block until the job is final and its buffers are safe to reuse."""
+        """Return a final state only when buffers are safe to reuse; otherwise raise."""
 
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         """Return a finished job without blocking, or None if still pending."""
 
     def publish(self, job: TransferJobState) -> None:
         """Accept a completed store; a runtime may defer visibility until then."""
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        """Cancel if possible, otherwise wait until buffers are safe to reuse."""
+
+    def take_evicted_keys(self) -> Sequence[str]:
+        """Return locally published keys evicted since the last call."""
 
     def close(self) -> None:
         """Release worker-side resources."""

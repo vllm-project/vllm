@@ -4,15 +4,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from typing import cast
 
 import torch
 
+from vllm.distributed.kv_events import BlockRemoved, KVCacheEvent
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from .data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
+    BlockStoreBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
     StoreEventResult,
@@ -22,6 +27,7 @@ from .data import (
     UMBPConnectorWorkerMetadata,
 )
 from .runtime import UMBPWorkerHandle
+from .stats import UMBPStoreConnectorStats
 
 logger = init_logger(__name__)
 
@@ -30,6 +36,7 @@ logger = init_logger(__name__)
 class _StoreBatch:
     event_id: int
     jobs: dict[str, TransferJobState]
+    failed_objects: set[tuple[int, bytes]] = field(default_factory=set)
 
 
 class UMBPStoreConnectorWorker:
@@ -41,18 +48,26 @@ class UMBPStoreConnectorWorker:
         layout: KVLayoutPlanner | None = None,
         *,
         codec: BlockIdentityCodec | None = None,
+        report_failed_requests: bool = False,
+        enable_kv_cache_events: bool = False,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
         self.codec = codec
+        self.enable_kv_cache_events = enable_kv_cache_events
         self._load_jobs: dict[str, dict[str | None, TransferJobState]] = {}
         self._store_jobs: dict[str, TransferJobState] = {}
         self._pending_stores: list[_StoreBatch] = []
         self._worker_meta = UMBPConnectorWorkerMetadata()
+        self._kv_events: list[KVCacheEvent] = []
         self._finished_recving: set[str] = set()
+        # Core maps block-level load failures to requests only with one group.
+        self._report_failed_requests = report_failed_requests
+        self._failed_recving: set[str] = set()
         self._load_error_block_ids: set[int] = set()
         self._report_load_completions = False
         self._active_store_event = -1
+        self._stats = UMBPStoreConnectorStats()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.layout is not None and self.layout.regions:
@@ -98,9 +113,35 @@ class UMBPStoreConnectorWorker:
         for request_id, plans in metadata.load_requests.items():
             if plans:
                 self._submit_loads(request_id, plans)
+        if not metadata.async_load:
+            self._drain_load_jobs(wait=True)
 
-    def _submit_loads(self, request_id: str, plans: list[BlockTransferPlan]) -> None:
-        materialized = self._materialize_plans(plans)
+    def _submit_loads(
+        self, request_id: str, plans: list[BlockTransferPlan] | BlockLoadBatch
+    ) -> None:
+        load_blocks = getattr(self.runtime, "load_blocks", None)
+        if load_blocks is not None:
+            localized: list[BlockTransferPlan] | BlockLoadBatch
+            if isinstance(plans, BlockLoadBatch):
+                localized = plans
+                if self.codec is not None:
+                    localized = replace(
+                        plans,
+                        keys=[
+                            self._localize_key(key, group)
+                            for key, group in zip(
+                                plans.keys, plans.group_ids, strict=True
+                            )
+                        ],
+                    )
+            else:
+                localized = [self._localize_plan(plan) for plan in plans]
+            job = load_blocks(localized)
+            if job is not None:
+                self._stats.record("load", submitted=len(plans))
+                self._load_jobs[request_id] = {None: job}
+                return
+        materialized = self._materialize_plans(list(plans))
         logger.debug(
             "UMBP load submitted request=%s plans=%d ranges=%d bytes=%d",
             request_id,
@@ -108,12 +149,19 @@ class UMBPStoreConnectorWorker:
             sum(len(plan.ranges) for plan in materialized),
             sum(item.length for plan in materialized for item in plan.ranges),
         )
+        self._stats.record("load", submitted=len(materialized))
         self._load_jobs[request_id] = {None: self.runtime.load(materialized)}
 
     def _finish_job(
         self, request_id: str, result: TransferJobState, *, is_load: bool
     ) -> bool:
         operation = "load" if is_load else "store"
+        self._stats.record(
+            operation,
+            completed=len(result.completed_keys),
+            failed=len(result.failed_keys),
+            num_bytes=result.completed_bytes,
+        )
         succeeded = result.status == TransferJobStatus.COMPLETED
         if not succeeded:
             logger.debug(
@@ -124,7 +172,10 @@ class UMBPStoreConnectorWorker:
                 result.error,
             )
         if is_load:
-            self._load_error_block_ids.update(result.failed_block_ids)
+            if not self._report_failed_requests:
+                self._load_error_block_ids.update(result.failed_block_ids)
+            elif not succeeded:
+                self._failed_recving.add(request_id)
         elif succeeded:
             self.runtime.publish(result)
         return succeeded
@@ -151,54 +202,106 @@ class UMBPStoreConnectorWorker:
                 result = self.runtime.wait(job) if wait else self.runtime.poll(job)
                 if result is None:
                     continue
-                # A partly failed job is not published, including its stored keys.
-                self._finish_job(request_id, result, is_load=False)
+                # A partly failed job is not published.
+                if not self._finish_job(request_id, result, is_load=False):
+                    batch.failed_objects.update(
+                        (plan.group_id, plan.block_hash)
+                        for plan in result.plans
+                        if plan.group_id is not None and plan.block_hash is not None
+                    )
                 del batch.jobs[request_id]
             if not batch.jobs:
                 if batch.event_id >= 0:
                     self._worker_meta.store_events[batch.event_id] = StoreEventResult(
-                        completed_workers=1
+                        completed_workers=1,
+                        failed_objects=batch.failed_objects,
                     )
                 self._pending_stores.remove(batch)
 
     def _submit_store_plans(
-        self, plans: list[BlockTransferPlan], request_id: str
+        self, plans: list[BlockTransferPlan] | BlockStoreBatch, request_id: str
     ) -> None:
         if not plans:
             return
-        materialized = self._materialize_plans(plans)
+        store_blocks = getattr(self.runtime, "store_blocks", None)
+        if store_blocks is not None:
+            localized: list[BlockTransferPlan] | BlockStoreBatch
+            if isinstance(plans, BlockStoreBatch):
+                localized = plans
+                if self.codec is not None:
+                    localized = plans.localized(
+                        [
+                            self._localize_key(key, group_id)
+                            for key, group_id in zip(
+                                plans.keys, plans.group_ids, strict=True
+                            )
+                        ]
+                    )
+            else:
+                localized = [self._localize_plan(plan) for plan in plans]
+            job = store_blocks(localized)
+            if job is not None:
+                self._stats.record("store", submitted=len(plans))
+                self._store_jobs[request_id] = job
+                return
+        materialized = self._materialize_plans(list(plans))
+        self._stats.record(
+            "store",
+            submitted=len(materialized),
+        )
         self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
         self._active_store_event = metadata.store_event
-        store_requests = {
-            request_id: list(plans)
-            for request_id, plans in metadata.store_requests.items()
+        store_requests = dict(metadata.store_requests)
+        grouped_plan_ids = {
+            id(plan)
+            for plans in store_requests.values()
+            if not isinstance(plans, BlockStoreBatch)
+            for plan in plans
         }
-        grouped = {plan for plans in store_requests.values() for plan in plans}
         for plan in metadata.store_plans:
-            if plan not in grouped:
-                store_requests.setdefault(
-                    plan.request_id or "__umbp_batch__", []
-                ).append(plan)
-                grouped.add(plan)
+            if id(plan) not in grouped_plan_ids:
+                request_id = plan.request_id or "__umbp_batch__"
+                if isinstance(store_requests.get(request_id), BlockStoreBatch):
+                    request_id = f"__umbp_flat__:{request_id}"
+                pending = store_requests.setdefault(request_id, [])
+                assert isinstance(pending, list)
+                pending.append(plan)
+                grouped_plan_ids.add(id(plan))
         for request_id, plans in store_requests.items():
             self._submit_store_plans(plans, request_id)
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
-        """Finish request-local jobs before vLLM reuses their GPU blocks."""
+        """Cancel request-local jobs before vLLM reuses their GPU blocks."""
         preempted = metadata.preempted_request_ids
         if not preempted:
             return
         for request_id in preempted:
             for job in self._load_jobs.pop(request_id, {}).values():
-                self.runtime.wait(job)
+                self._cancel_job(job)
         for jobs in [self._store_jobs, *(batch.jobs for batch in self._pending_stores)]:
             for request_id, job in jobs.items():
-                if request_id in preempted or any(
-                    plan.request_id in preempted for plan in job.plans
+                plan_request_id = (
+                    job.plans.request_id
+                    if isinstance(job.plans, (BlockLoadBatch, BlockStoreBatch))
+                    else None
+                )
+                if (
+                    request_id in preempted
+                    or plan_request_id in preempted
+                    or (
+                        plan_request_id is None
+                        and any(plan.request_id in preempted for plan in job.plans)
+                    )
                 ):
-                    jobs[request_id] = self.runtime.wait(job)
+                    jobs[request_id] = self._cancel_job(job)
+
+    def _cancel_job(self, job: TransferJobState) -> TransferJobState:
+        cancel = getattr(self.runtime, "cancel", None)
+        if callable(cancel):
+            return cancel(job)
+        return self.runtime.wait(job)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -223,15 +326,60 @@ class UMBPStoreConnectorWorker:
                 if self._report_load_completions:
                     self._finished_recving.add(request_id)
 
+    def get_failed_recving(self) -> set[str]:
+        failed = self._failed_recving - self._load_jobs.keys()
+        self._failed_recving.difference_update(failed)
+        return failed
+
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
         result = self._worker_meta
         self._worker_meta = UMBPConnectorWorkerMetadata()
         return result
 
+    def get_kv_events(self) -> list[KVCacheEvent]:
+        take_evicted = getattr(self.runtime, "take_evicted_keys", None)
+        if callable(take_evicted):
+            for key in take_evicted():
+                if not self.enable_kv_cache_events:
+                    continue
+                parsed = self._parse_key(key)
+                if parsed is None:
+                    continue
+                group_id, block_hash = parsed
+                self._kv_events.append(
+                    BlockRemoved(
+                        block_hashes=[
+                            maybe_convert_block_hash(cast(BlockHash, block_hash))
+                        ],
+                        medium="CPU",
+                        group_idx=group_id,
+                        locality="LOCAL",
+                    )
+                )
+        events = self._kv_events
+        self._kv_events = []
+        return events
+
+    @staticmethod
+    def _parse_key(key: str) -> tuple[int, bytes] | None:
+        try:
+            group_part, hash_hex = key.rsplit(":", 1)
+            group_id = int(group_part.rsplit(":g", 1)[1])
+            return group_id, bytes.fromhex(hash_hex)
+        except (IndexError, ValueError):
+            return None
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         failed = self._load_error_block_ids
         self._load_error_block_ids = set()
         return failed
+
+    def get_kv_connector_stats(self) -> UMBPStoreConnectorStats | None:
+        if self._stats.is_empty():
+            return None
+        result = UMBPStoreConnectorStats(data=dict(self._stats.data))
+        self._stats.reset()
+        return result
 
     def close(self) -> None:
         self.wait_for_save()
