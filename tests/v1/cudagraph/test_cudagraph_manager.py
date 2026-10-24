@@ -499,6 +499,21 @@ def test_uniform_decode_beyond_capture_ladder_falls_back(monkeypatch):
     assert desc.cg_mode == CUDAGraphMode.NONE
 
 
+def test_uniform_decode_full_batch_gets_a_full_graph(monkeypatch):
+    """A full batch keeps a FULL graph when rounding the capture sizes up to the
+    query length steps over max_num_seqs (e.g. a 5-token DSpark draft)."""
+    manager = _make_spec_decode_manager(
+        monkeypatch, decode_query_len=5, capture_sizes=[352, 368], max_num_seqs=72
+    )
+
+    desc = manager.dispatch(
+        num_reqs=72, num_tokens=360, uniform_token_count=5, num_active_loras=0
+    )
+
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert (desc.num_tokens, desc.num_reqs) == (360, 72)
+
+
 def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     """Every captured decode graph must remain reachable from dispatch().
 
