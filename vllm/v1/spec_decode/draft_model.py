@@ -40,10 +40,14 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             # to the intersection so rejection sampling stays lossless.
             target_tokenizer = get_tokenizer(
                 spec.target_model_config.tokenizer,
+                tokenizer_mode=spec.target_model_config.tokenizer_mode,
+                revision=spec.target_model_config.tokenizer_revision,
                 trust_remote_code=spec.target_model_config.trust_remote_code,
             )
             draft_tokenizer = get_tokenizer(
-                spec.draft_model_config.model,
+                spec.draft_model_config.tokenizer,
+                tokenizer_mode="auto",
+                revision=spec.draft_model_config.revision,
                 trust_remote_code=spec.draft_model_config.trust_remote_code,
             )
             self.vocab_mapping: VocabMapping | None = VocabMapping(
