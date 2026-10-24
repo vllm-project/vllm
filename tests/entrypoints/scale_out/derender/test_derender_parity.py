@@ -1021,6 +1021,20 @@ def _top_tokens(entry: dict) -> list[str]:
     return [top["token"] for top in entry["top_logprobs"]]
 
 
+def _assert_logprobs_parity(i_content: list, c_content: list, extra: dict) -> None:
+    assert [(e["token"], e["bytes"]) for e in i_content] == [
+        (e["token"], e["bytes"]) for e in c_content
+    ]
+    if "top_logprobs" in extra:
+        # Near ties can reorder candidates across the two generations, so
+        # compare the cut, not the candidates.
+        assert all(len(e["top_logprobs"]) == 3 for e in i_content)
+    else:
+        assert [sorted(_top_tokens(e)) for e in i_content] == [
+            sorted(_top_tokens(e)) for e in c_content
+        ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("include_reasoning", "extra"),
@@ -1043,16 +1057,155 @@ async def test_inline_derender_logprobs(client, include_reasoning, extra):
         return
 
     coupled = (await _coupled(client, messages, **extra))["choices"][0]
-    i_content = inline["logprobs"]["content"]
-    c_content = coupled["logprobs"]["content"]
-    assert [(e["token"], e["bytes"]) for e in i_content] == [
-        (e["token"], e["bytes"]) for e in c_content
-    ]
-    if "top_logprobs" in extra:
-        # Near ties can reorder candidates across the two generations, so
-        # compare the cut, not the candidates.
-        assert all(len(e["top_logprobs"]) == 3 for e in i_content)
-    else:
-        assert [sorted(_top_tokens(e)) for e in i_content] == [
-            sorted(_top_tokens(e)) for e in c_content
+    _assert_logprobs_parity(
+        inline["logprobs"]["content"], coupled["logprobs"]["content"], extra
+    )
+
+
+async def _inline_derender_stream(
+    client: httpx.AsyncClient, messages: list[dict], **extra
+) -> list[dict]:
+    """Render a chat request, then stream it at the derender level. Returns
+    every streamed choice."""
+    render = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 128,
+            **extra,
+        },
+    )
+    assert render.status_code == 200, render.text
+    choices: list[dict] = []
+    async with client.stream(
+        "POST",
+        "/inference/v1/generate",
+        json={**render.json(), "output_mode": "derender", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, await resp.aread()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: ") :]
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            assert "error" not in chunk, chunk
+            assert chunk["output_mode"] == "derender"
+            choices.extend(chunk["choices"])
+    return choices
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "extra"),
+    [
+        pytest.param(TEXT_MESSAGES[0]["content"], {}, id="plain"),
+        pytest.param(
+            "What is 17 times 23? Think it through.",
+            {"include_reasoning": True, "max_tokens": 256},
+            id="reasoning",
+        ),
+        pytest.param(
+            "What is 17 times 23? Think it through.",
+            {"include_reasoning": False, "max_tokens": 256},
+            id="reasoning-hidden",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": "auto", "max_tokens": 1024},
+            id="tool-auto",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": "required", "max_tokens": 1024},
+            id="tool-required",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": FORCE_WEATHER_TOOL, "max_tokens": 1024},
+            id="tool-named",
+        ),
+        pytest.param(
+            "What's the weather in Paris and in Rome?",
+            {
+                "tools": TOOLS,
+                "tool_choice": "required",
+                "parallel_tool_calls": False,
+                "max_tokens": 1024,
+            },
+            id="tool-no-parallel",
+        ),
+        pytest.param(
+            "Write two short lines about the sea.", {"stop": ["\n"]}, id="stop"
+        ),
+        pytest.param(
+            TEXT_MESSAGES[0]["content"],
+            {"n": 2, "temperature": 0.8, "seed": 42},
+            id="n2",
+        ),
+    ],
+)
+async def test_inline_derender_stream_parity(client, content, extra):
+    """Streaming at the derender level matches coupled chat streaming."""
+    messages = [{"role": "user", "content": content}]
+    hidden = extra.get("include_reasoning") is False
+    coupled_choices, _ = await _coupled_stream(
+        client, messages, require_token_ids=not hidden, **extra
+    )
+    inline_choices = await _inline_derender_stream(client, messages, **extra)
+
+    for index in range(extra.get("n", 1)):
+        coupled_index = [c for c in coupled_choices if c["index"] == index]
+        inline_index = [c for c in inline_choices if c["index"] == index]
+        roles = [c["delta"] for c in inline_index if c["delta"].get("role")]
+        assert len(roles) == 1
+        if hidden:
+            assert all(c["token_ids"] is None for c in inline_index)
+            assert assemble_stream(inline_index)["reasoning"] is None
+            assert assemble_stream(coupled_index)["reasoning"] is None
+            continue
+        assert [t for c in inline_index for t in c["token_ids"]] == [
+            t for c in coupled_index for t in c["token_ids"]
         ]
+        coupled = assemble_stream(coupled_index)
+        inline = assemble_stream(inline_index)
+        for message in (coupled, inline):
+            for tc in message["tool_calls"]:
+                tc["id"] = _tool_call_id_shape(tc["id"])
+        assert inline == coupled
+        if extra.get("parallel_tool_calls") is False:
+            assert len(inline["tool_calls"]) <= 1
+
+
+def _streamed_logprobs(choices: list[dict]) -> list[dict]:
+    return [e for c in choices if c.get("logprobs") for e in c["logprobs"]["content"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_reasoning", "extra"),
+    [
+        pytest.param(True, {"top_logprobs": 3}, id="top3"),
+        pytest.param(False, {"top_logprobs": 3}, id="top3-reasoning-hidden"),
+        pytest.param(True, {"logprob_token_ids": [15, 16, 17]}, id="token-ids"),
+    ],
+)
+async def test_inline_derender_stream_logprobs(client, include_reasoning, extra):
+    """Streamed logprobs match coupled chat, including the `top_logprobs` cut
+    and `logprob_token_ids`, and are dropped when reasoning is hidden."""
+    messages = [{"role": "user", "content": "What is 2+2?"}]
+    extra = {"logprobs": True, "include_reasoning": include_reasoning, **extra}
+    inline_choices = await _inline_derender_stream(client, messages, **extra)
+
+    if not include_reasoning:
+        assert all(c.get("logprobs") is None for c in inline_choices)
+        assert all(c["token_ids"] is None for c in inline_choices)
+        return
+
+    coupled_choices, _ = await _coupled_stream(client, messages, **extra)
+    _assert_logprobs_parity(
+        _streamed_logprobs(inline_choices), _streamed_logprobs(coupled_choices), extra
+    )

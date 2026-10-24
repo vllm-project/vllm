@@ -40,6 +40,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateLogProbs,
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -406,6 +407,38 @@ class OnlineDerenderer:
             )
             results.append((message, finish_reason))
         return results
+
+    def make_stream_processor(
+        self,
+        chat_request: ChatCompletionRequest | None,
+        history_tool_call_cnt: int,
+    ) -> ChatStreamProcessor:
+        """Build the request-scoped processor for one streamed choice.
+
+        Args:
+            chat_request: Request from `ParseContext.to_chat_request()`. Unused
+                when the server has no parser.
+            history_tool_call_cnt: Tool calls already in the conversation, for
+                deterministic tool call IDs.
+
+        Returns:
+            A processor holding its own parser, so call this once per choice.
+
+        Raises:
+            ValueError: If the parser rejects the request.
+            VLLMValidationError: If the parser rejects the request.
+
+        """
+        if self.parser is None or chat_request is None:
+            return ChatStreamProcessor(ParseContext().to_chat_request(), None)
+        parser = self.parser(
+            self.renderer.get_tokenizer(),
+            chat_request.tools,
+            chat_template_kwargs=chat_request.chat_template_kwargs or {},
+            model_config=self.model_config,
+        )
+        parser.set_history_tool_call_count(history_tool_call_cnt)
+        return ChatStreamProcessor(chat_request, parser)
 
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest
