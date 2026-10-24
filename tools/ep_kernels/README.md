@@ -4,10 +4,15 @@ Large-scale cluster-level expert parallel, as described in the [DeepSeek-V3 Tech
 
 Here we break down the requirements in 2 steps:
 
-1. Build and install the Python libraries ([DeepEP](https://github.com/deepseek-ai/DeepEP)), including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this.
+1. Build and install the Python libraries ([DeepEP](https://github.com/deepseek-ai/DeepEP) and [MoonEP](https://github.com/MoonshotAI/MoonEP)), including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this.
 2. Configure NVIDIA driver to enable IBGDA. This step requires root access, and must be done on the host machine.
 
 Step 2 is necessary for multi-node deployment.
+
+MoonEP has no releases or PyPI wheels yet, so it is built from source at a
+pinned commit (`MOONEP_COMMIT_HASH` / `--moonep-ref`), the same way DeepEP is
+handled. It has no NVSHMEM dependency; at runtime it requires NVSwitch
+multicast capable GPUs (single-node NVLink symmetric memory).
 
 All scripts accept a positional argument as workspace path for staging the build, defaulting to `$(pwd)/ep_kernels_workspace`.
 
