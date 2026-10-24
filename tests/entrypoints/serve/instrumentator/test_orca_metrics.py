@@ -6,6 +6,8 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.serve.utils import orca_metrics
+from vllm.v1.metrics.reader import Gauge
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -124,3 +126,42 @@ async def test_single_completion(client: openai.AsyncOpenAI):
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.parametrize(
+    ("metrics_format", "expected"),
+    [
+        (
+            "TEXT",
+            "TEXT named_metrics.kv_cache_usage_perc=0.5, "
+            "named_metrics.num_requests_waiting=40.0",
+        ),
+        (
+            "JSON",
+            'JSON {"named_metrics": {"kv_cache_usage_perc": 0.5, '
+            '"num_requests_waiting": 40.0}}',
+        ),
+    ],
+    ids=["text", "json"],
+)
+def test_orca_header_aggregates_dp_engines(monkeypatch, metrics_format, expected):
+    """With DP, the API server holds one sample per engine. The header must
+    report the whole endpoint's load, not the last engine's."""
+    samples = [
+        ("vllm:kv_cache_usage_perc", "0", 0.95),
+        ("vllm:kv_cache_usage_perc", "1", 0.05),
+        ("vllm:num_requests_waiting", "0", 40.0),
+        ("vllm:num_requests_waiting", "1", 0.0),
+    ]
+    monkeypatch.setattr(
+        orca_metrics,
+        "get_metrics_snapshot",
+        lambda: [
+            Gauge(name=name, labels={"model_name": "m", "engine": engine}, value=value)
+            for name, engine, value in samples
+        ],
+    )
+
+    assert orca_metrics.metrics_header(metrics_format) == {
+        "endpoint-load-metrics": expected
+    }
