@@ -54,6 +54,10 @@ log probabilities.
 
 Thinking is off unless `chat_template_kwargs` turns it on.
 
+Some models have `<think>` in their template, and it cannot be disabled,
+causing the next-token read to fail. The endpoint returns 501 in these
+cases.
+
 Probabilities can differ between identical requests. They depend on which
 requests share a batch and on whether a read hits the prefix cache. Set
 `VLLM_BATCH_INVARIANT=1` for reads that repeat exactly, at a cost in

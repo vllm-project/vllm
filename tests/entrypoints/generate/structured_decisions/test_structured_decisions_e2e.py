@@ -258,3 +258,59 @@ def test_validation_errors(server, questions, match):
     response = post(server, {"model": MODEL_NAME, "state": "x", "questions": questions})
     assert response.status_code == 400
     assert match in response.json()["error"]["message"]
+
+
+@pytest.fixture(scope="module")
+def thinking_template_server(tmp_path_factory):
+    template = tmp_path_factory.mktemp("thinking-template") / "chat.jinja"
+    template.write_text(
+        "{% for message in messages %}"
+        "{{ '<|im_start|>' + message['role'] + '\n' "
+        "+ message['content'] + '<|im_end|>\n' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+        "{{ thought_prefix | default('<think>\n\n') }}"
+        "{% endif %}"
+    )
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        [
+            "--chat-template",
+            str(template),
+            "--max-model-len",
+            "1024",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--enforce-eager",
+            "--logprobs-mode",
+            "raw_logprobs",
+        ],
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.parametrize(
+    "suffix,status",
+    [("<think>\n\n", 501), ("<think>\n\n</think>\n\n", 200)],
+)
+def test_next_token_requires_answer_outside_thinking(
+    thinking_template_server, suffix, status
+):
+    """Only an open thought in the generation suffix makes reads unsupported."""
+    response = post(
+        thinking_template_server,
+        {
+            "state": "The user wrote <think> in their message.",
+            "questions": {"q": choice("Which label?", "a", "b")},
+            "chat_template_kwargs": {"thought_prefix": suffix},
+        },
+    )
+    assert response.status_code == status, response.text
+    body = response.json()
+    if status == 501:
+        assert body["error"]["type"] == "NotImplementedError"
+        assert "requires an immediate answer label" in body["error"]["message"]
+        assert "unreliable answer probabilities" in body["error"]["message"]
+    else:
+        assert set(body["answers"]["q"]["probabilities"]) == {"a", "b"}

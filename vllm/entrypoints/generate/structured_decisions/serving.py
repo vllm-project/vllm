@@ -11,7 +11,10 @@ from vllm.entrypoints.openai.decisions.question_types import (
     build_question,
 )
 from vllm.entrypoints.openai.decisions.serving import BaseServingDecisions
-from vllm.entrypoints.openai.decisions.strategies import DecisionLimits
+from vllm.entrypoints.openai.decisions.strategies import (
+    DecisionLimits,
+    NextTokenStrategy,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 from .protocol import (
@@ -54,6 +57,36 @@ def parse_questions(
 
 
 class ServingStructuredDecisions(BaseServingDecisions):
+    def _check_thinking(self, chat_template_kwargs: dict[str, Any] | None) -> None:
+        """Require immediate answer labels for System One next-token reads."""
+        if type(self.strategy) is not NextTokenStrategy or (
+            chat_template_kwargs or {}
+        ).get("enable_thinking"):
+            return
+        context = self.strategy.context
+        tokenizer = context.online_renderer.renderer.get_tokenizer()
+        probe = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "x"}],
+            **{
+                **context.default_chat_template_kwargs,
+                **(chat_template_kwargs or {}),
+                "chat_template": context.chat_template,
+                "add_generation_prompt": True,
+                "tokenize": False,
+                "enable_thinking": False,
+            },
+        )
+        if not isinstance(probe, str):
+            probe = tokenizer.decode(probe)
+        if probe.rstrip().endswith("<think>"):
+            raise NotImplementedError(
+                "This model's chat template starts the reply inside a <think> block "
+                "even with enable_thinking=False. The next-token decision strategy "
+                "requires an immediate answer label; reading reasoning tokens would "
+                "produce unreliable answer probabilities. Use a model or chat "
+                "template that supports disabling thinking."
+            )
+
     def _media(self, request: StructuredDecisionRequest) -> dict[str, list[str]]:
         urls = {
             "image": request.images,
@@ -89,6 +122,7 @@ class ServingStructuredDecisions(BaseServingDecisions):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            self._check_thinking(request.chat_template_kwargs)
             read_fn = self.strategy.read_joint if joint else self.strategy.read
             reads = await read_fn(
                 questions,
