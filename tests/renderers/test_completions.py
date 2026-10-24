@@ -181,7 +181,8 @@ class TestRenderPrompt:
         assert results[1]["prompt_token_ids"] == [102, 1234, 5678, 9012]
         assert results[2]["prompt_token_ids"] == [103, 4567]
 
-    def test_text_input(self):
+    @pytest.mark.parametrize("needs_detokenization", [False, True])
+    def test_text_input(self, needs_detokenization):
         renderer = _build_renderer(MockModelConfig())
 
         text_input = "x" * 10
@@ -190,11 +191,14 @@ class TestRenderPrompt:
         )
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=100),
+            TokenizeParams(
+                max_total_tokens=100, needs_detokenization=needs_detokenization
+            ),
         )
 
         assert len(results) == 1
         assert len(results[0]["prompt_token_ids"]) == 10
+        assert results[0]["prompt"] == text_input
 
     def test_text_list_input(self):
         renderer = _build_renderer(MockModelConfig())
@@ -382,9 +386,12 @@ class TestRenderPrompt:
 
     @pytest.mark.parametrize(
         ("truncation_side", "expected"),
-        [("left", [106, 107, 108, 109]), ("right", [100, 101, 102, 103])],
+        [("left", [6, 7, 8, 9]), ("right", [0, 1, 2, 3])],
     )
-    def test_detokenization_matches_truncated_tokens(self, truncation_side, expected):
+    @pytest.mark.parametrize("prompt", ["abcdefghij", list(range(10))])
+    def test_detokenization_matches_truncated_tokens(
+        self, prompt, truncation_side, expected
+    ):
         """Echoed prompt text must match the truncated tokens sent to the engine."""
         renderer = _build_renderer(MockModelConfig())
         params = TokenizeParams(
@@ -396,7 +403,7 @@ class TestRenderPrompt:
 
         def render():
             return renderer.render_prompts(
-                _preprocess_prompt(renderer.model_config, list(range(100, 110)))
+                _preprocess_prompt(renderer.model_config, prompt)
             )
 
         results = renderer.tokenize_prompts(render(), params)
