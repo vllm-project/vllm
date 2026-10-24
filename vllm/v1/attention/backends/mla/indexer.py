@@ -1362,11 +1362,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        m_split_tp_size: int = 1,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
-        - Logits constraint: M * N * 4 <= max_logits_bytes
+        - Logits constraint: M * N * 4 <= max_logits_bytes. The CP indexer
+          stripes prefill rows across ``m_split_tp_size`` TP ranks and each
+          rank materialises only its own stripe, so the bound applies per rank
+          and M may be that many times larger.
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
@@ -1375,7 +1379,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         """
         chunks: list[tuple[slice, slice]] = []
         n = len(compressed_seq_lens_cpu)
-        max_logits_elems = max_logits_bytes // 4
+        max_logits_elems = (max_logits_bytes // 4) * m_split_tp_size
         end = 0
 
         while end < n:
@@ -1403,9 +1407,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 end += 1
 
             req_slice = slice(start + request_offset, end + request_offset)
-            max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+            per_rank_max_q = (
+                max(1, (max_logits_bytes // 4) // chunk_n)
+                if chunk_n > 0
+                else max(1, chunk_m)
             )
+            # A batch of only short chunks stays replicated. Round before
+            # scaling so even a one-row stripe respects the per-rank budget.
+            max_q = per_rank_max_q
+            if chunk_m >= m_split_tp_size:
+                max_q *= m_split_tp_size
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -1504,6 +1515,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            max_prefill_seq_len = int(seq_lens_cpu[num_decodes:].max().item())
+            m_split_tp_size = 1
+            # Only the uncompressed FP8 path can widen the logits budget.
+            # Compressed/candidate, FP4, and PCP/DCP paths keep their bound.
+            if (
+                current_platform.is_rocm()
+                and self.compress_ratio == 1
+                and not self.indexer_uses_fp4
+                and not self.use_pcp
+                and self.dcp_world_size == 1
+            ):
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    use_cp_indexer,
+                )
+
+                if use_cp_indexer(max_prefill_seq_len):
+                    m_split_tp_size = self.tp_size
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -1541,6 +1569,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    m_split_tp_size=m_split_tp_size,
                 )
 
             chunks = []
@@ -1588,11 +1617,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
-                max_prefill_seq_len=(
-                    int(seq_lens_cpu[num_decodes:].max().item())
-                    if num_prefills > 0
-                    else 0
-                ),
+                max_prefill_seq_len=max_prefill_seq_len,
                 row_shard_sizes=row_shard_sizes,
             )
 
