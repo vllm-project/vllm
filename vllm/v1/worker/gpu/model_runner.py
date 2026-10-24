@@ -147,6 +147,7 @@ from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
+    batch_sharded_sampling_enabled,
     gather_sampler_output,
 )
 from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_processors
@@ -445,7 +446,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.parallel_config.enable_batch_sharded_sampling:
-            if hasattr(self.model, "compute_logits_local"):
+            if batch_sharded_sampling_enabled(self.vllm_config, self.model):
                 self.batch_sharder = BatchSharder(
                     max_num_reqs=self.max_num_reqs,
                     max_num_logits_per_req=self.decode_query_len,
@@ -511,7 +512,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             custom = self.model_state.custom_sampler(self.sampler)
 
+            draft_logits_num_shards = (
+                self.speculator.draft_logits_num_shards
+                if isinstance(self.speculator, DraftModelSpeculator)
+                else 1
+            )
             if custom:
+                assert draft_logits_num_shards == 1, (
+                    "A custom rejection sampler cannot read batch-sharded draft logits"
+                )
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
@@ -522,6 +531,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     watermark_key=speculative_target_watermark_key(
                         self.vllm_config.watermark_config
                     ),
+                    draft_logits_num_shards=draft_logits_num_shards,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,

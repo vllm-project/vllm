@@ -348,6 +348,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.draft_logits,
             )
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
