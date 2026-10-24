@@ -1227,12 +1227,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         w2_data = w2_weight.data.view(torch.uint8)
         w13_scale_data = w13_weight_scale.data.view(torch.uint8)
 
-        # SILU applies the activation outside the GEMM and keeps the
-        # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
-        # interleaved.
+        # The fused swiglu epilogue (SWIGLUOAI and SILU) reads gate/up
+        # interleaved along N.
         if getattr(layer, "activation", None) in (
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SILU,
         ):
             w13_data = _interleave_gate_up_rows(w13_data)
             w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
