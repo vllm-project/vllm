@@ -8,7 +8,7 @@ from inspect import signature
 import pytest
 
 import vllm.envs as envs
-from vllm import SamplingParams
+from vllm import RequestOutput, SamplingParams
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -619,15 +619,20 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                         prompts[:1], SamplingParams(temperature=0.0, max_tokens=1)
                     )
                     before = _stress_metric_counts(llm)
-                    outputs = llm.generate(
-                        prompts,
-                        SamplingParams(
-                            temperature=0.0,
-                            max_tokens=512,
-                            stop=["\nQuestion:"],
-                            logprobs=5,
-                        ),
-                    )
+                    llm.sleep(level=0, mode="keep")
+                    try:
+                        llm.enqueue(
+                            prompts,
+                            SamplingParams(
+                                temperature=0.0,
+                                max_tokens=512,
+                                stop=["\nQuestion:"],
+                                logprobs=5,
+                            ),
+                        )
+                    finally:
+                        llm.wake_up(tags=["scheduling"])
+                    outputs = llm.wait_for_completion(output_type=RequestOutput)
                     after = _stress_metric_counts(llm)
                     assert len(outputs) == len(labels)
                     assert all(output.finished for output in outputs)
