@@ -1322,6 +1322,33 @@ class LoRAModelManager:
                     "is_3d_lora_weight=True on the LoRA request."
                 )
 
+    def _validate_supported_lora_modules(self, lora_model: LoRAModel) -> None:
+        unsupported = []
+        for lora_name in lora_model.loras:
+            # PEFT stores the fused 3D MoE gate_up_proj under experts.base_layer.
+            module_name = lora_name.removesuffix(".base_layer")
+            try:
+                module = self.model.get_submodule(module_name)
+            except AttributeError:
+                continue
+            # Modules on other PP ranks, outside --lora-target-modules, or
+            # without a PunicaWrapper are skipped on purpose.
+            if (
+                not isinstance(module, PPMissingLayer)
+                and self._match_target_modules(module_name)
+                and self._get_punica_wrapper(module_name) is not None
+                and not is_supported_lora_module(
+                    module_name, module, self.supported_lora_modules
+                )
+            ):
+                unsupported.append(lora_name)
+        if unsupported:
+            raise ValueError(
+                f"LoRA adapter {lora_model.id} has LoRA weights for "
+                f"{sorted(unsupported)}, but {type(self.model).__name__} does "
+                "not support LoRA on these modules."
+            )
+
     def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
         if self._classification_head is None:
             if not lora_model.modules_to_save:
