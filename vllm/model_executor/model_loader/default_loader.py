@@ -504,8 +504,9 @@ class DefaultModelLoader(BaseModelLoader):
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
-            "Loading weights took %.2f seconds",
+            "Loading weights took %.2f seconds (model=%s)",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            type(model).__name__,
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
