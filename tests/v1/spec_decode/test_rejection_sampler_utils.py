@@ -1600,3 +1600,71 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature", [(1, 0.0), (3, 0.73), (1, 1.0)]
+)
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_raw_target_logits_matches_pre_scaled_target_logits(
+    num_speculative_steps: int,
+    temperature: float,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    """target_logits_pre_scaled=False (raw target_logits, divided by
+    temperature inside the kernels) must reproduce
+    target_logits_pre_scaled=True (the historical default: target_logits
+    already divided by temperature by the caller) bit-for-bit, given the
+    same seed. This is the behavior the fused rejection-sampling path
+    (vLLM issue #61024 / SIG Spec Decode Q4 roadmap) relies on to skip
+    apply_sampling_params's temperature step and its FP32 logits copy.
+    """
+    torch.manual_seed(7)
+    device = "cuda"
+    vocab_size = 256
+    num_trials = 64
+
+    target_logits_1d = torch.randn(vocab_size, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(vocab_size, device=device, dtype=torch.float32)
+
+    scaled_target_logits_1d = target_logits_1d.clone()
+    if temperature > 0:
+        scaled_target_logits_1d /= temperature
+
+    inputs = _build_rejection_sample_inputs(
+        scaled_target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    expected_sampled, expected_num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+    )
+
+    raw_inputs = dict(inputs)
+    raw_inputs["target_logits"] = (
+        target_logits_1d.unsqueeze(0).expand_as(inputs["target_logits"]).contiguous()
+    )
+    actual_sampled, actual_num_sampled = rejection_sample(
+        **raw_inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        target_logits_pre_scaled=False,
+    )
+
+    torch.testing.assert_close(actual_num_sampled, expected_num_sampled, rtol=0, atol=0)
+    # Only the first num_sampled[req] entries of each row are written; the
+    # rest is leftover torch.empty content and may legitimately differ.
+    for req in range(num_trials):
+        n = int(expected_num_sampled[req])
+        torch.testing.assert_close(
+            actual_sampled[req, :n], expected_sampled[req, :n], rtol=0, atol=0
+        )
