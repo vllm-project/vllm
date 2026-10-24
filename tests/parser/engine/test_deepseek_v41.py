@@ -148,3 +148,87 @@ def test_python_argument_conversion_and_partial_values():
         "bare": 7,
         "text": "  a<b",
     }
+
+
+# A drifted call block observed in production: the tool name is emitted as a
+# bare ``parameter`` tag -- the invoke opener and the calls wrapper are
+# missing -- while the arguments and closers still carry the DSML markers.
+# The entire block used to fall back to plain content.
+DRIFTED_OPENERS = (
+    '<｜DSML｜ invoke name="get_weather">',
+    '<｜DSML｜ parameter name="get_weather">',
+    '<parameter name="get_weather">',
+)
+
+DRIFTED_ARGS = (
+    '<｜DSML｜ parameter name="city" string="true">杭州</｜DSML｜ parameter>\n'
+    '<｜DSML｜ parameter name="count" string="false">42</｜DSML｜ parameter>'
+)
+
+INVOKE_CLOSE = "</｜DSML｜ invoke>"
+CALLS_CLOSE = "</｜DSML｜ calls>"
+
+
+def drifted_call(opener):
+    return (
+        "\n\n" + opener + "\n" + DRIFTED_ARGS + "\n" + INVOKE_CLOSE + "\n" + CALLS_CLOSE
+    )
+
+
+@pytest.mark.parametrize("opener", DRIFTED_OPENERS)
+@pytest.mark.parametrize("thinking", [False, True])
+def test_drifted_call_openers_parse(opener, thinking):
+    prefix = "Plan.</think>" if thinking else ""
+    text = prefix + "Checking." + drifted_call(opener)
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {"thinking": thinking})
+    output = collect_output(
+        replay_streaming(
+            parser,
+            tokens,
+            chunk_size=1,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    assert output.reasoning == ("Plan." if thinking else "")
+    assert output.content.strip() == "Checking."
+    assert [call["name"] for call in output.tool_calls] == ["get_weather"]
+    assert json.loads(output.tool_calls[0]["arguments"]) == {
+        "city": "杭州",
+        "count": 42,
+    }
+
+
+def test_drifted_call_closes_reasoning_without_think_end():
+    text = "Plan." + drifted_call(DRIFTED_OPENERS[2])
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {})
+    output = collect_output(
+        replay_streaming(
+            parser,
+            tokens,
+            chunk_size=7,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50],
+        )
+    )
+    assert output.reasoning.strip() == "Plan."
+    assert [call["name"] for call in output.tool_calls] == ["get_weather"]
+
+
+@pytest.mark.parametrize("opener", DRIFTED_OPENERS)
+def test_drifted_call_non_streaming(opener):
+    text = drifted_call(opener)
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {"thinking": False})
+    reasoning, content, calls = parser.parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert [call.name for call in calls] == ["get_weather"]
+    assert json.loads(calls[0].arguments) == {"city": "杭州", "count": 42}
