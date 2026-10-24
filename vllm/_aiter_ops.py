@@ -1170,6 +1170,24 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
+def _unfused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.distributed import tensor_model_parallel_all_reduce
+
+    return torch.ops.vllm_aiter.fused_add_rms_norm(
+        tensor_model_parallel_all_reduce(input_),
+        residual,
+        weight,
+        epsilon,
+        gemma_norm,
+    )
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -1187,6 +1205,17 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
+        if qr_comm is not None:
+            if qr_comm.should_fused_allreduce_rmsnorm(input_, residual, weight):
+                return qr_comm.fused_allreduce_rmsnorm(
+                    input_, residual, weight, epsilon, gemma_norm
+                )
+            if qr_comm.uses_flydsl_int4(input_):
+                # FlyDSL QuickReduce owns this payload but its fused kernel
+                # declined it: all-reduce plus a separate RMSNorm.
+                return _unfused_allreduce_rmsnorm(
+                    input_, residual, weight, epsilon, gemma_norm
+                )
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
@@ -1241,15 +1270,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         gemma_norm=gemma_norm,
     )
     if result is None:
-        from vllm.distributed import tensor_model_parallel_all_reduce
-
-        return torch.ops.vllm_aiter.fused_add_rms_norm(
-            tensor_model_parallel_all_reduce(input_),
-            residual,
-            weight,
-            epsilon,
-            gemma_norm,
-        )
+        return _unfused_allreduce_rmsnorm(input_, residual, weight, epsilon, gemma_norm)
     return result[0], result[1]
 
 
@@ -1364,6 +1385,103 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
     )
     bf16_norm_out = torch.empty_like(input_)
     return quant_out, residual_out, scale_out, bf16_norm_out
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """AllReduce + add-RMSNorm, then an MXFP4 dynamic-quant linear
+    (``gemm_with_dynamic_quant`` on the ASM-layout weights) on the normed
+    activation. Returns (linear output, normed activation, residual).
+
+    Below M=32 the preshuffled Triton GEMM takes unshuffled per-1x32 scales,
+    which is the layout AITER's fused AR+RMSNorm+MXFP4 epilogue writes, so
+    there the quant runs in the all-reduce kernel instead of as a separate
+    launch. From M=32 both GEMMs take the shuffled scales FlyDSL INT4
+    QuickReduce writes, so where that all-reduce runs it quantizes in its
+    epilogue. Everywhere else this is the unfused sequence. Batch-invariant mode
+    takes the unfused sequence below M=32, as ``gemm_with_dynamic_quant`` skips
+    the preshuffled GEMM there and would read the decode scales as shuffled.
+
+    The pattern only matches linears with ``use_asm_gemm``, which requires a
+    tuned preshuffled config for the weight shape.
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+    m = input_.shape[0]
+    if m >= 32 and not aiter_ar.use_1stage_fused_ar_rms(input_):
+        from vllm.distributed import get_tp_group
+
+        qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+        if qr_comm is not None and qr_comm.should_fused_allreduce_rmsnorm_mxfp4(
+            input_, residual, norm_weight
+        ):
+            norm_out, residual_out, x_q, x_s = qr_comm.fused_allreduce_rmsnorm_mxfp4(
+                input_, residual, norm_weight, epsilon, gemma_norm
+            )
+            out = torch.ops.vllm.gemm_with_dynamic_quant(
+                x_q,
+                weight,
+                weight_scale,
+                rocm_use_aiter_fp4_asm_gemm=True,
+                out_dtype=out_dtype,
+                x_scales=x_s,
+            )
+            return out, norm_out, residual_out
+    stage = None
+    if m < 32 and not envs.VLLM_BATCH_INVARIANT:
+        stage = aiter_ar.mxfp4_fused_ar_rms_stage(input_)
+    if stage is None:
+        norm_out, residual_out = _rocm_aiter_fused_allreduce_rmsnorm_impl(
+            input_, residual, norm_weight, epsilon, gemma_norm
+        )
+        out = torch.ops.vllm.gemm_with_dynamic_quant(
+            norm_out, weight, weight_scale, True, out_dtype
+        )
+        return out, norm_out, residual_out
+
+    x_q, residual_out, x_s, norm_out = aiter_ar.aiter_ca.fused_ar_rms_mxfp4_quant(
+        input_,
+        residual,
+        w=norm_weight,
+        eps=epsilon,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=stage,
+        emit_bf16=True,
+        gemma_norm=gemma_norm,
+    )
+    out = torch.ops.vllm.gemm_with_dynamic_quant(
+        x_q,
+        weight,
+        weight_scale,
+        rocm_use_aiter_fp4_asm_gemm=True,
+        out_dtype=out_dtype,
+        x_scales=x_s,
+    )
+    return out, norm_out, residual_out
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    out = torch.empty(
+        (input_.shape[0], weight.shape[0]), dtype=out_dtype, device=input_.device
+    )
+    return out, torch.empty_like(input_), torch.empty_like(residual)
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -2428,6 +2546,29 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_flydsl_quick_reduce_available(cls) -> bool:
+        """Whether AITER's FlyDSL INT4 QuickReduce can run here.
+
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns it off. AITER's QuickAllReduceInt4 supports gfx942 and
+        gfx950 only (CDNA 3 and 4); `> 2` would also admit gfx1250.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
+
+    @staticmethod
+    def create_flydsl_quick_all_reduce_int4(
+        *, group: Any, device: Any, rank: int, world_size: int
+    ) -> Any:
+        from aiter.ops.flydsl import QuickAllReduceInt4
+
+        return QuickAllReduceInt4(
+            group=group, device=device, rank=rank, world_size=world_size
+        )
+
+    @classmethod
+    @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
@@ -3256,6 +3397,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -3344,6 +3491,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm.default  # noqa: E501
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_mxfp4_gemm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm.default
 
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
