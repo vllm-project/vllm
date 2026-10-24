@@ -70,6 +70,11 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
+After warmup, the daemon releases its communication resources and, on CUDA,
+cached cuBLAS workspaces before accepting engine connections. The model weights
+remain resident for CUDA IPC sharing. This reduces the daemon's GPU memory
+overhead; the amount reclaimed depends on the model and allocator state.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
