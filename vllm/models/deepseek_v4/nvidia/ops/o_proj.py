@@ -5,7 +5,12 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
+
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    w8a8_triton_block_scaled_mm,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
 )
@@ -75,31 +80,54 @@ def deep_gemm_fp8_o_proj(
             tma_aligned_scales=tma_aligned_scales,
             quantize=use_fp8,
         )
-    z = torch.empty(
-        (o_proj_input.shape[0], n_groups, o_lora_rank),
-        device=o_proj_input.device,
-        dtype=torch.bfloat16,
+
+    weight_scale = (
+        wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
     )
-    if use_fp8:
-        weight_scale = (
-            wo_a.weight_scale
-            if hasattr(wo_a, "weight_scale")
-            else wo_a.weight_scale_inv
+    if use_fp8 and envs.VLLM_BATCH_INVARIANT and not tma_aligned_scales:
+        # Hopper's batch-invariant path uses the verified block-scaled Triton
+        # kernel; SM100 packed scales stay on the DeepGEMM einsum path.
+        group_weight = wo_a.weight.reshape(n_groups, o_lora_rank, -1)
+        group_weight_scale = weight_scale.reshape(
+            n_groups,
+            o_lora_rank // 128,
+            group_weight.shape[-1] // 128,
         )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
-            z,
-            recipe=einsum_recipe,
+        z = torch.stack(
+            [
+                w8a8_triton_block_scaled_mm(
+                    o_proj_input[:, group].contiguous(),
+                    group_weight[group],
+                    o_scale[:, group].contiguous(),
+                    group_weight_scale[group],
+                    block_size=[128, 128],
+                    output_dtype=torch.bfloat16,
+                )
+                for group in range(n_groups)
+            ],
+            dim=1,
         )
     else:
-        grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
-        torch.bmm(
-            o_proj_input.transpose(0, 1),
-            grouped_weight.transpose(1, 2),
-            out=z.transpose(0, 1),
+        z = torch.empty(
+            (o_proj_input.shape[0], n_groups, o_lora_rank),
+            device=o_proj_input.device,
+            dtype=torch.bfloat16,
         )
+        if use_fp8:
+            fp8_einsum(
+                "bhr,hdr->bhd",
+                (o_proj_input, o_scale),
+                (wo_a.weight, weight_scale),
+                z,
+                recipe=einsum_recipe,
+            )
+        else:
+            grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
+            torch.bmm(
+                o_proj_input.transpose(0, 1),
+                grouped_weight.transpose(1, 2),
+                out=z.transpose(0, 1),
+            )
     return wo_b(z.flatten(1))
 
 
