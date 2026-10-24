@@ -627,6 +627,77 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_overflow_chunk_dropped_session_continues(
+    engine: AsyncLLM,
+):
+    """A chunk whose merged session would exceed max_model_len is dropped and
+    the session stays resumable (#62707).
+
+    The dropped chunk's reply ends with an empty, length-capped turn so the
+    output stream keeps its one-boundary-per-chunk rhythm, and a later chunk
+    that fits continues the session. On main the overflow chunk was merged
+    unconditionally; the scheduler then clamped its remaining prefill to zero
+    tokens and the session wedged in RUNNING without further outputs (or
+    crashed the model runner with a negative token count on older builds), so
+    the client hung forever.
+    """
+    request_id = "test_overflow_dropped"
+    sampling_params = get_sampling_params(max_tokens=10)
+
+    # opt-125m has max_model_len 2048. The first chunk plus its kept outputs
+    # hold ~1509 tokens; the second chunk would merge to ~2209 tokens, which
+    # leaves no room for a sampling step, so it must be dropped. The third
+    # chunk fits and must continue the session.
+    first_chunk = "hello " * 1500
+    overflow_chunk = "world " * 700
+    fitting_chunk = " The end is near and"
+
+    first_turn_done = asyncio.Event()
+    finish_count = 0
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=first_chunk)
+        yield StreamingInput(prompt=overflow_chunk)
+        # Wait for the first turn to complete: by then the overflow chunk has
+        # been dropped at the turn boundary and the session is parked.
+        await first_turn_done.wait()
+        yield StreamingInput(prompt=fitting_chunk)
+
+    outputs: list[RequestOutput] = []
+    full_text = ""
+
+    async def consume() -> None:
+        nonlocal finish_count, full_text
+        async for output in engine.generate(
+            input_generator(), sampling_params, request_id
+        ):
+            outputs.append(output)
+            if output.outputs and output.outputs[0].text:
+                full_text += output.outputs[0].text
+            if output.outputs and output.outputs[0].finish_reason is not None:
+                finish_count += 1
+                if finish_count == 1:
+                    first_turn_done.set()
+
+    await asyncio.wait_for(consume(), timeout=180)
+
+    # Three turn boundaries: the first turn, the dropped chunk's empty
+    # length-capped reply, and the final turn that closes the stream.
+    assert finish_count == 3
+    assert outputs[-1].finished
+    assert len(full_text) > 0
+    empty_turns = [
+        out
+        for out in outputs
+        if out.outputs
+        and out.outputs[0].finish_reason == "length"
+        and not out.outputs[0].text
+    ]
+    assert len(empty_turns) == 1, "the dropped chunk must end one empty reply"
+    assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_delayed_generator_exit(engine: AsyncLLM):
     """Test that output generator exits when input generator closes after outputs.
 

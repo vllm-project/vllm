@@ -54,7 +54,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -243,6 +248,11 @@ class Scheduler(SchedulerInterface):
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
+
+        # Streaming updates dropped because they would overflow max_model_len,
+        # as (client_index, request_id, count) entries awaiting translation
+        # into empty turn-boundary outputs for the frontend.
+        self.dropped_streaming_updates: list[tuple[int, str, int]] = []
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -1822,11 +1832,37 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        Returns:
+            True if the update was rejected because the merged session would
+            leave no room for a sampling step within ``max_model_len``. The
+            session is left untouched and stays resumable, so a shorter
+            update can continue it. False if the update was applied.
+
         """
+        # The merged session keeps every token but the last sampled one and
+        # appends the update's tokens. Once it no longer fits a sampling step
+        # below max_model_len, prefill would compute positions past
+        # max_model_len and later steps clamp num_new_tokens to <= 0, wedging
+        # the request (or crashing the model runner with a negative token
+        # count) instead of finishing the turn (#62707, #42489).
+        merged_num_tokens = session.num_tokens - 1 + len(update.prompt_token_ids or ())
+        if merged_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len:
+            logger.warning(
+                "Dropping streaming update for request %s: the merged session "
+                "would hold %d tokens, which leaves no room for a sampling "
+                "step within max_model_len=%d. The session stays resumable; "
+                "send a shorter update to continue it.",
+                session.request_id,
+                merged_num_tokens,
+                self.max_model_len,
+            )
+            return True
+
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
@@ -1862,6 +1898,8 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+        return False
 
     def _make_cached_request_data(
         self,
@@ -2569,6 +2607,15 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Streaming updates dropped this step end their replies with empty,
+        # length-capped turns so the frontend pops one update per turn
+        # boundary and terminates the stream correctly.
+        for client_index, req_id, count in self.take_dropped_streaming_updates():
+            outputs[client_index].extend(
+                EngineCoreOutput(req_id, [], finish_reason=FinishReason.LENGTH)
+                for _ in range(count)
+            )
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2663,16 +2710,50 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
 
         if request.streaming_queue:
-            update = request.streaming_queue.popleft()
-            if update is None:
-                # Streaming request finished.
-                return True
-            self._update_request_as_session(request, update)
+            dropped = 0
+            while request.streaming_queue:
+                update = request.streaming_queue.popleft()
+                if update is None:
+                    # Streaming request finished.
+                    if dropped:
+                        self._record_dropped_updates(request, dropped)
+                    return True
+                if not self._update_request_as_session(request, update):
+                    # Next turn starts with the fitting update.
+                    if dropped:
+                        self._record_dropped_updates(request, dropped)
+                    return False
+                # Dropped; keep draining so a later, shorter queued update
+                # can still continue the session.
+                dropped += 1
+            # Every queued update was dropped; park the session so a new,
+            # shorter update can continue it later.
+            self._record_dropped_updates(request, dropped)
+            request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+            self.num_waiting_for_streaming_input += 1
+            return False
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
 
         return False
+
+    def _record_dropped_updates(self, request: Request, count: int) -> None:
+        """Record streaming updates dropped for ``request``.
+
+        Each dropped update ends the reply it would have started with an
+        empty, length-capped turn so the frontend's per-chunk bookkeeping
+        stays in sync while the session stays resumable.
+        """
+        self.dropped_streaming_updates.append(
+            (request.client_index, request.request_id, count)
+        )
+
+    def take_dropped_streaming_updates(self) -> list[tuple[int, str, int]]:
+        """Return and clear the recorded dropped streaming updates."""
+        dropped = self.dropped_streaming_updates
+        self.dropped_streaming_updates = []
+        return dropped
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
@@ -2809,7 +2890,8 @@ class Scheduler(SchedulerInterface):
                 existing.streaming_queue.append(update)
             elif update is not None:
                 # Commence next input chunk.
-                self._update_request_as_session(existing, update)
+                if self._update_request_as_session(existing, update):
+                    self._record_dropped_updates(existing, 1)
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)

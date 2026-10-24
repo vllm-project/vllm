@@ -551,6 +551,28 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
+        # A streaming update can be dropped at admission (parked session +
+        # overflow). Send the empty, length-capped turn it ends the reply
+        # with out of band so the frontend stays in sync.
+        for (
+            client_index,
+            req_id,
+            count,
+        ) in self.scheduler.take_dropped_streaming_updates():
+            self.output_queue.put_nowait(
+                (
+                    client_index,
+                    EngineCoreOutputs(
+                        outputs=[
+                            EngineCoreOutput(
+                                req_id, [], finish_reason=FinishReason.LENGTH
+                            )
+                            for _ in range(count)
+                        ]
+                    ),
+                )
+            )
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
         # TODO: The scheduler doesn't really need to know the
