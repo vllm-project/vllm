@@ -12,6 +12,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
+    drop_old_draft_context,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -28,11 +29,14 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    draft_context_window: int | None = None,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
     max_num_tokens = 16
     num_speculative_steps = 3
+    if draft_dcp_size is None:
+        draft_dcp_size = cp_size
 
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
@@ -110,7 +114,9 @@ def _run_prepare(
             cp_size=cp_size,
             cp_interleave=cp_interleave,
         ),
-        dcp_size=cp_size if draft_dcp_size is None else draft_dcp_size,
+        dcp_size=draft_dcp_size,
+        draft_context_window=draft_context_window,
+        _context_window_span=4 * draft_dcp_size,
         parallel_drafting_token_id=123,
         num_query_per_req=num_speculative_steps,
         num_speculative_steps=num_speculative_steps,
@@ -151,6 +157,7 @@ def _run_prepare(
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
         seeds=seeds.cpu(),
+        block_table=block_table.cpu(),
     )
 
 
@@ -220,3 +227,112 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+@pytest.mark.parametrize(
+    "cp_rank,cp_size,block_table_values,shifted_entries",
+    [(0, 1, [0, 0, 7, 8, 9, 10, 11, 12], [7, 8]), (1, 2, [0, 7, 8, 9], [7])],
+)
+def test_draft_context_window_applies_after_slot_mappings(
+    cp_rank, cp_size, block_table_values, shifted_entries
+):
+    # Context ends at position 11, so the draft length is 15. A window of 4
+    # drops 8 positions: two entries of 4, or one entry of 4 x DCP 2.
+    kwargs = dict(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=block_table_values,
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+        cp_interleave=2,
+    )
+    full = _run_prepare(**kwargs)
+    windowed = _run_prepare(**kwargs, draft_context_window=4)
+
+    assert full.input_buffers.seq_lens[0].item() == 15
+    assert windowed.input_buffers.seq_lens[0].item() == 7
+    num_shifted = len(shifted_entries)
+    assert windowed.block_table[0][:num_shifted].tolist() == shifted_entries
+    assert windowed.query_slot_mapping.tolist() == full.query_slot_mapping.tolist()
+    assert windowed.context_slot_mapping.tolist() == full.context_slot_mapping.tolist()
+
+
+def _drop_old_context(
+    seq_lens: list[int],
+    block_table: list[list[int]],
+    *,
+    context_window: int,
+    window_span: int,
+    entry_span: int,
+    update_seq_lens: bool = True,
+    num_query_per_req: int = 4,
+):
+    device = torch.device("cuda")
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    block_table_t = torch.tensor(block_table, dtype=torch.int32, device=device)
+    drop_old_draft_context(
+        block_table_t,
+        seq_lens_t,
+        len(seq_lens),
+        num_query_per_req,
+        context_window,
+        window_span,
+        entry_span,
+        update_seq_lens=update_seq_lens,
+    )
+    return seq_lens_t.tolist(), block_table_t.tolist()
+
+
+def test_draft_context_window_drops_whole_entries():
+    # block_size 4 x DCP 2: one entry covers 8 positions. Request 0 has 83
+    # context tokens, so 64 are dropped and 19 (>= the window of 16) stay
+    # visible. Request 1 fits in the window and the padded row is untouched.
+    rows = [list(range(100, 116)), list(range(200, 216)), list(range(300, 316))]
+    seq_lens, block_table = _drop_old_context(
+        [87, 20, 0], rows, context_window=16, window_span=8, entry_span=8
+    )
+
+    assert seq_lens == [23, 20, 0]
+    assert block_table[0][:3] == [108, 109, 110]
+    assert block_table[1:] == rows[1:]
+
+
+def test_draft_context_window_shifts_groups_with_different_block_sizes():
+    # Groups with block sizes 4 and 8 drop the same 24 positions (a multiple
+    # of their lcm), and only the last group rewrites the shared seq_lens.
+    seq_lens = [40]
+    small, large = [list(range(100, 116))], [list(range(200, 208))]
+
+    seq_lens, small = _drop_old_context(
+        seq_lens,
+        small,
+        context_window=10,
+        window_span=8,
+        entry_span=4,
+        update_seq_lens=False,
+    )
+    assert seq_lens == [40]
+    seq_lens, large = _drop_old_context(
+        seq_lens, large, context_window=10, window_span=8, entry_span=8
+    )
+
+    assert seq_lens == [16]
+    assert small[0][:4] == [106, 107, 108, 109]
+    assert large[0][:2] == [203, 204]
+
+
+def test_draft_context_window_shifts_long_rows_in_place():
+    # A one-entry shift across several kernel chunks must not read entries
+    # that an earlier lane already overwrote.
+    num_entries, entry_span = 4096, 16
+    seq_len = num_entries * entry_span
+    row = list(range(1, num_entries + 1))
+    seq_lens, block_table = _drop_old_context(
+        [seq_len],
+        [row],
+        context_window=seq_len - 4 - entry_span - 4,
+        window_span=entry_span,
+        entry_span=entry_span,
+    )
+
+    assert seq_lens == [seq_len - entry_span]
+    assert block_table[0][: num_entries - 1] == row[1:]

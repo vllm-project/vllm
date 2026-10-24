@@ -653,6 +653,14 @@ class SpeculativeConfig:
     fly_entropy_top_k: int = Field(default=3, ge=1)
     """Number of largest target probabilities used by FLy's entropy gate."""
 
+    draft_context_window: int | None = Field(default=None, ge=1)
+    """For DFlash and DSpark, limit the draft's attention to the most recent
+    context tokens. Older tokens are dropped in whole block-table entries
+    (block_size * decode_context_parallel_size positions), so the draft sees at
+    least this many and fewer than one extra entry's worth. Positions stay
+    absolute and target verification is unchanged. None attends to the full
+    context. Model Runner V2 only."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -1946,6 +1954,15 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
+            )
+
+        if self.draft_context_window is not None and self.method not in (
+            "dflash",
+            "dspark",
+        ):
+            raise ValueError(
+                "draft_context_window is only supported with method='dflash' "
+                f"or 'dspark', got {self.method!r}."
             )
 
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
