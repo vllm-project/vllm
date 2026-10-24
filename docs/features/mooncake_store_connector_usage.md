@@ -271,6 +271,25 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### KV Load Failure Policy
+
+The `kv_load_failure_policy` setting in `--kv-transfer-config` controls what happens when a block that lookup reported as present cannot be loaded (for example, when a store node fails during transfer, a node restarts, or a disk read fails):
+
+- **fail** (default): Finish the request immediately with an error. For a shared prefix cache, the client may receive an empty response with no generated output.
+- **recompute**: Reschedule the request so vLLM computes the failed blocks locally and continues generation.
+
+For `MooncakeStoreConnector` used as a shared prefix cache (including single-node disk offloading), `"recompute"` is generally the recommended setting because it ensures requests complete reliably even during transient store errors or node rebalancing.
+
+Example configuration for a store-backed prefix cache:
+
+```bash
+MOONCAKE_CONFIG_PATH=mooncake_config.json \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute"}'
+```
+
+Mooncake RPC timeouts (`MC_RPC_CONNECT_TIMEOUT_MS`, `MC_RPC_TIMEOUT_MS`) can also be configured in the environment to minimize wait time before fallback occurs. Note that these variables are read directly by the Mooncake engine rather than vLLM.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
