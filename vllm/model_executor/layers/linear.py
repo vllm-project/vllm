@@ -174,6 +174,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
             config.kernel_config.linear_backend if config is not None else "auto"
         )
         self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+        self._use_rtx6000d_bf16 = (
+            config is not None
+            and config.kernel_config.enable_rtx6000d_bf16
+            and linear_backend in ("auto", "torch", "b12x")
+            and not envs.VLLM_BATCH_INVARIANT
+        )
 
     def create_weights(
         self,
@@ -228,6 +234,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
+        elif self._use_rtx6000d_bf16:
+            from vllm.model_executor.kernels.linear.cute_dsl.rtx6000d_bf16 import (
+                prepare_rtx6000d_bf16,
+            )
+
+            layer._rtx6000d_bf16 = prepare_rtx6000d_bf16(layer)
 
     def apply(
         self,
@@ -239,6 +251,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             return linear_batch_invariant(x, layer.weight, bias)
+        if getattr(layer, "_rtx6000d_bf16", False) and bias is None:
+            return torch.ops.vllm.rtx6000d_bf16_linear(x, layer.weight)
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 
