@@ -6,6 +6,7 @@ import asyncio
 import copy
 import inspect
 import itertools
+import threading
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -1053,6 +1054,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+        # Set when the render pool is replaced, so that renders still queued
+        # in the old pool move to the new one.
+        self._pool_replaced = asyncio.Event()
 
         if self.tokenizer is not None:
             maybe_make_thread_pool(
@@ -1070,6 +1074,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         eventually finish or be reaped on process exit.
         """
         self._executor.replace_inner()
+        self._pool_replaced.set()
+        self._pool_replaced = asyncio.Event()
         logger.warning(
             "Chat template render timed out — executor pool replaced "
             "(%d worker(s)). The stuck thread may continue consuming "
@@ -1077,17 +1083,44 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             self.model_config.renderer_num_workers,
         )
 
-    async def _render_with_timeout(self, coro):
-        """Run a template-rendering coroutine with a timeout.
+    async def _render_with_timeout(self, *args, **kwargs):
+        """Render the chat template on the renderer pool with a timeout.
 
-        On timeout, replaces the executor so subsequent renders are not
-        permanently blocked by the stuck thread.
+        The timeout counts the render's own run time, not the time the job
+        waits in the pool queue behind other work (tokenization and decoding
+        share the pool). A render still queued when the pool is replaced is
+        submitted again to the new pool. On timeout, replaces the executor so
+        subsequent renders are not permanently blocked by the stuck thread.
         """
         timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
         if timeout <= 0:
-            return await coro
+            return await self._apply_chat_template_async(*args, **kwargs)
+        loop = asyncio.get_running_loop()
+        while True:
+            started = loop.create_future()
+            abandoned = threading.Event()
+
+            def render(started=started, abandoned=abandoned):
+                loop.call_soon_threadsafe(
+                    lambda: started.done() or started.set_result(None)
+                )
+                if abandoned.is_set():
+                    return None
+                return safe_apply_chat_template(*args, **kwargs)
+
+            result = loop.run_in_executor(self._executor, render)
+            replaced = asyncio.ensure_future(self._pool_replaced.wait())
+            try:
+                await asyncio.wait(
+                    {started, replaced}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                replaced.cancel()
+            if started.done():
+                break
+            abandoned.set()  # still queued in the replaced pool: submit again
         try:
-            return await asyncio.wait_for(coro, timeout=timeout)
+            return await asyncio.wait_for(result, timeout=timeout)
         except TimeoutError:
             self._replace_executor()
             raise TimeoutError(
@@ -1266,12 +1299,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             visibility_check_kwargs = chat_template_kwargs.copy()
             visibility_check_kwargs["tokenize"] = False
             rendered = await self._render_with_timeout(
-                self._apply_chat_template_async(
-                    model_config,
-                    tokenizer,
-                    conversation,
-                    **visibility_check_kwargs,
-                )
+                model_config,
+                tokenizer,
+                conversation,
+                **visibility_check_kwargs,
             )
             assert isinstance(rendered, str)
             prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
@@ -1287,12 +1318,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             chat_template_kwargs["tokenize"] = True
 
         prompt_raw = await self._render_with_timeout(
-            self._apply_chat_template_async(
-                model_config,
-                tokenizer,
-                conversation,
-                **chat_template_kwargs,
-            )
+            model_config,
+            tokenizer,
+            conversation,
+            **chat_template_kwargs,
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
