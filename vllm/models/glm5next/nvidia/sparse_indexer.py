@@ -363,17 +363,18 @@ def sparse_attn_indexer_kpool(
                 )
                 # Compressed: row i starts at K position cu_seqlen_ks[i].
                 row_ends = cu_seqlen_ke - cu_seqlen_ks
-                logits = as_fp32_logits(
-                    fp8_fp4_mqa_logits(
-                        (q_slice_cast, q_scale_slice),
-                        (k_quant_cast, k_scale_cast),
-                        chunk_weights,
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        chunk.max_seqlen_k,
-                    ),
-                    row_ends,
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    chunk_weights,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    chunk.max_seqlen_k,
                 )
+                # top_k_per_row_prefill reads BF16 logits directly; the DCP
+                # merge needs FP32.
+                if dcp_world_size > 1:
+                    logits = as_fp32_logits(logits, row_ends)
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
             # so topk selects pools. We pick topk_tokens // kpool pools then

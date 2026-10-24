@@ -246,12 +246,14 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
     top_k: int,
     clean_logits: bool,
+    dtype: torch.dtype,
 ) -> None:
     """Test top_k_per_row."""
     set_random_seed(0)
@@ -261,7 +263,7 @@ def test_top_k_per_row(
     vocab_size = 20000
     row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
     logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, clean_logits, "random"
+        row_starts, row_ends, dtype, 42, clean_logits, "random"
     )
 
     # Create output tensors
@@ -291,6 +293,48 @@ def test_top_k_per_row(
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+
+@pytest.mark.parametrize("row_len", [16_384, 131_072])
+@pytest.mark.parametrize("num_distinct", [None, 64])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_bf16_long_rows(
+    row_len: int, num_distinct: int | None
+) -> None:
+    """BF16 prefill top-k on long rows, offset row starts and heavy ties, as in
+    the sparse indexer's prefill logits."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+    num_rows, top_k = 8, 2048
+    row_starts = torch.arange(num_rows, dtype=torch.int32) * 37
+    row_ends = row_starts + row_len - torch.arange(num_rows, dtype=torch.int32) * 1000
+    width = int(row_ends.max()) + 64
+    logits = torch.randn(num_rows, width) * 30
+    if num_distinct is not None:
+        # Few distinct values: most of the cut falls on ties.
+        logits = torch.round(logits / 30 * num_distinct / 8) * 8 / num_distinct
+    logits = logits.to(torch.bfloat16)
+
+    indices = torch.full((num_rows, top_k), -7, dtype=torch.int32)
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    for i in range(num_rows):
+        start, end = int(row_starts[i]), int(row_ends[i])
+        row = logits[i, start:end].float()
+        got = indices[i].long()
+        assert bool((got >= 0).all()) and got.unique().numel() == top_k
+        expected = torch.sort(row.topk(top_k).values).values
+        assert torch.equal(torch.sort(row[got]).values, expected)
 
 
 def _run_top_k_per_row_decode_test(

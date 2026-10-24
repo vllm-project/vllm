@@ -757,6 +757,183 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
 }
 #endif  // USE_ROCM
 
+#ifndef USE_ROCM
+// Prefill top-k over BF16 logits (DeepGEMM's SM100 MQA logits), read directly
+// instead of upcasting the logits matrix to FP32 first. Same contract as
+// topKPerRowPrefill: one block per row, indices relative to rowStarts[row],
+// rows of at most topK elements return 0..len-1 padded with -1, and the order
+// of the selected indices is unspecified.
+//
+// Each BF16 value maps to a 16-bit key that orders like the value. Pass 1
+// histograms the top 14 key bits (32 bins per binade, like the FP16 first step
+// of the FP32 kernel; indexer logits concentrate in a few binades, so coarser
+// bins serialise the shared-memory atomics). Pass 2 emits every element above
+// the threshold bin and histograms the low 2 bits of the threshold bin, staging
+// its elements in shared memory when they fit. Pass 3 then emits the elements
+// above the second threshold and fills the remaining slots with exact ties.
+namespace bf16_topk {
+
+constexpr int kNumThreads = 1024;
+constexpr int kLowBits = 2;
+constexpr int kNumBins1 = 1 << (16 - kLowBits);
+constexpr int kNumBins2 = 1 << kLowBits;
+// Threshold-bin elements kept in shared memory for pass 3.
+constexpr int kNumStaged = 6144;
+constexpr int kSmemBytes =
+    kNumBins1 * sizeof(int) + kNumStaged * (sizeof(int) + sizeof(uint16_t));
+
+__device__ __forceinline__ uint32_t sortableKey(uint16_t bits) {
+  return (bits & 0x8000u) ? (~bits & 0xffffu) : (bits | 0x8000u);
+}
+
+// Calls f(key, idx) for row[0, len), with 16-byte loads where alignment allows.
+template <typename Func>
+__device__ __forceinline__ void forEachKey(const uint16_t* row, int len,
+                                           Func f) {
+  int head =
+      static_cast<int>((16 - (reinterpret_cast<uintptr_t>(row) & 15)) & 15) /
+      static_cast<int>(sizeof(uint16_t));
+  head = min(head, len);
+  if (threadIdx.x < head) f(sortableKey(row[threadIdx.x]), threadIdx.x);
+  const int numVecs = (len - head) / 8;
+  const uint4* vecs = reinterpret_cast<const uint4*>(row + head);
+  for (int i = threadIdx.x; i < numVecs; i += kNumThreads) {
+    const uint4 w = vecs[i];
+    const uint32_t words[4] = {w.x, w.y, w.z, w.w};
+    const int base = head + i * 8;
+  #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      f(sortableKey(words[j] & 0xffffu), base + 2 * j);
+      f(sortableKey(words[j] >> 16), base + 2 * j + 1);
+    }
+  }
+  for (int i = head + numVecs * 8 + threadIdx.x; i < len; i += kNumThreads) {
+    f(sortableKey(row[i]), i);
+  }
+}
+
+// Finds the highest bin t with (count above t) < need <= (count at or above t)
+// and stores t and the count above it.
+template <int kNumBins>
+__device__ void findThreshold(const int* histo, int need, int* smemThreshold,
+                              int* smemAbove) {
+  using Scan = cub::BlockScan<int, kNumThreads>;
+  __shared__ typename Scan::TempStorage scanStorage;
+  constexpr int kBinsPerThread = (kNumBins + kNumThreads - 1) / kNumThreads;
+  // Thread t owns kBinsPerThread consecutive bins, scanned from the top.
+  int counts[kBinsPerThread];
+  int sum = 0;
+  #pragma unroll
+  for (int j = 0; j < kBinsPerThread; ++j) {
+    const int bin = kNumBins - 1 - (threadIdx.x * kBinsPerThread + j);
+    counts[j] = bin >= 0 ? histo[bin] : 0;
+    sum += counts[j];
+  }
+  int above;
+  Scan(scanStorage).ExclusiveSum(sum, above);
+  #pragma unroll
+  for (int j = 0; j < kBinsPerThread; ++j) {
+    const int bin = kNumBins - 1 - (threadIdx.x * kBinsPerThread + j);
+    if (bin >= 0 && above < need && above + counts[j] >= need) {
+      *smemThreshold = bin;
+      *smemAbove = above;
+    }
+    above += counts[j];
+  }
+  __syncthreads();
+}
+
+}  // namespace bf16_topk
+
+static __global__ __launch_bounds__(
+    bf16_topk::kNumThreads) void topKPerRowPrefillBf16(const uint16_t* logits,
+                                                       const int* rowStarts,
+                                                       const int* rowEnds,
+                                                       int* outIndices,
+                                                       int64_t stride0,
+                                                       int64_t outStride0,
+                                                       int topK) {
+  using namespace bf16_topk;
+  __shared__ int smemThreshold, smemAbove, smemNumOut, smemNumStaged,
+      smemNumTies;
+  extern __shared__ int smemDynamic[];
+  int* histo = smemDynamic;
+  int* stagedIdx = smemDynamic + kNumBins1;
+  uint16_t* stagedKey = reinterpret_cast<uint16_t*>(stagedIdx + kNumStaged);
+
+  const int rowIdx = blockIdx.x;
+  const int rowStart = rowStarts[rowIdx];
+  const int rowLen = rowEnds[rowIdx] - rowStart;
+  outIndices += rowIdx * outStride0;
+  const uint16_t* row = logits + rowIdx * stride0 + rowStart;
+
+  if (rowLen <= topK) {
+    for (int i = threadIdx.x; i < topK; i += kNumThreads) {
+      outIndices[i] = i < rowLen ? i : -1;
+    }
+    return;
+  }
+
+  // Pass 1: histogram of the top key bits.
+  for (int i = threadIdx.x; i < kNumBins1; i += kNumThreads) histo[i] = 0;
+  if (threadIdx.x == 0) {
+    smemNumOut = 0;
+    smemNumStaged = 0;
+    smemNumTies = 0;
+  }
+  __syncthreads();
+  forEachKey(row, rowLen,
+             [&](uint32_t key, int) { atomicAdd(&histo[key >> kLowBits], 1); });
+  __syncthreads();
+  findThreshold<kNumBins1>(histo, topK, &smemThreshold, &smemAbove);
+  const uint32_t threshold1 = smemThreshold;
+  const int above1 = smemAbove;
+  const bool staged = histo[threshold1] <= kNumStaged;
+  __syncthreads();
+
+  // Pass 2: emit the elements above the threshold bin, histogram the low bits
+  // of the threshold bin.
+  if (threadIdx.x < kNumBins2) histo[threadIdx.x] = 0;
+  __syncthreads();
+  forEachKey(row, rowLen, [&](uint32_t key, int idx) {
+    const uint32_t bin = key >> kLowBits;
+    if (bin > threshold1) {
+      outIndices[atomicAdd(&smemNumOut, 1)] = idx;
+    } else if (bin == threshold1) {
+      atomicAdd(&histo[key & (kNumBins2 - 1)], 1);
+      if (staged) {
+        const int slot = atomicAdd(&smemNumStaged, 1);
+        stagedKey[slot] = static_cast<uint16_t>(key);
+        stagedIdx[slot] = idx;
+      }
+    }
+  });
+  __syncthreads();
+  const int need2 = topK - above1;
+  findThreshold<kNumBins2>(histo, need2, &smemThreshold, &smemAbove);
+  const uint32_t threshold2 = smemThreshold;
+  const int numTies = need2 - smemAbove;
+
+  // Pass 3: within the threshold bin, emit the elements above the second
+  // threshold and numTies of those equal to it.
+  auto finish = [&](uint32_t key, int idx) {
+    if ((key >> kLowBits) != threshold1) return;
+    const uint32_t low = key & (kNumBins2 - 1);
+    if (low > threshold2 ||
+        (low == threshold2 && atomicAdd(&smemNumTies, 1) < numTies)) {
+      outIndices[atomicAdd(&smemNumOut, 1)] = idx;
+    }
+  };
+  if (staged) {
+    for (int i = threadIdx.x; i < smemNumStaged; i += kNumThreads) {
+      finish(stagedKey[i], stagedIdx[i]);
+    }
+  } else {
+    forEachKey(row, rowLen, finish);
+  }
+}
+#endif  // USE_ROCM
+
 }  // namespace vllm
 
 void apply_repetition_penalties_(
@@ -995,6 +1172,33 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
   const torch::stable::accelerator::DeviceGuard device_guard(
       logits.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
+
+  if (logits.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
+#ifndef USE_ROCM
+    STD_TORCH_CHECK(stride1 == 1, "BF16 logits rows must be contiguous");
+    STD_TORCH_CHECK(indices.stride(1) == 1 && indices.size(1) >= topK,
+                    "indices must have topK contiguous columns");
+    if (numRows == 0) return;
+    static const cudaError_t attrStatus =
+        cudaFuncSetAttribute(vllm::topKPerRowPrefillBf16,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             vllm::bf16_topk::kSmemBytes);
+    STD_TORCH_CHECK(
+        attrStatus == cudaSuccess,
+        "topKPerRowPrefillBf16: cannot raise dynamic shared memory");
+    vllm::topKPerRowPrefillBf16<<<numRows, vllm::bf16_topk::kNumThreads,
+                                  vllm::bf16_topk::kSmemBytes, stream>>>(
+        static_cast<const uint16_t*>(logits.data_ptr()),
+        rowStarts.const_data_ptr<int>(), rowEnds.const_data_ptr<int>(),
+        indices.mutable_data_ptr<int>(), stride0, indices.stride(0),
+        static_cast<int>(topK));
+    return;
+#else
+    STD_TORCH_CHECK(false, "top_k_per_row_prefill: BF16 logits need CUDA");
+#endif
+  }
+  STD_TORCH_CHECK(logits.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "top_k_per_row_prefill expects FP32 or BF16 logits");
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
