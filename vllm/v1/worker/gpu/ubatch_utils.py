@@ -282,8 +282,9 @@ def slice_model_inputs(
 def merge_ubatch_outputs(outputs: list[Any]) -> Any:
     """Reassemble the full-batch model output from the per-microbatch ones.
 
-    Models return hidden states, a tuple of those plus auxiliary hidden states
-    (EAGLE3), or IntermediateTensors on non-final pipeline ranks.
+    Models return hidden states, a tuple of those plus a list of auxiliary
+    hidden states (EAGLE3, DFlash), or IntermediateTensors on non-final
+    pipeline ranks.
     """
     first = outputs[0]
     if isinstance(first, IntermediateTensors):
@@ -294,7 +295,9 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
             }
         )
     if isinstance(first, tuple):
-        return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
+        return tuple(merge_ubatch_outputs(list(parts)) for parts in zip(*outputs))
+    if isinstance(first, list):
+        return [merge_ubatch_outputs(list(parts)) for parts in zip(*outputs)]
     return torch.cat(outputs, dim=0)
 
 

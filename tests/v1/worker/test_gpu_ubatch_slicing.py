@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -631,6 +632,19 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
 
     # Both microbatches reach the handoff before either finishes.
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+
+
+def test_merge_keeps_aux_hidden_states_per_layer():
+    # EAGLE3 and DFlash targets return (hidden_states, [aux per layer]).
+    hidden = torch.arange(6.0).view(6, 1)
+    aux = [torch.arange(6.0).view(6, 1) + 10 * i for i in range(3)]
+    merged_hidden, merged_aux = merge_ubatch_outputs(
+        [(hidden[:2], [x[:2] for x in aux]), (hidden[2:], [x[2:] for x in aux])]
+    )
+    torch.testing.assert_close(merged_hidden, hidden)
+    assert len(merged_aux) == len(aux)
+    for merged, expected in zip(merged_aux, aux):
+        torch.testing.assert_close(merged, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
