@@ -438,32 +438,144 @@ class TestMockObjTierFailures:
         )
         assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
-    def test_submit_store_register_memory_failure_reported_in_get_finished(self):
+    def test_submit_load_raise_marks_verdict_negative(self):
+        # A promotion that fails at submission must mark the cached verdict as
+        # a miss, so the scheduler does not re-issue the same doomed promotion
+        # every step for the life of the request.
         tier, agent = _make_tier(num_blocks=4)
-        agent.register_memory = lambda *a, **k: None
+        ctx = ReqContext(req_id="obj-raise-load")
         tier.submit_store(make_job(1, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 1
-        assert not results[0].success
+        assert all(r.success for r in drain(tier))
+        # Cache a positive verdict: the object is present, so lookup is a HIT.
+        assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
 
-    def test_submit_load_register_memory_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
-        agent.register_memory = lambda *a, **k: None
+        # The promotion the HIT triggered fails at submission.
+        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
         tier.submit_load(make_job(2, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
+        results = drain(tier)
         assert len(results) == 1
         assert results[0].job_id == 2
         assert not results[0].success
 
-    def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
+        # The same request must now resolve to MISS instead of serving the
+        # stale HIT, even though the object itself is still present.
+        assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
+
+    @pytest.mark.parametrize(
+        ("failing_call", "failure", "released"),
+        [
+            ("register_memory", "raise", []),
+            ("prep_xfer_dlist", "raise", ["files_desc"]),
+            ("make_prepped_xfer", "raise", ["obj_handle", "files_desc"]),
+            ("transfer", "raise", ["xfer_handle", "obj_handle", "files_desc"]),
+            ("transfer", "ERR", ["xfer_handle", "obj_handle", "files_desc"]),
+        ],
+    )
+    def test_submission_failure_releases_the_handles_created(
+        self, monkeypatch, failing_call, failure, released
+    ):
+        # NIXL returns a handle or raises; transfer() also reports "ERR".
+        # Release exactly the handles created so far, and report the job.
         tier, agent = _make_tier(num_blocks=4)
-        agent.make_prepped_xfer = lambda *a, **k: None
-        tier.submit_store(make_job(3, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 3
-        assert not results[0].success
+        handles = {
+            "files_desc": MagicMock(name="files_desc"),
+            "obj_handle": MagicMock(name="obj_handle"),
+            "xfer_handle": MagicMock(name="xfer_handle"),
+        }
+        handles["files_desc"].trim.return_value = MagicMock()
+        released_handles: list[object] = []
+        monkeypatch.setattr(
+            agent, "register_memory", lambda *a, **k: handles["files_desc"]
+        )
+        monkeypatch.setattr(
+            agent, "prep_xfer_dlist", lambda *a, **k: handles["obj_handle"]
+        )
+        monkeypatch.setattr(
+            agent, "make_prepped_xfer", lambda *a, **k: handles["xfer_handle"]
+        )
+        monkeypatch.setattr(agent, "transfer", lambda *a, **k: "PROC")
+        for release in (
+            "release_xfer_handle",
+            "release_dlist_handle",
+            "deregister_memory",
+        ):
+            monkeypatch.setattr(agent, release, released_handles.append)
+
+        if failure == "raise":
+            fail = MagicMock(side_effect=RuntimeError("backend error"))
+        else:
+            fail = MagicMock(return_value=failure)
+        monkeypatch.setattr(agent, failing_call, fail)
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        assert released_handles == [handles[name] for name in released]
+        assert tier._transfers == {}
+        assert [(r.job_id, r.success) for r in tier.get_finished_jobs()] == [(1, False)]
+
+    def test_submission_raise_with_failing_release_still_reports_failure(
+        self, monkeypatch
+    ):
+        # A failing release must not skip the remaining ones or the JobResult.
+        tier, agent = _make_tier(num_blocks=4)
+        deregister = MagicMock()
+        monkeypatch.setattr(
+            agent,
+            "release_dlist_handle",
+            MagicMock(side_effect=RuntimeError("release failed")),
+        )
+        monkeypatch.setattr(agent, "deregister_memory", deregister)
+        agent.make_prepped_xfer = MagicMock(side_effect=RuntimeError("backend error"))
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        assert deregister.call_count == 1
+        assert [(r.job_id, r.success) for r in tier.get_finished_jobs()] == [(1, False)]
+
+    def test_raise_does_not_leak_parent_job_or_primary_pin(self):
+        # The parent tiering manager only unwinds a job when the tier reports
+        # a JobResult for it. A raise from the tier would leave the job
+        # registered, the primary chunk pinned and the request unfinalized.
+        num_blocks = 4
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
+        mmap_region = MagicMock()
+        mmap_region.create_kv_memoryview.return_value = primary_kv_view
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_blocks, mmap_region=mmap_region
+        )
+        obj_tier, agent = _make_tier(
+            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+        )
+        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
+
+        ctx = ReqContext(req_id="obj-raise")
+        manager.on_new_request(ctx)
+        keys = [key(1)]
+        assert manager.prepare_store(keys, ctx) is not None
+        primary_tier.complete_store(keys, ctx, success=True)
+
+        # Must not raise: the tier reports the failure as a failed job.
+        manager.complete_store(keys, ctx, success=True)
+        manager.on_request_finished(ctx)
+
+        block = primary_tier._policy.get(keys[0])
+        assert block is not None
+        assert block.ref_cnt == 1  # pinned by the store job
+
+        schedule_context = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        # The job gate is reset at the end of a step, so the failed job is
+        # polled in the next one.
+        manager.on_schedule_end(schedule_context)
+        manager.on_schedule_end(schedule_context)
+
+        assert manager._transfer_jobs == {}
+        assert block.ref_cnt == 0
+        assert not manager.has_pending_work()
+        assert "obj-raise" not in manager._req_state
 
     def test_failure_and_success_both_returned_by_get_finished(self):
         # One job fails at submission, another succeeds in flight.
@@ -473,7 +585,9 @@ class TestMockObjTierFailures:
 
         def register_once_fail(*a, **k):
             call_count[0] += 1
-            return None if call_count[0] == 1 else original_register(*a, **k)
+            if call_count[0] == 1:
+                raise RuntimeError("backend error")
+            return original_register(*a, **k)
 
         agent.register_memory = register_once_fail
 
@@ -687,7 +801,9 @@ class TestObjTierKVEvents:
         assert self.tier._store_job_keys == {}
 
     def test_submission_failure_emits_no_event(self):
-        self.agent.make_prepped_xfer = lambda *a, **k: None
+        self.agent.make_prepped_xfer = MagicMock(
+            side_effect=RuntimeError("backend error")
+        )
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = list(self.tier.get_finished_jobs())
         assert not results[0].success
