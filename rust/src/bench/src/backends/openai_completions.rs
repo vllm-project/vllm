@@ -156,10 +156,8 @@ impl OpenAICompletionsBackend {
                             }
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
-                            if let Some(ref usage) = data.usage
-                                && let Some(ct) = usage.completion_tokens
-                            {
-                                output.output_tokens = ct as usize;
+                            if let Some(ref usage) = data.usage {
+                                usage.apply(&mut output);
                             }
                         }
                     }
@@ -199,5 +197,61 @@ impl OpenAICompletionsBackend {
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spawn_sse_server(prompt_tokens: u64) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {{\"choices\":[{{\"text\":\"a\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{{\"completion_tokens\":1,\"prompt_tokens\":{prompt_tokens}}}}}\n\ndata: [DONE]\n\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+        format!("http://{addr}/v1/completions")
+    }
+
+    #[tokio::test]
+    async fn test_usage_prompt_tokens_override_prompt_len() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(128),
+            model: "test-model".to_string(),
+            prompt_len: 100,
+            output_len: 1,
+            ..Default::default()
+        };
+
+        let output = OpenAICompletionsBackend
+            .send_request(&input, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.prompt_len, 128);
     }
 }

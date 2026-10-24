@@ -170,16 +170,13 @@ pub fn detect_window(
     })
 }
 
-use crate::datasets::SampleRequest;
-
 /// Compute steady-state metrics from per-request outputs, the detected window,
-/// and the original request list (for input-token attribution).
+/// using each successful output's prompt-token count.
 ///
 /// `is_pooling` gates off TTFT because pooling backends write `ttft = latency`
 /// as a placeholder; reporting TTFT over that would silently be E2EL.
 pub fn compute(
     outputs: &[RequestFuncOutput],
-    input_requests: &[SampleRequest],
     window: &SteadyStateWindow,
     percentiles: &[f64],
     is_pooling: bool,
@@ -200,7 +197,7 @@ pub fn compute(
     let mut ttfts_in_window: Vec<f64> = Vec::new();
     let mut tpots_in_window: Vec<f64> = Vec::new();
 
-    for (idx, o) in outputs.iter().enumerate() {
+    for o in outputs.iter() {
         if !o.success {
             continue;
         }
@@ -213,7 +210,7 @@ pub fn compute(
         }
 
         if started_in {
-            input_tokens_in_window += input_requests[idx].prompt_len;
+            input_tokens_in_window += o.prompt_len;
             if !is_pooling {
                 ttfts_in_window.push(o.ttft);
                 // Per-request TPOT: (latency - ttft) / (output_tokens - 1).
@@ -417,10 +414,6 @@ mod tests {
         assert!((w.end_s - 10.0).abs() < 1e-9);
     }
 
-    use std::sync::Arc;
-
-    use crate::datasets::SampleRequest;
-
     fn mk_full(
         start: f64,
         latency: f64,
@@ -440,16 +433,6 @@ mod tests {
         }
     }
 
-    fn mk_sample(prompt_len: usize) -> SampleRequest {
-        SampleRequest {
-            prompt: Arc::from(""),
-            prompt_len,
-            expected_output_len: 0,
-            request_id: None,
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn compute_constant_concurrency_matches_full_run() {
         // 3 identical requests, each 10s, each emitting 5 tokens uniformly via itl=2s.
@@ -459,13 +442,9 @@ mod tests {
             mk_full(0.0, 10.0, 2.0, itl.clone(), 5),
             mk_full(0.0, 10.0, 2.0, itl.clone(), 5),
         ];
-        let requests: Vec<SampleRequest> =
-            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
-
         let w = detect_window(&outputs, Some(3), 1.0, 0.1, 10.0).unwrap();
         let m = compute(
             &outputs,
-            &requests,
             &w,
             &[99.0],
             false, // is_pooling
@@ -494,6 +473,21 @@ mod tests {
     }
 
     #[test]
+    fn compute_uses_server_reported_prompt_lengths() {
+        let mut outputs = vec![
+            mk_full(0.0, 10.0, 2.0, vec![2.0; 4], 5),
+            mk_full(0.0, 10.0, 2.0, vec![2.0; 4], 5),
+        ];
+        outputs[0].prompt_len = 128;
+        outputs[1].prompt_len = 256;
+
+        let window = detect_window(&outputs, Some(2), 1.0, 0.1, 10.0).unwrap();
+        let metrics = compute(&outputs, &window, &[99.0], false);
+
+        assert!((metrics.input_throughput - 38.4).abs() < 1e-9);
+    }
+
+    #[test]
     fn compute_drain_only_tokens_not_counted() {
         // 1 "steady" request defining the window, + 1 late-admitted request whose
         // 1000 output tokens land after end_s — must not pump output_throughput.
@@ -502,12 +496,9 @@ mod tests {
         let late_itl = vec![0.02; 999]; // 1000 tokens; emission starts after end_s
         let late = mk_full(9.9, 30.0, 0.05, late_itl, 1000);
         outputs.push(late);
-        let requests: Vec<SampleRequest> =
-            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
-
         // Target = 2 so threshold_abs = 2; window opens when both are in flight.
         let w = detect_window(&outputs, Some(2), 1.0, 0.1, 40.0).unwrap();
-        let m = compute(&outputs, &requests, &w, &[99.0], false);
+        let m = compute(&outputs, &w, &[99.0], false);
 
         // Late request started in window but most of its tokens are emitted AFTER end_s.
         // Only a handful (≤3) should count.
@@ -534,10 +525,8 @@ mod tests {
             mk_full(0.0, 5.0, 5.0, Vec::new(), 0),
             mk_full(0.0, 5.0, 5.0, Vec::new(), 0),
         ];
-        let requests: Vec<SampleRequest> =
-            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
         let w = detect_window(&outputs, Some(2), 1.0, 0.1, 10.0).unwrap();
-        let m = compute(&outputs, &requests, &w, &[99.0], /* is_pooling */ true);
+        let m = compute(&outputs, &w, &[99.0], /* is_pooling */ true);
         assert_eq!(m.mean_ttft_ms, 0.0);
         assert_eq!(m.median_ttft_ms, 0.0);
         assert!(m.percentiles_ttft_ms.is_empty());
@@ -560,10 +549,8 @@ mod tests {
             mk_full(0.0, 10.0, 2.0, itl.clone(), 5),
             mk_full(0.0, 10.0, 2.0, itl.clone(), 5),
         ];
-        let requests: Vec<SampleRequest> =
-            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
         let w = detect_window(&outputs, Some(3), 1.0, 0.1, 10.0).unwrap();
-        let m = compute(&outputs, &requests, &w, &[99.0], false);
+        let m = compute(&outputs, &w, &[99.0], false);
 
         assert!((m.mean_tpot_ms - 2000.0).abs() < 1e-6);
         assert!((m.median_tpot_ms - 2000.0).abs() < 1e-6);
@@ -574,10 +561,8 @@ mod tests {
     #[test]
     fn json_roundtrip_some() {
         let outputs = vec![mk_full(0.0, 10.0, 2.0, vec![2.0; 4], 5); 3];
-        let requests: Vec<SampleRequest> =
-            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
         let w = detect_window(&outputs, Some(3), 1.0, 0.1, 10.0).unwrap();
-        let m = compute(&outputs, &requests, &w, &[99.0], false);
+        let m = compute(&outputs, &w, &[99.0], false);
         let s = serde_json::to_string(&m).unwrap();
         let parsed: SteadyStateMetrics = serde_json::from_str(&s).unwrap();
         assert!((parsed.output_throughput - m.output_throughput).abs() < 1e-12);
@@ -605,14 +590,12 @@ mod tests {
         let itl = vec![1.0; 9];
         let outputs: Vec<RequestFuncOutput> =
             (0..5).map(|i| mk_full(i as f64, 20.0, 1.0, itl.clone(), 10)).collect();
-        let requests: Vec<SampleRequest> = (0..5).map(|_| mk_sample(100)).collect();
-
         let w = detect_window(&outputs, Some(5), 1.0, 1.0, 25.0).unwrap();
         assert_eq!(w.threshold_abs, 5);
         assert!((w.start_s - 4.0).abs() < 1e-9);
         assert!((w.end_s - 20.0).abs() < 1e-9);
 
-        let m = compute(&outputs, &requests, &w, &[50.0, 99.0], false);
+        let m = compute(&outputs, &w, &[50.0, 99.0], false);
 
         // Round-trip through JSON.
         let s = serde_json::to_string(&m).unwrap();
