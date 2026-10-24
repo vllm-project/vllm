@@ -727,6 +727,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only.
 
 !!! note
+    `PaliGemmaForConditionalGeneration` attends bidirectionally over the whole
+    prompt (image and prefix text), as in Transformers. Each prompt is
+    prefilled in one step, so chunked prefill and prefix caching are disabled
+    by default for these models.
+
+!!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 

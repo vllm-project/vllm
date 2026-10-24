@@ -10,7 +10,12 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import DiffusionGemmaConfig, PreTrainedConfig
+from transformers import (
+    DiffusionGemmaConfig,
+    Gemma3Config,
+    PaliGemmaConfig,
+    PreTrainedConfig,
+)
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
@@ -370,6 +375,25 @@ def _gemma4_text_config(**overrides) -> Gemma4TextConfig:
         layer_types=["sliding_attention"] * 5 + ["full_attention"],
     )
     return Gemma4TextConfig(**(fields | overrides))
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "supports_multimodal", "expected"),
+    [
+        (PaliGemmaConfig(), True, True),
+        (PaliGemmaConfig(), False, False),
+        (Gemma3Config(), True, False),
+    ],
+    ids=["paligemma", "paligemma-text-only", "gemma3"],
+)
+def test_mm_prefix_whole_prompt(hf_config, supports_multimodal, expected):
+    """PaliGemma's PrefixLM block is the whole prompt; Gemma3's is each image."""
+    arch = ModelArchConfigConvertorBase(hf_config, hf_config.get_text_config()).convert(
+        supports_multimodal
+    )
+
+    assert arch.is_mm_prefix_lm == supports_multimodal
+    assert arch.mm_prefix_whole_prompt == expected
 
 
 def test_gemma4_head_dims_vary_by_layer_type():

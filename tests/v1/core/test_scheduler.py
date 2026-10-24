@@ -1243,6 +1243,32 @@ def test_no_mm_input_chunking(warm_encoder_cache: bool):
         )
 
 
+def test_whole_prompt_prefix_lm_prefills_prompt_in_one_step():
+    """A PaliGemma-style prompt is one bidirectional block, so it must not be
+    split across steps even when only part of it fits in the budget."""
+    scheduler = create_scheduler(max_num_batched_tokens=1024)
+    scheduler.mm_prefix_whole_prompt = True
+    first, second = create_requests(num_requests=2, num_tokens=600)
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {first.request_id: 600}
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[first.request_id],
+        req_id_to_index={first.request_id: 0},
+        sampled_token_ids=[[0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {first.request_id: 1, second.request_id: 600}
+
+
 def test_no_mm_input_chunking_for_same_step_duplicate():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",

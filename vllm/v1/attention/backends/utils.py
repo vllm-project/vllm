@@ -79,10 +79,23 @@ def compute_mm_prefix_ranges(
     sliding_window: int | None = None,
     clamp_sliding_window: bool = False,
     span_pad: int = 0,
+    prompt_lens: Sequence[int | None] | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
-    """Per-request PrefixLM bidirectional ranges for image/video tokens."""
+    """Per-request PrefixLM bidirectional ranges for image/video tokens.
+
+    With ``prompt_lens`` (PaliGemma), a request's range is its whole prompt
+    when the prompt fits in the sliding window.
+    """
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, mm_features in enumerate(mm_features_per_req):
+        prompt_len = prompt_lens[req_idx] if prompt_lens is not None else None
+        if prompt_len is not None and (
+            clamp_sliding_window
+            or sliding_window is None
+            or prompt_len <= sliding_window
+        ):
+            req_doc_ranges[req_idx] = [(0, prompt_len - 1)]
+            continue
         image_doc_ranges = []
         for mm_feature in mm_features:
             if mm_feature.modality not in ("image", "video"):

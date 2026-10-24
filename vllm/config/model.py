@@ -1650,6 +1650,10 @@ class ModelConfig:
         return self.model_arch_config.is_mm_prefix_lm
 
     @property
+    def mm_prefix_whole_prompt(self) -> bool:
+        return self.is_mm_prefix_lm and self.model_arch_config.mm_prefix_whole_prompt
+
+    @property
     def rswa_window(self) -> int | None:
         return self.model_arch_config.rswa_window
 
@@ -2231,6 +2235,12 @@ class ModelConfig:
             if attn_type == "encoder_decoder":
                 logger.debug("Encoder decoder models do not support chunked prefill.")
                 return False
+            if self.mm_prefix_whole_prompt:
+                logger.debug(
+                    "Models whose whole prompt is one bidirectional block do not "
+                    "support chunked prefill."
+                )
+                return False
 
             logger.debug("Generative models support chunked prefill.")
             return True
@@ -2285,6 +2295,13 @@ class ModelConfig:
                 return False
             elif attn_type == "encoder_decoder":
                 logger.debug("Encoder decoder models do not support prefix caching.")
+                return False
+            elif self.mm_prefix_whole_prompt:
+                # The KV of every prompt token depends on the tokens after it.
+                logger.debug(
+                    "Models whose whole prompt is one bidirectional block do not "
+                    "support prefix caching."
+                )
                 return False
             else:  # attn_type == "decoder"
                 logger.debug("Generative models support prefix caching.")

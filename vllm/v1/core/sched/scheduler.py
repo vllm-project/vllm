@@ -115,6 +115,10 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
+        self.mm_prefix_whole_prompt = (
+            vllm_config.model_config is not None
+            and vllm_config.model_config.mm_prefix_whole_prompt
+        )
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -1353,6 +1357,15 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = self._reserve_prefill_lookahead(
                         request, num_computed_tokens, num_new_tokens
                     )
+
+                    # Prompt tokens attend to the prompt tokens after them, so
+                    # the whole prompt has to be prefilled in one step.
+                    if (
+                        self.mm_prefix_whole_prompt
+                        and num_computed_tokens + num_new_tokens
+                        < request.num_prompt_tokens
+                    ):
+                        num_new_tokens = 0
 
                     if num_new_tokens == 0:
                         # The request cannot be scheduled. Requeue it so it does
