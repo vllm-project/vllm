@@ -116,6 +116,7 @@ fn lower_render_request(
         ec_transfer_params,
         content_parts: None,
         return_token_ids,
+        packed_top_k_logprobs: None,
         output_mode: None,
         // Carry what the chat route would pass to the engine, so the engine
         // gates structured outputs the same way on `/inference/v1/generate`.
