@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Literal
 
 import torch
@@ -201,6 +201,9 @@ class WorkerLoRAManager:
             self._adapter_manager.supports_mm
             and self._adapter_manager.supports_tower_connector_lora
         )
+
+    def token_logits_rows(self, start: int, end: int) -> AbstractContextManager:
+        return self._adapter_manager.token_logits_rows(start, end)
 
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
