@@ -59,6 +59,13 @@ accepted-token cursors, prefix restoration and finish lifecycle. Model identity,
 source layers and TopK width identify the SHM namespace. R3-only storage keeps
 its existing format.
 
+GPUWorker initializes and binds both capturers after leaving the weights memory
+pool and before KV-cache memory profiling. The Connector owns their buffers and
+bindings; SHM storage is initialized separately after KV capacity is resolved.
+Capture buffers therefore participate in automatic KV budgeting and stay outside
+the weights pool during weight reload or sleep. Explicit KV memory budgets remain
+manual. Shutdown releases captured graphs before unbinding and freeing capture.
+
 Indexer storage is `4 * num_indexer_sources * index_topk` bytes/token. Startup
 adds the byte widths of all enabled artifacts, including routed experts. For
 `N` KV blocks and `B` tokens/block, required SHM per output worker is

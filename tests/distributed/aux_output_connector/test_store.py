@@ -202,6 +202,7 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._unbind_capturer = None
     worker._indexer = (
         SimpleNamespace(
             shape_per_token=indexer_shape,

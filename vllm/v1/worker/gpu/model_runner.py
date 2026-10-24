@@ -36,18 +36,11 @@ from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.distributed.aux_output_connector.worker import (
-    AuxOutputWorkerConnector,
-    get_aux_output_connector,
-)
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group, get_tp_group
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
+from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.indexer_capture import (
-    IndexerCapturer,
-    bind_indexer_capturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -366,9 +359,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The AuxOutput Connector owns R3 capture, copying, and storage.
+        # The connector owns capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
-        self.indexer_capturer: IndexerCapturer | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -413,14 +405,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
-
-            if self.vllm_config.aux_output_config.enable_return_indexer_topk:
-                self.indexer_capturer = IndexerCapturer(
-                    self.model,
-                    self.vllm_config,
-                    output_rank=get_tp_group().is_first_rank,
-                )
-                bind_indexer_capturer(self.model, self.indexer_capturer)
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
@@ -831,12 +815,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
-                self.aux_output_connector = get_aux_output_connector(
-                    self.model,
-                    self.vllm_config,
-                    kv_cache_config,
-                    indexer_capturer=self.indexer_capturer,
-                )
+                if self.aux_output_connector is None:
+                    raise RuntimeError(
+                        "auxiliary output connector was not initialized before KV init"
+                    )
+                self.aux_output_connector.initialize_storage(kv_cache_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2393,21 +2376,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def _release_capture_resources(self) -> None:
+        """Release graphs before the connector and its capture buffers.
+
+        Captured graphs reference capture buffers, so they are dropped before
+        the connector unbinds and releases them.
+        """
+        has_aux_output = self.aux_output_connector is not None
+        if current_platform.is_rocm() or has_aux_output:
+            # Capture callbacks are captured into graphs that must be dropped before
+            # the referenced buffers. On ROCm RCCL's ncclCommAbort also waits
+            # for live graphs that captured the comm:
+            # https://github.com/ROCm/rocm-systems/issues/13018
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+        if has_aux_output and self.cudagraph_manager is not None:
+            self.cudagraph_manager.release_graphs()
+            self.cudagraph_manager = None
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
+            self.aux_output_connector = None
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if current_platform.is_rocm():
-            # RCCL's ncclCommAbort waits for live graphs that captured the comm:
-            # https://github.com/ROCm/rocm-systems/issues/13018
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
-        if self.aux_output_connector is not None:
-            self.aux_output_connector.close()
-        indexer_capturer = getattr(self, "indexer_capturer", None)
-        if indexer_capturer is not None:
-            indexer_capturer.close()
-            self.indexer_capturer = None
+        self._release_capture_resources()
         set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None
