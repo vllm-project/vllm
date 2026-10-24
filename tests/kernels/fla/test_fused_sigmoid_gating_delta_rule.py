@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
@@ -197,3 +198,60 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA/ROCm GPU"
+)
+def test_chunk_gated_delta_rule_finite_under_large_fp32_state():
+    """Chunk/prefill path must stay finite when the fp32 SSM state is large.
+
+    Same overflow as #54146 (fp32 state downcast to the fp16/bf16 activation
+    dtype), but on the chunk/prefill path instead of the decode-update
+    kernel: chunk_delta_h.py's per-chunk state buffer and chunk_o.py's
+    readout both inherited the activation dtype, so a large fp32 state
+    overflowed to inf before it was ever normalized.
+    """
+    set_random_seed(0)
+    B, T, H, K, V = 1, 256, 4, 64, 64
+    dt = torch.float16
+    q = torch.randn(B, T, H, K, device=DEVICE, dtype=dt)
+    k = F.normalize(torch.randn(B, T, H, K, device=DEVICE, dtype=dt), p=2, dim=-1)
+    v = torch.randn(B, T, H, V, device=DEVICE, dtype=dt)
+    g = torch.full((B, T, H), -0.01, device=DEVICE, dtype=dt)
+    beta = torch.full((B, T, H), 0.5, device=DEVICE, dtype=dt)
+    # fp32 state at a magnitude reachable over long context; 1e6 > fp16 max.
+    state = torch.randn(B, H, V, K, device=DEVICE, dtype=torch.float32) * 1e6
+
+    # Ground truth: same inputs/state through the fp32 recurrent reference.
+    o_ref, final_state_ref = fused_recurrent_gated_delta_rule(
+        q=q.float(),
+        k=k.float(),
+        v=v.float(),
+        g=g.float(),
+        beta=beta.float(),
+        initial_state=state.clone(),
+        inplace_final_state=False,
+    )
+    assert torch.isfinite(o_ref).all()
+    assert torch.isfinite(final_state_ref).all()
+
+    o, final_state = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state.clone(),
+        output_final_state=True,
+    )
+
+    n_bad = int((~torch.isfinite(o)).sum())
+    assert n_bad == 0, (
+        f"chunk path output has {n_bad} non-finite (inf/NaN) entries under a "
+        f"large fp32 state while the fp32 reference is finite -- fp16 "
+        f"overflow; max|o|={o.float().abs().max().item():.3e}"
+    )
+    assert torch.isfinite(final_state).all()
+    # Carries the true large magnitude, not a saturated/clamped value.
+    assert o.float().abs().max().item() > 1e4
