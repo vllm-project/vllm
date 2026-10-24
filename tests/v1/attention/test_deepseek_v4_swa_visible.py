@@ -304,6 +304,7 @@ def combine_case(
     replay_starts: list[int] | None = None,
     combine_fn=combine_topk_swa_indices,
     in_range_topk: bool = False,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
     """Run combine_topk_swa_indices and return (indices, lens, expected).
 
@@ -364,6 +365,7 @@ def combine_case(
         topk,
         M,
         N,
+        out=out,
         **image_kwargs,
     )
 
@@ -448,6 +450,50 @@ def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    ("cfg", "seq_lens", "query_lens", "replay_starts"),
+    [
+        (COMBINE_CASES[0], [12], [12], None),
+        (COMBINE_CASES[1], [40, 12], [24, 12], [16, 0]),
+        (dict(compress_ratio=1, topk=120), [512], [512], None),
+    ],
+)
+def test_v41_combine_topk_swa_initializes_reused_out(
+    cfg, seq_lens, query_lens, replay_starts
+):
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+
+    kwargs = dict(
+        seq_lens=seq_lens,
+        query_lens=query_lens,
+        spans=[[] for _ in seq_lens],
+        with_image=False,
+        replay_starts=replay_starts,
+        combine_fn=combine_v41,
+        in_range_topk=True,
+    )
+    expected_indices, expected_lens, expected_rows, _ = combine_case(
+        cfg["compress_ratio"], cfg["topk"], **kwargs
+    )
+    stale_indices = torch.full_like(expected_indices, 12345)
+    stale_lens = torch.full_like(expected_lens, 12345)
+    indices, lens, rows, row_lens = combine_case(
+        cfg["compress_ratio"],
+        cfg["topk"],
+        out=(stale_indices, stale_lens),
+        **kwargs,
+    )
+
+    torch.testing.assert_close(indices, expected_indices)
+    torch.testing.assert_close(lens, expected_lens)
+    assert expected_indices.cpu().tolist() == expected_rows
+    assert indices.cpu().tolist() == rows
+    assert lens.cpu().tolist() == row_lens
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
