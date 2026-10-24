@@ -97,6 +97,17 @@ class AnthropicContentBlock(BaseModel):
     tool: "AnthropicToolChange | None" = None
 
     @model_validator(mode="after")
+    def validate_tool_result_content(self) -> "AnthropicContentBlock":
+        if self.type == "tool_result" and isinstance(self.content, list):
+            for index, item in enumerate(self.content):
+                if item.get("type") not in ("text", "image", "tool_reference"):
+                    raise ValueError(
+                        f"Unsupported tool_result.content[{index}] type: "
+                        f"{item.get('type')!r}; expected text, image or tool_reference"
+                    )
+        return self
+
+    @model_validator(mode="after")
     def validate_tool_change(self) -> "AnthropicContentBlock":
         if self.type not in ("tool_addition", "tool_removal"):
             return self

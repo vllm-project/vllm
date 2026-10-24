@@ -243,3 +243,47 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
     warm_usage = await get_stream_usage(await client.messages.create(**request))
     assert warm_usage.cache_read_input_tokens is not None
     assert warm_usage.cache_read_input_tokens > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_unsupported_nested_tool_result_returns_bad_request(
+    client: anthropic.AsyncAnthropic, stream: bool
+):
+    with pytest.raises(
+        anthropic.BadRequestError, match="Unsupported tool_result.content"
+    ):
+        await client.messages.create(
+            model="claude-3-7-sonnet-latest",
+            max_tokens=1,
+            stream=stream,
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_file",
+                            "input": {},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": [
+                                {"type": "text", "text": "Read this report"},
+                                {
+                                    "type": "document",
+                                    "source": {"type": "text", "data": "report"},
+                                },
+                            ],
+                        }
+                    ],
+                },
+            ],
+        )
