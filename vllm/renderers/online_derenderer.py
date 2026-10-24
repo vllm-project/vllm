@@ -745,6 +745,8 @@ class OnlineDerenderer:
                 chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
                 model_config=self.model_config,
             ),
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=parser_cls,
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded
