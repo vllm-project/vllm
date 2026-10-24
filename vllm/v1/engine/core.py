@@ -1297,8 +1297,7 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
-            # Completes once the drain does, which for DP happens in the busy
-            # loop.
+            # Completes once the drain does, which for DP happens in the busy loop.
             if vllm_config.model_config.checkpoint_prepare_on_startup and (
                 refusal := self.checkpoint_prepare()
             ):

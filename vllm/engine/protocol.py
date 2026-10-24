@@ -220,16 +220,13 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def checkpoint_prepare(self, mode: "PauseMode" = "wait") -> str | None:
-        """Start preparing for a process checkpoint: drain with `mode`, then
-        release the KV cache and what a checkpoint must not contain. Poll
-        checkpoint_state() for PREPARED. Returns why the engine cannot prepare,
-        with nothing changed, or None."""
+        """Drain with `mode`, then release what a checkpoint must not contain.
+        Returns why the engine cannot prepare, with nothing changed, or None."""
         ...
 
     @abstractmethod
     async def checkpoint_restore(self) -> None:
-        """Bring back what preparing released and serve again, in the
-        restored process or in place."""
+        """Bring back what preparing released, in the restored process or in place."""
         ...
 
     @abstractmethod
