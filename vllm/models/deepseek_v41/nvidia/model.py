@@ -237,6 +237,12 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
     if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        # FlashMLA mega attention reads the grouped ``wo_a`` weight directly
+        # from its fused quantized output. LoRA wraps that layer after model
+        # construction, so use the split-KV path whose grouped projection
+        # explicitly applies the adapter delta.
+        if vllm_config.lora_config is not None:
+            return DeepseekV4FlashMLAAttention
         return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -253,7 +259,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     # implementation itself stores. It declines topologies it cannot serve
     # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
     # group, a build without the kernel), which then fall through to FlashMLA.
-    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+    if vllm_config.lora_config is None and DeepseekV4MegaAttnAttention.is_available_for(
+        vllm_config
+    ):
         return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
@@ -862,6 +870,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
+            and vllm_config.lora_config is None
         ):
             assert self.layers[cut].attn.compress_ratio <= 1
             # The last KV source writes every row's KV, then replays.
@@ -1386,6 +1395,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name_mapped = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1411,7 +1421,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
-                    loaded_params.add(name_mapped)
+                    if name_mapped is not None:
+                        loaded_params.add(name_mapped)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -1750,7 +1761,6 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
