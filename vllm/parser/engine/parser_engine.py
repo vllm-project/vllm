@@ -741,20 +741,21 @@ class ParserEngine(Parser):
         if not wait_for_reasoning:
             return input_ids
 
+        turn_start = 0
+        boundary_ids = self._turn_boundary_token_ids
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] in boundary_ids:
+                turn_start = i + 1
+                break
+
         end_id = self._reasoning_end_token_id
         if end_id is not None:
-            for i in range(len(input_ids) - 1, -1, -1):
+            for i in range(turn_start, len(input_ids)):
                 if input_ids[i] == end_id:
                     return input_ids[i + 1 :]
 
         end_ids = self._reasoning_end_token_ids
         if end_ids:
-            turn_start = 0
-            boundary_ids = self._turn_boundary_token_ids
-            for i in range(len(input_ids) - 1, -1, -1):
-                if input_ids[i] in boundary_ids:
-                    turn_start = i + 1
-                    break
             for i in range(turn_start, len(input_ids)):
                 if input_ids[i] in end_ids:
                     return input_ids[i:]
