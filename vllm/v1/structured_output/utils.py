@@ -18,7 +18,7 @@ from cachetools import LRUCache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
@@ -139,13 +139,15 @@ def apply_grammar_bitmask(
     out_indices: list[int] = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask_tensor = torch.full(
-        (logits.shape[0], grammar_bitmask.shape[1]),
-        -1,
-        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
-        pin_memory=PIN_MEMORY,
+    # The input batch owns this pinned CPU/GPU pair for its full lifetime. This
+    # avoids allocating pinned host memory on every structured decode step.
+    bitmask_buffer = input_batch.get_grammar_bitmask_buffer(
+        logits.shape[0],
+        grammar_bitmask.shape[1],
+        torch.from_numpy(grammar_bitmask[:0]).dtype,
     )
-    sorted_bitmask = sorted_bitmask_tensor.numpy()
+    sorted_bitmask = bitmask_buffer.np[: logits.shape[0]]
+    sorted_bitmask.fill(-1)
     mask_stride = grammar_bitmask.shape[0] // len(
         grammar_output.structured_output_request_ids
     )
@@ -159,8 +161,9 @@ def apply_grammar_bitmask(
             out_indices.extend(range(logit_idx, logit_idx + num_rows))
         cumulative_index += mask_stride
 
-    # Copy async to device.
-    grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
+    # Copy async to the input batch's persistent device buffer.
+    grammar_bitmask = bitmask_buffer.copy_to_gpu(logits.shape[0])
+    input_batch.record_grammar_bitmask_copy()
 
     # If the length of out indices and the logits have the same shape
     # we don't need to pass indices to the kernel,

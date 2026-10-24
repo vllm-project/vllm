@@ -27,7 +27,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
-from vllm.v1.utils import copy_slice
+from vllm.v1.utils import CpuGpuBuffer, copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable, SlotMappingMode
 
 
@@ -120,6 +120,9 @@ class InputBatch:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.vocab_size = vocab_size
+        self._max_num_grammar_bitmask_rows = max_num_reqs * (1 + num_spec_tokens)
+        self._grammar_bitmask_buffer: CpuGpuBuffer | None = None
+        self._grammar_bitmask_copy_event: torch.Event | None = None
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -316,6 +319,38 @@ class InputBatch:
         # None elements should only be present transiently
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
+
+    def get_grammar_bitmask_buffer(
+        self, num_rows: int, num_columns: int, dtype: torch.dtype
+    ) -> CpuGpuBuffer:
+        """Return persistent staging storage for structured-output bitmasks."""
+        if self._grammar_bitmask_copy_event is not None:
+            # A non-blocking H2D copy does not protect a reused pinned source
+            # tensor from a host write in the next decode step.
+            self._grammar_bitmask_copy_event.synchronize()
+
+        buffer = self._grammar_bitmask_buffer
+        if (
+            buffer is None
+            or buffer.cpu.dtype != dtype
+            or buffer.cpu.shape[1] != num_columns
+            or buffer.cpu.shape[0] < num_rows
+        ):
+            self._grammar_bitmask_buffer = buffer = CpuGpuBuffer(
+                max(self._max_num_grammar_bitmask_rows, num_rows),
+                num_columns,
+                dtype=dtype,
+                device=self.device,
+            )
+        return buffer
+
+    def record_grammar_bitmask_copy(self) -> None:
+        """Record when the current-stream H2D copy releases its CPU staging."""
+        if self.device.type != "cuda":
+            return
+        if self._grammar_bitmask_copy_event is None:
+            self._grammar_bitmask_copy_event = torch.cuda.Event()
+        self._grammar_bitmask_copy_event.record()
 
     def _register_add_request(self, request: "CachedRequestState") -> int:
         """Track add-request operations for logits processors.
