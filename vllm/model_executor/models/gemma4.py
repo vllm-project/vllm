@@ -25,6 +25,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.utils import getattr_iter
@@ -218,6 +219,37 @@ def gemma4_fused_routing_kernel_triton(
     return weights, ids
 
 
+def gemma4_routing_function_xpu(
+    gating_output: torch.Tensor,
+    topk: int,
+    per_expert_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gemma4 routing on XPU with the SYCL ``topk_softmax`` from vllm-xpu-kernels.
+
+    ``topk_softmax(renormalize=True)`` is the Gemma4 routing (softmax over all
+    experts, top-k, renormalize over the selected k); the per-expert scale is
+    then folded into the weights. Returns float32 weights and int32 expert ids
+    of shape ``[num_tokens, topk]``, like the Triton and torch paths.
+    """
+    num_tokens = gating_output.shape[0]
+    topk_weights = torch.empty(
+        num_tokens, topk, dtype=torch.float32, device=gating_output.device
+    )
+    topk_ids = torch.empty(
+        num_tokens, topk, dtype=torch.int32, device=gating_output.device
+    )
+    token_expert_indices = torch.empty_like(topk_ids)
+    ops.topk_softmax(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output.contiguous(),
+        True,
+    )
+    topk_weights.mul_(per_expert_scale[topk_ids].to(torch.float32))
+    return topk_weights, topk_ids
+
+
 def gemma4_routing_function_torch(
     gating_output: torch.Tensor,
     topk: int,
@@ -346,7 +378,11 @@ class Gemma4Router(nn.Module):
         local) so that torch.func.functional_call parameter substitution
         reaches the routing function correctly.
         """
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.is_xpu():
+            return gemma4_routing_function_xpu(
+                gating_output, topk, self.per_expert_scale
+            )
+        if current_platform.is_cuda_alike():
             return gemma4_fused_routing_kernel_triton(
                 gating_output, topk, self.per_expert_scale
             )
