@@ -40,6 +40,12 @@
     "BUILD_NIXL": {
       "default": "false"
     },
+    "NIXL_PLUGINS": {
+      "default": "UCX"
+    },
+    "LIBFABRIC_REF": {
+      "default": "v2.7.0"
+    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
