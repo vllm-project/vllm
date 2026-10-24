@@ -11,6 +11,10 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.verify_extension import (
+    LinearAttnVerifyExtension,
+    create_linear_attn_verify_extension,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -127,6 +131,10 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
 
+    # Set when the speculative method registered a non-chain verify; the Mamba2
+    # layer hands it the decode rows instead of running its own kernels.
+    verify_extension: LinearAttnVerifyExtension | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -157,6 +165,16 @@ class Mamba2AttentionMetadataBuilder(
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
+        self.verify_extension: LinearAttnVerifyExtension | None = (
+            create_linear_attn_verify_extension(vllm_config)
+            if self.use_spec_decode
+            else None
+        )
+        if self.verify_extension is not None and vllm_config.cache_config.use_replayssm:
+            raise ValueError(
+                "ReplaySSM keeps no per-row Mamba2 states, which a speculative "
+                "method's verify extension needs"
+            )
 
     def build(
         self,
@@ -225,6 +243,7 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
             checkpoint_meta=checkpoint_meta,
+            verify_extension=self.verify_extension,
         )
 
     def update_block_table(
