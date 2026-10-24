@@ -148,7 +148,7 @@ docker run -it \
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. For **pipeline parallel**, we support it on single node with mp as the backend. For example, a reference execution like following:
 
 ```bash
-vllm serve facebook/opt-13b \
+vllm serve Qwen/Qwen3-0.6B \
      --dtype=bfloat16 \
      --max_model_len=1024 \
      --distributed-executor-backend=mp \

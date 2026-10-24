@@ -16,7 +16,7 @@ To install `tensorizer`, run `pip install vllm[tensorizer]`.
 To load a model using Tensorizer, the model first needs to be serialized by
 Tensorizer. [The example script](../../../examples/features/tensorize_vllm_model.py) takes care of this process.
 
-Let's walk through a basic example by serializing `facebook/opt-125m` using the script, and then loading it for inference.
+Let's walk through a basic example by serializing `Qwen/Qwen3-0.6B` using the script, and then loading it for inference.
 
 ## Serializing a vLLM model with Tensorizer
 
@@ -26,20 +26,20 @@ and how to use it properly in great detail, and we'll use one of the examples fr
 
 ```bash
 python examples/features/tensorize_vllm_model.py \
-   --model facebook/opt-125m \
+   --model Qwen/Qwen3-0.6B \
    serialize \
    --serialized-directory s3://my-bucket \
    --suffix v1
 ```
 
-This saves the model tensors at `s3://my-bucket/vllm/facebook/opt-125m/v1`.
+This saves the model tensors at `s3://my-bucket/vllm/Qwen/Qwen3-0.6B/v1`.
 
 ## Serving the model using Tensorizer
 
 Once the model is serialized where you want it, you can load the model using `vllm serve` or the `LLM` entrypoint. You can pass the directory where you saved the model to the `model` argument for `LLM()` and `vllm serve`. For example, to serve the tensorized model saved previously, you'd do:
 
 ```bash
-vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
+vllm serve s3://my-bucket/vllm/Qwen/Qwen3-0.6B/v1 \
     --load-format tensorizer
 ```
 
@@ -48,7 +48,7 @@ Or, with `LLM()`:
 ```python
 from vllm import LLM
 llm = LLM(
-    "s3://my-bucket/vllm/facebook/opt-125m/v1", 
+    "s3://my-bucket/vllm/Qwen/Qwen3-0.6B/v1", 
     load_format="tensorizer",
 )
 ```
@@ -61,7 +61,7 @@ As an example, CPU concurrency can be limited when serializing with `tensorizer`
 
 ```bash
 python examples/features/tensorize_vllm_model.py \
-   --model facebook/opt-125m \
+   --model Qwen/Qwen3-0.6B \
    serialize \
    --serialized-directory s3://my-bucket \
    --serialization-kwargs '{"limit_cpu_concurrency": 2}' \
@@ -71,7 +71,7 @@ python examples/features/tensorize_vllm_model.py \
 As an example when customizing the loading process via `TensorDeserializer`, you could limit the number of concurrency readers during deserialization with the `num_readers` parameter in the initializer via `model_loader_extra_config` like so:
 
 ```bash
-vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
+vllm serve s3://my-bucket/vllm/Qwen/Qwen3-0.6B/v1 \
     --load-format tensorizer \
     --model-loader-extra-config '{"deserialization_kwargs": {"num_readers": 2}}'
 ```
@@ -81,7 +81,7 @@ Or with `LLM()`:
 ```python
 from vllm import LLM
 llm = LLM(
-    "s3://my-bucket/vllm/facebook/opt-125m/v1", 
+    "s3://my-bucket/vllm/Qwen/Qwen3-0.6B/v1", 
     load_format="tensorizer",
     model_loader_extra_config={"deserialization_kwargs": {"num_readers": 2}},
 )
