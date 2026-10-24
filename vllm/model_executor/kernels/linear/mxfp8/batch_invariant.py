@@ -176,13 +176,12 @@ class BatchInvariantMxfp8LinearKernel(Mxfp8LinearKernel):
         scale = layer.weight_scale.data[:n, : k // 32].contiguous()
         if envs.VLLM_BI_WO_FP8_EPILOGUE and _uses_tensor_core((n, k)):
             # DeepGEMM's packed-UE8M0 weight scales for a pre-quantized input
-            # in DeepGEMM's layout (wo_a's FP8 epilogue). A buffer, so a
-            # layerwise reload refreshes it in place.
-            dg_scale = _deep_gemm_weight_scale(scale, n, k)
-            if isinstance(getattr(layer, "weight_scale_dg", None), torch.Tensor):
-                layer.weight_scale_dg.copy_(dg_scale)
-            else:
-                layer.register_buffer("weight_scale_dg", dg_scale, persistent=False)
+            # in DeepGEMM's layout (wo_a's FP8 epilogue). A Parameter: layerwise
+            # reload copies parameters back in place but skips non-persistent
+            # buffers, which would leave stale scales after a weight update.
+            layer.weight_scale_dg = Parameter(
+                _deep_gemm_weight_scale(scale, n, k), requires_grad=False
+            )
         if _uses_tensor_core((n, k)):
             scale = swizzle_mxfp8_scale(scale, M=n, K=k)
         layer.weight_scale = Parameter(scale, requires_grad=False)
