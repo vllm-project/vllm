@@ -1790,6 +1790,7 @@ def test_nccl_trainer_init_dispatches_subclass_hooks_only_on_sender(rank):
             ("payload", Trainer, init_info),
             ("endpoint", engine, init_info),
         ]
+        assert client.last_init_info is not None
         assert client.last_init_info["master_port"] == 29501
         assert engine.model_update_group is group
     else:
