@@ -3265,7 +3265,8 @@ class AsyncEngineArgs(EngineArgs):
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
             "You can also set a separate log level for request JSON body "
-            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
+            "via `--logging-config.request_body_log_level` (default: DEBUG, "
+            "or `VLLM_REQUEST_BODY_LOG_LEVEL` if set).",
         )
         current_platform.pre_register_and_update(parser)
         return parser

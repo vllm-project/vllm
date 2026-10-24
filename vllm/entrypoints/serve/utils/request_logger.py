@@ -18,8 +18,18 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(self, *, max_log_len: int | None) -> None:
+    def __init__(
+        self,
+        *,
+        max_log_len: int | None,
+        request_body_log_level: str | None = None,
+    ) -> None:
         self.max_log_len = max_log_len
+        self.request_body_log_level = (
+            envs.VLLM_REQUEST_BODY_LOG_LEVEL
+            if request_body_log_level is None
+            else request_body_log_level
+        )
 
         if not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
@@ -72,12 +82,12 @@ class RequestLogger:
 
     def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
         try:
-            level = logging.getLevelNamesMapping()[envs.VLLM_REQUEST_BODY_LOG_LEVEL]
+            level = logging.getLevelNamesMapping()[self.request_body_log_level]
         except KeyError:
             logger.warning_once(
                 "Invalid logging level for request content: %s. "
                 "Request JSON body will not be logged.",
-                envs.VLLM_REQUEST_BODY_LOG_LEVEL,
+                self.request_body_log_level,
             )
             return
 

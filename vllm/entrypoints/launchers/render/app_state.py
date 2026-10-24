@@ -41,7 +41,10 @@ async def init_render_app_state(
     )
 
     if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
+        request_logger = RequestLogger(
+            max_log_len=args.max_log_len,
+            request_body_log_level=vllm_config.logging_config.request_body_log_level,
+        )
     else:
         request_logger = None
 

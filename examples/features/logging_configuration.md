@@ -15,7 +15,8 @@ For `vllm serve`, configure logging with CLI arguments:
 ## CLI logging configuration
 
 `--logging-config` accepts a JSON object. Its fields are `log_level`,
-`formatter`, `configure_logging`, and `pylogging_config_file`. For example:
+`request_body_log_level`, `formatter`, `configure_logging`, and
+`pylogging_config_file`. For example:
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
@@ -28,6 +29,22 @@ Fields can also be set individually with dotted arguments:
 vllm serve mistralai/Mistral-7B-v0.1 \
     --logging-config.log_level DEBUG
 ```
+
+With `--enable-log-requests`, set the level of request JSON body records
+independently of other request details:
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 --enable-log-requests \
+    --logging-config.request_body_log_level INFO
+```
+
+The default body level is `DEBUG`. Logger and handler thresholds still apply,
+including those set in a custom `pylogging_config_file`. `--max-log-len`
+continues to limit the logged body length. The same setting works for
+`vllm launch render`.
+Unrecognized body levels produce a warning and skip body logging, matching
+the legacy environment setting. Python logging aliases such as `WARN` and
+`FATAL` are also accepted.
 
 The built-in `text` formatter is selected by default. To emit one JSON object
 per vLLM and Uvicorn log record, select the built-in `json` formatter:
@@ -71,9 +88,10 @@ schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-
 ## Environment variables
 
 The CLI configuration is recommended for `vllm serve`. The legacy
-`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_LEVEL`, and
-`VLLM_LOGGING_CONFIG_PATH` variables remain supported as defaults. The default
-handler's stream, prefix, and color are currently controlled only through
+`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_LEVEL`,
+`VLLM_LOGGING_CONFIG_PATH`, and `VLLM_REQUEST_BODY_LOG_LEVEL` variables remain
+supported as defaults. The default handler's stream, prefix, and color are
+currently controlled only through
 environment variables. Values from a YAML `--config` file or the command line
 override those defaults. See [Environment Variables](https://docs.vllm.ai/en/latest/configuration/env_vars/)
 for those settings.

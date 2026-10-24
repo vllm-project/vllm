@@ -28,6 +28,16 @@ class LoggingConfig:
     )
     """Log level used when no custom logging configuration is provided."""
 
+    request_body_log_level: str = Field(
+        default_factory=lambda: envs.VLLM_REQUEST_BODY_LOG_LEVEL
+    )
+    """Level for request JSON body records when request logging is enabled.
+
+    Defaults to ``VLLM_REQUEST_BODY_LOG_LEVEL`` (``DEBUG`` if unset).
+    Logger and handler thresholds still determine whether records are emitted.
+    Invalid levels warn and skip body logging, matching the legacy setting.
+    """
+
     formatter: LogFormatter = "text"
     """Formatter used by the built-in logging configuration."""
 
