@@ -788,8 +788,17 @@ def test_update_states_request_finished(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(model_runner, dist_init):
+@pytest.mark.parametrize("replayssm_async", [None, False, True])
+def test_update_states_request_resumed(model_runner, dist_init, replayssm_async):
     req_id = "req_0"
+
+    if replayssm_async is not None:
+        model_runner._use_flashinfer_replayssm = True
+        model_runner.use_async_scheduling = replayssm_async
+        model_runner.num_spec_tokens = 3
+        model_runner._replayssm_accepted_tokens = torch.ones(
+            model_runner.max_num_reqs + 1, dtype=torch.int32, device=DEVICE_TYPE
+        )
 
     # new req
     scheduler_output = _schedule_new_request(req_id)
@@ -797,6 +806,14 @@ def test_update_states_request_resumed(model_runner, dist_init):
     model_runner._update_states(scheduler_output)
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
+
+    if replayssm_async is not None:
+        previous = dict(model_runner.input_batch.req_id_to_index)
+        if replayssm_async:
+            model_runner.input_batch.prev_req_id_to_index = previous
+        else:
+            model_runner._replayssm_sync_req_indices = previous
+        model_runner._replayssm_accepted_tokens[previous[req_id]] = 3
 
     # unschedule req
     scheduler_output = SchedulerOutput(
@@ -813,6 +830,12 @@ def test_update_states_request_resumed(model_runner, dist_init):
     model_runner._update_states(scheduler_output)
     assert _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
+
+    if replayssm_async is not None:
+        # remove_request clears the shared map. The pause must save the scalar
+        # first, independently of the snapshot row used by the next batch.
+        assert req_id not in previous
+        model_runner._replayssm_accepted_tokens[0] = 4
 
     # resume req
     cached_req_data = CachedRequestData(
@@ -842,6 +865,15 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
+
+    if replayssm_async is not None:
+        model_runner._compute_prev_positions(model_runner.input_batch.num_reqs)
+        model_runner.prev_positions.copy_to_gpu()
+        model_runner._restore_replayssm_accepted_tokens()
+        index = model_runner.input_batch.req_id_to_index[req_id]
+        assert model_runner.num_accepted_tokens.gpu[index].item() == 3
+        assert torch.all(model_runner.num_accepted_tokens.gpu[1:] == 1)
+        assert not model_runner._replayssm_paused_accepted_tokens
 
 
 def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
