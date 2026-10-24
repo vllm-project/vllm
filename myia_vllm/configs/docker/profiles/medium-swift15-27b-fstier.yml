@@ -127,7 +127,7 @@ services:
           --enable-chunked-prefill \
           --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-8} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
-          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
+          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"TouchOnHitFsTier","module_path":"lru_fs_tier","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
           --enable-prefix-caching \
           --prefix-caching-hash-algo sha256 \
           --prefix-match-unit 16 \
@@ -163,7 +163,7 @@ services:
       - VLLM_USE_DEEP_GEMM=0
       - OMP_NUM_THREADS=1
       - VLLM_LOG_DIR=/logs
-      - PYTHONPATH=/middleware
+      - PYTHONPATH=/middleware:/opt/kv_tier
       - VLLM_MAX_REQUEST_BODY_BYTES=0
       - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
       - VLLM_FLOAT32_MATMUL_PRECISION=high
@@ -187,6 +187,7 @@ services:
       - vllm-compile-cache-swift15-27b-v0320:/root/.cache/vllm
       - ${VLLM_LOG_PATH:-./../../../logs}:/logs
       - ./../../../middleware:/middleware:ro
+      - ./../../../kv_tier:/opt/kv_tier:ro
     ports:
       - "${VLLM_PORT_GLM:-5002}:${VLLM_PORT_GLM:-5002}"
     healthcheck:
