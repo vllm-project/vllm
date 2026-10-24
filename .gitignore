@@ -298,3 +298,8 @@ _phase1_cache/
 
 # po-2025 seat runtime logs (thermal logger/governor, grows unbounded)
 myia_vllm/_logs/
+
+# Agent scratch (fleet convention): never tracked
+.tmp/
+scratchpad_*
+C:Users*
