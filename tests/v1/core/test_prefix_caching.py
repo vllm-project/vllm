@@ -5352,6 +5352,48 @@ def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
     assert (blocks is not None) is fits
 
 
+@pytest.mark.parametrize(
+    ("prompt_len", "num_decode_step_tokens", "num_lookahead_tokens", "fits"),
+    [(64, 0, 0, True), (62, 0, 3, False), (57, 4, 3, True), (58, 4, 3, False)],
+)
+def test_full_sequence_admission_counts_the_first_decode_step(
+    prompt_len, num_decode_step_tokens, num_lookahead_tokens, fits
+):
+    """The last prefill chunk allocates the lookahead slots and the decode step
+    after it adds its own tokens, so a prompt that fits its blocks only without
+    them must not be admitted: it would be preempted after its prefill ran."""
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=5,  # Four usable blocks after the null block.
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config, max_model_len=128, enable_caching=True, hash_block_size=block_size
+    )
+    request = make_request("lookahead", list(range(prompt_len)), block_size, sha256)
+
+    blocks = manager.allocate_slots(
+        request,
+        block_size,
+        num_lookahead_tokens=num_lookahead_tokens,
+        full_sequence_must_fit=True,
+        num_decode_step_tokens=num_decode_step_tokens,
+    )
+
+    assert (blocks is not None) is fits
+
+
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     """The cap only loosens the SWA group; a prompt that exceeds the
     full-attention pool capacity must still be rejected."""

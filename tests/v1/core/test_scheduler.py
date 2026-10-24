@@ -1918,6 +1918,66 @@ def test_schedule_order(enable_chunked_prefill: bool):
         assert len(scheduler_output1.scheduled_new_reqs) == 1
 
 
+def test_full_sequence_admission_covers_the_first_decode_step():
+    """With ngram k=3, the decode step after a 30-token prefill needs 30 + 1 + 3
+    slots: a third 16-token block, while two decodes hold all but two. Admitted
+    on its prompt alone, the request is preempted on that step after its prefill
+    ran, and again after every re-admission."""
+    scheduler = create_scheduler(
+        block_size=16,
+        num_blocks=7,  # Six usable blocks after the null block.
+        max_num_batched_tokens=64,
+        max_model_len=96,
+        enable_prefix_caching=False,
+        num_speculative_tokens=3,
+    )
+
+    def step():
+        output = scheduler.schedule()
+        req_ids = list(output.num_scheduled_tokens)
+        sampled = [
+            scheduler.requests[req_id].num_computed_tokens
+            >= scheduler.requests[req_id].num_tokens
+            for req_id in req_ids
+        ]
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+                sampled_token_ids=[[7] if s else [] for s in sampled],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(req_ids, [[7, 7, 7] if s else [] for s in sampled])
+        )
+
+    # Two decodes take two blocks each and keep room in their last block.
+    for request in create_requests(
+        num_requests=2, num_tokens=17, max_tokens=12, req_ids=["d0", "d1"]
+    ):
+        scheduler.add_request(request)
+    while any(
+        r.num_computed_tokens < r.num_prompt_tokens for r in scheduler.requests.values()
+    ):
+        step()
+
+    [request] = create_requests(
+        num_requests=1, num_tokens=30, max_tokens=4, req_ids=["v"]
+    )
+    scheduler.add_request(request)
+    for _ in range(100):
+        if not scheduler.requests:
+            break
+        step()
+
+    assert not scheduler.requests
+    assert request.num_preemptions == 0
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.

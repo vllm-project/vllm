@@ -389,6 +389,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        num_decode_step_tokens: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -423,6 +424,10 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            num_decode_step_tokens: Main-model tokens of the decode step right
+                after the prefill (the sampled token plus the draft tokens).
+                Only the full-sequence gate counts them, so that a request
+                whose first decode step needs another block is not admitted.
 
         Blocks layout:
         ```
@@ -527,8 +532,14 @@ class KVCacheManager:
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
         if full_sequence_must_fit:
-            # First check and fail if the full request sequence won't fit.
-            full_num_tokens = min(request.num_tokens, self.max_model_len)
+            # First check and fail if the full request sequence won't fit,
+            # through the decode step after its prefill and its lookahead.
+            full_num_tokens_main_model = min(
+                request.num_tokens + num_decode_step_tokens, self.max_model_len
+            )
+            full_num_tokens = min(
+                full_num_tokens_main_model + num_lookahead_tokens, self.max_model_len
+            )
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
                 request_id=request.request_id,
@@ -537,7 +548,7 @@ class KVCacheManager:
                 num_encoder_tokens=num_encoder_tokens,
                 total_computed_tokens=total_computed_tokens,
                 num_local_computed_tokens=num_local_computed_tokens,
-                num_tokens_main_model=full_num_tokens,
+                num_tokens_main_model=full_num_tokens_main_model,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
             )
