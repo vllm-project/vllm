@@ -186,6 +186,8 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         prefix_text = self.model_tokenizer.decode(token_ids[start:num_fed])
         end = len(token_ids)
         text = self.model_tokenizer.decode(token_ids[start:end])
+        # Hold back only an unfinished trailing character. For utf-8 this backs off
+        # at most 3 tokens.
         while end > num_fed and text.endswith("\ufffd"):
             end -= 1
             text = self.model_tokenizer.decode(token_ids[start:end])
