@@ -766,8 +766,8 @@ _STATE_FAILED = False
 
 
 def _is_pcie_only_group(tp: GroupCoordinator) -> bool:
-    """Lamport polls peer stores, which needs NVLink beyond two GPUs."""
-    if tp.world_size <= 2 or not all(in_the_same_node_as(tp.cpu_group)):
+    """Lamport polls peer stores, which hangs over PCIe P2P (#51405)."""
+    if tp.world_size < 2 or not all(in_the_same_node_as(tp.cpu_group)):
         return False
     physical_device_id = current_platform.visible_device_id_to_physical_device_id(
         tp.device.index
@@ -790,9 +790,9 @@ def initialize_lamport_rs_conv(
         return
     if _is_pcie_only_group(get_tp_group()):
         logger.warning_once(
-            "Lamport fused collective is disabled because it's not supported "
-            "on more than two PCIe-only GPUs; using the NCCL fallback. To "
-            "silence this warning, set LAMPORT_RS_SCONV=0."
+            "Lamport fused collective is disabled because the TP GPUs are "
+            "not fully NVLink-connected; using the NCCL fallback. To silence "
+            "this warning, set LAMPORT_RS_SCONV=0."
         )
         return
     try:
