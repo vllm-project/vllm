@@ -161,3 +161,23 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+def test_streaming_single_delta_preserves_content_after_reasoning():
+    """A combined delta must not leave post-thinking content buffered."""
+    output = f"{START_REASONING}Think first{END_REASONING}Final answer"
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser: ReasoningParser = parser_cls(tokenizer)
+
+    delta_message = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=output,
+        delta_text=output,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+    )
+
+    assert delta_message is not None
+    assert delta_message.reasoning == "Think first"
+    assert delta_message.content == "Final answer"
