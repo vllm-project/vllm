@@ -319,6 +319,23 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
+    # AITER's CK 2-stage MoE kernels derive a single batch-wide dynamic
+    # per-tensor activation scale with no way to exclude any row (see
+    # ROCm/aiter#6275 and ROCm/aiter#6565). A token whose every topk slot is
+    # masked to -1 (HIP-graph padding, see grouped_topk_router.py) never
+    # enters AITER's sorted token list, so its slice of the post-stage1
+    # intermediate buffer is left uninitialized and still feeds that
+    # reduction -- whatever garbage is there can corrupt every other
+    # token's output. Route padding tokens to a real (zero-weight) expert
+    # so AITER actually writes something for the row, and zero their input
+    # so what gets written is finite and harmless.
+    is_padding_row = (topk_ids < 0).all(dim=-1, keepdim=True)
+    sentinel_expert_id = (
+        (expert_mask >= 0).to(torch.int32).argmax() if expert_mask is not None else 0
+    )
+    hidden_states = torch.where(is_padding_row, 0, hidden_states)
+    topk_ids = torch.where(is_padding_row, sentinel_expert_id, topk_ids)
+
     # w8a8 per-channel quantization
     if (
         quant_config.per_act_token_quant
