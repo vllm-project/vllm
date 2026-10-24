@@ -217,6 +217,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
+    VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER_FP8_INPUT: bool = False
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
@@ -1674,6 +1675,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "1"))
+    ),
+    # Let the FlashInfer/DeepGEMM FP8 block-scale GEMM on SM90 accept
+    # activations pre-quantized by the preceding RMSNorm (fused norm + 1x128
+    # FP8 quant) instead of quantizing BF16 input itself.
+    "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER_FP8_INPUT": lambda: bool(
+        int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER_FP8_INPUT", "0"))
     ),
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
