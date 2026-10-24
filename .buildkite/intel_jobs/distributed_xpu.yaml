@@ -31,11 +31,11 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_comm_ops.py -k "not test_multi_process_tensor_parallel and not test_multi_process_pipeline_parallel" || true &&
-    pytest -v -s distributed/test_cpu_all_reduce.py || true &&
-    pytest -v -s distributed/test_shm_broadcast.py || true &&
-    pytest -v -s distributed/test_shm_buffer.py || true &&
-    pytest -v -s distributed/test_shm_storage.py || true'
+    pytest --continue-on-collection-errors -v -s distributed/test_comm_ops.py -k "not test_multi_process_tensor_parallel and not test_multi_process_pipeline_parallel" || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_cpu_all_reduce.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_shm_broadcast.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_shm_buffer.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_shm_storage.py || true'
 - label: ':nvidia: (L4) Sharded RDT Weight Transfer'
   key: sharded-rdt-weight-transfer
   device: intel_gpu
@@ -65,9 +65,9 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_sharded_rdt_plan.py || true &&
-    pytest -v -s distributed/test_sharded_rdt_producer.py || true &&
-    pytest -v -s distributed/test_sharded_rdt_trainer.py || true'
+    pytest --continue-on-collection-errors -v -s distributed/test_sharded_rdt_plan.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_sharded_rdt_producer.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_sharded_rdt_trainer.py || true'
 - label: ':nvidia: (L4) Distributed DP Basic'
   key: distributed-dp-tests-2-gpus
   device: intel_gpu
@@ -98,7 +98,7 @@ steps:
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -111,12 +111,12 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py || true &&
-    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py || true &&
-    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py || true &&
-    DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py || true &&
-    pytest -v -s v1/e2e/general/test_sharded_sampling.py || true &&
-    pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py || true'
+    TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_async_llm_dp.py || true &&
+    TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_eagle_dp.py || true &&
+    TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_external_lb_dp.py || true &&
+    DP_SIZE=2 pytest --continue-on-collection-errors -v -s entrypoints/launchers/api_server/test_multi_api_servers.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/general/test_sharded_sampling.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/test_sharded_sampling.py || true'
 - label: ':nvidia: (L4) Distributed Compile + RPC'
   key: distributed-compile-rpc-tests-2-gpus
   device: intel_gpu
@@ -143,7 +143,7 @@ steps:
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
@@ -153,8 +153,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s entrypoints/llm/test_collective_rpc.py || true &&
-    pytest -v -s ./compile/test_wrapper.py || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/llm/test_collective_rpc.py || true &&
+    pytest --continue-on-collection-errors -v -s ./compile/test_wrapper.py || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
   key: distributed-torchrun-shutdown-tests-2-gpus-2
   device: intel_gpu
@@ -182,7 +182,7 @@ steps:
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
@@ -195,9 +195,9 @@ steps:
     cd tests &&
     VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep \"Same node test passed\" || true &&
     VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep \"Same node test passed\" || true &&
-    CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown || true &&
-    pytest -v -s v1/worker/test_worker_memory_snapshot.py || true'
-- label: ':nvidia: (L4) Distributed Torchrun + Examples'
+    CUDA_VISIBLE_DEVICES=0,1 pytest --continue-on-collection-errors -v -s v1/shutdown || true &&
+    pytest --continue-on-collection-errors -v -s v1/worker/test_worker_memory_snapshot.py || true'
+- label: ':nvidia: (L4) [Nightly] Distributed Torchrun + Examples'
   key: distributed-torchrun-examples-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
@@ -243,7 +243,7 @@ steps:
     PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true'
-- label: ':nvidia: (L4) Distributed DP Extended'
+- label: ':nvidia: (L4) [Nightly] Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
@@ -285,16 +285,16 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py || true &&
-    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py || true &&
-    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py || true &&
-    TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py || true &&
-    TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py || true &&
-    TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py || true &&
-    pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
-    pytest -v -s distributed/test_utils.py --deselect="tests/distributed/test_utils.py::test_cuda_device_count_stateless" || true &&
-    pytest -v -s distributed/test_engram_dp_shard.py || true'
-- label: ':nvidia: (L4) Distributed Compile + Comm'
+    TP_SIZE=2 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_async_llm_dp.py || true &&
+    TP_SIZE=2 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_eagle_dp.py || true &&
+    TP_SIZE=2 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_external_lb_dp.py || true &&
+    TP_SIZE=1 DP_SIZE=4 pytest --continue-on-collection-errors -v -s v1/distributed/test_dense_dp_world_size.py || true &&
+    TP_SIZE=1 DP_SIZE=4 pytest --continue-on-collection-errors -v -s v1/distributed/test_internal_lb_dp.py || true &&
+    TP_SIZE=1 DP_SIZE=4 pytest --continue-on-collection-errors -v -s v1/distributed/test_hybrid_lb_dp.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_utils.py --deselect="tests/distributed/test_utils.py::test_cuda_device_count_stateless" || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_engram_dp_shard.py || true'
+- label: ':nvidia: (L4) [Nightly] Distributed Compile + Comm'
   key: distributed-compile-comm-4-gpus
   device: intel_gpu
   timeout_in_minutes: 70
@@ -329,10 +329,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s distributed/test_events.py || true &&
-    pytest -v -s distributed/test_symm_mem_allreduce.py || true &&
-    pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
-- label: ':nvidia: (H100) Distributed Features'
+    pytest --continue-on-collection-errors -v -s distributed/test_events.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_symm_mem_allreduce.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
+- label: ':nvidia: (H100) [Nightly] Distributed Features'
   key: distributed-tests-2xh100-2xmi300
   device: intel_gpu
   timeout_in_minutes: 30
@@ -363,7 +363,7 @@ steps:
     VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[ray]" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[http]" || true &&
     VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
-- label: ':nvidia: (B200) Distributed'
+- label: ':nvidia: (B200) [Nightly] Distributed'
   key: distributed-tests-2xb200
   device: intel_gpu
   num_devices: 2
@@ -387,11 +387,11 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py || true &&
-    pytest -v -s tests/distributed/test_context_parallel.py || true &&
-    pytest -v -s tests/distributed/test_nccl_symm_mem.py || true &&
-    pytest -v -s tests/v1/distributed/test_dbo.py || true &&
-    pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
+    'pytest --continue-on-collection-errors -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py || true &&
+    pytest --continue-on-collection-errors -v -s tests/distributed/test_context_parallel.py || true &&
+    pytest --continue-on-collection-errors -v -s tests/distributed/test_nccl_symm_mem.py || true &&
+    pytest --continue-on-collection-errors -v -s tests/v1/distributed/test_dbo.py || true &&
+    pytest --continue-on-collection-errors -v -s tests/distributed/test_mnnvl_alltoall.py || true'
 - label: ':nvidia: (B200) GEMM-RS/AR'
   key: gemm-rs-ar-2xb200
   device: intel_gpu
@@ -417,8 +417,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest -v -s tests/kernels/test_gemm_rs_ar.py || true'
-- label: ':nvidia: (L4) Pipeline + Context Parallelism'
+    'pytest --continue-on-collection-errors -v -s tests/kernels/test_gemm_rs_ar.py || true'
+- label: ':nvidia: (L4) [Nightly] Pipeline + Context Parallelism'
   key: pipeline-context-parallelism-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
@@ -453,10 +453,10 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_pp_cudagraph.py || true &&
-    pytest -v -s distributed/test_pipeline_parallel.py || true &&
-    pytest -v -s v1/distributed/test_pp_dp_v2.py || true'
-- label: ':nvidia: (L4) RayExecutorV2'
+    pytest --continue-on-collection-errors -v -s distributed/test_pp_cudagraph.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_pipeline_parallel.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/distributed/test_pp_dp_v2.py || true'
+- label: ':nvidia: (L4) [Nightly] RayExecutorV2'
   key: rayexecutorv2-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
@@ -497,4 +497,31 @@ steps:
     cd tests &&
     pytest -v -s distributed/test_ray_v2_executor.py -k "not test_ray_v2_executor_pg and not test_ray_v2_bundle_indices_env and not test_ray_v2_single_node_generation_with_pg and not test_ray_v2_invalid_bundle_indices" || true &&
     pytest -v -s distributed/test_pipeline_parallel.py -k ray || true &&
-    TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k ray || true'
+    TARGET_TEST_SUITE=L4 pytest --continue-on-collection-errors -v -s basic_correctness/models/test_basic_correctness.py -k ray || true'
+- label: ':nvidia: (L4) Distributed Preload'
+  key: preload-2-gpus
+  device: intel_gpu
+  timeout_in_minutes: 15
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_weight_cache.py -m distributed(num_gpus=2) || true'

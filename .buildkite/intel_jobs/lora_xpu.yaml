@@ -18,6 +18,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
   source_file_dependencies:
@@ -27,8 +28,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwenvl.py::test_qwen2vl_multiple_lora_types"|| true'
-- label: ':nvidia: (L4) LoRA TP (Distributed) %N'
+    pytest --continue-on-collection-errors -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwenvl.py::test_qwen2vl_multiple_lora_types"|| true'
+- label: ':nvidia: (L4) [Nightly] LoRA TP (Distributed) %N'
   key: lora-tp-distributed
   device: intel_gpu
   timeout_in_minutes: 25
@@ -67,11 +68,11 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True || true &&
     cd tests &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py --deselect="tests/lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4_fully_sharded_loras" --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py --deselect="tests/lora/test_qwen3_with_multi_loras.py::test_multi_loras_with_tp_sync" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py -k "not test_olmoe_lora_tp2 and not test_olmoe_lora_tp4" --deselect="tests/lora/test_olmoe_tp.py::test_olmoe_lora" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp2" --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp4" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp || true'
+    test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest --continue-on-collection-errors -v -s -x lora/test_chatglm3_tp.py --deselect="tests/lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest --continue-on-collection-errors -v -s -x lora/test_llama_tp.py --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4_fully_sharded_loras" --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest --continue-on-collection-errors -v -s -x lora/test_qwen3_with_multi_loras.py --deselect="tests/lora/test_qwen3_with_multi_loras.py::test_multi_loras_with_tp_sync" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest --continue-on-collection-errors -v -s -x lora/test_olmoe_tp.py -k "not test_olmoe_lora_tp2 and not test_olmoe_lora_tp4" --deselect="tests/lora/test_olmoe_tp.py::test_olmoe_lora" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest --continue-on-collection-errors -v -s -x lora/test_gptoss_tp.py || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest --continue-on-collection-errors -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest --continue-on-collection-errors -v -s -x lora/test_gemma4_tp.py --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp2" --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp4" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest --continue-on-collection-errors -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp || true'
