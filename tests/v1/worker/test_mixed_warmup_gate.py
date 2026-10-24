@@ -80,7 +80,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         speculative_config=SimpleNamespace(),
     )
 
-    def run_steps(model_runner, execute, sample, greedy=False):
+    def run_steps(model_runner, execute, sample, greedy=False, seeded=False):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
         if fail_warmup:
@@ -104,8 +104,14 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
     monkeypatch.setattr(
         warmup,
         "_warmup_kernels",
-        lambda runner, execute, sample, greedy=False: rounds.append(greedy),
+        lambda runner, execute, sample, greedy=False, seeded=False: rounds.append(
+            greedy
+        ),
     )
+    # Ensure fused sampling is inactive so we isolate the speculative rounds.
+    monkeypatch.setattr(warmup, "flashinfer_sampler_supported", lambda: False)
+    monkeypatch.setattr(warmup, "xpu_sampler_supported", lambda: False)
+
     for is_last_pp_rank in (False, True):
         rounds.clear()
         runner = SimpleNamespace(
@@ -116,6 +122,56 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
                 if is_last_pp_rank and speculative
                 else None
             ),
+            is_pooling_model=False,
+            sampler=None,
         )
         warmup.warmup_kernels(runner, _fail, _fail)
         assert rounds == ([False, True] if speculative else [False])
+
+
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+@pytest.mark.parametrize("fused_backend", ["flashinfer", "xpu", None])
+def test_warmup_kernels_dispatches_seeded_pass_across_all_pp_ranks(
+    monkeypatch, is_last_pp_rank, fused_backend
+):
+    """Verify that warmup_kernels dispatches a matching seeded pass (#54425)
+    across all PP ranks (last and non-last alike) to prevent pipeline parallel
+    deadlocks (#62129)."""
+    passes_called = []
+
+    def mock_warmup_kernels(model_runner, execute, sample, greedy=False, seeded=False):
+        passes_called.append({"greedy": greedy, "seeded": seeded})
+
+    monkeypatch.setattr(warmup, "_warmup_kernels", mock_warmup_kernels)
+    monkeypatch.setattr(
+        warmup, "flashinfer_sampler_supported", lambda: fused_backend == "flashinfer"
+    )
+    monkeypatch.setattr(warmup, "xpu_sampler_supported", lambda: fused_backend == "xpu")
+
+    sampler = (
+        SimpleNamespace(
+            use_flashinfer=(fused_backend == "flashinfer"),
+            use_xpu_sampler=(fused_backend == "xpu"),
+        )
+        if is_last_pp_rank
+        else None
+    )
+    runner = SimpleNamespace(
+        is_pooling_model=False,
+        adaptive_verification=None,
+        rejection_sampler=None,
+        speculative_config=None,
+        sampler=sampler,
+    )
+
+    warmup.warmup_kernels(runner, _fail, _fail)
+
+    if fused_backend in ("flashinfer", "xpu"):
+        assert passes_called == [
+            {"greedy": False, "seeded": False},
+            {"greedy": False, "seeded": True},
+        ]
+    else:
+        assert passes_called == [
+            {"greedy": False, "seeded": False},
+        ]

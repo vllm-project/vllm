@@ -26,6 +26,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    flashinfer_sampler_supported,
+    xpu_sampler_supported,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -245,6 +249,26 @@ def warmup_kernels(
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
+        if not model_runner.is_pooling_model:
+            # All PP ranks must execute matching warmup passes to avoid pipeline
+            # deadlocks (#62129). Non-last PP ranks have sampler=None, so gate on
+            # backend support rather than rank-local self.sampler.
+            sampler = getattr(model_runner, "sampler", None)
+            use_fused_sampler = (
+                (sampler.use_flashinfer or sampler.use_xpu_sampler)
+                if sampler is not None
+                else (flashinfer_sampler_supported() or xpu_sampler_supported())
+            )
+            if use_fused_sampler:
+                # Seeded requests bypass fused sampling (e.g. FlashInfer), falling back
+                # to PyTorch-native top-k/top-p and Gumbel sampling (#54425).
+                _warmup_kernels(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                    seeded=True,
+                )
+
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
@@ -257,6 +281,7 @@ def _warmup_kernels(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
     greedy: bool = False,
+    seeded: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -329,11 +354,14 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = (
-            SamplingParams(temperature=0)
-            if greedy
-            else SamplingParams.for_sampler_warmup()
-        )
+        if greedy:
+            sampling_params = SamplingParams(temperature=0)
+        elif seeded:
+            sampling_params = SamplingParams(
+                temperature=0.9, top_p=0.9, top_k=50, seed=42
+            )
+        else:
+            sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
