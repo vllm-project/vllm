@@ -124,6 +124,9 @@ steps:
       timeout_in_minutes: 115
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+      - pytest -v -s models/multimodal/processing/test_mistral3.py::test_pixtral_patch_embed_preserves_image_order_and_strides models/multimodal/test_mimo_v2_omni.py
 
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Accuracy Eval (Small Models)"
   device: h200_35gb

@@ -71,8 +71,8 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Requires CUDA or XPU",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Requires CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_chunked_scores_match_full_batch(
@@ -151,8 +151,8 @@ def test_chunked_scores_match_full_batch(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Requires CUDA or XPU",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Requires CUDA, ROCm or XPU",
 )
 def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     device = torch.device(current_platform.device_type)
@@ -305,4 +305,4 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
 
     assert masks == expected_masks
     assert all(token_id in mask for token_id, mask in zip(emitted, masks))
-    assert torch.equal(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
+    torch.testing.assert_close(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)

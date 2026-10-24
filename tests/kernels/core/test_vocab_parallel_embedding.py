@@ -24,8 +24,8 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 requires_cuda = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="the fused vocab-parallel embedding kernel is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="the fused vocab-parallel embedding kernel requires CUDA or ROCm",
 )
 
 

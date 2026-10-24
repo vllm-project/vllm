@@ -714,7 +714,7 @@ def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
 def test_real_vllm_config_caps_widest_ngram_decode_batch():
     """Real config post-init preserves the default capture ceiling."""
     model_config = ModelConfig(model="facebook/opt-125m")

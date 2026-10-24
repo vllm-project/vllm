@@ -70,8 +70,8 @@ def _worker_fused_ar_norm(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUDA required",
+    not current_platform.is_cuda_alike(),
+    reason="CUDA or ROCm required",
 )
 # world_size=1 exercises the TP==1 identity branch on a single GPU; >1 exercises
 # the all_reduce + GemmaRMSNorm equivalence (flashinfer kernel or fallback).

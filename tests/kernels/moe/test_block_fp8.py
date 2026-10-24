@@ -47,11 +47,6 @@ dg_available = has_deep_gemm()
 device_capability = current_platform.get_device_capability()
 if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
 
 vllm_config = VllmConfig()
 
@@ -195,7 +190,7 @@ def test_w8a8_block_fp8_fused_moe(
         N,
         K,
         dtype,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_act_token_quant=False,
         block_shape=block_size,
     )
@@ -273,7 +268,7 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
     a = torch.randn((M, K), dtype=torch.bfloat16) / 10
     score = torch.randn((M, E), dtype=torch.bfloat16)
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, torch.bfloat16, current_platform.fp8_dtype(), block_shape=block_size
     )
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_s,
@@ -326,7 +321,7 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
     w1, w2, quant_config = make_test_quant_config(
-        E, N, K, dtype, quant_dtype=torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, dtype, quant_dtype=current_platform.fp8_dtype(), block_shape=block_size
     )
 
     local_e = E // ep_size
@@ -391,7 +386,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         N,
         K,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=block_size,
     )
@@ -513,7 +508,7 @@ def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
         inter_full,
         hidden,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=ckpt_block,
     )

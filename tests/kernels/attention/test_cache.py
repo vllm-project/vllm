@@ -8,7 +8,10 @@ import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+    scaled_dequantize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
@@ -912,8 +915,6 @@ def test_concat_and_cache_ds_mla(
     seed: int,
     device: str,
 ) -> None:
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     if kv_lora_rank != 512:
@@ -943,6 +944,7 @@ def test_concat_and_cache_ds_mla(
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
+    _, fp8_max = get_fp8_min_max()
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
@@ -966,7 +968,7 @@ def test_concat_and_cache_ds_mla(
             manual_max = abs(tile_data_float[0])
             for j in range(1, 128):
                 manual_max = max(manual_max, abs(tile_data_float[j]))
-            raw_scale = torch.clamp(manual_max / 448.0, min=1e-4)
+            raw_scale = torch.clamp(manual_max / fp8_max, min=1e-4)
             tile_scale = torch.exp2(torch.ceil(torch.log2(raw_scale)))
 
             ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
@@ -1018,8 +1020,6 @@ def test_concat_and_cache_ds_mla(
 def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
     """NoPE matches zero RoPE, clears valid tails, and preserves unused slots."""
     dtype = torch.bfloat16
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     num_tokens, num_blocks = 3, 2
     set_random_seed(0)
     torch.set_default_device(device)

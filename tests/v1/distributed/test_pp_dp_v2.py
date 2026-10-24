@@ -4,7 +4,7 @@
 
 Covers the interaction between the V2 model runner's PP sampled-token
 broadcast and the DP per-step all-reduce across a few concurrency
-regimes. Requires 4 GPUs (DP=2, PP=2, TP=1) on CUDA.
+regimes. Requires 4 GPUs (DP=2, PP=2, TP=1) on CUDA or ROCm.
 """
 
 import asyncio
@@ -25,8 +25,8 @@ PROMPT = "This is a test of data parallel and pipeline parallel together"
 
 
 def _gpu_skip_reason() -> str | None:
-    if not current_platform.is_cuda():
-        return "requires CUDA"
+    if not current_platform.is_cuda_alike():
+        return "requires CUDA or ROCm"
     n = current_platform.device_count()
     if n < 4:
         return f"requires 4 GPUs, got {n}"

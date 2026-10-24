@@ -83,7 +83,9 @@ def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
     "batch,num_groups,group_size,block_size,taps",

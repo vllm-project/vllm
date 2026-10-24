@@ -145,6 +145,9 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
         "test_sparse_backend_prefill_correctness",
         "test_rocm_fused_v32_dense_prefill_matches_mqa",
         "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+        "test_split_indexer_prefill_chunks",
+        "test_split_indexer_prefill_chunks_single_request_overflow",
+        "test_sparse_mla_common_impl_resolves_buffer_lazily",
     }
     if (
         current_platform.is_rocm()

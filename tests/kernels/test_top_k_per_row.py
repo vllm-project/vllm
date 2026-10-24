@@ -53,7 +53,14 @@ COOPERATIVE_TOPK_BACKEND = pytest.param(
         reason="cooperative_topk requires SM90+",
     ),
 )
-WORKSPACE_TOPK_BACKENDS = ["persistent_topk", COOPERATIVE_TOPK_BACKEND]
+PERSISTENT_TOPK_BACKEND = pytest.param(
+    "persistent_topk",
+    marks=pytest.mark.skipif(
+        not current_platform.is_cuda(),
+        reason="persistent_topk requires CUDA",
+    ),
+)
+WORKSPACE_TOPK_BACKENDS = [PERSISTENT_TOPK_BACKEND, COOPERATIVE_TOPK_BACKEND]
 TOPK_BACKENDS = ["top_k_per_row_decode", *WORKSPACE_TOPK_BACKENDS]
 
 
@@ -246,7 +253,9 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
@@ -357,7 +366,9 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.parametrize("next_n", NEXT_N)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -374,7 +385,9 @@ def test_top_k_per_row_decode(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
@@ -1502,7 +1515,9 @@ def test_workspace_topk_stress(backend: str) -> None:
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("backend", TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @torch.inference_mode()
@@ -2250,7 +2265,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
     pytest.param(
         "per_row",
         marks=pytest.mark.skipif(
-            not current_platform.is_cuda(), reason="requires CUDA"
+            not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
         ),
     ),
     "torch",
@@ -2339,7 +2354,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
         pytest.param(
             "per_row",
             marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="requires CUDA"
+                not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
             ),
         ),
         pytest.param(

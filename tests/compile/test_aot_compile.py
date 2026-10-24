@@ -197,8 +197,8 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not is_torch_equal_or_newer("2.10.0"),
-    reason="requires CUDA and torch 2.10",
+    not current_platform.is_cuda_alike() or not is_torch_equal_or_newer("2.10.0"),
+    reason="requires CUDA/ROCm and torch 2.10",
 )
 def test_sparse_activation_standalone_aot_preserves_dependencies(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path

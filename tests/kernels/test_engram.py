@@ -51,7 +51,9 @@ def _reference_engram_post_wkv(
     return (h + gate.unsqueeze(-1) * value.unsqueeze(-2)).to(hidden_states.dtype)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "num_tokens,num_kv_tokens,hc_mult,dim,tp_size,tp_rank,use_mask",
     [
@@ -251,7 +253,9 @@ def _reference_hashes(
     return torch.tensor(result, dtype=torch.int32)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("query_len", [1, 17, 257])
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided_slots", [False, True])
@@ -433,7 +437,9 @@ def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
     return [out[a:b] for a, b in zip(starts, starts[1:])]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("runner", ["v2_window_only", "v1_prompt_window_plus_cache"])
 @pytest.mark.parametrize("capture", [False, True])
 def test_lookback_window_reproduces_single_instance(runner, capture):
@@ -503,7 +509,9 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
     assert not torch.equal(unseeded[0][0], reference[0][len(prompts[0])])
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("pcp", [False, True])
 def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
@@ -699,7 +707,9 @@ def test_engram_head_shards_reconstruct_checkpoint(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_lookup_reuses_jit_across_token_shapes():
     """Runtime token counts and launch grids must share one JIT variant."""
     layer = _make_embedding(cpu_offload=False)
@@ -827,7 +837,9 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [None, False])
 def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     """Default offload uses pinned storage and the given stream; False uses HBM."""
@@ -897,7 +909,9 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         assert streams == [main]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "cpu_offload,delay",
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
@@ -1080,7 +1094,9 @@ def _engram_tp_worker(rank, tp_size, port):
 
 
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_head_collectives_survive_graph_breaks():
     """All-gather preserves head order and local SP tokens across graph replay."""
     from vllm.utils.network_utils import get_open_port

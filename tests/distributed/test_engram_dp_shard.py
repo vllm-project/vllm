@@ -739,7 +739,9 @@ def _check_prefetch_replay(
         torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
     """Check all storage modes with one process launch per TP/DP topology."""

@@ -95,7 +95,9 @@ def _run(
     return sampled[roi_req].clone(), num_sampled[roi_req].clone()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     # Overflow triggers when roi_req * LOGITS_PER_REQ * VOCAB_SIZE (target
     # logits) or req_state_idx * NUM_SPECULATIVE_STEPS * VOCAB_SIZE (draft

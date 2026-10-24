@@ -42,7 +42,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
     [
@@ -158,7 +158,7 @@ def test_dspark_context_kv_matches_query_insert(
         torch.testing.assert_close(kv, before, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("kv_mxfp8", [False, True])
 def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
     """PCP SWA writes must preserve the established CUDA cache bytes."""
@@ -460,7 +460,7 @@ def _mxfp8_record_reference(
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
@@ -582,7 +582,7 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
 
@@ -865,7 +865,7 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     assert cos > (0.98 if extra is not None else 0.999)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("store_fp8", [False, True])
 def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
@@ -944,7 +944,7 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
@@ -1327,7 +1327,7 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
         local.metadata = builder.build(0, local.common)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
 def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
     """Pairs split across PCP chunks and decode owner changes keep exact latents."""

@@ -240,7 +240,9 @@ def test_non_pinned_cpu_tensor(device):
     assert gpu_view[9, 9] == 198
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only sync check.")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA/ROCm-only sync check."
+)
 def test_non_uva_buffer_copies_without_stream_sync():
     buffer = buffer_utils.NonUvaBuffer(8, torch.int32)
     buffer.np[:] = np.arange(8)

@@ -588,7 +588,9 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         assert set(actual[row].cpu().tolist()) == set(expected[row].cpu().tolist())
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     device = torch.device("cuda")
     seq_len = 8
@@ -663,7 +665,9 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("block_stride_rows", [None, 12])
 def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_stride_rows: int | None,
@@ -701,7 +705,9 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 # Include padded single-tile compaction and the multi-tile atomic fallback.
@@ -766,7 +772,9 @@ def test_dcp_filter_compaction_matches_reference(
         assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
@@ -839,7 +847,9 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("is_lse_base_on_e", [True, False])
 def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     out = torch.full((1, 1, 4), float("nan"), device="cuda")
@@ -862,7 +872,9 @@ def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     torch.testing.assert_close(final_lse, torch.zeros_like(final_lse))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 def test_decode_topk_pads_surplus_with_negative_one():
     """When a row's valid length < topk the top-k kernel must pad the surplus
     slots with -1: the DCP merge (`topk_indices >= 0`) and

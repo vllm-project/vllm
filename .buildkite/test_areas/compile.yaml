@@ -261,8 +261,7 @@ steps:
         VLLM_ROCM_USE_AITER_CUSTOM_AR=1
         pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
         -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
-        not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
-        ROCM_AITER_MLA'
+        not +quant_fp8 and DeepSeek-Coder and ROCM_AITER_MLA'
 
 - label: ":nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep"
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100

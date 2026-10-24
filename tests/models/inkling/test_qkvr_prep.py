@@ -4,11 +4,20 @@
 import pytest
 import torch
 
-import vllm.models.inkling.nvidia.ops.sconv as sconv
-from vllm.models.inkling.nvidia.ops import qkvr_prep
 from vllm.platforms import current_platform
 
-_cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
+if current_platform.is_rocm():
+    import vllm.models.inkling.amd.ops.sconv as sconv
+    from vllm.models.inkling.amd.ops import qkvr_prep
+else:
+    import vllm.models.inkling.nvidia.ops.sconv as sconv
+    from vllm.models.inkling.nvidia.ops import qkvr_prep
+
+_cap = (
+    current_platform.get_device_capability()
+    if current_platform.is_cuda_alike()
+    else None
+)
 
 
 def _make_inputs(*, is_local: bool, tokens: int = 33, tp_size: int = 4):
@@ -154,7 +163,7 @@ def _reference(args):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     ("is_local", "tokens", "tp_size"),
@@ -183,7 +192,7 @@ def test_qkvr_prep_matches_reference(is_local, tokens, tp_size):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize("tokens", [9, 128])
 @torch.inference_mode()
@@ -204,7 +213,7 @@ def test_qkvr_log_scaling_preserves_bf16_norm_output(tokens):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize("tokens", [9, 128])
 @torch.inference_mode()

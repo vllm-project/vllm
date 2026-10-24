@@ -70,10 +70,6 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="This platform supports e4m3fnuz, not e4m3fn.",
-)
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,column_major_scales,tma_aligned_scales,seed",
     itertools.product(

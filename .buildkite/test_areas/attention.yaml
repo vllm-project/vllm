@@ -33,8 +33,8 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
       commands:
-      - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py
-      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
+      - pytest -v -s v1/attention --ignore=v1/attention/test_gdn_aiter_flydsl.py --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_gdn_aiter_flydsl.py v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (B200) V1 Attention"
   key: v1-attention-b200
@@ -67,8 +67,8 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
       commands:
-      - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
-      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py
+      - pytest -v -s v1/attention --ignore=v1/attention/test_gdn_aiter_flydsl.py --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_gdn_aiter_flydsl.py v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
   key: flashinfer-nvfp4-xqa-dgx-spark
