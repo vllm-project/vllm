@@ -32,6 +32,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import yaml
 from rich.console import Console
@@ -50,6 +51,7 @@ from common import (
     is_mla_backend,
 )
 
+from vllm.config.cache import CacheDType
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -549,6 +551,11 @@ def main():
     # Benchmark settings
     parser.add_argument("--device", default="cuda:0", help="Device")
     parser.add_argument(
+        "--model",
+        default="meta-llama/Meta-Llama-3-8B",
+        help="Model whose config the backend is built with",
+    )
+    parser.add_argument(
         "--warmup-ms",
         type=int,
         default=None,
@@ -561,8 +568,8 @@ def main():
     parser.add_argument(
         "--kv-cache-dtype",
         default="auto",
-        choices=["auto", "fp8"],
-        help="KV cache dtype: auto or fp8",
+        choices=get_args(CacheDType),
+        help="KV cache dtype",
     )
     parser.add_argument(
         "--cuda-graphs",
@@ -894,6 +901,7 @@ def main():
                         device=args.device,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
+                        model=args.model,
                         use_cuda_graphs=args.cuda_graphs,
                         prefill_backend="fa4",
                     )
@@ -964,6 +972,7 @@ def main():
                         device=args.device,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
+                        model=args.model,
                         use_cuda_graphs=args.cuda_graphs,
                         ncu_profile=args.ncu_profile,
                         warmup_ms=args.warmup_ms,
@@ -1208,6 +1217,7 @@ def main():
                             device=args.device,
                             max_model_len=getattr(args, "max_model_len", None),
                             kv_cache_dtype=args.kv_cache_dtype,
+                            model=args.model,
                             profile_memory=args.profile_memory,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
@@ -1353,6 +1363,7 @@ def main():
                             device=args.device,
                             profile_memory=args.profile_memory,
                             kv_cache_dtype=args.kv_cache_dtype,
+                            model=args.model,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
                             warmup_ms=args.warmup_ms,
