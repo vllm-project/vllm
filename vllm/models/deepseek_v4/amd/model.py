@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import os
 import typing
 import weakref
 from collections.abc import Callable, Iterable
@@ -13,7 +14,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -32,6 +33,8 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    FusedTopKBiasRouter,
+    _forward_allows_fused_shared_append,
     fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -85,7 +88,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.utils.torch_utils import aux_stream, current_stream
 from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
@@ -221,13 +224,87 @@ def _validate_heterogeneous_routes(
         )
 
 
+def _heterogeneous_shared_expert_min_tokens() -> int:
+    """Minimum batch size (rows entering the MoE) for the fused
+    heterogeneous FHMoE path.
+
+    At or above this size the fused call wins: the fixed overhead of
+    AITER's mixed FP8/MXFP4 kernel variants amortizes, and fusing removes
+    the separate shared-expert launches and aux-stream syncs from the
+    launch-bound prefill chain. Below it those variants regress, so the
+    stock overlapped separate shared expert runs instead. 0 restores the
+    always-fused behavior.
+    """
+    raw = os.environ.get("VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS", "16")
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning_once(
+            "VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS must be an integer, got "
+            "%r; using 16.",
+            raw,
+        )
+        return 16
+    if value < 0:
+        logger.warning_once(
+            "VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS must be >= 0, got %d; using 0.",
+            value,
+        )
+        return 0
+    return value
+
+
 def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_config
     quant_config = vllm_config.quant_config
     parallel_config = vllm_config.parallel_config
     reasons: list[str] = []
+    mono_prefill_fusion_armed = False
+
+    # Kill switch shared with the FP8->MXFP4 requant fusion: the env var
+    # restores the separate shared-expert path everywhere (V4 and V4.1
+    # target layers, and the DSpark draft layers).
+    if os.environ.get("VLLM_DISABLE_FUSED_SHARED_EXPERTS", "0") == "1":
+        logger.warning_once(
+            "Fused shared experts (heterogeneous native-FP8) is DISABLED (env override)"
+        )
+        return False
+
+    # Mono decode kernels hard-require the stock 384/6 structure (separate
+    # shared experts, no expert-table remap), so the hetero construction
+    # coexists with --monokernel only because every module mono reads stays
+    # stock: the appended shared slot sits past the routed experts and is
+    # sliced off for the mono weight views (mono_stock_moe_views). The
+    # fused hetero FHMoE engages only for prefill-shaped batches (the
+    # router's prefill-only append plus
+    # VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS), so mono decode steps and the
+    # fusion never share a step. VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1
+    # disables the fusion under --monokernel.
+    if vllm_config.kernel_config.monokernel:
+        if os.environ.get("VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO", "0") == "1":
+            logger.info_once(
+                "Fused shared experts (heterogeneous native-FP8) yields to "
+                "--monokernel decode (VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1; "
+                "the mono kernels require the stock 384/6 MoE structure)"
+            )
+            return False
+        # Armed: fall through to the full eligibility chain below. A
+        # blocked chain logs "ARMED but unavailable" instead of the
+        # engagement warning, which fires only on success. The AITER
+        # coordination flag the chain checks next is defaulted ON by the
+        # platform for supported checkpoints (rocm.py
+        # _maybe_default_fused_shared_experts).
+        mono_prefill_fusion_armed = True
 
     if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+        if mono_prefill_fusion_armed:
+            logger.warning_once(
+                "prefill fusion above mono ARMED but unavailable: "
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is off (the "
+                "AITER router/kernel coordination flag the heterogeneous "
+                "construction requires). Continuing with the stock "
+                "shared-expert path above mono (decode stays mono)."
+            )
         return False
     if not on_gfx950():
         reasons.append("the device is not gfx950")
@@ -235,8 +312,6 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("expert parallelism is enabled")
     if parallel_config.enable_eplb:
         reasons.append("EPLB is enabled")
-    if parallel_config.tensor_parallel_size != 8:
-        reasons.append("tensor parallelism is not 8")
     if parallel_config.data_parallel_size != 1:
         reasons.append("data parallelism is enabled")
     if parallel_config.prefill_context_parallel_size != 1:
@@ -245,32 +320,94 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("the MoE backend is not AITER")
     if vllm_config.model_config.dtype != torch.bfloat16:
         reasons.append("the model dtype is not BF16")
-    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(1):
-        reasons.append(
-            "AITER lacks CSV-backed DSV4 I384 heterogeneous shared-expert support"
-        )
 
-    expected_model = {
+    # Two supported shape classes:
+    #   dsv4        - big DeepSeek-V4: TP8, block-128 FP8 shared experts,
+    #                 AITER's CSV-backed DSV4 I384 FHMoE contract, no
+    #                 intermediate padding.
+    #   dsv41_flash - DeepSeek-V4.1-Flash: TP4, block-32 FP8 shared experts,
+    #                 AITER's default-config two-stage FHMoE path with the
+    #                 MXFP4 128-multiple intermediate padding (576 -> 640 per
+    #                 rank). The shared expert keeps its native FP8 weights:
+    #                 no FP8->MXFP4 requant, so neither the routed-expert nor
+    #                 the shared-expert numerics change.
+    common_model: dict[str, typing.Any] = {
         "n_routed_experts": 384,
         "num_experts_per_tok": 6,
         "n_shared_experts": 1,
-        "hidden_size": 7168,
-        "moe_intermediate_size": 3072,
         "hidden_act": "silu",
-        "expert_dtype": "fp4",
         "topk_method": "noaux_tc",
     }
-    for name, expected in expected_model.items():
-        if getattr(config, name, None) != expected:
-            reasons.append(f"{name} is not {expected!r}")
+    shape_classes = {
+        "dsv4": {
+            "hidden_size": 7168,
+            "moe_intermediate_size": 3072,
+        },
+        "dsv41_flash": {
+            "hidden_size": 5120,
+            "moe_intermediate_size": 2304,
+        },
+    }
+    shape_class = None
+    for name, sizes in shape_classes.items():
+        if all(
+            getattr(config, key, None) == value
+            for key, value in {**common_model, **sizes}.items()
+        ):
+            shape_class = name
+            break
+    if shape_class is None:
+        reasons.append("the model is not a supported heterogeneous shared-expert shape")
+    elif shape_class == "dsv4":
+        if getattr(config, "expert_dtype", None) != "fp4":
+            reasons.append("expert_dtype is not 'fp4'")
+        if parallel_config.tensor_parallel_size != 8:
+            reasons.append("tensor parallelism is not 8")
+        if rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(1) is not True:
+            reasons.append(
+                "AITER lacks CSV-backed DSV4 I384 heterogeneous shared-expert support"
+            )
+    else:  # dsv41_flash
+        # Flash's text config does not carry expert_dtype; the quant config
+        # resolves the same default ("fp4") for FP4-expert checkpoints.
+        # Each early rejection skips the AITER shape probe: there is no
+        # point asking about configurations already turned down.
+        tp_size = parallel_config.tensor_parallel_size
+        moe_intermediate = shape_classes[shape_class]["moe_intermediate_size"]
+        if getattr(config, "expert_dtype", "fp4") != "fp4":
+            reasons.append("expert_dtype is not 'fp4'")
+        elif tp_size != 4:
+            reasons.append("tensor parallelism is not 4")
+        elif moe_intermediate % tp_size != 0:
+            reasons.append("the MoE intermediate size does not shard evenly")
+        else:
+            inter_per_rank = moe_intermediate // tp_size
+            padded_inter = (inter_per_rank + 127) // 128 * 128
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            if (
+                rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert_shape(
+                    max_tokens,
+                    shape_classes[shape_class]["hidden_size"],
+                    padded_inter,
+                    common_model["n_routed_experts"] + 1,
+                    common_model["num_experts_per_tok"] + 1,
+                    padded_inter - inter_per_rank,
+                )
+                is not True
+            ):
+                reasons.append(
+                    "AITER's default FHMoE configs do not cover this "
+                    "DeepSeek-V4.1-Flash TP4 shape"
+                )
 
     if quant_config is None or quant_config.get_name() != "deepseek_v4_fp8":
         reasons.append("the DeepSeek V4 FP8 quantization config is not active")
     else:
         if getattr(quant_config, "moe_quant_algo", "").upper() == "NVFP4":
             reasons.append("routed experts use NVFP4")
-        if getattr(quant_config, "weight_block_size", None) != [128, 128]:
-            reasons.append("shared experts are not block-128 FP8")
+        expected_block = [32, 32] if shape_class == "dsv41_flash" else [128, 128]
+        if getattr(quant_config, "weight_block_size", None) != expected_block:
+            reasons.append(f"shared experts are not block-{expected_block[0]} FP8")
         if not getattr(quant_config, "is_checkpoint_fp8_serialized", False):
             reasons.append("shared experts are not serialized as FP8")
         if not getattr(quant_config, "is_scale_e8m0", False):
@@ -291,6 +428,13 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("weight offloading is enabled")
 
     if reasons:
+        if mono_prefill_fusion_armed:
+            logger.warning_once(
+                "prefill fusion above mono ARMED but unavailable: %s. "
+                "Continuing with the stock shared-expert path above mono "
+                "(decode stays mono).",
+                "; ".join(reasons),
+            )
         logger.debug_once(
             "DeepSeek V4 heterogeneous shared-expert fusion is unavailable: %s. "
             "Continuing with the existing shared-expert path.",
@@ -298,11 +442,68 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         )
         return False
 
-    logger.info_once(
-        "Using AITER DeepSeek V4 heterogeneous MoE for CSV-covered MoE input "
-        "rows (M) per invocation (native intermediate width 384)."
-    )
+    if shape_class == "dsv41_flash":
+        if mono_prefill_fusion_armed:
+            logger.warning_once(
+                "prefill fusion above mono engaged: the heterogeneous fused "
+                "shared experts (native-FP8) run above --monokernel decode "
+                "(prefill-shaped batches of >= %d tokens only; mono decode "
+                "keeps the stock 384/6 kernels on decode-only steps; disable "
+                "with VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1)",
+                _heterogeneous_shared_expert_min_tokens(),
+            )
+        logger.warning_once(
+            "Fused shared experts (heterogeneous native-FP8) is ENABLED for "
+            "this DeepSeek-V4.1-Flash checkpoint (AITER FHMoE; the shared "
+            "expert keeps its native FP8 block-32 weights - no requant). "
+            "Fused execution engages for prefill batches of >= %d tokens "
+            "(VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS); decode forwards and "
+            "smaller batches keep the overlapped separate shared expert",
+            _heterogeneous_shared_expert_min_tokens(),
+        )
+    else:
+        logger.info_once(
+            "Using AITER DeepSeek V4 heterogeneous MoE for CSV-covered MoE "
+            "input rows (M) per invocation (native intermediate width 384)."
+        )
     return True
+
+
+def _shared_expert_block_scales(linear: nn.Module) -> torch.Tensor:
+    """Block-32 scale tensor for a shared-expert linear, (N // 32, K // 32).
+
+    Two checkpoint formats reach the heterogeneous prepare step:
+    * DeepSeek V4 (Fp8Config) keeps ``weight_scale_inv`` block scales
+      ((N // B, K // B) with B in {32, 128}).
+    * DeepSeek V4.1-Flash routes the shared linears through ModelOpt's
+      kMxfp8Static scheme: the checkpoint's (32, 32) block scales are
+      expanded at load time into the per-row MXFP8 layout (N, K // 32),
+      and the linear kernel's post-load folds them back to
+      (N // 32, K // 32). Both landings are accepted here.
+    """
+    scale = getattr(linear, "weight_scale_inv", None)
+    if scale is not None:
+        return scale
+    scale = linear.weight_scale
+    if scale.ndim != 2:
+        raise ValueError(f"Unexpected shared-expert scale layout {tuple(scale.shape)}.")
+    rows, k_blocks = scale.shape
+    out_rows = linear.weight.shape[0]
+    if rows == out_rows // 32:
+        # already folded by the linear kernel's post-load
+        return scale
+    if rows == out_rows:
+        # per-row MXFP8 layout: fold, verifying the block uniformity the
+        # load-time expansion guarantees
+        blocks = scale.view(rows // 32, 32, k_blocks)
+        folded = blocks[:, 0, :].contiguous()
+        if not torch.equal(blocks, folded.unsqueeze(1).expand_as(blocks)):
+            raise ValueError(
+                "The shared-expert per-row scales are not uniform inside "
+                "their 32-row blocks; the block scales cannot be recovered."
+            )
+        return folded
+    raise ValueError(f"Unexpected shared-expert scale layout {tuple(scale.shape)}.")
 
 
 @torch.no_grad()
@@ -312,8 +513,17 @@ def _prepare_native_fp8_shared_expert(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     intermediate_size: int,
+    padded_intermediate_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Expand native block-128 E8M0 scales to FHMoE's 1x32 layout."""
+    """Expand native block-128/block-32 E8M0 scales to FHMoE's 1x32 layout.
+
+    ``intermediate_size`` is the true per-rank shared-expert width (half the
+    ``gate_up_proj`` rows). ``padded_intermediate_size`` is the allocated
+    routed-expert width (MXFP4 rounds it up to a 128 multiple, e.g.
+    DeepSeek-V4.1-Flash TP4: 576 -> 640); when larger, the gate/up slabs and
+    the W2 columns are zero-padded so the shared expert matches the FHMoE
+    contract, which sizes it off the routed tensors.
+    """
     if w13.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
         raise ValueError("Heterogeneous shared-expert weights must be FP8 E4M3.")
     hidden_size = w13.shape[1]
@@ -337,21 +547,72 @@ def _prepare_native_fp8_shared_expert(
 
     w13_scale = scale_bytes(w13_scale)
     w2_scale = scale_bytes(w2_scale)
-    expected_w13_scale = (2 * intermediate_size // 128, hidden_size // 128)
-    expected_w2_scale = (hidden_size // 128, intermediate_size // 128)
-    if tuple(w13_scale.shape) != expected_w13_scale:
+
+    block = None
+    for candidate in (128, 32):
+        if tuple(w13_scale.shape) == (
+            2 * intermediate_size // candidate,
+            hidden_size // candidate,
+        ) and tuple(w2_scale.shape) == (
+            hidden_size // candidate,
+            intermediate_size // candidate,
+        ):
+            block = candidate
+            break
+    if block is None:
         raise ValueError(
-            f"Expected shared W13 scale shape {expected_w13_scale}, got "
-            f"{tuple(w13_scale.shape)}."
-        )
-    if tuple(w2_scale.shape) != expected_w2_scale:
-        raise ValueError(
-            f"Expected shared W2 scale shape {expected_w2_scale}, got "
-            f"{tuple(w2_scale.shape)}."
+            f"Shared-expert scales {tuple(w13_scale.shape)}/"
+            f"{tuple(w2_scale.shape)} match neither the block-128 nor the "
+            "block-32 FP8 layout."
         )
 
-    w13_scale = w13_scale.repeat_interleave(128, dim=0).repeat_interleave(4, dim=1)
-    w2_scale = w2_scale.repeat_interleave(128, dim=0).repeat_interleave(4, dim=1)
+    if block == 128:
+        w13_scale = w13_scale.repeat_interleave(128, dim=0).repeat_interleave(4, dim=1)
+        w2_scale = w2_scale.repeat_interleave(128, dim=0).repeat_interleave(4, dim=1)
+    else:
+        # Block-32 scales: rows expand 32x; columns are already 1x32.
+        w13_scale = w13_scale.repeat_interleave(32, dim=0)
+        w2_scale = w2_scale.repeat_interleave(32, dim=0)
+
+    if padded_intermediate_size is None:
+        padded_intermediate_size = intermediate_size
+    if (
+        padded_intermediate_size < intermediate_size
+        or (padded_intermediate_size - intermediate_size) % 32 != 0
+    ):
+        raise ValueError(
+            f"Padded intermediate size {padded_intermediate_size} is "
+            f"incompatible with intermediate size {intermediate_size}."
+        )
+    if padded_intermediate_size > intermediate_size:
+        # Pad the gate and up slabs separately: the GUGU interleave applied
+        # by shuffle_weight_a16w4 / shuffle_scale_a16w4 splits the rows as
+        # [gate rows; up rows], so a plain bottom append would corrupt the
+        # slab boundaries.
+        padded_w13 = w13.new_zeros((2, padded_intermediate_size, hidden_size))
+        padded_w13[:, :intermediate_size].copy_(
+            w13.view(2, intermediate_size, hidden_size)
+        )
+        w13 = padded_w13.view(2 * padded_intermediate_size, hidden_size)
+
+        w13_scale_cols = w13_scale.shape[1]
+        padded_w13_scale = w13_scale.new_full(
+            (2, padded_intermediate_size, w13_scale_cols), 0x7F
+        )
+        padded_w13_scale[:, :intermediate_size].copy_(
+            w13_scale.view(2, intermediate_size, w13_scale_cols)
+        )
+        w13_scale = padded_w13_scale.view(2 * padded_intermediate_size, w13_scale_cols)
+
+        padded_w2 = w2.new_zeros((hidden_size, padded_intermediate_size))
+        padded_w2[:, :intermediate_size].copy_(w2)
+        w2 = padded_w2
+
+        padded_w2_scale = w2_scale.new_full(
+            (hidden_size, padded_intermediate_size // 32), 0x7F
+        )
+        padded_w2_scale[:, : intermediate_size // 32].copy_(w2_scale)
+        w2_scale = padded_w2_scale
 
     scale_cols = ((w2_scale.shape[1] + 7) // 8) * 8
     if scale_cols != w2_scale.shape[1]:
@@ -399,6 +660,37 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         self.register_buffer("shared_w2", None, persistent=False)
         self.register_buffer("shared_w1_scale", None, persistent=False)
         self.register_buffer("shared_w2_scale", None, persistent=False)
+        # Decode-path shared-expert overlap (see forward_modular): mirrors
+        # MoERunner's SharedExperts aux-stream execution. The stream and
+        # events are created here, before any CUDA graph capture, and are
+        # reused across captured graphs (the same pattern the stock
+        # SharedExperts runner uses). The separate shared-expert output is
+        # consumed within the same forward call, so a single event pair
+        # stays correct under sequential DBO ubatches as well.
+        self._overlap_stream: torch.cuda.Stream | None = None
+        if torch.cuda.is_available() and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
+            from vllm.utils.torch_utils import aux_stream
+
+            self._overlap_stream = aux_stream()
+            if self._overlap_stream is not None:
+                self._overlap_input_ready = torch.cuda.Event()
+                self._overlap_output_ready = torch.cuda.Event()
+        # Log which decode layout runs below the append threshold;
+        # warning_once dedups across the per-layer instances.
+        if self._overlap_stream is not None:
+            logger.warning_once(
+                "Fused shared experts decode layout: decode forwards and "
+                "batches below VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS run the "
+                "separate shared expert overlapped on the aux stream "
+                "(disable with VLLM_DISABLE_SHARED_EXPERTS_STREAM=1)"
+            )
+        else:
+            logger.warning_once(
+                "Fused shared experts decode layout: decode forwards and "
+                "batches below VLLM_HETERO_SHARED_EXPERT_MIN_TOKENS run the "
+                "separate shared expert serially (overlap unavailable: no "
+                "CUDA, or VLLM_DISABLE_SHARED_EXPERTS_STREAM=1)"
+            )
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         quant_method = super()._get_quant_method(prefix, quant_config, moe_config)
@@ -412,17 +704,52 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         if shared_expert is None:
             raise RuntimeError("The native shared-expert module was released.")
 
+        # The shared module carries the true per-rank width; the routed
+        # buffers carry the MXFP4-rounded width (DeepSeek-V4.1-Flash TP4:
+        # 576 -> 640). FHMoE sizes the shared expert off the routed tensors,
+        # so the shared weights are padded to match (see
+        # _prepare_native_fp8_shared_expert).
+        shared_intermediate = shared_expert.gate_up_proj.weight.shape[0] // 2
+        padded_intermediate = self.w13_weight.shape[1] // 2
+        if padded_intermediate != self.moe_config.intermediate_size_per_partition:
+            raise ValueError(
+                "The routed-expert intermediate width "
+                f"{self.moe_config.intermediate_size_per_partition} does not "
+                f"match the routed weight buffers ({padded_intermediate})."
+            )
         shared = _prepare_native_fp8_shared_expert(
             shared_expert.gate_up_proj.weight,
             shared_expert.down_proj.weight,
-            shared_expert.gate_up_proj.weight_scale_inv,
-            shared_expert.down_proj.weight_scale_inv,
-            self.moe_config.intermediate_size_per_partition,
+            _shared_expert_block_scales(shared_expert.gate_up_proj),
+            _shared_expert_block_scales(shared_expert.down_proj),
+            shared_intermediate,
+            padded_intermediate_size=padded_intermediate,
         )
         self.shared_w1 = rocm_aiter_ops.shuffle_weight_a16w4(shared[0], 16, True)
         self.shared_w2 = rocm_aiter_ops.shuffle_weight_a16w4(shared[1], 16, False)
         self.shared_w1_scale = rocm_aiter_ops.shuffle_scale_a16w4(shared[2], 1, True)
         self.shared_w2_scale = rocm_aiter_ops.shuffle_scale(shared[3])
+
+        # Per-invocation dispatch: the DSV4 I384 contract is served from
+        # AITER's dedicated FHMoE CSV; every other shape (e.g.
+        # DeepSeek-V4.1-Flash TP4) goes through the default-config two-stage
+        # path, probed per M against the scheduler's token budget.
+        model_dim = self.w2_weight.shape[1]
+        experts = self.w13_weight.shape[0]
+        topk = self.moe_config.experts_per_token + 1
+        self._fhmoe_csv_dispatch = (
+            model_dim,
+            padded_intermediate,
+            experts,
+            topk,
+        ) == (7168, 384, 385, 7)
+        self._fhmoe_shape_key = (
+            model_dim,
+            padded_intermediate,
+            experts,
+            topk,
+            padded_intermediate - shared_intermediate,
+        )
 
         self._ensure_moe_quant_config_init()
         quant_config = self.quant_method.moe_quant_config
@@ -449,6 +776,44 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             ),
         )
 
+    def mono_stock_moe_views(self) -> tuple[torch.Tensor, ...]:
+        """The stock 384-expert views of the routed buffers for the mono
+        decode kernels.
+
+        The appended shared slot (index ``shared_expert_id``, past every
+        routed expert) is sliced off; the routed rows and their AITER A8W4
+        layout are exactly the stock ones. The appended slot's own weights
+        are never read by any path -- the fused hetero call passes the
+        native-FP8 shared buffers separately, and the routed-only paths
+        slice the slot off the same way -- so the mono kernels reading
+        these views see byte-identical weights to a non-hetero build.
+        """
+        n = self.shared_expert_id
+        rows = self.w13_weight.shape[0]
+        if n <= 0 or rows != n + 1:
+            raise RuntimeError(
+                "prefill fusion above mono: the routed buffers are not the "
+                "expected (routed + 1 appended) layout (w13 rows "
+                f"{rows}, shared_expert_id {n})"
+            )
+        cols = self.w13_weight_scale.shape[-1]
+        w13_s = (
+            self.w13_weight_scale.reshape(n + 1, -1, cols)[:n]
+            .reshape(-1, cols)
+            .contiguous()
+        )
+        dcols = self.w2_weight_scale.shape[-1]
+        w2_s = (
+            self.w2_weight_scale.reshape(n + 1, -1, dcols)[:n]
+            .reshape(-1, dcols)
+            .contiguous()
+        )
+        w13 = self.w13_weight[:n]
+        w2 = self.w2_weight[:n]
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+        return w13, w13_s, w2, w2_s
+
     def forward_modular(
         self,
         x: torch.Tensor,
@@ -459,6 +824,34 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         if shared_experts is not None or shared_experts_input is not None:
             raise ValueError("The heterogeneous expert owns the shared path.")
+        if (
+            topk_ids.ndim == 2
+            and topk_ids.shape[-1] == self.moe_config.experts_per_token
+        ):
+            # The router skipped the shared-expert append for this
+            # decode-sized batch (below the model's
+            # shared_expert_append_min_tokens): keep the stock decode
+            # layout -- routed experts through the plain kernel with the
+            # separate shared expert overlapped on the aux stream.
+            return self._forward_overlapped_separate(x, topk_weights, topk_ids)
+        if (
+            topk_ids.ndim == 2
+            and topk_ids.shape[-1] == self.moe_config.experts_per_token + 1
+            and not _forward_allows_fused_shared_append()
+        ):
+            # Belt-and-suspenders for the prefill-only policy: a width-(K+1)
+            # route arrived during an unambiguous decode forward (a router
+            # path that appended before consulting the mode gate, or a
+            # caller that appends unconditionally). Slice the appended
+            # shared slot back off and keep the stock decode layout instead
+            # of running the fused hetero FHMoE on decode tokens. The
+            # router renormalizes the routed top-k BEFORE appending, so the
+            # slice is bit-identical to what a no-append router emits.
+            return self._forward_overlapped_separate(
+                x,
+                topk_weights[:, :-1].contiguous(),
+                topk_ids[:, :-1].contiguous(),
+            )
         _validate_heterogeneous_routes(
             topk_weights,
             topk_ids,
@@ -475,7 +868,16 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         ):
             raise RuntimeError("Heterogeneous shared weights were not prepared.")
 
-        if _use_heterogeneous_fhmoe(x.shape[0]):
+        if self._fhmoe_csv_dispatch:
+            use_fhmoe = _use_heterogeneous_fhmoe(x.shape[0])
+        else:
+            use_fhmoe = (
+                rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert_shape(
+                    x.shape[0], *self._fhmoe_shape_key
+                )
+                is True
+            )
+        if use_fhmoe:
             self._ensure_moe_quant_config_init()
             quant_config = self.quant_method.moe_quant_config
             if quant_config is None:
@@ -499,20 +901,29 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 shared_expert_id=self.shared_expert_id,
             )
 
-        shared_expert = self._shared_expert_ref()
-        if shared_expert is None or self._routed_quant_config is None:
-            raise RuntimeError("The separate shared-expert fallback is unavailable.")
-        shared_out = shared_expert(x)
+        return self._forward_separate_shared(x, topk_weights, topk_ids)
+
+    def _forward_routed_experts_only(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run only the routed experts through the plain (non-heterogeneous)
+        AITER kernel: E=384 sliced weights, routed-width routes. The caller
+        owns the separate shared-expert contribution."""
+        if self._routed_quant_config is None:
+            raise RuntimeError("The routed-only shared-expert path is unavailable.")
         routed_w1 = self.w13_weight[: self.shared_expert_id]
         routed_w2 = self.w2_weight[: self.shared_expert_id]
         routed_w1.is_shuffled = True
         routed_w2.is_shuffled = True
-        routed = rocm_aiter_fused_experts(
+        return rocm_aiter_fused_experts(
             hidden_states=x,
             w1=routed_w1,
             w2=routed_w2,
-            topk_weights=topk_weights[:, :-1].contiguous(),
-            topk_ids=topk_ids[:, :-1].contiguous(),
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             moe_config=self.moe_config,
             activation=self.activation,
             expert_mask=self.expert_map,
@@ -520,10 +931,84 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             output_dtype=x.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
+
+    def _forward_overlapped_separate(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Stock decode layout for decode-sized batches.
+
+        The separate shared expert runs on the aux stream (mirroring
+        SharedExperts.maybe_forward_async: record input_ready on the current
+        stream, run the shared MLP on the aux stream, record output_ready)
+        while the routed experts run through the plain kernel on the current
+        stream; the streams join before the sum. AITER's heterogeneous
+        variants regress at decode-sized M while this overlap hides the
+        separate shared expert under the routed chain, so decode keeps this
+        layout. Returns the TP-partial sum; the caller's late all-reduce
+        reduces it, exactly like the stock path."""
+        shared_expert = self._shared_expert_ref()
+        if shared_expert is None:
+            raise RuntimeError("The native shared-expert module was released.")
+        if self._overlap_stream is not None:
+            self._overlap_input_ready.record(current_stream())
+            with torch.cuda.stream(self._overlap_stream):
+                self._overlap_input_ready.wait(self._overlap_stream)
+                shared_out = shared_expert(x)
+                self._overlap_output_ready.record(self._overlap_stream)
+            routed = self._forward_routed_experts_only(x, topk_weights, topk_ids)
+            self._overlap_output_ready.wait(current_stream())
+        else:
+            # Overlap disabled (VLLM_DISABLE_SHARED_EXPERTS_STREAM or no
+            # CUDA): serial separate shared expert, like the stock
+            # no-stream path.
+            routed = self._forward_routed_experts_only(x, topk_weights, topk_ids)
+            shared_out = shared_expert(x)
+        return routed + shared_out
+
+    def _forward_separate_shared(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Serial fallback when AITER cannot serve the fused heterogeneous
+        shape: width-7 routes sliced to routed width, plus the separate
+        shared expert, all on the current stream."""
+        shared_expert = self._shared_expert_ref()
+        if shared_expert is None:
+            raise RuntimeError("The separate shared-expert fallback is unavailable.")
+        shared_out = shared_expert(x)
+        routed = self._forward_routed_experts_only(
+            x,
+            topk_weights[:, :-1].contiguous(),
+            topk_ids[:, :-1].contiguous(),
+        )
         return routed + shared_out
 
 
-def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> bool:
+def _fuse_shared_experts_enabled(config, vllm_config: "VllmConfig") -> bool:
+    # Kill switch for the fused-shared-expert feature (including the
+    # FP8->MXFP4 load-time requant path): setting the env var restores the
+    # original separate shared-expert execution everywhere (V4 and V4.1
+    # target layers, and the DSpark draft layers).
+    if os.environ.get("VLLM_DISABLE_FUSED_SHARED_EXPERTS", "0") == "1":
+        logger.warning_once(
+            "Fused shared experts (FP8->MXFP4) is DISABLED (env override)"
+        )
+        return False
+    if vllm_config.kernel_config.monokernel:
+        # Under --monokernel the FP8->MXFP4 requant fusion is refused
+        # unconditionally -- it consumes the shared-expert FP8 weights into
+        # the routed MXFP4 table, which the mono decode kernels read in
+        # their checkpoint layout. The only fused-shared-expert consumer
+        # under mono is the heterogeneous native-FP8 fusion
+        # (prefill-shaped batches above mono decode), which keeps the
+        # shared weights in FP8.
+        return False
+    parallel_config = vllm_config.parallel_config
     if (
         getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -656,12 +1141,12 @@ class DeepseekV4MoE(nn.Module):
 
         self.n_shared_experts = config.n_shared_experts
 
-        # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
-        # is checked to enable FSE for DeepSeek-v4, despite AITER not being used.
-        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
+        # TODO: FSE for DeepSeek-v4 is enabled by checking only
+        # `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`, despite AITER not
+        # being used; this should use `resolve_layer_fused_shared_expert`.
         self.fuse_heterogeneous_shared_expert = fuse_heterogeneous_shared_expert
         fse_requested = (
-            _fuse_shared_experts_enabled(config, vllm_config.parallel_config)
+            _fuse_shared_experts_enabled(config, vllm_config)
             and not self.fuse_heterogeneous_shared_expert
         )
         fse_compatible = False
@@ -782,6 +1267,20 @@ class DeepseekV4MoE(nn.Module):
                 else None
             ),
         )
+        if self.fuse_heterogeneous_shared_expert:
+            # Prefill-only gating for the heterogeneous fused path: batches
+            # below the M threshold skip the shared-slot append in the
+            # router (routed-width top-k) and keep the stock overlapped
+            # separate shared-expert layout in forward_modular; decode
+            # forwards never append regardless of batch size, so the fused
+            # hetero FHMoE engages only for prefill-shaped batches (the
+            # regime where it wins) and large decode batches keep stock
+            # numerics.
+            router = typing.cast(FusedTopKBiasRouter, self.experts.router)
+            router.shared_expert_append_min_tokens = (
+                _heterogeneous_shared_expert_min_tokens()
+            )
+            router.shared_expert_append_prefill_only = True
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None

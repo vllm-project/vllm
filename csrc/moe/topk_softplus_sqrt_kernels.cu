@@ -239,6 +239,20 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
   work for any k.
 */
 
+// Parameters for appending fused shared-expert slots directly inside the
+// top-k kernel. num_fused_shared == 0 leaves the kernel fully inert
+// (out_row_stride must then equal k, as it does for contiguous outputs).
+// When num_fused_shared > 0 the top-k outputs are (num_rows, k + n) buffers
+// whose shared columns [k, k + n) are written here with a constant expert id
+// and routing weight, so the router needs no arange/full/cat append kernels
+// (four tiny launch-latency-bound kernels per layer per step otherwise).
+struct FusedSharedTopkParams {
+  int out_row_stride;          // row stride of topk_weights / topk_indices
+  int num_fused_shared;        // number of shared slots appended (0 = off)
+  int shared_expert_base;      // expert id of the first shared slot
+  float shared_expert_weight;  // routing weight for every shared slot
+};
+
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG,
           int WARP_SIZE_PARAM, bool USE_HASH, typename IndType,
           typename HashIndType, typename InputType = float>
@@ -249,8 +263,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         const int start_expert, const int end_expert, const bool renormalize,
         double routed_scaling_factor, const float* correction_bias,
         const HashIndType* input_ids, const HashIndType* tid2eid,
-        const bool* is_padding, const float* bias_vl,
-        int64_t image_sentinel_lo) {
+        const bool* is_padding, const float* bias_vl, int64_t image_sentinel_lo,
+        const FusedSharedTopkParams fused) {
   static_assert(std::is_same_v<InputType, float> ||
                     std::is_same_v<InputType, __nv_bfloat16> ||
                     std::is_same_v<InputType, __half>,
@@ -316,6 +330,13 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   }
   const bool row_is_active = finished ? !finished[thread_row] : true;
   const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+
+  // Row stride of the top-k output buffers; equals k for freshly allocated
+  // contiguous (num_rows, k) tensors. The fused-shared-experts path passes
+  // wider (num_rows, k + n) persistent buffers, so the routed columns land
+  // at stride k + n while token_expert_indices stays (num_rows, k)
+  // contiguous and keeps its own k-stride indexing.
+  const int out_stride = fused.out_row_stride > 0 ? fused.out_row_stride : k;
 
   // Image tokens carry five consecutive in-vocab sentinel ids starting at
   // image_sentinel_lo (0 = disabled); they select experts with bias_vl
@@ -577,14 +598,14 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         // The lead thread from each sub-group will write out the final results
         // to global memory. (This will be a single) thread per row of the
         // input/output matrices.
-        const int idx = k * thread_row + k_idx;
+        const int idx = out_stride * thread_row + k_idx;
         if (row_bias != nullptr && should_process_row) {
           max_val -= row_bias[expert];
         }
         output[idx] = max_val;
         indices[idx] =
             !is_pad_row ? expert - start_expert : static_cast<IndType>(-1);
-        source_rows[idx] = k_idx * num_rows + thread_row;
+        source_rows[k * thread_row + k_idx] = k_idx * num_rows + thread_row;
         if (renormalize) {
           selected_sum += max_val;
         }
@@ -617,8 +638,18 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         scale /= denom;
       }
       for (int k_idx = 0; k_idx < k; ++k_idx) {
-        const int idx = k * thread_row + k_idx;
+        const int idx = out_stride * thread_row + k_idx;
         output[idx] = output[idx] * scale;
+      }
+      // Fused shared-expert slots: constant expert id and routing weight
+      // for every token, appended in-kernel (bit-exact with the router-side
+      // arange/full/cat append, without its four tiny kernels). Shared slots
+      // are deliberately NOT part of the renormalization, exactly like the
+      // cat-based append which runs after the kernel.
+      for (int j = 0; j < fused.num_fused_shared; ++j) {
+        const int idx = out_stride * thread_row + k + j;
+        output[idx] = fused.shared_expert_weight;
+        indices[idx] = fused.shared_expert_base + j;
       }
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -667,7 +698,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
     double routed_scaling_factor, const float* correction_bias,
     const bool use_hash, const HashIndType* input_ids,
     const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding,
-    const float* bias_vl, int64_t image_sentinel_lo) {
+    const float* bias_vl, int64_t image_sentinel_lo,
+    const FusedSharedTopkParams fused) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -697,12 +729,12 @@ void topkGatingSoftplusSqrtLauncherHelper(
                        indices, source_row, k, start_expert, end_expert,
                        renormalize, routed_scaling_factor, correction_bias,
                        input_ids, tid2eid, is_padding, bias_vl,
-                       image_sentinel_lo);
+                       image_sentinel_lo, fused);
 #else
     kernel<<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert,
         end_expert, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo);
+        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo, fused);
 #endif
   })
 }
@@ -716,7 +748,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
         gating_output, nullptr, topk_weights, topk_indices,                    \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,   \
         routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,  \
-        stream, is_padding, bias_vl, image_sentinel_lo);
+        stream, is_padding, bias_vl, image_sentinel_lo, fused);
 #else
   #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)           \
     if (WARP_SIZE == 64) {                                                     \
@@ -725,14 +757,14 @@ void topkGatingSoftplusSqrtLauncherHelper(
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);            \
+          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo, fused);     \
     } else if (WARP_SIZE == 32) {                                              \
       topkGatingSoftplusSqrtLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32,      \
                                            MAX_BYTES>(                         \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);            \
+          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo, fused);     \
     } else {                                                                   \
       assert(false &&                                                          \
              "Unsupported warp size. Only 32 and 64 are supported for ROCm");  \
@@ -747,7 +779,10 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const float* correction_bias, const bool use_hash,
     const HashIndType* input_ids, const HashIndType* tid2eid,
     cudaStream_t stream, const bool* is_padding, const float* bias_vl,
-    int64_t image_sentinel_lo) {
+    int64_t image_sentinel_lo, const FusedSharedTopkParams fused = {}) {
+  STD_TORCH_CHECK(!(use_hash && fused.num_fused_shared > 0),
+                  "fused shared experts are not supported with hash (tid2eid) "
+                  "routing");
 #ifndef USE_ROCM
   if constexpr (std::is_same_v<InputType, float>) {
     if (use_hash && topk == 6 && renormalize &&
@@ -857,7 +892,7 @@ void dispatch_topk_softplus_sqrt_launch(
     const std::optional<torch::stable::Tensor>& tid2eid, cudaStream_t stream,
     const std::optional<torch::stable::Tensor>& is_padding,
     const std::optional<torch::stable::Tensor>& bias_vl,
-    int64_t image_sentinel_lo) {
+    int64_t image_sentinel_lo, const vllm::moe::FusedSharedTopkParams& fused) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
     bias_ptr = correction_bias.value().const_data_ptr<float>();
@@ -913,7 +948,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int64_t>(),
             tid2eid.value().const_data_ptr<int64_t>(), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, fused);
       } else {
         STD_TORCH_CHECK(tid2eid.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -924,7 +959,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int>(),
             tid2eid.value().const_data_ptr<int>(), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, fused);
       }
     } else if (bias_vl_ptr != nullptr) {
       // Non-hash rows with bias_vl: image tokens (five sentinel ids starting
@@ -940,7 +975,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, false, input_ids.value().const_data_ptr<int64_t>(),
             static_cast<const int64_t*>(nullptr), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, fused);
       } else {
         STD_TORCH_CHECK(input_ids.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -951,7 +986,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, false, input_ids.value().const_data_ptr<int>(),
             static_cast<const int*>(nullptr), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, fused);
       }
     } else {
       vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType>(
@@ -960,7 +995,7 @@ void dispatch_topk_softplus_sqrt_launch(
           num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
           bias_ptr, false, static_cast<const OutIndType*>(nullptr),
           static_cast<const OutIndType*>(nullptr), stream, is_padding_ptr,
-          nullptr, 0);
+          nullptr, 0, fused);
     }
   };
 
@@ -977,8 +1012,10 @@ void dispatch_topk_softplus_sqrt_launch(
 }
 
 void topk_softplus_sqrt(
-    torch::stable::Tensor& topk_weights,          // [num_tokens, topk]
-    torch::stable::Tensor& topk_indices,          // [num_tokens, topk]
+    // [num_tokens, topk] (or [num_tokens, topk + n] with fused shared slots)
+    torch::stable::Tensor& topk_weights,
+    // [num_tokens, topk] (or [num_tokens, topk + n] with fused shared slots)
+    torch::stable::Tensor& topk_indices,
     torch::stable::Tensor& token_expert_indices,  // [num_tokens, topk]
     torch::stable::Tensor& gating_output,         // [num_tokens, num_experts]
     bool renormalize, double routed_scaling_factor,
@@ -987,10 +1024,38 @@ void topk_softplus_sqrt(
     const std::optional<torch::stable::Tensor>& tid2eid,
     const std::optional<torch::stable::Tensor>& is_padding,
     const std::optional<torch::stable::Tensor>& bias_vl,
-    int64_t image_sentinel_lo) {
+    int64_t image_sentinel_lo, int64_t num_fused_shared_experts,
+    int64_t shared_expert_base, double shared_expert_weight) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
-  const int topk = topk_weights.size(-1);
+  STD_TORCH_CHECK(num_fused_shared_experts >= 0,
+                  "num_fused_shared_experts must be non-negative, got ",
+                  num_fused_shared_experts);
+  const int topk =
+      topk_weights.size(-1) - static_cast<int>(num_fused_shared_experts);
+  STD_TORCH_CHECK(topk > 0, "topk must be positive, got ", topk);
+  if (num_fused_shared_experts > 0) {
+    STD_TORCH_CHECK(!tid2eid.has_value(),
+                    "fused shared experts are not supported with hash "
+                    "(tid2eid) routing");
+    STD_TORCH_CHECK(topk_indices.size(-1) == topk_weights.size(-1),
+                    "topk_indices and topk_weights must have the same last "
+                    "dim, got ",
+                    topk_indices.size(-1), " vs ", topk_weights.size(-1));
+    STD_TORCH_CHECK(topk_indices.stride(0) == topk_weights.stride(0),
+                    "topk_indices and topk_weights must have the same row "
+                    "stride");
+    STD_TORCH_CHECK(token_expert_indices.size(-1) == topk,
+                    "token_expert_indices must have the routed topk width ",
+                    topk, ", got ", token_expert_indices.size(-1));
+  }
+  // Row stride of the top-k outputs: k for freshly allocated contiguous
+  // tensors, k + n for the persistent fused-shared-experts buffers.
+  const vllm::moe::FusedSharedTopkParams fused{
+      static_cast<int>(topk_weights.stride(0)),
+      static_cast<int>(num_fused_shared_experts),
+      static_cast<int>(shared_expert_base),
+      static_cast<float>(shared_expert_weight)};
   const torch::stable::accelerator::DeviceGuard guard(
       gating_output.get_device_index());
   const cudaStream_t stream =
@@ -1001,21 +1066,23 @@ void topk_softplus_sqrt(
         gating_output.const_data_ptr<float>(), topk_weights, topk_indices,
         token_expert_indices, num_tokens, num_experts, topk, renormalize,
         routed_scaling_factor, correction_bias, input_ids, tid2eid, stream,
-        is_padding, bias_vl, image_sentinel_lo);
+        is_padding, bias_vl, image_sentinel_lo, fused);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::Half) {
     dispatch_topk_softplus_sqrt_launch<__half>(
         reinterpret_cast<const __half*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);
+        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo,
+        fused);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::BFloat16) {
     dispatch_topk_softplus_sqrt_launch<__nv_bfloat16>(
         reinterpret_cast<const __nv_bfloat16*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);
+        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo,
+        fused);
   } else {
     STD_TORCH_CHECK(false, "Unsupported gating_output data type: ",
                     gating_output.scalar_type());

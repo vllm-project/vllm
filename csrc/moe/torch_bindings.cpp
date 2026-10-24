@@ -21,7 +21,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
       "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
-      "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
+      "Tensor? bias_vl=None, int image_sentinel_lo=0, "
+      "int num_fused_shared_experts=0, int shared_expert_base=0, "
+      "float shared_expert_weight=1.0) -> ()");
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when

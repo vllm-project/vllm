@@ -30,7 +30,8 @@ void topk_softplus_sqrt(
     const std::optional<torch::stable::Tensor>& tid2eid,
     const std::optional<torch::stable::Tensor>& is_padding,
     const std::optional<torch::stable::Tensor>& bias_vl,
-    int64_t image_sentinel_lo);
+    int64_t image_sentinel_lo, int64_t num_fused_shared_experts,
+    int64_t shared_expert_base, double shared_expert_weight);
 
 void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output,
              std::optional<torch::stable::Tensor> topk_ids,

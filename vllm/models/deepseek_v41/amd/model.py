@@ -59,6 +59,9 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v4.amd.model import (
+    _heterogeneous_shared_expert_enabled,
+)
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -93,6 +96,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         vllm_config: VllmConfig,
         prefix: str = "",
         use_sequence_parallel: bool = False,
+        fuse_heterogeneous_shared_expert: bool = False,
     ):
         config = vllm_config.model_config.hf_config
         n_routed_experts = config.n_routed_experts
@@ -115,7 +119,11 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         config.num_experts_per_tok = n_activated_experts
         config.num_hash_layers = 0
         try:
-            super().__init__(vllm_config, prefix=prefix)
+            super().__init__(
+                vllm_config,
+                prefix=prefix,
+                fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
+            )
         finally:
             config.n_routed_experts = old_routed
             config.num_experts_per_tok = old_activated
@@ -188,6 +196,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        fuse_heterogeneous_shared_expert: bool = False,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -221,6 +230,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
+            fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -562,6 +572,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
                 self.engram_dp_shared_memory = engram_config.dp_shared_memory
 
+        # Heterogeneous native-FP8 shared-expert fusion: same gate and
+        # wiring as the DeepSeek-V4 model (deepseek_v4/amd/model.py) — the
+        # flag flows Model -> DecoderLayer -> MoE. DSpark draft layers are
+        # built by dspark.py WITHOUT the flag, so they keep the separate
+        # shared-expert path (draft cut) by construction.
+        self.fuse_heterogeneous_shared_expert = _heterogeneous_shared_expert_enabled(
+            vllm_config
+        )
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV4DecoderLayer(
@@ -571,6 +590,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                fuse_heterogeneous_shared_expert=(
+                    self.fuse_heterogeneous_shared_expert
+                ),
             ),
             prefix=f"{prefix}.layers",
         )
