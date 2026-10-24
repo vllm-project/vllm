@@ -566,12 +566,24 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    zero_fill: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
+
+    ``zero_fill=False`` returns the same layout without touching the pages.
+    Platforms whose cache lives in unified memory can use it to avoid committing
+    every page of a multi-GB pool at startup, which a serving run mostly does not
+    use: it only writes the blocks it allocates. The caller then owns the
+    guarantee that nothing reads a slot that was never written — every position
+    below the sequence length is written before a reader runs, and the kernels
+    mask the rest, which is the same assumption
+    ``KVCacheConfig.needs_kv_cache_zeroing`` encodes for Mamba and
+    mixed-precision caches (those keep the fill, up front or per block as the
+    scheduler hands blocks out).
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -593,7 +605,10 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    if zero_fill:
+        buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    else:
+        buf = torch.empty(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
