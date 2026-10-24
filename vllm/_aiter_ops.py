@@ -1794,6 +1794,80 @@ def _fused_mla_dual_rms_norm_per_token_quant_fake(
     return q_out, q_scale, kv_normed
 
 
+def _fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_impl(
+    x: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """MLA per-token FP8 fused_qkv_a_proj + q/kv RMSNorm + q per-token quant."""
+    from aiter.ops.triton.fused_fp8_quant import fused_reduce_rms_fp8_group_quant
+    from aiter.ops.triton.gemm_a8w8 import gemm_a8w8_preshuffle
+
+    from vllm.triton_utils import triton
+
+    q_dim, kv_dim = q_weight.shape[0], kv_weight.shape[0]
+    if x.shape[0] > 512:
+        y = _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
+            x, weight, x_scale, weight_scale, None, torch.bfloat16
+        )
+    else:
+        # (NUM_KSPLIT, M, N) fp32 partials, or (M, N) bf16 if the config has no split
+        y = gemm_a8w8_preshuffle(
+            x,
+            weight.view(weight.shape[0] // 16, -1),
+            x_scale,
+            weight_scale.view(1, -1),
+            skip_reduce=True,
+        )
+    q, kv, k_pe = y.split([q_dim, kv_dim, weight.shape[0] - q_dim - kv_dim], dim=-1)
+    if 512 < x.shape[0] <= 1024:
+        q_out, q_scale, kv_normed = _fused_mla_dual_rms_norm_per_token_quant_impl(
+            q, q_weight, kv, kv_weight, q_epsilon, kv_epsilon
+        )
+        return q_out, q_scale, kv_normed, k_pe.contiguous()
+    split_k = y.dim() == 3
+    (q_out, q_scale), _, kv_normed, _, k_pe_out = fused_reduce_rms_fp8_group_quant(
+        q,
+        q_weight,
+        q_epsilon,
+        kv,
+        kv_weight,
+        kv_epsilon,
+        k_pe if split_k else None,
+        # One quant group spans the whole q row: per-token quant.
+        group_size=triton.next_power_of_2(q_dim),
+        dtype_quant=FP8_DTYPE,
+        dtype=torch.bfloat16,
+    )
+    return q_out, q_scale, kv_normed, k_pe_out if split_k else k_pe.contiguous()
+
+
+def _fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_fake(
+    x: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    m = x.shape[0]
+    q_dim, kv_dim = q_weight.shape[0], kv_weight.shape[0]
+    pe_dim = weight.shape[0] - q_dim - kv_dim
+    return (
+        torch.empty((m, q_dim), dtype=FP8_DTYPE, device=x.device),
+        torch.empty((m, 1), dtype=torch.float32, device=x.device),
+        torch.empty((m, kv_dim), dtype=torch.bfloat16, device=x.device),
+        torch.empty((m, pe_dim), dtype=torch.bfloat16, device=x.device),
+    )
+
+
 def _fused_mla_dual_rms_norm_group_quant_impl(
     q: torch.Tensor,
     q_weight: torch.Tensor,
@@ -3267,6 +3341,13 @@ class rocm_aiter_ops:
                 op_func=_fused_mla_dual_rms_norm_per_token_quant_impl,
                 mutates_args=[],
                 fake_impl=_fused_mla_dual_rms_norm_per_token_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant",
+                op_func=_fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_fake,
             )
 
             direct_register_custom_op(
