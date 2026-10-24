@@ -359,3 +359,33 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
+
+
+def test_abort_requests_validates_json_object_and_request_ids():
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from vllm.entrypoints.scale_out.token_in_token_out.api_router import router
+
+    aborted: list[str | list[str]] = []
+
+    class DummyEngineClient:
+        async def abort(self, request_ids: str | list[str]) -> None:
+            aborted.append(request_ids)
+
+    app = FastAPI()
+    app.state.engine_client = DummyEngineClient()
+    app.include_router(router)
+    client = TestClient(app)
+
+    resp = client.post("/inference/v1/abort_requests", json=["req-1"])
+    assert resp.status_code == 400
+    assert "JSON object" in resp.json()["detail"]
+
+    resp = client.post("/inference/v1/abort_requests", json={"request_ids": 123})
+    assert resp.status_code == 400
+    assert "string or a list of strings" in resp.json()["detail"]
+
+    resp = client.post("/inference/v1/abort_requests", json={"request_ids": ["req-1"]})
+    assert resp.status_code == 200
+    assert aborted == [["req-1"]]
