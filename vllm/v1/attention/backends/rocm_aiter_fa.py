@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
@@ -485,6 +486,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
+        swa_verify_trim_usable = False
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -494,6 +496,12 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            if (
+                layer.impl.sliding_window is not None
+                and layer.impl.sliding_window[0] != -1
+                and layer.impl.alibi_slopes is None
+            ):
+                swa_verify_trim_usable = True
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
@@ -512,9 +520,14 @@ class AiterFlashAttentionMetadataBuilder(
         self._swa_block_table: torch.Tensor | None = None
         self._swa_seq_lens: torch.Tensor | None = None
         self._swa_block_offsets: torch.Tensor | None = None
+        self._swa_verify_trim = False
         if self.aot_sliding_window is not None:
             window = self.aot_sliding_window[0] + 1
-            num_window_blocks = cdiv(window, self.block_size) + 1
+            max_decode_q = 1
+            if envs.VLLM_ROCM_AITER_FA_SWA_VERIFY_TRIM and swa_verify_trim_usable:
+                self._swa_verify_trim = True
+                max_decode_q = max(1, self.reorder_batch_threshold or 1)
+            num_window_blocks = cdiv(window + max_decode_q - 1, self.block_size) + 1
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self._swa_block_table = torch.zeros(
                 (max_num_reqs, num_window_blocks), dtype=torch.int32, device=device
@@ -551,6 +564,8 @@ class AiterFlashAttentionMetadataBuilder(
         seq_lens: torch.Tensor,
         num_decodes: int,
         max_seq_len: int,
+        query_start_loc: torch.Tensor | None = None,
+        max_query_len: int = 1,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
         """Trim the decode block table to the sliding window.
 
@@ -565,19 +580,30 @@ class AiterFlashAttentionMetadataBuilder(
             return None, None, 0
         assert self._swa_seq_lens is not None and self._swa_block_offsets is not None
         window = self.aot_sliding_window[0] + 1
+        num_window_blocks = self._swa_block_table.shape[1]
+        if cdiv(window + max_query_len - 1, self.block_size) + 1 > num_window_blocks:
+            return None, None, 0
         lens = seq_lens[:num_decodes]
-        first_block = torch.clamp(lens - window, min=0) // self.block_size
-        index = (first_block.to(torch.int64)[:, None] + self._swa_block_offsets).clamp_(
+        if max_query_len == 1:
+            first_key = lens - window
+        else:
+            assert query_start_loc is not None
+            query_lens = (
+                query_start_loc[1 : num_decodes + 1] - query_start_loc[:num_decodes]
+            )
+            first_key = (lens - query_lens).sub_(window - 1)
+        first_block = first_key.clamp_(min=0) // self.block_size
+        index = (self._swa_block_offsets + first_block[:, None]).clamp_(
             max=block_table.shape[1] - 1
         )
         swa_block_table = self._swa_block_table[:num_decodes]
         torch.gather(block_table[:num_decodes], 1, index, out=swa_block_table)
         swa_seq_lens = self._swa_seq_lens[:num_decodes]
-        swa_seq_lens.copy_(lens - first_block * self.block_size)
+        torch.sub(lens, first_block, alpha=self.block_size, out=swa_seq_lens)
         return (
             swa_block_table,
             swa_seq_lens,
-            min(max_seq_len, window + self.block_size - 1),
+            min(max_seq_len, window + max_query_len - 1 + self.block_size - 1),
         )
 
     def build_for_cudagraph_capture(
@@ -674,13 +700,17 @@ class AiterFlashAttentionMetadataBuilder(
         if num_decodes > 0:
             decode_max_query_len = query_lens_cpu[:num_decodes].max().item()
             swa_block_table, swa_seq_lens, swa_max_seq_len = None, None, 0
-            if decode_max_query_len == 1:
+            if decode_max_query_len == 1 or (
+                self._swa_verify_trim and common_attn_metadata.causal is True
+            ):
                 swa_block_table, swa_seq_lens, swa_max_seq_len = (
                     self._build_swa_decode_tables(
                         common_attn_metadata.block_table_tensor,
                         common_attn_metadata.seq_lens,
                         num_decodes,
                         common_attn_metadata.max_seq_len,
+                        query_start_loc=common_attn_metadata.query_start_loc,
+                        max_query_len=decode_max_query_len,
                     )
                 )
             decode_metadata = AiterFlashAttentionDecodeMetadata(
@@ -1474,6 +1504,21 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         unified_attention,
                     )
 
+                    if (
+                        self.sliding_window[0] != -1
+                        and decode_max_query_len > 1
+                        and self.alibi_slopes is None
+                        and decode_md.swa_block_table is not None
+                    ):
+                        assert decode_md.swa_seq_lens is not None
+                        decode_block_table = decode_md.swa_block_table
+                        decode_seq_lens = decode_md.swa_seq_lens
+                        decode_max_seq_len = decode_md.swa_max_seq_len
+                    else:
+                        decode_block_table = attn_metadata.block_table[:num_decodes]
+                        decode_seq_lens = attn_metadata.seq_lens[:num_decodes]
+                        decode_max_seq_len = attn_metadata.max_seq_len
+
                     unified_attention(
                         q=query[:num_decode_tokens],
                         k=key_cache,
@@ -1481,13 +1526,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         out=output[:num_decode_tokens],
                         cu_seqlens_q=attn_metadata.query_start_loc[: num_decodes + 1],
                         max_seqlen_q=decode_max_query_len,
-                        seqused_k=attn_metadata.seq_lens[:num_decodes],
-                        max_seqlen_k=attn_metadata.max_seq_len,
+                        seqused_k=decode_seq_lens,
+                        max_seqlen_k=decode_max_seq_len,
                         softmax_scale=self.scale,
                         causal=True,
                         alibi_slopes=self.alibi_slopes,
                         window_size=self.sliding_window,
-                        block_table=attn_metadata.block_table[:num_decodes],
+                        block_table=decode_block_table,
                         softcap=self.logits_soft_cap,
                         q_descale=None,
                         k_descale=k_descale,
