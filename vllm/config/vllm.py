@@ -22,6 +22,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
@@ -53,6 +54,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
+from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -96,6 +98,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+        "MuseSpark1xForCausalLM",
+        "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
@@ -444,6 +448,9 @@ class VllmConfig:
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
+    watchdog_config: WatchdogConfig = Field(default_factory=WatchdogConfig)
+    """Configuration for the stack-dump watchdog."""
+
     shutdown_timeout: int = Field(default=0, ge=0)
     """Shutdown grace period for in-flight requests. Shutdown will be delayed for
     up to this amount of time to allow already-running requests to complete. Any
@@ -725,7 +732,7 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        if not HAS_TRITON:
+        if not HAS_TRITON and not current_platform.is_unspecified():
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
@@ -1526,6 +1533,8 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
+
+        self._limit_max_model_len_to_draft()
 
         if (
             self.model_config is not None
@@ -2833,11 +2842,16 @@ class VllmConfig:
 
         ec_config = self.ec_transfer_config
         kv_config = self.kv_transfer_config
+        is_ec_consumer = ec_config is not None and ec_config.is_ec_consumer
+        is_kv_consumer = kv_config is not None and kv_config.is_kv_consumer
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        mm_config.allow_missing_mm_embeddings = (
-            ec_config is not None and ec_config.is_ec_consumer
-        ) or (kv_config is not None and kv_config.is_kv_consumer)
+        # A language-model-only KV consumer (text-only P/D) stays text-only
+        # unless the user opts in with --enable-mm-embeds.
+        mm_config.allow_missing_mm_embeddings = is_ec_consumer or (
+            is_kv_consumer
+            and (not mm_config.language_model_only or mm_config.enable_mm_embeds)
+        )
         if not mm_config.allow_missing_mm_embeddings:
             return
 
@@ -2990,6 +3004,34 @@ class VllmConfig:
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
 
+    def _limit_max_model_len_to_draft(self) -> None:
+        """Lower max_model_len to the draft model's when the V2 model runner
+        can't serve longer sequences.
+        """
+        spec_config = self.speculative_config
+        if (
+            spec_config is None
+            or spec_config.draft_model_config is None
+            or self.model_config is None
+            or not self.use_v2_model_runner
+            # The draft's positional capacity was raised to match the target.
+            or spec_config.draft_shares_target_positions()
+        ):
+            return
+        draft_max_model_len = spec_config.draft_model_config.max_model_len
+        target_max_model_len = self.model_config.max_model_len
+        if draft_max_model_len >= target_max_model_len:
+            return
+        logger.warning(
+            "The draft model's max_model_len (%d) is smaller than the target "
+            "model's (%d) and the V2 model runner can't skip speculation for "
+            "longer sequences; reducing max_model_len to %d.",
+            draft_max_model_len,
+            target_max_model_len,
+            draft_max_model_len,
+        )
+        self.model_config.max_model_len = draft_max_model_len
+
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
@@ -3051,10 +3093,20 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            elif self.speculative_config.is_xpress():
+                unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
             if self.speculative_config.draft_lm_head_quantization is not None:
                 unsupported.append("draft lm_head quantization")
+
+        # The attention-free Parse MTP draft requires the V2 speculator.
+        if self.speculative_config:
+            draft_config = self.speculative_config.draft_model_config
+            if draft_config is not None and "ParseAuxMTPModel" in (
+                draft_config.architectures or []
+            ):
+                unsupported.append("Parse 3.5 MTP")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
@@ -3268,9 +3320,6 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
-            raise ValueError("Model Runner V2 requires Triton.")
-
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
@@ -3487,6 +3536,10 @@ class VllmConfig:
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
+            # A KDA RecoverSSM request's state is its conv and SSM state in the
+            # stock Mamba page (the verify records are kept outside the KV
+            # cache), so KV connectors transfer it as usual.
+            and not self.cache_config.use_kda_recoverssm
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "
