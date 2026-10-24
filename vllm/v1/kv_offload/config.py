@@ -60,6 +60,21 @@ class OffloadingParallelConfig:
     # under any topology; for the canonical layout, the canonical page itself
     # is topology-free.
     is_parallelism_agnostic: bool
+    # Number of workers of this replica on each node. Falls back to
+    # world_size for legacy configs and single-node deployments.
+    local_world_size: int | None = None
+    # Executor that places this replica's workers.
+    executor_backend: str | None = None
+    # Elastic expert parallelism: data parallel replicas join and leave.
+    elastic_ep: bool = False
+
+    @property
+    def spans_nodes(self) -> bool:
+        """Whether this replica's workers are placed on several nodes."""
+        return (
+            self.local_world_size is not None
+            and self.local_world_size < self.world_size
+        )
 
 
 @dataclass(frozen=True)
