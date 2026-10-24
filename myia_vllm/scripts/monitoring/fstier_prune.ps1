@@ -11,6 +11,11 @@
 
     DRY-RUN PAR DEFAUT. `-Apply` est requis pour supprimer quoi que ce soit.
     Plafond : min(MaxGiB, libre invité − GuestFloorGiB, libre guard-mount − ReservePct%).
+    MaxGiB = 96 depuis le 24/10 (GO user) : a 48 GiB le pruneur supprimait
+    ~23 GiB toutes les 90 min, en pleine sonde (23:50:02Z : 896 fichiers /
+    22,9 GiB), ce qui detruisait le cache prefixe des conversations longues
+    (57 % des requetes > 100 K tokens) et forcait un re-prefill de 70-140 s
+    par tour. Le garde-fou disque reste actif : min() ci-dessus.
     Tourne en root WSL (-u root) : les blocs sont ecrits par le conteneur (root)
     dans des sous-repertoires 755 — l'utilisateur par defaut ne peut pas supprimer
     (mesure 21/10 : Permission denied sur la sonde de suppression).
@@ -22,7 +27,7 @@
 [CmdletBinding()]
 param(
     [switch]$Apply,
-    [double]$MaxGiB = 48,
+    [double]$MaxGiB = 96,
     [double]$ReservePct = 12,
     [int]$MinAgeMin = 30,
     [string]$GuardMounts = '/mnt/c',
