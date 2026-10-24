@@ -1189,6 +1189,14 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        if speculative_config.remote_draft is not None and self.temperature != 0.0:
+            raise VLLMValidationError(
+                "Remote drafter currently requires greedy target sampling "
+                "(temperature=0).",
+                parameter="temperature",
+                value=self.temperature,
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise VLLMValidationError(
