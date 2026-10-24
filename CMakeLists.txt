@@ -537,36 +537,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       # Generate sources:
       set(MACHETE_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-      file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
-
-      message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
-      message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
-
-      if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
-          OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
-        execute_process(
-          COMMAND ${CMAKE_COMMAND} -E env
-          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
-            ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
-          RESULT_VARIABLE machete_generation_result
-          OUTPUT_VARIABLE machete_generation_output
-          OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-          ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-        )
-
-        if (NOT machete_generation_result EQUAL 0)
-          message(FATAL_ERROR "Machete generation failed."
-                              " Result: \"${machete_generation_result}\""
-                              "\nCheck the log for details: "
-                              "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
-        else()
-          set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
-              CACHE STRING "Last run machete generate script hash" FORCE)
-          message(STATUS "Machete generation completed successfully.")
-        endif()
-      else()
-        message(STATUS "Machete generation script has not changed, skipping generation.")
-      endif()
+      file(GLOB MACHETE_CUTLASS_LIBRARY_SRCS ${cutlass_SOURCE_DIR}/python/cutlass_library/*.py)
+      run_source_generator(Machete
+        LOG machete_generation.log
+        STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/generate.hash
+        OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/*.cu
+        INPUTS
+          ${MACHETE_GEN_SCRIPT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/vllm_cutlass_library_extension.py
+          ${MACHETE_CUTLASS_LIBRARY_SRCS}
+        COMMAND ${CMAKE_COMMAND} -E env
+          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${cutlass_SOURCE_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+          ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT})
 
       # Add machete generated sources
       file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
@@ -666,38 +648,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       # Generate sources:
       set(MARLIN_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.py)
-      file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
       list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-      set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
-
-      message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-      message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-
-      if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-          OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
-        execute_process(
-          COMMAND ${CMAKE_COMMAND} -E env
-          PYTHONPATH=$ENV{PYTHONPATH}
-            ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
-          RESULT_VARIABLE marlin_generation_result
-          OUTPUT_VARIABLE marlin_generation_result
-          OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
-          ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
-        )
-
-        if (NOT marlin_generation_result EQUAL 0)
-          message(FATAL_ERROR "Marlin generation failed."
-                              " Result: \"${marlin_generation_result}\""
-                              "\nCheck the log for details: "
-                              "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
-        else()
-          set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-              CACHE STRING "Last run Marlin generate script hash and arch" FORCE)
-          message(STATUS "Marlin generation completed successfully.")
-        endif()
-      else()
-        message(STATUS "Marlin generation script has not changed, skipping generation.")
-      endif()
+      run_source_generator(Marlin
+        LOG marlin_generation.log
+        STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.hash
+        OUTPUTS
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/kernel_selector.h
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/*kernel_*.cu
+        INPUTS ${MARLIN_GEN_SCRIPT}
+        KEY "(ARCH:${CUDA_ARCHS_STR})"
+        COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}
+          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR})
 
       if (MARLIN_ARCHS)
         file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_float16.cu")
@@ -1118,7 +1079,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
     # Add MLA-specific include directories only to MLA source files
     set_source_files_properties(${CUTLASS_MLA_SRCS}
-      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
+      PROPERTIES INCLUDE_DIRECTORIES "${cutlass_SOURCE_DIR}/examples/77_blackwell_fmha;${cutlass_SOURCE_DIR}/examples/common")
     message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
   else()
     message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
@@ -1389,39 +1350,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # Generate sources:
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.py)
-    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
-
-    message(STATUS "Marlin MOE generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-    message(STATUS "Last run Marlin MOE generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-
-    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$ENV{PYTHONPATH}
-          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
-          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16
-        RESULT_VARIABLE moe_marlin_generation_result
-        OUTPUT_VARIABLE moe_marlin_generation_output
-        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
-        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
-      )
-
-      if (NOT moe_marlin_generation_result EQUAL 0)
-        message(FATAL_ERROR "Marlin MOE generation failed."
-                            " Result: \"${moe_marlin_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
-      else()
-        set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
-        message(STATUS "Marlin MOE generation completed successfully.")
-      endif()
-    else()
-      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
-    endif()
+    run_source_generator("Marlin MOE"
+      LOG moe_marlin_generation.log
+      STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.hash
+      OUTPUTS
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/kernel_selector.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/*kernel_*.cu
+      INPUTS ${MOE_MARLIN_GEN_SCRIPT}
+      KEY "(ARCH:${CUDA_ARCHS_STR})"
+      COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}
+        ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16)
 
     if (MARLIN_MOE_ARCHS)
       file(GLOB MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/sm80_kernel_*.cu")

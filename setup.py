@@ -13,6 +13,7 @@ import sys
 import sysconfig
 from pathlib import Path
 from shutil import which
+from typing import TypedDict
 
 import torch
 from packaging.version import Version, parse
@@ -205,9 +206,80 @@ class CMakeExtension(Extension):
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
+# Environment variables CMake only reads on the first configure.
+CMAKE_ENV_VARS = (
+    "CMAKE_ARGS",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_GENERATOR_PLATFORM",
+    "CMAKE_GENERATOR_TOOLSET",
+    "CMAKE_C_COMPILER_LAUNCHER",
+    "CMAKE_CXX_COMPILER_LAUNCHER",
+    "CMAKE_CUDA_COMPILER_LAUNCHER",
+    "CMAKE_HIP_COMPILER_LAUNCHER",
+    "CC",
+    "CXX",
+    "CUDACXX",
+    "CUDAHOSTCXX",
+    "HIPCXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CUDAFLAGS",
+    "HIPFLAGS",
+    "LDFLAGS",
+    "CUDAARCHS",
+    "HIPARCHS",
+    "FETCHCONTENT_SOURCE_DIR_ONEDNN",
+)
+
+
+class CMakeBuildEnv(TypedDict):
+    """Inputs a configured CMake build directory is tied to."""
+
+    python: str
+    torch_dir: str
+    torch_version: str
+    toolkit: str | None
+    generator: str | None
+    launcher: str | None
+    env: dict[str, str | None]
+
+
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
+
+    def finalize_options(self) -> None:
+        super().finalize_options()
+        if self.editable_mode:
+            # setuptools uses a throwaway dir for editable builds; reuse the
+            # persistent one regular builds use.
+            build = self.get_finalized_command("build")
+            plat_specifier = f"{self.plat_name}-{sys.implementation.cache_tag}"
+            if is_freethreaded():
+                plat_specifier += "t"
+            if hasattr(sys, "gettotalrefcount"):
+                plat_specifier += "-pydebug"
+            self.build_temp = os.path.join(build.build_base, f"temp.{plat_specifier}")
+
+    def changed_build_env(self, build_env: CMakeBuildEnv, stamp: Path) -> list[str]:
+        """Fields and env vars of `build_env` that differ from the ones the
+        CMake cache was configured with, or `stamp`'s name if unreadable."""
+        if not Path(self.build_temp, "CMakeCache.txt").exists():
+            return []
+        try:
+            configured = json.loads(stamp.read_text())
+            configured_vars = configured["env"]
+            changed = [
+                k for k, v in build_env.items() if k != "env" and configured.get(k) != v
+            ]
+            return changed + [
+                var
+                for var, v in build_env["env"].items()
+                if configured_vars.get(var) != v
+            ]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return [stamp.name]
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -273,22 +345,18 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = envs.VERBOSE
-        if verbose:
-            cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
+        cmake_args += [f"-DCMAKE_VERBOSE_MAKEFILE={'ON' if verbose else 'OFF'}"]
 
         if is_sccache_available():
-            cmake_args += [
-                "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_HIP_COMPILER_LAUNCHER=sccache",
-            ]
+            launcher = "sccache"
         elif is_ccache_available():
+            launcher = "ccache"
+        else:
+            launcher = None
+        if launcher:
             cmake_args += [
-                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_HIP_COMPILER_LAUNCHER=ccache",
+                f"-DCMAKE_{lang}_COMPILER_LAUNCHER={launcher}"
+                for lang in ("C", "CXX", "CUDA", "HIP")
             ]
 
         # Pass the python executable to cmake so it can find an exact
@@ -314,30 +382,57 @@ class cmake_build_ext(build_ext):
 
         if nvcc_threads:
             cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
+        else:
+            cmake_args += ["-UNVCC_THREADS"]
 
         if is_ninja_available():
-            build_tool = ["-G", "Ninja"]
+            generator = "Ninja"
+            build_tool = ["-G", generator]
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
                 f"-DCMAKE_JOB_POOLS:STRING=compile={num_jobs}",
             ]
         else:
             # Default build tool to whatever cmake picks.
+            generator = os.environ.get("CMAKE_GENERATOR")
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
+        toolkit = None
         if _is_cuda() and CUDA_HOME is not None:
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            toolkit = os.path.realpath(CUDA_HOME)
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+            toolkit = os.path.realpath(ROCM_HOME)
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
 
+        build_env = CMakeBuildEnv(
+            python=os.path.realpath(sys.executable),
+            torch_dir=os.path.dirname(torch.__file__),
+            torch_version=torch.__version__,
+            toolkit=toolkit,
+            generator=generator,
+            launcher=launcher,
+            env={var: os.environ.get(var) for var in CMAKE_ENV_VARS},
+        )
+        stamp = Path(self.build_temp, "vllm_build_env.json")
+        fresh = []
+        if changed := self.changed_build_env(build_env, stamp):
+            logger.warning(
+                "Build environment changed (%s); reconfiguring CMake.",
+                ", ".join(changed),
+            )
+            fresh = ["--fresh"]
+            # Rewritten on success, so a failed configure is redone fresh.
+            stamp.unlink(missing_ok=True)
         subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            ["cmake", ext.cmake_lists_dir, *fresh, *build_tool, *cmake_args],
             cwd=self.build_temp,
         )
+        stamp.write_text(json.dumps(build_env))
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
