@@ -498,6 +498,17 @@ Supported models:
 
 Flags: `--tool-call-parser glm47`
 
+### Flint Models (`flint`)
+
+Supported models:
+
+* `RecursiveSI/flint`
+* `RecursiveSI/flint-nvfp4-gguf`
+
+Flags: `--tool-call-parser flint --reasoning-parser flint`
+
+Flint writes XML tool calls but decides on each turn whether to reason. A reply without a `<think>...</think>` block is returned as content.
+
 ### FunctionGemma Models (`functiongemma`)
 
 Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.

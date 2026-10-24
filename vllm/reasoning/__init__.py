@@ -52,6 +52,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",
     ),
+    "flint": (
+        "flint_reasoning_parser",
+        "FlintParserReasoningAdapter",
+    ),
     "gemma4": (
         "gemma4_engine_reasoning_parser",
         "Gemma4ParserReasoningAdapter",
