@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from tests.quantization.utils import (
     is_quant_method_supported,
@@ -133,6 +134,36 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
             {r"+:model\.layers\.0\..*": {"group_size": 128}},
             {},
         )
+
+
+def test_auto_gptq_block_relative_modules_skip_unquantized_tower(tmp_path):
+    """Block-relative names like `self_attn.q_proj` must not quantize a vision
+    tower layer of the same name that the checkpoint stores unquantized."""
+    dtypes = {
+        "model.layers.0.self_attn.q_proj.qweight": torch.int32,
+        "model.layers.0.self_attn.q_proj.scales": torch.half,
+        "vision_tower.layers.0.self_attn.q_proj.weight": torch.half,
+    }
+    save_file(
+        {name: torch.zeros(1, dtype=dtype) for name, dtype in dtypes.items()},
+        tmp_path / "model.safetensors",
+    )
+    config = AutoGPTQConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 128,
+            "desc_act": False,
+            "sym": True,
+            "modules_in_block_to_quantize": [["self_attn.q_proj"]],
+        }
+    )
+    config.maybe_update_config(str(tmp_path))
+
+    quantized = config.modules_in_block_to_quantize
+    assert is_layer_gptq_quantized("model.layers.0.self_attn.q_proj", quantized)
+    assert not is_layer_gptq_quantized(
+        "vision_tower.layers.0.self_attn.q_proj", quantized
+    )
 
 
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
