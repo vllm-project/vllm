@@ -164,10 +164,11 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
 @pytest.mark.parametrize(
-    # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
-    # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
+    # 33/64 bound the SM100 32-wide swapAB tile; 65/66/67 cover all M%4
+    # residue classes above the swapAB threshold (m <= 64); 1026 crosses
+    # multiple 128-row SF atoms.
     "M",
-    [32, 65, 66, 67, 1026],
+    [32, 33, 64, 65, 66, 67, 1026],
 )
 @torch.inference_mode()
 def test_w8a8_block_fp8_cutlass_matmul(M):
