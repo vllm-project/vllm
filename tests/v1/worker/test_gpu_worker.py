@@ -117,6 +117,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
 
+    from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightMemory
+
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
@@ -130,6 +132,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _external_weights=ExternalWeightMemory(),
     )
     original_threads = torch.get_num_threads()
     try:
