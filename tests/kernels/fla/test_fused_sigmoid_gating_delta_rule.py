@@ -197,3 +197,73 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("num_accepted", [0, 5])
+def test_spec_invalid_accepted_count_zeroes_output(num_accepted: int) -> None:
+    """Invalid active-request state selection must not expose empty output."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    num_tokens, num_k_heads, num_v_heads = 4, 2, 4
+    head_k_dim = head_v_dim = 16
+    query = torch.rand(1, num_tokens, num_k_heads, head_k_dim)
+    key = torch.rand_like(query)
+    value = torch.rand(1, num_tokens, num_v_heads, head_v_dim)
+    a = torch.rand(num_tokens, num_v_heads)
+    b = torch.rand_like(a)
+    A_log = torch.rand(num_v_heads)
+    dt_bias = torch.rand_like(A_log)
+    initial_state = torch.rand(num_tokens + 1, num_v_heads, head_v_dim, head_k_dim)
+    state_indices = torch.arange(1, num_tokens + 1, dtype=torch.int32).view(
+        1, num_tokens
+    )
+    cu_seqlens = torch.tensor([0, num_tokens], dtype=torch.int32)
+    accepted = torch.tensor([num_accepted], dtype=torch.int32)
+
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_fill = torch.utils.deterministic.fill_uninitialized_memory
+    torch.use_deterministic_algorithms(True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    try:
+        recurrent_state = initial_state.clone()
+        recurrent_out, recurrent_state = fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            g=torch.rand(1, num_tokens, num_v_heads),
+            beta=torch.rand(1, num_tokens, num_v_heads),
+            initial_state=recurrent_state,
+            inplace_final_state=True,
+            ssm_state_indices=state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=accepted,
+        )
+
+        sigmoid_state = initial_state.clone()
+        sigmoid_out, sigmoid_state = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            initial_state=sigmoid_state,
+            inplace_final_state=True,
+            ssm_state_indices=state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=accepted,
+        )
+    finally:
+        torch.utils.deterministic.fill_uninitialized_memory = previous_fill
+        torch.use_deterministic_algorithms(
+            previous_deterministic, warn_only=previous_warn_only
+        )
+
+    torch.testing.assert_close(recurrent_out, torch.zeros_like(recurrent_out))
+    torch.testing.assert_close(sigmoid_out, torch.zeros_like(sigmoid_out))
+    torch.testing.assert_close(recurrent_state, initial_state)
+    torch.testing.assert_close(sigmoid_state, initial_state)
