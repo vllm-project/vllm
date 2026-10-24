@@ -73,6 +73,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    get_flashinfer_kv_cache_layouts,
     get_flashinfer_layout_string,
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
@@ -702,13 +703,15 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             # The trtllm-gen kernels consume head-major block interiors; the L/B
             # nesting outside the block is immaterial to them.
             return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
-        return super().supported_kv_cache_layouts()
+        # FlashInfer addresses a layer's cache as NHD or HND pages, so it cannot
+        # consume LHBNC, which puts the head dim outside the block dim.
+        return get_flashinfer_kv_cache_layouts()
 
     forward_includes_kv_cache_update: bool = False
 
