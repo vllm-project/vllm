@@ -2502,6 +2502,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
 def recv_worker():
     """Receive lifecycle state without distributed or device initialization."""
     worker = object.__new__(NixlConnectorWorker)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16)
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.block_size_ratio.return_value = 1
     worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
@@ -4224,10 +4225,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     FailingNixlWrapper,
 )
 @pytest.mark.parametrize("is_hma", [False, True])
+@pytest.mark.parametrize("multiple_kv_cache_groups", [False, True])
 def test_transfer_setup_failure_returns_finished(
-    default_vllm_config, dist_init, is_hma
+    default_vllm_config, dist_init, is_hma, multiple_kv_cache_groups
 ):
-    """Setup failures report the request; only non-HMA reports block IDs."""
+    """Setup failures report the request; block IDs only with one group."""
     block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(block_size=block_size)
 
@@ -4241,6 +4243,17 @@ def test_transfer_setup_failure_returns_finished(
     )
     connector.connector_worker.nixl_wrapper.fail_transfer_setup = True
     connector.connector_worker._is_hma_required = is_hma
+    if multiple_kv_cache_groups:
+        # HiSparse adds groups that take no part in the transfer.
+        kv_cache_config = make_kv_cache_config(block_size=block_size)
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["hisparse0"],
+                kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+                enable_kv_transfer=False,
+            )
+        )
+        connector.connector_worker.kv_cache_config = kv_cache_config
 
     request_id = "test_transfer_fail"
     metadata = NixlConnectorMetadata()
@@ -4275,7 +4288,8 @@ def test_transfer_setup_failure_returns_finished(
     assert request_id in results.finished_recving
     assert results.failed_recving == {request_id}
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == (set() if is_hma else {7, 8, 9})
+    reports_blocks = not is_hma and not multiple_kv_cache_groups
+    assert invalid_blocks == ({7, 8, 9} if reports_blocks else set())
 
 
 class _ScriptedXferWrapper(FakeNixlWrapper):

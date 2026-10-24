@@ -3248,7 +3248,14 @@ class NixlBaseConnectorWorker:
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
                 # TODO (NickLucche) handle failed transfer for HMA.
-                if not self._is_hma_required:
+                # Block IDs are only unique within a KV cache group, including
+                # groups outside the transfer, so failed_recving covers the rest.
+                # TODO: Drop the group count check once the scheduler's
+                # _handle_invalid_blocks supports several KV cache groups.
+                if (
+                    not self._is_hma_required
+                    and len(self.kv_cache_config.kv_cache_groups) == 1
+                ):
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
