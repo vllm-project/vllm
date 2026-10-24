@@ -186,6 +186,7 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
+        self._mm_stripped_prefix: list[MultiModalFeatureSpec] = []
 
         # Read-only views
         # Prevent directly appending to these lists since
