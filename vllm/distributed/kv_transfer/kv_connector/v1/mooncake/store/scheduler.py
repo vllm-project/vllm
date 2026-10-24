@@ -203,6 +203,7 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
+        self._finished_decode_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -462,6 +463,11 @@ class MooncakeStoreScheduler:
                         block_hashes=unfinished_req.block_hashes,
                         num_prompt_tokens=unfinished_req.num_prompt_tokens,
                         save_partial_tail=self.enable_partial_hash_hits,
+                        max_save_tokens=(
+                            len(unfinished_req.block_hashes) * self._hash_block_size
+                            if is_decode
+                            else None
+                        ),
                     )
 
                 if req_meta is not None:
@@ -519,6 +525,9 @@ class MooncakeStoreScheduler:
         for req_meta in self._finished_partial_tail_metas.values():
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
+        for req_meta in self._finished_decode_metas.values():
+            meta.add_request(req_meta)
+        self._finished_decode_metas.clear()
 
         if not self._capacity_only:
             self._reference_save_blocks(meta)
@@ -596,6 +605,46 @@ class MooncakeStoreScheduler:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
+
+    def register_finished_decode_save(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> None:
+        """Pin a final confirmed decode prefix before the request is freed."""
+        if not self.save_decode_cache:
+            return
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return
+        completed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        completed = min(completed, request.num_tokens)
+        final_tracker = RequestTracker(
+            req_id=request.request_id,
+            token_len=completed,
+            allocated_block_ids=tuple(
+                block_ids[group_id].copy() for group_id in self._store_group_ids
+            ),
+            num_saved_tokens=tracker.num_saved_tokens,
+            token_ids=(
+                list(request.all_token_ids[:completed])
+                if self.enable_kv_events
+                else None
+            ),
+            prefill_end_tokens=tracker.prefill_end_tokens,
+            partial_tail_sent=tracker.partial_tail_sent,
+        )
+        req_meta = ReqMeta.from_request_tracker(
+            final_tracker,
+            self._block_size,
+            block_hashes=request.block_hashes,
+            num_prompt_tokens=request.num_prompt_tokens,
+            max_save_tokens=len(request.block_hashes) * self._hash_block_size,
+        )
+        if req_meta is None:
+            return
+        meta = MooncakeStoreConnectorMetadata(set(), set())
+        meta.add_request(req_meta)
+        self._reference_save_blocks(meta)
+        self._finished_decode_metas[request.request_id] = req_meta
 
     def register_finished_partial_tail(
         self,

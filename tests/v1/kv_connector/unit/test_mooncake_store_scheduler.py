@@ -61,6 +61,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
+    scheduler._finished_decode_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -423,6 +424,72 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.token_len == 48
     assert tracker.num_saved_tokens == 48
+
+
+def test_async_decode_hash_coverage_does_not_skip_delayed_blocks():
+    """A delayed hash must defer its save without moving the save cursor past it."""
+    scheduler, tracker = _setup_decode_request(save_decode_cache=True, token_len=63)
+    request = scheduler._unfinished_requests["req-0"][0]
+    output = _make_decode_scheduler_output(
+        num_computed_tokens=63, num_scheduled_tokens=4
+    )
+
+    [first] = scheduler.build_connector_meta(output).requests
+
+    assert first.token_len_chunk == 48
+    assert tracker.num_saved_tokens == 48
+    request.block_hashes.append(b"h3")
+    assert first.block_hashes == [b"h0", b"h1", b"h2"]
+    output = _make_decode_scheduler_output(num_computed_tokens=64)
+    output.kv_connector_block_state = _make_connector_block_state(([0, 1, 2, 3],))
+
+    [caught_up] = scheduler.build_connector_meta(output).requests
+
+    assert caught_up.token_ids_start == 48
+    assert caught_up.token_len_chunk == 64
+    assert tracker.num_saved_tokens == 64
+
+
+@pytest.mark.parametrize(
+    "computed,in_flight,known",
+    [(64, 0, 65), (80, 16, 81), (80, 0, 65)],
+)
+def test_finished_decode_flushes_only_confirmed_unsaved_blocks(
+    computed, in_flight, known
+):
+    """Finish must retain and save the final accepted block without another decode."""
+    scheduler, tracker = _setup_decode_request(save_decode_cache=True, token_len=63)
+    tracker.num_saved_tokens = 48
+    request = scheduler._unfinished_requests["req-0"][0]
+    request.request_id = "req-0"
+    request.all_token_ids = list(range(known))
+    request.num_tokens = known
+    request.num_computed_tokens = computed
+    request.num_in_flight_tokens = in_flight
+    request.block_hashes = [b"h0", b"h1", b"h2", b"h3"]
+    scheduler.client = SimpleNamespace(discard=lambda *_: None)
+    block_ids = ([1, 2, 3, 4, 5],)
+    pool = scheduler._gpu_block_pool
+    blocks = [pool.blocks[bid] for bid in block_ids[0]]
+    pool.touch(blocks)
+
+    scheduler.register_finished_decode_save(request, block_ids)
+    pool.free_blocks(blocks)
+
+    assert scheduler.has_pending_push_work()
+    assert all(block.ref_cnt == 1 for block in blocks)
+    output = _make_preemption_scheduler_output()
+    output.preempted_req_ids = set()
+    output.finished_req_ids = {"req-0"}
+    [final] = scheduler.build_connector_meta(output).requests
+
+    assert final.token_ids_start == 48
+    assert final.token_len_chunk == 64
+    assert final.completed_token_len == min(computed - in_flight, known)
+    assert "req-0" not in scheduler._request_trackers
+    scheduler.update_connector_output(_make_worker_output({final.store_job_id: 1}))
+    assert not scheduler.has_pending_push_work()
+    assert all(block.ref_cnt == 0 for block in blocks)
 
 
 @pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])

@@ -794,17 +794,20 @@ class ReqMeta:
         block_hashes: list[BlockHash] | None = None,
         save_partial_tail: bool = False,
         num_prompt_tokens: int | None = None,
+        max_save_tokens: int | None = None,
     ) -> "ReqMeta | None":
-        """Create ReqMeta from a RequestTracker."""
+        """Create metadata, deferring saves beyond the confirmed hash frontier."""
         if save_partial_tail:
             assert num_prompt_tokens is not None
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
-
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
-        num_tokens_to_save = input_token_len // block_size * block_size
+        save_token_len = input_token_len
+        if max_save_tokens is not None:
+            save_token_len = min(save_token_len, max_save_tokens)
+        num_tokens_to_save = save_token_len // block_size * block_size
 
         publish_tail = (
             save_partial_tail
@@ -855,7 +858,7 @@ class ReqMeta:
             block_ids=tracker.allocated_block_ids,
             can_save=not skip_save,
             load_spec=load_spec,
-            block_hashes=block_hashes,
+            block_hashes=list(block_hashes),
             token_ids=token_ids,
             token_ids_start=token_ids_start,
             num_prompt_tokens=num_prompt_tokens,
