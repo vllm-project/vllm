@@ -667,6 +667,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHINFER_MLA_SPARSE_SM120",
                 "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
+                "ROCM_AITER_MLA_SPARSE",
             ):
                 from vllm.v1.attention.backends.mla.compressor_utils import (
                     _COMPRESSED_SLOT_MAPPING_KERNEL,
@@ -680,7 +681,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
                 _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
-                if backend_name != "DEEPSEEK_V32_INDEXER":
+                if backend_name not in (
+                    "DEEPSEEK_V32_INDEXER",
+                    "ROCM_AITER_MLA_SPARSE",
+                ):
                     from vllm.v1.attention.backends.mla.sparse_swa import (
                         _COMPUTE_PREFILL_METADATA_KERNEL,
                     )
