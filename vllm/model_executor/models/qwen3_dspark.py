@@ -270,6 +270,16 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.attn.layer_name for layer in self.model.layers]
 
+    def compute_local_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return this TP rank's draft-vocabulary logits without gathering."""
+        logits = self.logits_processor(
+            self.lm_head,
+            hidden_states,
+            skip_gather=True,
+        )
+        assert logits is not None
+        return logits
+
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Draft-vocab logits without the d2t scatter: the speculator adds the
         # Markov bias in draft space, then remaps via map_draft_to_target.
