@@ -508,13 +508,14 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
         if self._role == KVConnectorRole.SCHEDULER:
             self._scheduling_states: dict[str, RequestSchedulingState] = {}
-            self._metadata_client = Hf3fsMetadataClient()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(0, role="scheduler")
 
         atexit.register(self.close)
         signal.signal(signal.SIGINT, lambda sig, frame: self.close())
         signal.signal(signal.SIGTERM, lambda sig, frame: self.close())
-        signal.signal(signal.SIGQUIT, lambda sig, frame: self.close())
+        if hasattr(signal, "SIGQUIT"):
+            signal.signal(signal.SIGQUIT, lambda sig, frame: self.close())
 
         logger.info(
             "HF3FSKVConnector initialized: path=%s, role=%s",
@@ -595,7 +596,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Initialize metadata client
             num_pages = self._file_size // self._bytes_per_page
-            self._metadata_client = Hf3fsMetadataClient()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(self._rank, num_pages, role="worker")
         except Exception as e:
             logger.error("HF3FS client initialization failed: %s", e)
