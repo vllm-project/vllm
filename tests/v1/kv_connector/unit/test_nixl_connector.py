@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 import ray
 import torch
+import zmq
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import LLM
@@ -50,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     HeartbeatInfo,
     RemoteMeta,
     ReqMeta,
@@ -64,6 +66,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
@@ -5079,6 +5082,112 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+def _start_handshake_listener(port: int) -> tuple[threading.Thread, threading.Event]:
+    encoded_data = {(0, 0): b"fake-metadata-blob"}
+    ready_event = threading.Event()
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=NixlConnectorScheduler._nixl_handshake_listener,
+        args=(encoded_data, ready_event, stop_event, "127.0.0.1", port),
+        daemon=True,
+    )
+    thread.start()
+    assert ready_event.wait(timeout=5), "listener did not start"
+    return thread, stop_event
+
+
+def _ask_handshake_listener(port: int, timeout_ms: int = 2000):
+    """Send a real GET_META_MSG request, like a decode worker would."""
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.REQ)
+    sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(f"tcp://127.0.0.1:{port}")
+    sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0)))
+    try:
+        reply = sock.recv_multipart()
+    except zmq.Again:
+        reply = None
+    sock.close()
+    ctx.term()
+    return reply
+
+
+@pytest.mark.parametrize(
+    "socket_type,message",
+    [
+        pytest.param(zmq.DEALER, b"whatever", id="bad_envelope"),
+        pytest.param(zmq.REQ, b"not valid msgpack", id="malformed_content"),
+        pytest.param(zmq.REQ, b"\x91" * 20000 + b"\x01", id="deeply_nested"),
+        pytest.param(
+            zmq.REQ,
+            msgspec.msgpack.encode((GET_META_MSG, 0, 1)),
+            id="unknown_rank",
+        ),
+        pytest.param(
+            zmq.REQ,
+            msgspec.msgpack.encode((b"something_else", 0, 0)),
+            id="wrong_message",
+        ),
+    ],
+)
+def test_handshake_listener_survives_bad_request(socket_type, message):
+    """A bad request gets no reply and must not kill the listener thread."""
+    port = get_open_port()
+    thread, stop_event = _start_handshake_listener(port)
+    try:
+        reply = _ask_handshake_listener(port)
+        assert reply is not None and reply[0] == b"fake-metadata-blob"
+
+        ctx = zmq.Context()
+        sock = ctx.socket(socket_type)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://127.0.0.1:{port}")
+        sock.send(message)
+        got_reply = sock.poll(300) != 0
+        sock.close()
+        ctx.term()
+
+        assert not got_reply, "listener replied to a bad request"
+        assert thread.is_alive(), "listener died on a bad request"
+
+        reply = _ask_handshake_listener(port)
+        assert reply is not None and reply[0] == b"fake-metadata-blob"
+    finally:
+        stop_event.set()
+        thread.join(timeout=3)
+
+
+def test_handshake_listener_shutdown_with_continuous_bad_requests():
+    """stop_event must be observed while bad requests keep arriving."""
+    port = get_open_port()
+    thread, stop_event = _start_handshake_listener(port)
+    spam_stop = threading.Event()
+
+    def spam():
+        ctx = zmq.Context()
+        sock = ctx.socket(zmq.DEALER)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://127.0.0.1:{port}")
+        while not spam_stop.is_set():
+            with contextlib.suppress(zmq.Again):
+                sock.send(b"bad frame", zmq.NOBLOCK)
+        sock.close()
+        ctx.term()
+
+    spammer = threading.Thread(target=spam, daemon=True)
+    spammer.start()
+    try:
+        time.sleep(0.3)
+        assert thread.is_alive(), "listener died on a bad request"
+        stop_event.set()
+        thread.join(timeout=3)
+        assert not thread.is_alive(), "shutdown blocked on continuous bad requests"
+    finally:
+        spam_stop.set()
+        spammer.join(timeout=3)
 
 
 @patch(
