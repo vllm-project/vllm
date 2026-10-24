@@ -283,6 +283,33 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     assert method.get_fused_moe_quant_config(layer) is quant_config
 
 
+@pytest.mark.parametrize("int8_activations", [False, True])
+def test_compressed_tensors_wna16_moe_passes_input_global_scales(int8_activations):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    # With VLLM_MARLIN_INPUT_DTYPE=int8, the Marlin weight processing scales the
+    # group scales down and keeps the factors as w13/w2_input_global_scale.
+    method = object.__new__(CompressedTensorsWNA16MoEMethod)
+    method.wna16_backend = WNA16MoEBackend.MARLIN
+    method.group_size = 128
+    method.num_bits = 4
+    layer = SimpleNamespace(
+        w13_weight_scale=torch.ones(2, 2, 16),
+        w2_weight_scale=torch.ones(2, 1, 16),
+    )
+    if int8_activations:
+        layer.w13_input_global_scale = torch.tensor([0.5, 0.25])
+        layer.w2_input_global_scale = torch.tensor([0.125, 2.0])
+
+    quant_config = method.get_fused_moe_quant_config(layer)
+
+    assert quant_config is not None
+    assert quant_config.a1_gscale is getattr(layer, "w13_input_global_scale", None)
+    assert quant_config.a2_gscale is getattr(layer, "w2_input_global_scale", None)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Compressed-tensors Humming WNA16 MoE requires CUDA",
