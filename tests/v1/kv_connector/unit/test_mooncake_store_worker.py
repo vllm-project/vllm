@@ -2365,7 +2365,32 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+
+
+@pytest.mark.parametrize(
+    "result, invalid_blocks",
+    [([-10, 256], {1, 2, 5}), (RuntimeError("boom"), {1, 2, 5, 6})],
+    ids=["partial-failure", "exception"],
+)
+def test_recv_thread_reports_failed_and_unattempted_blocks(result, invalid_blocks):
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = [[256, 256], result]
+    thread = _make_store_recving_thread(
+        store,
+        tp_rank=2,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+    )
+    req = _make_load_req(
+        "req-a", [bytes([i]) for i in range(7)], token_len=112, vllm_cached_tokens=16
+    )
+
+    thread._handle_request(req)
+
+    # Block 0 is local; rotated batches are [3, 4], [5, 6], [1, 2].
+    assert store.batch_get_into_multi_buffers.call_count == 2
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == invalid_blocks
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
