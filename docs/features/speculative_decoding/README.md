@@ -96,6 +96,21 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
 
+!!! note "`synthetic_acceptance_length` picks the minimum-variance shape"
+    A mean acceptance length does not determine an acceptance distribution.
+    `synthetic_acceptance_length` resolves to the least-dispersed distribution with
+    that mean, so the drafter commits a nearly constant number of tokens per step.
+    That keeps a fixture reproducible, and it is fine for throughput. A benchmark
+    that reads a latency *distribution* sees a drafter unlike any real one, whose
+    per-position rates decay instead.
+
+    To replay a measured drafter's shape, pass `synthetic_acceptance_rates`
+    directly. `benchmarks/spec_acceptance_rates.py` builds that vector from an
+    acceptance distribution vLLM already reports, either
+    `metrics.speculative_decoding.acceptance_histogram` (see
+    [acceptance metrics](acceptance_metrics.md)) or the `Per-position acceptance
+    rate` field in a server log.
+
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
     as generic draft models. Use `"method": "mtp"` with the assistant
