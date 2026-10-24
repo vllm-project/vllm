@@ -146,7 +146,7 @@ def _apply_grammar_bitmask_kernel(
     mapping_idx = tl.load(logits_indices_ptr + bitmask_idx)
     req_idx = mapping_idx // MASK_STRIDE
     position_idx = mapping_idx % MASK_STRIDE
-    logits_idx = tl.load(cu_num_logits_ptr + req_idx)
+    logits_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_idx
     logits_idx += position_idx
     position_is_active = position_idx < num_req_logits
