@@ -633,6 +633,30 @@ def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
     assert (capturer.device_buffer[stop - start :, 0] == -1).all()
 
 
+@pytest.mark.parametrize("microbatch_sizes", [(2, 2), (3, 2)])
+@pytest.mark.parametrize("dp_rank", [0, 1])
+def test_routed_experts_capturer_dbo_microbatches_keep_their_rows(
+    microbatch_sizes, dp_rank
+):
+    """Each DBO microbatch writes at its token offset, not over the first one."""
+    capturer = _capturer_with_buffer(dp_rank=dp_rank)
+    num_tokens = sum(microbatch_sizes)
+    topk = torch.arange(num_tokens * 2, dtype=torch.int32).reshape(num_tokens, 2)
+    start = 0
+    for size in microbatch_sizes:
+        ctx = _forward_context(
+            dp_metadata=DPMetadata(num_tokens_across_dp_cpu=torch.tensor([size, size])),
+        )
+        with (
+            patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+            patch(f"{_REC_MODULE}.dbo_current_ubatch_token_offset", return_value=start),
+        ):
+            capturer.capture(0, topk[start : start + size])
+        start += size
+    torch.testing.assert_close(capturer.device_buffer[:num_tokens, 0], topk)
+    assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
+
+
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)

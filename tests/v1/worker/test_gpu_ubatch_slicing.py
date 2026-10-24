@@ -52,7 +52,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+    dbo_current_ubatch_token_offset,
+    dbo_yield,
+)
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
@@ -592,16 +596,20 @@ def test_runner_allocates_one_buffer_pair_per_microbatch():
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
-    def __init__(self, trace: list[tuple[str, int]]):
+    def __init__(self, trace: list[tuple[str, int, int]]):
         super().__init__()
         self.trace = trace
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
-        self.trace.append(("enter", dbo_current_ubatch_id()))
+        self.trace.append(
+            ("enter", dbo_current_ubatch_id(), dbo_current_ubatch_token_offset())
+        )
         out = input_ids.float().unsqueeze(-1) * 2 + positions.float().unsqueeze(-1)
         # Stands in for the expert all-to-all handoff point.
         dbo_yield()
-        self.trace.append(("exit", dbo_current_ubatch_id()))
+        self.trace.append(
+            ("exit", dbo_current_ubatch_id(), dbo_current_ubatch_token_offset())
+        )
         return out
 
 
@@ -621,7 +629,7 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
         ],
     )
 
-    trace: list[tuple[str, int]] = []
+    trace: list[tuple[str, int, int]] = []
     model = _YieldingModel(trace)
     output = runner.run(model, model_inputs, ubatch_state)
 
@@ -631,7 +639,12 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     torch.testing.assert_close(output, expected)
 
     # Both microbatches reach the handoff before either finishes.
-    assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    assert trace == [
+        ("enter", 0, 0),
+        ("enter", 1, 8),
+        ("exit", 0, 0),
+        ("exit", 1, 8),
+    ]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -857,6 +870,13 @@ def test_capturable_run_replays_as_a_cudagraph():
     )
     with torch.cuda.graph(graph, stream=runner.capture_stream):
         captured = finish()
+
+    assert model.trace == [
+        ("enter", 0, 0),
+        ("enter", 1, 8),
+        ("exit", 0, 0),
+        ("exit", 1, 8),
+    ]
 
     input_ids.fill_(3)
     positions.fill_(5)
