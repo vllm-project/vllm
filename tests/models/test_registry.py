@@ -64,6 +64,13 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("HY V4 is only supported on CUDA and ROCm")
 
+    if model_arch in (
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
+    ) and not (current_platform.is_cuda() or current_platform.is_rocm()):
+        pytest.skip("Qwen4Exp is only supported on CUDA and ROCm")
+
     if (
         model_arch == "DeepseekV4ForConditionalGeneration"
         and not current_platform.is_cuda_alike()
