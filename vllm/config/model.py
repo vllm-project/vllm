@@ -36,6 +36,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
+    get_sentence_transformers_activation_fn,
     is_encoder_decoder,
     iter_rope_parameters,
     mrope_num_dims,
@@ -791,6 +792,23 @@ class ModelConfig:
                     if getattr(self.pooler_config, k) is None:
                         setattr(self.pooler_config, k, v)
                         pooler_config_sources[k] = "sentence_transformers"
+
+            # Sentence Transformers v6 saves the CrossEncoder activation outside
+            # config.json; put it where the classifier activation lookup reads it,
+            # unless hf_overrides already set the activation explicitly.
+            overrides = self.hf_overrides if isinstance(self.hf_overrides, dict) else {}
+            act_fn_overridden = "sbert_ce_default_activation_function" in overrides or (
+                "activation_fn" in (overrides.get("sentence_transformers") or {})
+            )
+            if not act_fn_overridden and (
+                act_fn := get_sentence_transformers_activation_fn(
+                    self.model, self.revision
+                )
+            ):
+                self.hf_config.sentence_transformers = {
+                    **(getattr(self.hf_config, "sentence_transformers", None) or {}),
+                    "activation_fn": act_fn,
+                }
 
             default_seq_pooling_type = self._model_info.default_seq_pooling_type
             if self.pooler_config.seq_pooling_type is None:

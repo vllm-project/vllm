@@ -50,11 +50,17 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
+from vllm.model_executor.layers.pooler.activations import (
+    PoolerClassify,
+    PoolerIdentity,
+    get_act_fn,
+)
 from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
+    get_sentence_transformers_activation_fn,
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -2433,6 +2439,55 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     assert try_get_dense_modules(str(tmp_path)) == [
         {**dense_config, "folder": "2_Dense"}
     ]
+
+
+@pytest.mark.parametrize(
+    ("st_config", "expected"),
+    [
+        (
+            {
+                "model_type": "CrossEncoder",
+                "activation_fn": "torch.nn.modules.linear.Identity",
+            },
+            "torch.nn.modules.linear.Identity",
+        ),
+        (
+            {
+                "model_type": "SentenceTransformer",
+                "activation_fn": "torch.nn.modules.linear.Identity",
+            },
+            None,
+        ),
+        ({"model_type": "CrossEncoder"}, None),
+    ],
+)
+def test_get_sentence_transformers_activation_fn(tmp_path, st_config, expected):
+    _write_json(tmp_path / "config_sentence_transformers.json", st_config)
+
+    assert get_sentence_transformers_activation_fn(str(tmp_path)) == expected
+
+
+_SIGMOID = "torch.nn.modules.activation.Sigmoid"
+
+
+@pytest.mark.parametrize(
+    ("hf_overrides", "expected"),
+    [
+        ({}, PoolerIdentity),
+        ({"sentence_transformers": {"activation_fn": _SIGMOID}}, PoolerClassify),
+        ({"sbert_ce_default_activation_function": _SIGMOID}, PoolerClassify),
+    ],
+)
+def test_sentence_transformers_cross_encoder_activation_fn(hf_overrides, expected):
+    """Sentence Transformers v6 saves the CrossEncoder activation (here
+    Identity) in config_sentence_transformers.json instead of config.json.
+    An explicit hf_overrides activation still takes precedence."""
+    model_config = ModelConfig(
+        "tomaarsen/ettin-encoder-150m-reranker-msmarco524k-1e-4-20261014",
+        hf_overrides=hf_overrides,
+    )
+
+    assert isinstance(get_act_fn(model_config.hf_config), expected)
 
 
 @pytest.mark.skipif(

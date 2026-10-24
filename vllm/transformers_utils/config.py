@@ -1448,6 +1448,40 @@ def get_sentence_transformers_chat_template_kwargs(
     return chat_template_kwargs
 
 
+@cache
+def get_sentence_transformers_activation_fn(
+    model: str | Path,
+    revision: str | None = None,
+) -> str | None:
+    """Get the activation function of a Sentence Transformers CrossEncoder.
+
+    Sentence Transformers v6 saves it as `activation_fn` in
+    `config_sentence_transformers.json` and prefers it over the copies older
+    versions kept in `config.json`.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+
+    Returns:
+        The qualified name of the activation function, or `None` if the
+        checkpoint is not a CrossEncoder that declares one.
+
+    """
+    try:
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if not isinstance(st_config, dict) or st_config.get("model_type") != "CrossEncoder":
+        return None
+    activation_fn = st_config.get("activation_fn")
+    return activation_fn if isinstance(activation_fn, str) else None
+
+
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
     return {
         param_name: info
