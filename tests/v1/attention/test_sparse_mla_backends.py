@@ -2012,6 +2012,12 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers
 
 
 def test_sparse_mla_index_group_converts_decode_indices_once(monkeypatch):
+    def unexpected_hisparse_backend():
+        pytest.fail("Sparse attention without HiSparse must not resolve its backend")
+
+    monkeypatch.setattr(
+        index_group_module, "get_hisparse_backend", unexpected_hisparse_backend
+    )
     device = torch.device(DEVICE_TYPE)
     logical = torch.full((2, 128), -1, dtype=torch.int32, device=device)
     logical[:, :4] = torch.tensor(
@@ -4728,10 +4734,12 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
 
 
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
+    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+
     compute_stream = object()
     prefill_stream = MagicMock()
     gather = MagicMock()
-    monkeypatch.setattr(index_group_module, "current_stream", lambda: compute_stream)
+    monkeypatch.setattr("vllm.utils.torch_utils.current_stream", lambda: compute_stream)
     monkeypatch.setattr(
         index_group_module.ops, "cp_gather_and_upconvert_fp8_kv_cache", gather
     )
@@ -4742,7 +4750,8 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
-            request_state_indices=torch.tensor([0], dtype=torch.int32)
+            backend=CUDAHiSparseBackend(),
+            request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)

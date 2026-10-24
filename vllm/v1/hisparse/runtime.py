@@ -50,24 +50,6 @@ def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
     )
 
 
-def is_hisparse_group_prefetch_batch(attn_metadata: Any | None, max_rows: int) -> bool:
-    """Allow speculative Decode to stage a group's old missing KV rows.
-
-    This controls prefetch only. The single-token ``decode_batch`` policy
-    still controls resident writes and Host mirroring. The resolver excludes
-    resident rows, including current tentative tokens, from the swap plan.
-    Each follower writes those tokens before its own attention consumption.
-    """
-    return (
-        attn_metadata is not None
-        and attn_metadata.num_actual_tokens > 0
-        and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
-        and 0 < attn_metadata.num_reqs <= attn_metadata.num_actual_tokens
-        and 0 < attn_metadata.max_query_len <= max_rows
-        and attn_metadata.num_actual_tokens <= max_rows
-    )
-
-
 def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     max_query_len = max_decode_query_len(vllm_config)
     scheduler_config = vllm_config.scheduler_config
@@ -1077,7 +1059,7 @@ class HiSparseRuntime:
                 valid_counts_out=valid_counts_out,
             )
             runtimes = [self]
-            if resident.prefetch_decode_group:
+            if resident.decode_batch:
                 runtimes.extend(group.followers)
             for runtime in runtimes:
                 runtime._swap_rows(shared_rows)
@@ -1201,7 +1183,6 @@ class HiSparseCacheHandle:
         self.runtime = runtime
         self.dummy_batch = False
         self.decode_batch = False
-        self.prefetch_decode_group = False
         self.all_context_pages_resident = True
         self.num_actual_tokens = 0
         self.num_decode_tokens = 0
@@ -1233,12 +1214,6 @@ class HiSparseCacheHandle:
             attn_metadata.req_id_per_token if attn_metadata is not None else None
         )
         self.decode_batch = is_hisparse_decode_batch(attn_metadata)
-        self.prefetch_decode_group = self.decode_batch or (
-            self.runtime.backend.supports_speculative_group_prefetch
-            and is_hisparse_group_prefetch_batch(
-                attn_metadata, self.runtime.max_swap_rows
-            )
-        )
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )

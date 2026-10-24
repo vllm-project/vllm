@@ -19,8 +19,6 @@ if TYPE_CHECKING:
 
 class HiSparseBackend:
     supports_shared_host_pool = False
-    # Opt in only when group staging preserves tentative KV and event ownership.
-    supports_speculative_group_prefetch = False
     stats_dtype = torch.uint64
 
     def check_available(self) -> None:

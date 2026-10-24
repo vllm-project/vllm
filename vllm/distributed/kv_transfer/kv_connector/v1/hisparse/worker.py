@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import get_hisparse_backend
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -300,6 +303,7 @@ class HiSparseConnectorWorker:
                 ),
             )
         self._dma_free_descriptors: list[_DMADescriptors] = []
+        self._failed_dma_descriptors: list[_DMADescriptors] = []
         self._pending_dma_descriptors: deque[tuple[torch.Event, _DMADescriptors]] = (
             deque()
         )
@@ -633,7 +637,13 @@ class HiSparseConnectorWorker:
         except Exception:
             # A backend may have queued part of a batch before reporting an
             # error. Keep the descriptors alive until that work has drained.
-            stream.synchronize()
+            try:
+                stream.synchronize()
+            except Exception:
+                self._failed_dma_descriptors.append(descriptors)
+                logger.exception(
+                    "HiSparse: failed to drain DMA after submission error."
+                )
             raise
         self._pending_dma_descriptors.append((completion_event, descriptors))
         self._dma_submitted = True
@@ -980,6 +990,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
+        self._failed_dma_descriptors.clear()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,

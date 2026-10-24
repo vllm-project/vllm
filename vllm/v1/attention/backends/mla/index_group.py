@@ -11,8 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import current_stream as default_current_stream
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -27,27 +26,11 @@ from vllm.v1.hisparse.runtime import (
 
 
 def _create_side_stream(device: torch.device) -> torch.Stream:
-    if current_platform.get_hisparse_backend_cls() is not None:
-        return get_hisparse_backend().create_stream(device, generic=True)
     return torch.Stream(device=device)
 
 
 def _create_event() -> torch.Event:
-    if current_platform.get_hisparse_backend_cls() is not None:
-        return get_hisparse_backend().create_event()
     return torch.Event()
-
-
-def current_stream() -> Any:
-    if current_platform.get_hisparse_backend_cls() is not None:
-        return get_hisparse_backend().current_stream()
-    return default_current_stream()
-
-
-def _stream_context(stream: Any) -> Any:
-    if current_platform.get_hisparse_backend_cls() is not None:
-        return get_hisparse_backend().stream_context(stream, generic=True)
-    return stream
 
 
 @dataclass
@@ -62,6 +45,12 @@ class SparseMLAIndexGroup:
     physical_topk_ready: torch.Event
     has_indexer: bool
     num_layers: int = 0
+
+    def _current_stream(self) -> Any:
+        return current_stream()
+
+    def _stream_context(self, stream: Any) -> Any:
+        return stream
 
     def register_layer(
         self,
@@ -84,7 +73,7 @@ class SparseMLAIndexGroup:
         # touches this event), so skip the record as well.
         if in_piecewise_cudagraph():
             return
-        self.logical_topk_ready.record(current_stream())
+        self.logical_topk_ready.record(self._current_stream())
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         pass
@@ -154,13 +143,13 @@ class SparseMLAIndexGroup:
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
-        compute_stream = current_stream()
+        compute_stream = self._current_stream()
         if layer_index == 0:
             if self.has_indexer and not in_piecewise_cudagraph():
                 self.side_stream.wait_event(self.logical_topk_ready)
             else:
                 self.side_stream.wait_stream(compute_stream)
-            with _stream_context(self.side_stream):
+            with self._stream_context(self.side_stream):
                 triton_convert_req_index_to_global_index(
                     req_id_per_token,
                     block_table,
@@ -191,6 +180,12 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
 
+    def _current_stream(self) -> Any:
+        return get_hisparse_backend().current_stream()
+
+    def _stream_context(self, stream: Any) -> Any:
+        return get_hisparse_backend().stream_context(stream, generic=True)
+
     def register_layer(
         self,
         vllm_config: VllmConfig | None = None,
@@ -202,8 +197,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert head_size is not None
         assert kv_cache_dtype is not None
         layer_index = super().register_layer()
+        backend = get_hisparse_backend()
         if self.prefill_stream is None:
-            self.prefill_stream = _create_side_stream(self.logical_topk_indices.device)
+            self.prefill_stream = backend.create_stream(
+                self.logical_topk_indices.device, generic=True
+            )
         if kv_cache_dtype == "fp8_ds_mla":
             row_width = FP8_DS_MLA_ROW_BYTES
             kv_dtype = torch.uint8
@@ -225,7 +223,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert cache is not None
         self.caches.append(cache)
         cache.index_group_caches = self.caches
-        self.prefill_ready_events.append(_create_event())
+        self.prefill_ready_events.append(backend.create_event())
         return layer_index
 
     def cache(self, layer_index: int) -> HiSparseCacheHandle:
@@ -343,8 +341,9 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
         block_table = plan.block_table[request_start : request_start + batch_size]
-        prefill_stream.wait_stream(current_stream())
-        with _stream_context(prefill_stream):
+        backend = cache.runtime.backend
+        prefill_stream.wait_stream(backend.current_stream())
+        with backend.stream_context(prefill_stream, generic=True):
             cache.runtime.backend.gather_fp8_prefill(
                 cache.view.cache,
                 dst,
@@ -395,6 +394,17 @@ class SparseMLAIndexGroupBuilder:
                 dtype=self.logical_topk_indices.dtype,
                 device=self.logical_topk_indices.device,
             )
+            if group_cls is HiSparseMLAIndexGroup:
+                backend = get_hisparse_backend()
+                side_stream = backend.create_stream(
+                    self.logical_topk_indices.device, generic=True
+                )
+                logical_topk_ready = backend.create_event()
+                physical_topk_ready = backend.create_event()
+            else:
+                side_stream = _create_side_stream(self.logical_topk_indices.device)
+                logical_topk_ready = _create_event()
+                physical_topk_ready = _create_event()
             self.current_group = group_cls(
                 logical_topk_indices=self.logical_topk_indices,
                 physical_topk_indices=physical_topk_indices,
@@ -403,9 +413,9 @@ class SparseMLAIndexGroupBuilder:
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
-                side_stream=_create_side_stream(self.logical_topk_indices.device),
-                logical_topk_ready=_create_event(),
-                physical_topk_ready=_create_event(),
+                side_stream=side_stream,
+                logical_topk_ready=logical_topk_ready,
+                physical_topk_ready=physical_topk_ready,
                 has_indexer=is_index_producing_layer,
             )
         group = self.current_group
