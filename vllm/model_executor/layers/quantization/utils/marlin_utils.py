@@ -542,8 +542,11 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
 
 
 def marlin_act_int8_process_scales(s: torch.Tensor):
-    a_scales_scale_factor = 1 / 4096 * s.max().float()
-    s = s / s.max() * 4096
+    # Group scales may be negative (e.g. symmetric AutoRound exports), so
+    # normalize by abs().max() to keep the signed int16 values in [-4096, 4096].
+    s_absmax = s.abs().max()
+    a_scales_scale_factor = 1 / 4096 * s_absmax.float()
+    s = s / s_absmax * 4096
     s = s.round().to(torch.int16).view(s.dtype)
     return s, a_scales_scale_factor
 
