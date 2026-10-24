@@ -4,6 +4,7 @@
 
 import queue
 import threading
+import weakref
 from collections.abc import Iterable
 
 import pytest
@@ -101,6 +102,21 @@ class TestAsyncLookupManager:
         mgr.cleanup("req_a")
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
+
+    def test_completed_lookup_releases_request_context(self):
+        """An idle worker must not retain a completed request's payloads."""
+        mgr = InMemoryLookupManager()
+        released = threading.Event()
+        ctx = _ctx()
+        weakref.finalize(ctx, released.set)
+        try:
+            mgr.lookup(_key(1), ctx)
+            mgr.flush()
+            mgr.cleanup(ctx.req_id)
+            del ctx
+            assert released.wait(timeout=5)
+        finally:
+            mgr.shutdown()
 
     def test_cleanup_preserves_shared_entries(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})

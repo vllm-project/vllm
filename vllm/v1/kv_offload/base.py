@@ -90,6 +90,8 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
+    """Per-request offloading state with optional live token counts."""
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
@@ -104,6 +106,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
