@@ -7,11 +7,13 @@ import os
 import shutil
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -75,6 +77,48 @@ def _mock_pp_group(
         "vllm.distributed.get_pipeline_model_parallel_rank",
         lambda: pp_rank,
     )
+
+
+@pytest.mark.parametrize("source", ["local", "hf", "hf_override"])
+def test_load_weights_resolves_checkpoint_path(monkeypatch, tmp_path, source):
+    """Load the selected checkpoint, resolving HF IDs with the requested revision."""
+    from safetensors.torch import save_file
+
+    _mock_pp_group(monkeypatch, 1)
+    weights = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    save_file({"weight": weights}, tmp_path / "model-rank-0-part-0.safetensors")
+    download = Mock(return_value=str(tmp_path))
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.sharded_state_loader.download_weights_from_hf",
+        download,
+    )
+    load_config = LoadConfig(
+        load_format="sharded_state",
+        download_dir=str(tmp_path / "cache"),
+        ignore_patterns=["unused/*"],
+    )
+    model_config = SimpleNamespace(
+        model="org/model" if source == "hf" else str(tmp_path),
+        model_weights="org/weights" if source == "hf_override" else None,
+        revision="checkpoint-revision",
+    )
+    model = torch.nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1)
+
+    ShardedStateLoader(load_config).load_weights(model, model_config)
+
+    torch.testing.assert_close(model.weight, weights)
+    if source == "local":
+        download.assert_not_called()
+    else:
+        download.assert_called_once_with(
+            model_config.model_weights or model_config.model,
+            load_config.download_dir,
+            ["*.safetensors"],
+            model_config.revision,
+            ignore_patterns=load_config.ignore_patterns,
+        )
 
 
 @pytest.mark.parametrize(
