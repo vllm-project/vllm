@@ -14,6 +14,8 @@ ARG MORI_BRANCH="v1.2.3.post1"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCM_RUNTIME_COMMIT="25e14349f2606a6b95c4ccd45eb92a1835646cf2"
+# Drop once the ROCm 10 wheel contains ROCm/rocm-systems#12089.
+ARG ROCPROFILER_SDK_FIX_COMMIT="86dd3bab5b9f8c360a2c2dcc13d6238cb3cdce2b"
 
 
 # TheRock configuration
@@ -327,6 +329,41 @@ RUN mkdir -p /staging/lib \
 
 
 ###
+### rocprofiler-sdk split-lock fix
+###
+# The 10.0 wheel places static_object storage below alignof(Tp). pool<signal_t>
+# then bus-locks on m_reused while the torch profiler reuses HSA signals.
+FROM base AS build_rocprofiler_sdk
+ARG ROCM_SYSTEMS_REPO
+ARG ROCM_RUNTIME_COMMIT
+ARG ROCPROFILER_SDK_FIX_COMMIT
+SHELL ["/bin/bash", "-c"]
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ libdw-dev libelf-dev libdrm-dev libsqlite3-dev xxd \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone -q --filter=blob:none --no-checkout ${ROCM_SYSTEMS_REPO} /src && cd /src \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
+    && git checkout -q ${ROCM_RUNTIME_COMMIT} \
+    && git -c user.email=x@x -c user.name=x cherry-pick -n ${ROCPROFILER_SDK_FIX_COMMIT} \
+    && grep -q "alignas" projects/rocprofiler-sdk/source/lib/common/static_object.hpp \
+    && git submodule update --init --depth 1 --jobs 8 -- projects/rocprofiler-sdk/external
+ENV SYSDEPS="$SDK_DEV/lib/rocm_sysdeps"
+RUN cd /src/projects/rocprofiler-sdk \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DROCPROFILER_BUILD_TESTS=OFF \
+        -DROCPROFILER_BUILD_SAMPLES=OFF \
+        -DROCPROFILER_BUILD_DOCS=OFF \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DCMAKE_INSTALL_PREFIX=/rp-install \
+    && cmake --build build --parallel 16 --target rocprofiler-sdk-shared-library \
+    && mkdir -p /staging \
+    && cp "$(readlink -f "$(find build -name 'librocprofiler-sdk.so.1*' -type f | head -1)")" /staging/librocprofiler-sdk.so.fixed \
+    && ls -la /staging
+
+
+###
 ### Final Build
 ###
 
@@ -400,6 +437,19 @@ RUN set -eux; \
 
 RUN ldconfig
 
+COPY --from=build_rocprofiler_sdk /staging/librocprofiler-sdk.so.fixed /tmp/librocprofiler-sdk.so.fixed
+# Symlinks keep their targets; only the real SONAME file is replaced.
+RUN set -eux; \
+    replaced=0; \
+    for f in "$SDK_DEV"/lib/librocprofiler-sdk.so.1* "$SDK_CORE"/lib/librocprofiler-sdk.so.1*; do \
+        [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+        install -m 0644 /tmp/librocprofiler-sdk.so.fixed "$f"; \
+        replaced=$((replaced + 1)); \
+    done; \
+    test "$replaced" -ge 1; \
+    rm -f /tmp/librocprofiler-sdk.so.fixed; \
+    ldconfig
+
 # This is to prevent resolvers from checking METADATA and RECORD and clobbering
 # the Triton source build we installed. Constraints files are unable to help
 # with this. However, these entries are optional and can be blanked which
@@ -442,6 +492,7 @@ ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCM_SYSTEMS_REPO
 ARG ROCM_RUNTIME_COMMIT
+ARG ROCPROFILER_SDK_FIX_COMMIT
 ARG TRITON_VERSION
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
@@ -462,6 +513,7 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
     && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
     && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
+    && echo "ROCPROFILER_SDK_FIX_COMMIT: ${ROCPROFILER_SDK_FIX_COMMIT}" >> /app/versions.txt \
     # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
     && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
