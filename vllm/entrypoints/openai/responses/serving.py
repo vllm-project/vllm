@@ -15,6 +15,7 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
+    ResponseReasoningItem,
     ResponseStatus,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
@@ -60,6 +61,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     _StateType,
     emit_content_delta_events,
     emit_previous_item_done_events,
+    emit_reasoning_summary_events,
     emit_tool_action_events,
     split_delta,
 )
@@ -67,8 +69,10 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
+    fill_reasoning_summary,
     response_item_status,
     reuse_streamed_item_ids,
+    wants_reasoning_summary,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
@@ -875,6 +879,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
+        if wants_reasoning_summary(request):
+            for item in output:
+                if isinstance(item, ResponseReasoningItem):
+                    fill_reasoning_summary(item)
+
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
@@ -1397,6 +1406,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             )
 
+            summarize_reasoning = wants_reasoning_summary(request)
             try:
                 async for event_data in processor(
                     request,
@@ -1409,6 +1419,20 @@ class OpenAIServingResponses(GenerateBaseServing):
                     created_time,
                     _increment_sequence_number_and_return,
                 ):
+                    if (
+                        summarize_reasoning
+                        and isinstance(event_data, ResponseOutputItemDoneEvent)
+                        and isinstance(event_data.item, ResponseReasoningItem)
+                        and fill_reasoning_summary(event_data.item)
+                    ):
+                        # The done event is already numbered: send the summary
+                        # events first and renumber it after them.
+                        sequence_number = event_data.sequence_number
+                        for event in emit_reasoning_summary_events(
+                            event_data.item, event_data.output_index
+                        ):
+                            yield _increment_sequence_number_and_return(event)
+                        _increment_sequence_number_and_return(event_data)
                     yield event_data
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)

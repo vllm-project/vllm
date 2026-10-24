@@ -30,6 +30,7 @@ from openai.types.responses.response_output_text import Logprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.response_reasoning_item import Summary
 from openai.types.responses.tool import Tool
 from partial_json_parser.core.options import Allow
 
@@ -39,7 +40,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
@@ -105,6 +109,29 @@ def response_item_status(
 ) -> Literal["completed", "incomplete"]:
     """Status of the output item that ended a generation with ``finish_reason``."""
     return "incomplete" if finish_reason == "length" else "completed"
+
+
+def wants_reasoning_summary(request: ResponsesRequest) -> bool:
+    """Whether the request sets ``reasoning.summary`` (or ``generate_summary``)."""
+    reasoning = request.reasoning
+    return reasoning is not None and bool(
+        reasoning.summary or reasoning.generate_summary
+    )
+
+
+def fill_reasoning_summary(item: ResponseReasoningItem) -> bool:
+    """Mirror a reasoning item's text into its ``summary``.
+
+    vLLM has no separate summarizer, so a requested summary is the reasoning
+    text itself. Returns whether the item was changed.
+    """
+    if item.summary or not item.content:
+        return False
+    text = "".join(part.text for part in item.content)
+    if not text:
+        return False
+    item.summary = [Summary(text=text, type="summary_text")]
+    return True
 
 
 def build_response_output_items(

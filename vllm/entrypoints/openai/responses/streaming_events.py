@@ -47,6 +47,10 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseTextDeltaEvent,
@@ -427,6 +431,53 @@ def emit_text_output_done_events(
             ),
         )
     )
+    return events
+
+
+def emit_reasoning_summary_events(
+    item: ResponseReasoningItem,
+    output_index: int,
+) -> list[StreamingResponsesResponse]:
+    """Emit the summary events of a completed reasoning item, one delta per
+    summary part."""
+    events: list[StreamingResponsesResponse] = []
+    for summary_index, part in enumerate(item.summary):
+        events.extend(
+            [
+                ResponseReasoningSummaryPartAddedEvent(
+                    type="response.reasoning_summary_part.added",
+                    sequence_number=-1,
+                    item_id=item.id,
+                    output_index=output_index,
+                    summary_index=summary_index,
+                    part={"text": "", "type": "summary_text"},
+                ),
+                ResponseReasoningSummaryTextDeltaEvent(
+                    type="response.reasoning_summary_text.delta",
+                    sequence_number=-1,
+                    item_id=item.id,
+                    output_index=output_index,
+                    summary_index=summary_index,
+                    delta=part.text,
+                ),
+                ResponseReasoningSummaryTextDoneEvent(
+                    type="response.reasoning_summary_text.done",
+                    sequence_number=-1,
+                    item_id=item.id,
+                    output_index=output_index,
+                    summary_index=summary_index,
+                    text=part.text,
+                ),
+                ResponseReasoningSummaryPartDoneEvent(
+                    type="response.reasoning_summary_part.done",
+                    sequence_number=-1,
+                    item_id=item.id,
+                    output_index=output_index,
+                    summary_index=summary_index,
+                    part={"text": part.text, "type": "summary_text"},
+                ),
+            ]
+        )
     return events
 
 
