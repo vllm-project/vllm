@@ -17,6 +17,20 @@ from vllm.logprobs import Logprob
 PPL_TOL = 0.01
 
 
+def _answer_span(token_ids: list[int], answer_ids: list[int]) -> range:
+    """Positions of the reference answer within the prompt tokens.
+
+    Only answer tokens are scored: they depend on the image and the question,
+    while system-prompt, question and chat-template tokens have perplexities in
+    the thousands that dominate the average and mostly reflect numerical noise.
+    """
+    n = len(answer_ids)
+    for start in range(len(token_ids) - n, -1, -1):
+        if token_ids[start : start + n] == answer_ids:
+            return range(start, start + n)
+    raise AssertionError("Reference answer tokens not found in the prompt")
+
+
 @torch.inference_mode
 def vqa_ppl_test(
     hf_runner,
@@ -34,10 +48,10 @@ def vqa_ppl_test(
         mm_processor_kwargs = {}
 
     processor = AutoProcessor.from_pretrained(model_info.name)
-    image_token_id = processor.image_token_id
 
     images = []
     prompts = []
+    answers_ids = []
     for row in dataset:
         image = row["image"]
         images.append(image)
@@ -60,6 +74,9 @@ def vqa_ppl_test(
 
         prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
         prompts.append(prompt)
+        answers_ids.append(
+            processor.tokenizer(answer, add_special_tokens=False).input_ids
+        )
 
     with vllm_runner(
         model_info.name,
@@ -91,25 +108,29 @@ def vqa_ppl_test(
             use_tqdm=False,
         )
 
-        for output in outputs:
+        for output, answer_ids in zip(outputs, answers_ids):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
 
             assert token_datas[0] is None
-            token_log_probs = []
+            # The first prompt token has no logprob and is never an answer token.
+            token_ids = [-1]
+            token_log_probs = [0.0]
             for token_data in token_datas[1:]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_id, token_log_prob = next(iter(token_data.items()))
-                if token_id == image_token_id:
-                    continue
+                token_ids.append(token_id)
                 token_log_probs.append(token_log_prob.logprob)
 
+            span = _answer_span(token_ids, answer_ids)
             neg_log_likelihood = -torch.tensor(
-                token_log_probs, dtype=torch.float32, device="cpu"
+                token_log_probs[span.start : span.stop],
+                dtype=torch.float32,
+                device="cpu",
             ).sum()
             nll_sum += neg_log_likelihood
-            n_tokens += len(token_log_probs)
+            n_tokens += len(span)
         vllm_ppl = float(torch.exp(nll_sum / n_tokens))
         vllm_dtype = model_config.dtype
         head_dtype = model_config.head_dtype
@@ -124,7 +145,7 @@ def vqa_ppl_test(
             nll_sum = torch.tensor(0.0, dtype=torch.float32, device="cpu")
             n_tokens = 0
 
-            for prompt, image in zip(prompts, images):
+            for prompt, image, answer_ids in zip(prompts, images, answers_ids):
                 inputs = processor(
                     text=[prompt],
                     images=[image],
@@ -135,7 +156,9 @@ def vqa_ppl_test(
                 inputs = inputs.to("cuda")
                 input_ids = inputs["input_ids"]
 
-                labels = input_ids.masked_fill(input_ids == image_token_id, -100)
+                span = _answer_span(input_ids[0].tolist(), answer_ids)
+                labels = torch.full_like(input_ids, -100)
+                labels[:, span.start : span.stop] = input_ids[:, span.start : span.stop]
                 outputs = hf_model.model(**inputs, labels=labels)
                 neg_log_likelihood = outputs.loss
                 neg_log_likelihood = neg_log_likelihood.to(torch.float32).cpu()
