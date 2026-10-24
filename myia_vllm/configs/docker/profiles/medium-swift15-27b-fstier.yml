@@ -7,6 +7,11 @@
 #      tokens de fillers, pas en 1,5M). VAR DÉDIÉE KV_OFFLOAD_GB_FSTIER (21/10) :
 #      ne lit PLUS KV_OFFLOAD_GB_SWIFT15 — le .env de prod porte 32, un boot de
 #      fenêtre via --env-file aurait pris RAM 32 + fs au lieu du 8 validé.
+#      24/10 : défaut 8 -> 24 GiB (Q30=b, GO user). 5 crashs du même assert
+#      amont « Chunk … not found in cache » (vllm#60729 cas 2) ce jour : une
+#      promotion fs->RAM évince un bloc RAM déjà compté HIT. Un primaire plus
+#      grand réduit la pression d'éviction (effet NON mesuré). 200K tokens
+#      ≈ 4,6 GiB en nvfp4 : 8 GiB en tient < 2, 24 GiB ~5.
 #   2. --kv-transfer-config : spec_name=TieringOffloadingSpec + secondary_tiers
 #      fs root=/kv-tier-fs — la synthèse _post_init_kv_transfer_config fait un
 #      .update() de kv_connector_extra_config (config/vllm.py:1097) : nos clés
@@ -87,7 +92,11 @@
 
 services:
   vllm-medium-swift15-27b:
-    image: ${VLLM_IMAGE_SWIFT15:-vllm/vllm-openai:v0.32.0}
+    # 24/10: overlay = stock v0.32.0 + our fix for the tiering race
+    # "Chunk ... not found in cache" (configs/docker/overlay_v0320_tierpin).
+    # Build: docker build -t vllm-openai-v0320-tierpin:v1 configs/docker/overlay_v0320_tierpin
+    # Rollback: VLLM_IMAGE_SWIFT15=vllm/vllm-openai:v0.32.0 ... up -d --no-deps vllm-medium-swift15-27b
+    image: ${VLLM_IMAGE_SWIFT15:-vllm-openai-v0320-tierpin:v1}
     container_name: myia_vllm-medium-swift15-27b
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -125,7 +134,7 @@ services:
           --speculative-config '${VLLM_SPEC_CONFIG_SWIFT15:-null}' \
           --performance-mode interactivity \
           --enable-chunked-prefill \
-          --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-8} \
+          --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-24} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
           --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"TouchOnHitFsTier","module_path":"lru_fs_tier","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
           --enable-prefix-caching \
