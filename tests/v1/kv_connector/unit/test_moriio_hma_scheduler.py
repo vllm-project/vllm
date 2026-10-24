@@ -147,6 +147,7 @@ def _gate_vllm_config(
                 "notify_port": 6002,
             },
             kv_role="kv_consumer",
+            kv_load_failure_policy="fail",
         ),
         speculative_config=speculative_config,
         cache_config=SimpleNamespace(
