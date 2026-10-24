@@ -374,15 +374,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ):
                 return
 
-        if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
+        gqa_replicated = self._is_gqa_replicated_pull(tp_ratio, engine_id)
+        if (self.use_mla and tp_ratio < 0 and len(read_specs) == 1) or gqa_replicated:
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
             # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
-            # reflects whether any remote replica is left unchosen.
+            # reflects whether any remote replica is left unchosen. GQA-replicated
+            # P likewise has unread replicas.
             notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
+            read_ranks = {(0, spec.remote_rank) for spec in read_specs}
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != (0, read_specs[0].remote_rank):
+                if rank_to_notify not in read_ranks:
                     try:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
                     except Exception as e:

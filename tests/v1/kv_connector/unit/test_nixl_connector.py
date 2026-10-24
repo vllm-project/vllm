@@ -55,6 +55,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqMeta,
     compute_nixl_compatibility_hash,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    compute_tp_mapping,
+)
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
     has_kv_transfer_group,
@@ -1786,6 +1789,103 @@ class TestNixlHandshake:
 
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    @pytest.mark.parametrize(
+        ("local_tp", "remote_tp", "num_kv_heads"),
+        [
+            (4, 16, 8),  # e.g. Llama-3.3-70B: P TP16 -> D TP4
+            (1, 8, 4),  # 4 KV heads: P TP8 -> D TP1
+        ],
+    )
+    def test_handshake_gqa_replicated_p_gt_d(
+        self, default_vllm_config, dist_init, local_tp, remote_tp, num_kv_heads
+    ):
+        """P_TP > num_kv_heads > ... with P_TP > D_TP: P replicates each KV
+        head over remote_tp // num_kv_heads ranks. D reads one replica per head,
+        so its local region is still head-split and the remote block_len is
+        one head's worth. This used to trip the replicated-KV assert.
+        """
+        block_size = maybe_update_block_size(16)
+        vllm_config = create_vllm_config(block_size=block_size)
+
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=local_tp,
+        ):
+            connector = NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=block_size),
+            )
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
+            worker = connector.connector_worker
+
+            local_heads = num_kv_heads // local_tp
+            worker.transfer_topo.total_num_kv_heads = num_kv_heads
+            worker.transfer_topo.local_physical_heads = local_heads
+            worker.kv_cache_layout = "LBHNC"
+
+            head_bytes = 4096
+            worker.slot_size_per_layer = [head_bytes * local_heads]
+            worker.block_len_per_layer = [head_bytes * local_heads * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+            local_len = worker.block_len_per_layer[0]
+            worker.src_blocks_data = np.array(
+                [(0, local_len, worker.tp_rank, local_len, worker.num_blocks)],
+                dtype=np.uint64,
+            )
+            worker.num_descs = int(worker.src_blocks_data[:, 4].sum())
+
+            remote_block_len = head_bytes * worker.block_size  # 1 head per P rank
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                device_id=0,
+                num_blocks=1,
+                block_lens=[remote_block_len],
+                block_strides=[remote_block_len],
+                kv_cache_layout="LBHNC",
+                block_size=worker.block_size,
+                ssm_sizes=(0, 0),
+                attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
+            )
+
+            # Must validate cleanly (used to raise AssertionError).
+            worker.add_remote_agent(meta, remote_tp_size=remote_tp)
+
+            plan = worker.tp_mappings[FakeNixlConnectorWorker.REMOTE_ENGINE_ID]
+            # One source rank per local head, one replica each.
+            assert len(plan.all_source_ranks) == local_heads
+            replicas = remote_tp // num_kv_heads
+            assert all(r % replicas == 0 for r in plan.all_source_ranks)
+
+            # Wrong remote block_len (whole local region) is still rejected.
+            bad_meta = NixlAgentMetadata(
+                engine_id="remote_engine_bad",
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                device_id=0,
+                num_blocks=1,
+                block_lens=list(worker.block_len_per_layer),
+                block_strides=list(worker.block_len_per_layer),
+                kv_cache_layout="LBHNC",
+                block_size=worker.block_size,
+                ssm_sizes=(0, 0),
+                attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
+            )
+            worker.dst_num_blocks["remote_engine_bad"] = 1
+            with pytest.raises(AssertionError):
+                worker.add_remote_agent(bad_meta, remote_tp_size=remote_tp)
 
     @pytest.mark.parametrize(
         ("kv_quant_mode", "local_tp", "remote_tp", "num_kv_heads", "rejected"),
@@ -3606,8 +3706,8 @@ class TestPeerReplacement:
             {"old-req": [10, 11], "healthy-req": [12]}
         )
         self.nixl.invalid_remote_agents.add("old")
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "ERR" if h == 10 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "ERR" if h == 10 else "PROC"
         )
         old_handle = self.worker.dst_xfer_side_handles["old"][0]
 
@@ -3617,8 +3717,8 @@ class TestPeerReplacement:
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
         self.transport.make_prepped_xfer.assert_not_called()
 
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "DONE" if h == 11 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "DONE" if h == 11 else "PROC"
         )
         result = self.worker.get_transfer_results()
         assert (
@@ -3695,8 +3795,8 @@ class TestPeerReplacement:
     def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
         self._fail_old_peer()
         self.worker._recving_transfers["old-req"].append(11)
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "PROC" if h == 11 else "ERR"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "PROC" if h == 11 else "ERR"
         )
         self.worker.get_transfer_results()
         self.transport.make_prepped_xfer.reset_mock()
@@ -5079,6 +5179,106 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_gqa_replicated_pull_reads_one_replica_and_notifies_rest(
+    default_vllm_config, dist_init
+):
+    """GQA-replicated P (P_TP=8 > 4 KV heads) pulled by D_TP=1: D reads the
+    first replica of each KV head (ranks 0, 2, 4, 6) and sends the
+    completion notification to the skipped replicas (1, 3, 5, 7) so they
+    release their blocks instead of waiting for the lease to expire.
+    """
+    decode_tp_size = 1
+    prefill_tp_size = 8
+    num_kv_heads = 4
+
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(block_size=block_size)
+    vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
+
+    connector = NixlConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        make_kv_cache_config(block_size=block_size),
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker.transfer_topo.total_num_kv_heads = num_kv_heads
+
+    remote_engine_id = "remote_engine"
+    worker.transfer_topo.register_remote_engine(
+        remote_engine_id,
+        EngineTransferInfo(
+            remote_tp_size=prefill_tp_size,
+            remote_block_size=worker.block_size,
+            remote_block_len=worker.block_size * 4096,
+            remote_physical_blocks_per_logical=1,
+        ),
+    )
+    worker.dst_region_group_ids[remote_engine_id] = worker.region_group_ids
+    worker.tp_mappings[remote_engine_id] = compute_tp_mapping(
+        transfer_topology=worker.transfer_topo,
+        remote_tp_size=prefill_tp_size,
+        group_spec_types=worker._group_spec_types,
+    )
+    worker._remote_agents[remote_engine_id] = {
+        (0, rank): f"agent_p{rank}" for rank in range(prefill_tp_size)
+    }
+    worker.dst_xfer_side_handles = {
+        remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+    }
+    split_key = (-prefill_tp_size, worker.block_size)
+    worker.src_xfer_handles_by_tp_ratio[split_key] = [
+        200 + i for i in range(num_kv_heads)
+    ]
+
+    prefill_req_id = "prefill-req"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="decode-req",
+        local_block_ids=([0, 1, 2],),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12],),
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": prefill_req_id,
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": prefill_tp_size,
+        },
+    )
+    meta = metadata.reqs_to_recv["decode-req"]
+    meta.local_physical_block_ids = meta.local_block_ids
+
+    send_notif_calls: list[tuple[str, bytes]] = []
+    worker.nixl_wrapper.send_notif = (  # type: ignore[method-assign]
+        lambda agent_name, notif_msg: send_notif_calls.append((agent_name, notif_msg))
+    )
+    worker._read_blocks = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    worker._read_blocks_for_req("decode-req", meta)
+
+    read_ranks = [
+        c.kwargs["read_spec"].remote_rank for c in worker._read_blocks.call_args_list
+    ]
+    assert read_ranks == [0, 2, 4, 6]
+    # Each read lands in its own head slot of the local region.
+    assert [
+        c.kwargs["local_xfer_side_handle"] for c in worker._read_blocks.call_args_list
+    ] == [200, 201, 202, 203]
+    assert {agent for agent, _ in send_notif_calls} == {
+        "agent_p1",
+        "agent_p3",
+        "agent_p5",
+        "agent_p7",
+    }
+    assert all(notif == f"{prefill_req_id}:1".encode() for _, notif in send_notif_calls)
 
 
 @patch(
