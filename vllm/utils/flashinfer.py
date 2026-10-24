@@ -11,6 +11,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import re
 import shutil
 from collections.abc import Callable
 from typing import Any, NoReturn
@@ -71,6 +72,86 @@ def _flashinfer_nvcc_path() -> str | None:
             os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
         )
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
+
+
+def _is_compatible_flashinfer_cuda_architecture(
+    provider_architecture: str, device_architecture: str
+) -> bool:
+    """Mirror FlashInfer 0.7.2 SASS target compatibility for provider metadata."""
+    pattern = r"sm(?P<major>[0-9]{1,2})(?P<minor>[0-9])(?P<suffix>[af]?)"
+    provider = re.fullmatch(pattern, provider_architecture)
+    device = re.fullmatch(pattern, device_architecture)
+    if provider is None or device is None:
+        return False
+
+    provider_major = int(provider.group("major"))
+    provider_minor = int(provider.group("minor"))
+    device_major = int(device.group("major"))
+    device_minor = int(device.group("minor"))
+    suffix = provider.group("suffix")
+
+    if suffix == "a":
+        return (provider_major, provider_minor) == (device_major, device_minor)
+    return provider_major == device_major and provider_minor <= device_minor
+
+
+def _has_compatible_flashinfer_jit_cache_provider() -> bool:
+    """Return whether an installed provider advertises kernels for this GPU."""
+    if importlib.util.find_spec("flashinfer_jit_cache") is None:
+        return False
+    try:
+        providers = importlib.import_module(
+            "flashinfer_jit_cache"
+        ).get_jit_cache_providers()
+    except (AttributeError, ImportError, ModuleNotFoundError, RuntimeError, ValueError):
+        return False
+
+    providers = tuple(providers)
+    if not providers:
+        return False
+
+    try:
+        device_capability = current_platform.get_device_capability()
+    except (NotImplementedError, RuntimeError):
+        device_capability = None
+    if device_capability is None:
+        # Some platforms cannot expose a capability before device setup. Require
+        # the provider to advertise both modules and architectures, but note
+        # that this cannot establish a match to the active device.
+        return any(
+            provider.modules and provider.cuda_architectures for provider in providers
+        )
+
+    device_architecture = f"sm{device_capability.to_int()}"
+    return any(
+        _is_compatible_flashinfer_cuda_architecture(architecture, device_architecture)
+        for provider in providers
+        if provider.modules and provider.cuda_architectures
+        for architecture in provider.cuda_architectures
+    )
+
+
+def is_flashinfer_jit_usable() -> bool:
+    """Check whether FlashInfer attention JIT has a usable build or AOT path.
+
+    FlashInfer's runtime JIT needs both nvcc and ninja. The jit-cache shim
+    alone does not provide kernels; a provider must advertise at least one
+    module for the active GPU architecture. The separate cubin package only
+    supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
+    This check does not verify per-kernel artifacts; it decides eligibility,
+    not whether every specific kernel can load.
+    """
+    if not has_flashinfer():
+        return False
+
+    if _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None:
+        return True
+
+    # flashinfer-jit-cache ships no SM75 kernels, so SM75 needs the JIT.
+    if current_platform.is_device_capability(75):
+        return False
+
+    return _has_compatible_flashinfer_jit_cache_provider()
 
 
 @functools.cache
