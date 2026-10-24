@@ -4,7 +4,9 @@
 
 With DS conv state layout (dim, state_len), sub-projections are
 contiguous in memory.  Each D rank reads its slices via separate
-RDMA transfers — no P-side permutation needed.
+RDMA transfers — no P-side permutation needed.  With SD layout
+(state_len, dim), a sub-projection is contiguous only within one row;
+see `sd_conv_sub_spans`.
 
 Supported model types:
   - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
@@ -50,7 +52,7 @@ class MambaConvSplitInfo:
 
     @property
     def proj_bytes(self) -> tuple[int, ...]:
-        """Byte sizes of the sub-projections for one rank."""
+        """Byte sizes of the sub-projections for one rank (DS layout)."""
         row_bytes = self.conv_rows * self.conv_dtype_size
         return tuple(d * row_bytes for d in self.local_proj_dims)
 
@@ -115,7 +117,8 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout,
+                        (conv_rows, conv_dim_local) in SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
 
@@ -138,11 +141,10 @@ def derive_mamba_conv_split(
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
-    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
-    conv_rows = conv_shape[1]
+    if is_conv_state_dim_first():
+        local_conv_dim, conv_rows = conv_shape
+    else:
+        conv_rows, local_conv_dim = conv_shape
 
     conv_dtype_size = torch.tensor(
         [],
@@ -233,3 +235,52 @@ def compute_physical_blocks_per_logical(
 
     """
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
+
+
+def sd_conv_sub_spans(
+    split: MambaConvSplitInfo, tp_ratio: int
+) -> list[tuple[int, int, int, int]]:
+    """Split an SD-layout conv state into its per-row sub-projection spans.
+
+    In the SD layout (conv_rows, conv_dim), each row concatenates the
+    sub-projections, so a sub-projection is contiguous only within one row.
+    Heterogeneous TP must reshard each (row, sub-projection) span on its own;
+    splitting the whole state by the TP ratio cuts across rows and
+    projections.
+
+    Args:
+        split: this engine's conv split (SD layout).
+        tp_ratio: signed TP ratio from `_get_tp_ratio(local_tp, remote_tp)`;
+            positive when the remote engine has the larger per-rank state.
+
+    Returns:
+        (local_offset, remote_offset, local_len, remote_len) in bytes, one per
+        (row, sub-projection), with offsets from the start of the conv state.
+
+    """
+    assert tp_ratio != 1
+    abs_ratio = abs(tp_ratio)
+    local_dims = split.local_proj_dims
+    if tp_ratio > 0:
+        remote_dims = tuple(dim * abs_ratio for dim in local_dims)
+    else:
+        assert all(dim % abs_ratio == 0 for dim in local_dims), (
+            f"Conv sub-projection dims {local_dims} do not divide by the TP "
+            f"ratio {abs_ratio}."
+        )
+        remote_dims = tuple(dim // abs_ratio for dim in local_dims)
+    elem = split.conv_dtype_size
+    local_row = sum(local_dims) * elem
+    remote_row = sum(remote_dims) * elem
+
+    spans: list[tuple[int, int, int, int]] = []
+    for row in range(split.conv_rows):
+        local_offset = row * local_row
+        remote_offset = row * remote_row
+        for local_dim, remote_dim in zip(local_dims, remote_dims):
+            spans.append(
+                (local_offset, remote_offset, local_dim * elem, remote_dim * elem)
+            )
+            local_offset += local_dim * elem
+            remote_offset += remote_dim * elem
+    return spans

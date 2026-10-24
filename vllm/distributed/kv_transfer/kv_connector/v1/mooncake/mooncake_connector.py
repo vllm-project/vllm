@@ -13,6 +13,7 @@ from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
+from math import prod
 from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
@@ -51,6 +52,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+    derive_mamba_conv_split,
+    sd_conv_sub_spans,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -58,11 +64,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.torch_utils import get_dtype_size, is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -611,6 +618,19 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
+class MambaTransferGeometry(
+    msgspec.Struct,
+    frozen=True,  # type: ignore[call-arg]
+):
+    """A Mamba/GDN layer's state geometry, checked under heterogeneous TP."""
+
+    shapes: list[list[int]]
+    dtypes: list[str]
+    conv_layout: str
+    mamba_type: str
+    tp_replicated: bool
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -636,6 +656,11 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    # Mamba/GDN state geometry by layer, sent with the layout only when the
+    # TP sizes differ, so the equal-TP wire format is unchanged.
+    mamba_transfer_geometry: dict[str, MambaTransferGeometry] = msgspec.field(
+        default_factory=dict
+    )
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1387,6 +1412,12 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
+        # Registered SD-layout conv state regions, keyed by (layer, base
+        # address): a packed row named after an attention layer can start at
+        # the same address. Conv sub-projection splits are derived on first
+        # heterogeneous-TP use.
+        self._sd_conv_regions: set[tuple[str, int]] = set()
+        self._conv_splits: dict[str, MambaConvSplitInfo] = {}
         for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
             specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
@@ -1624,18 +1655,32 @@ class MooncakeConnectorWorker:
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 return
-        validation_err = _validate_asymmetric_region_lengths(
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-            local_tp_size=self.tp_size,
-            remote_tp_size=meta.remote_tp_size,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-            total_num_kv_heads=(
-                None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
-        )
+        validation_err: str | None = None
+        # Attention and Mamba/GDN regions follow different TP rules.
+        regions_by_rule: dict[
+            tuple[bool, int | None],
+            tuple[list[TransferRegion], list[TransferRegion]],
+        ] = {}
+        for local_region, remote_region in zip(local_regions, remote_regions):
+            local_group, remote_group = regions_by_rule.setdefault(
+                self._transfer_rule(local_region.layer_name), ([], [])
+            )
+            local_group.append(local_region)
+            remote_group.append(remote_region)
+        for (replicated, num_kv_heads), (
+            local_group,
+            remote_group,
+        ) in regions_by_rule.items():
+            validation_err = _validate_asymmetric_region_lengths(
+                local_regions=local_group,
+                remote_regions=remote_group,
+                local_tp_size=self.tp_size,
+                remote_tp_size=meta.remote_tp_size,
+                producer_cache_replicated=replicated,
+                total_num_kv_heads=num_kv_heads,
+            )
+            if validation_err is not None:
+                break
         if validation_err is not None:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
@@ -1946,18 +1991,10 @@ class MooncakeConnectorWorker:
                 group_local_block_ids, group_remote_block_ids = (
                     group_concurrent_contiguous(local_block_ids, remote_block_ids)
                 )
-                (
-                    should_transfer,
-                    src_region_offset,
-                    dst_region_offset,
-                    transfer_len,
-                ) = self._get_sender_transfer_plan(
-                    local_kv_block_len=local_region.kv_block_len,
-                    remote_kv_block_len=remote_region.kv_block_len,
-                    remote_tp_rank=agent_meta.remote_tp_rank,
-                    remote_tp_size=agent_meta.remote_tp_size,
+                copies = self._sender_block_copies(
+                    local_region, remote_region, agent_meta
                 )
-                if not should_transfer:
+                if not copies:
                     # Replicated KV cache: only one producer rank in the TP group
                     # needs to send the actual bytes for this paired decoder rank.
                     # TODO: Account for replicated producer KV in
@@ -1965,26 +2002,20 @@ class MooncakeConnectorWorker:
                     # unnecessary ZMQ requests and remove this branch.
                     continue
 
-                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
-                    "Computed source transfer region exceeds local KV block size."
-                )
-                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
-                    "Destination transfer region exceeds remote KV block size."
-                )
                 # Collapse one contiguous block group into a single larger
                 # transfer descriptor when the per-block copy is identical.
-                can_coalesce = _can_coalesce_block_transfers(
+                can_coalesce = len(copies) == 1 and _can_coalesce_block_transfers(
                     local_region_block_len=local_region.block_len,
                     remote_region_block_len=remote_region.block_len,
-                    src_region_offset=src_region_offset,
-                    dst_region_offset=dst_region_offset,
-                    transfer_len=transfer_len,
+                    src_region_offset=copies[0][0],
+                    dst_region_offset=copies[0][1],
+                    transfer_len=copies[0][2],
                 )
-
                 for group_local_block_id, group_remote_block_id in zip(
                     group_local_block_ids, group_remote_block_ids
                 ):
                     if can_coalesce:
+                        src_region_offset, dst_region_offset, transfer_len = copies[0]
                         src_ptrs.append(
                             local_region.base_addr
                             + group_local_block_id[0] * local_region.block_len
@@ -1996,20 +2027,21 @@ class MooncakeConnectorWorker:
                             + dst_region_offset
                         )
                         lengths.append(transfer_len * len(group_local_block_id))
-                    else:
-                        for local_block_id, remote_block_id in zip(
-                            group_local_block_id, group_remote_block_id
-                        ):
-                            src_ptrs.append(
-                                local_region.base_addr
-                                + local_block_id * local_region.block_len
-                                + src_region_offset
-                            )
-                            dst_ptrs.append(
-                                remote_region.base_addr
-                                + remote_block_id * remote_region.block_len
-                                + dst_region_offset
-                            )
+                        continue
+                    for local_block_id, remote_block_id in zip(
+                        group_local_block_id, group_remote_block_id
+                    ):
+                        local_block_addr = (
+                            local_region.base_addr
+                            + local_block_id * local_region.block_len
+                        )
+                        remote_block_addr = (
+                            remote_region.base_addr
+                            + remote_block_id * remote_region.block_len
+                        )
+                        for src_offset, dst_offset, transfer_len in copies:
+                            src_ptrs.append(local_block_addr + src_offset)
+                            dst_ptrs.append(remote_block_addr + dst_offset)
                             lengths.append(transfer_len)
 
             logger.debug(
@@ -2068,6 +2100,7 @@ class MooncakeConnectorWorker:
         seen_storage_ptrs: set[int] = set()
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
+        self._sd_conv_regions = set()
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
@@ -2106,6 +2139,57 @@ class MooncakeConnectorWorker:
                 seen_storage_ptrs.add(storage_addr)
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
+
+            if isinstance(layer_spec, MambaSpec):
+                # The block page packs each state contiguously before any
+                # padding, and the page can sit inside a larger packed block.
+                # Register every state as its own region with its real unpadded
+                # byte length, so neither a heterogeneous-TP slice nor a copy of
+                # the whole state reaches past it into padding or the next block.
+                base_addr = cache.data_ptr()
+                block_len = cache.stride(0) * cache.element_size()
+                conv_bytes = prod(layer_spec.shapes[0]) * get_dtype_size(
+                    layer_spec.dtypes[0]
+                )
+                if layer_spec.tp_replicated:
+                    region_entries = [(0, conv_bytes)]
+                elif is_conv_state_dim_first():
+                    # The conv state concatenates sub-projections (GDN: Q, K,
+                    # V) along the dim axis, and each sub-projection shards
+                    # across TP independently. Register one region per
+                    # sub-projection so the per-region heterogeneous-TP split
+                    # never cuts across a projection boundary. Only the DS
+                    # (dim, state_len) layout keeps each sub-projection
+                    # contiguous. A TP-replicated state is copied whole.
+                    split = derive_mamba_conv_split(layer_spec, self.tp_size)
+                    region_entries = [
+                        (offset, size) for offset, size in split.local_conv_offsets
+                    ]
+                else:
+                    # SD (state_len, dim) interleaves the sub-projections
+                    # across rows, so the state stays one region and the
+                    # sender reshards it per row (_sender_block_copies).
+                    region_entries = [(0, conv_bytes)]
+                    self._sd_conv_regions.add((layer_name, base_addr))
+                state_offset = conv_bytes
+                shape: tuple[int, ...]
+                dtype: torch.dtype
+                for shape, dtype in zip(layer_spec.shapes[1:], layer_spec.dtypes[1:]):
+                    state_bytes = prod(shape) * get_dtype_size(dtype)
+                    region_entries.append((state_offset, state_bytes))
+                    state_offset += state_bytes
+
+                for state_offset, kv_block_len in region_entries:
+                    region_base_addresses.append(base_addr + state_offset)
+                    self.block_len_per_layer.append(block_len)
+                    self.kv_block_len_per_layer.append(kv_block_len)
+                    self.registered_layer_names.append(layer_name)
+                    self.registered_layer_indices.append(layer_index)
+                    self.registered_group_indices.append(group_index)
+                    self.region_shared_groups.append((group_index,))
+                    # Not a view into a shared packed row, so do not promote it.
+                    self.region_row_offsets.append(-1)
+                continue
 
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
@@ -2420,6 +2504,8 @@ class MooncakeConnectorWorker:
         # Each peer settles its own requests, sharing the per-request counters.
         pull_metas = pull_metas.copy()
         req_ids = set(pull_metas)
+        remote_engine_id = next(iter(pull_metas.values())).remote_engine_id
+        include_mamba_geometry = self._tp_size.get(remote_engine_id) != self.tp_size
         include_layout = (
             not self._kv_layout_id or worker_addr not in self._acked_layout_peers
         )
@@ -2427,7 +2513,9 @@ class MooncakeConnectorWorker:
         # the layout after a LAYOUT_MISS.
         while True:
             metadata = self._build_pull_metadata(
-                pull_metas, include_layout=include_layout
+                pull_metas,
+                include_layout=include_layout,
+                include_mamba_geometry=include_mamba_geometry,
             )
             encoded_data = self._encoder.encode(metadata)
             logger.debug(
@@ -2753,6 +2841,7 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
+            msgspec.msgpack.encode(meta.mamba_transfer_geometry),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -2830,13 +2919,22 @@ class MooncakeConnectorWorker:
         )
         if head_err is not None:
             return finish([], [], head_err)
+        mamba_err = self._validate_mamba_unequal_tp(
+            meta.remote_tp_size, meta.mamba_transfer_geometry, local_regions
+        )
+        if mamba_err is not None:
+            return finish([], [], mamba_err)
         # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
         # multi-layer span would land that offset on the wrong layer.
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
-        # for a non-replicated MLA rank with tp_ratio != 1.
+        # for a non-replicated MLA rank with tp_ratio != 1. Each region's own
+        # rule decides: sharded Mamba/GDN states must not merge even when the
+        # attention KV is replicated.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
+        if tp_ratio == 1 or all(
+            self._transfer_rule(region.layer_name)[0] for region in local_regions
+        ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -2894,6 +2992,7 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
         *,
         include_layout: bool,
+        include_mamba_geometry: bool = False,
     ) -> MooncakeXferMetadata:
         req_blocks = {
             req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
@@ -2930,6 +3029,9 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            mamba_transfer_geometry=(
+                self._mamba_transfer_geometry() if include_mamba_geometry else {}
+            ),
         )
 
     def _validate_head_resharding_layout(
@@ -2984,13 +3086,119 @@ class MooncakeConnectorWorker:
             row_offsets=row_offsets,
         )
 
+    def _mamba_transfer_geometry(self) -> dict[str, MambaTransferGeometry]:
+        layout = "DS" if is_conv_state_dim_first() else "SD"
+        return {
+            name: MambaTransferGeometry(
+                shapes=[list(shape) for shape in spec.shapes],
+                dtypes=[str(dtype) for dtype in spec.dtypes],
+                conv_layout=layout,
+                mamba_type=spec.mamba_type.name,
+                tp_replicated=spec.tp_replicated,
+            )
+            for name, spec in self._layer_specs.items()
+            if isinstance(spec, MambaSpec)
+        }
+
+    def _validate_mamba_unequal_tp(
+        self,
+        remote_tp_size: int,
+        remote_geometry: dict[str, MambaTransferGeometry],
+        local_regions: list[TransferRegion],
+    ) -> str | None:
+        """Reject Mamba/GDN states that cannot be resharded across TP sizes.
+
+        Each sharded state must be an exact TP shard on both peers: the conv
+        state along its dim axis (the first axis in DS, the last in SD) and
+        the temporal states along their first axis, with sub-projections that
+        can be derived. Equal TP copies whole states and needs no geometry.
+        """
+        if self.tp_size == remote_tp_size:
+            return None
+        local_geometry = self._mamba_transfer_geometry()
+        for name in dict.fromkeys(region.layer_name for region in local_regions):
+            local = local_geometry.get(name)
+            if local is None:
+                continue
+            remote = remote_geometry.get(name)
+            if remote is None:
+                return f"Mooncake peer omitted Mamba transfer geometry for {name}."
+            if (
+                local.dtypes != remote.dtypes
+                or local.conv_layout != remote.conv_layout
+                or local.mamba_type != remote.mamba_type
+                or local.tp_replicated != remote.tp_replicated
+                or len(local.shapes) != len(remote.shapes)
+            ):
+                return f"Mooncake incompatible Mamba transfer geometry for {name}."
+            if local.tp_replicated:
+                if local.shapes != remote.shapes:
+                    return f"Mooncake Mamba state shape mismatch for {name}."
+                continue
+            conv_axis = 0 if local.conv_layout == "DS" else -1
+            for state, (a, b) in enumerate(zip(local.shapes, remote.shapes)):
+                shard_axis = (conv_axis if state == 0 else 0) % max(len(a), 1)
+                if len(a) != len(b) or any(
+                    x * self.tp_size != y * remote_tp_size
+                    if axis == shard_axis
+                    else x != y
+                    for axis, (x, y) in enumerate(zip(a, b))
+                ):
+                    return (
+                        "Mooncake Mamba state of "
+                        f"{name} is not an exact TP shard on both peers."
+                    )
+            try:
+                self._conv_split(name)
+            except (AssertionError, NotImplementedError) as e:
+                return f"Mooncake cannot reshard the conv state of {name}: {e}"
+        return None
+
+    def _transfer_rule(self, layer_name: str) -> tuple[bool, int | None]:
+        """Replication rule for a region under heterogeneous TP.
+
+        Returns (producer_cache_replicated, total_num_kv_heads), read from the
+        region's own layer spec: a group's spec can wrap several layers in a
+        UniformTypeKVCacheSpecs. Attention follows the head mapping of plain
+        models, also in hybrid models (a packed row shared by several groups is
+        named after an attention layer). Mamba/GDN states shard by the TP
+        ratio, or are copied whole when replicated across TP.
+        """
+        spec = self._layer_specs.get(layer_name)
+        if isinstance(spec, MambaSpec):
+            return spec.tp_replicated, None
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+        if (
+            self.kv_cache_config.has_mamba_layers
+            and not self.use_mla
+            and (
+                isinstance(spec, (MLAAttentionSpec, CircularBufferSpec))
+                or (
+                    isinstance(spec, AttentionSpec)
+                    and spec.num_kv_heads != max(total_num_kv_heads // self.tp_size, 1)
+                )
+            )
+        ):
+            # A hybrid model's auxiliary cache that does not shard with the KV
+            # heads (e.g. a single-head indexer key cache) is the same on every
+            # rank. Ring buffers are per-request scratch whose head slots are
+            # not KV heads, so their head count cannot tell them apart from a
+            # one-head shard.
+            return True, None
+        return (
+            self._producer_cache_is_replicated(),
+            None if self.use_mla else total_num_kv_heads,
+        )
+
     def _get_sender_transfer_plan(
         self,
         local_kv_block_len: int,
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        layer_name: str,
     ) -> tuple[bool, int, int, int]:
+        producer_cache_replicated, total_num_kv_heads = self._transfer_rule(layer_name)
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
             local_tp_size=self.tp_size,
@@ -2998,13 +3206,68 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-            total_num_kv_heads=(
-                None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
+            producer_cache_replicated=producer_cache_replicated,
+            total_num_kv_heads=total_num_kv_heads,
         )
+
+    def _sender_block_copies(
+        self,
+        local_region: TransferRegion,
+        remote_region: TransferRegion,
+        agent_meta: MooncakeXferMetadata,
+    ) -> list[tuple[int, int, int]]:
+        """(src_offset, dst_offset, length) copies for one block of a region
+        pair; empty when this producer rank does not send the region."""
+        spans = [(0, 0, local_region.kv_block_len, remote_region.kv_block_len)]
+        if (
+            agent_meta.remote_tp_size != self.tp_size
+            and (local_region.layer_name, local_region.base_addr)
+            in self._sd_conv_regions
+        ):
+            # Each SD conv row interleaves the sub-projections, so reshard
+            # every (row, sub-projection) span on its own.
+            spans = sd_conv_sub_spans(
+                self._conv_split(local_region.layer_name),
+                _get_tp_ratio(self.tp_size, agent_meta.remote_tp_size),
+            )
+            assert spans[-1][0] + spans[-1][2] == local_region.kv_block_len
+            assert spans[-1][1] + spans[-1][3] == remote_region.kv_block_len
+
+        copies: list[tuple[int, int, int]] = []
+        for local_offset, remote_offset, local_len, remote_len in spans:
+            (
+                should_transfer,
+                src_offset,
+                dst_offset,
+                transfer_len,
+            ) = self._get_sender_transfer_plan(
+                local_kv_block_len=local_len,
+                remote_kv_block_len=remote_len,
+                remote_tp_rank=agent_meta.remote_tp_rank,
+                remote_tp_size=agent_meta.remote_tp_size,
+                layer_name=local_region.layer_name,
+            )
+            if not should_transfer:
+                return []
+            assert src_offset + transfer_len <= local_len, (
+                "Computed source transfer region exceeds local KV block size."
+            )
+            assert dst_offset + transfer_len <= remote_len, (
+                "Destination transfer region exceeds remote KV block size."
+            )
+            copies.append(
+                (local_offset + src_offset, remote_offset + dst_offset, transfer_len)
+            )
+        return copies
+
+    def _conv_split(self, layer_name: str) -> MambaConvSplitInfo:
+        split = self._conv_splits.get(layer_name)
+        if split is None:
+            spec = self._layer_specs[layer_name]
+            assert isinstance(spec, MambaSpec)
+            split = derive_mamba_conv_split(spec, self.tp_size)
+            self._conv_splits[layer_name] = split
+        return split
 
     def _log_debug_cache_registration(
         self, layer_name: str, cache: torch.Tensor
