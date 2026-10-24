@@ -1109,6 +1109,33 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _validate_dynamic_sd_schedule(self) -> None:
+        """Validate the schedule before the model loads."""
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            return
+
+        schedule = speculative_config.num_speculative_tokens_per_batch_size
+        if not schedule:
+            logger.warning_once(
+                "num_speculative_tokens_per_batch_size is empty. Falling back "
+                "to static num_speculative_tokens=%d.",
+                speculative_config.num_speculative_tokens,
+            )
+            speculative_config.num_speculative_tokens_per_batch_size = None
+            return
+
+        from vllm.v1.spec_decode.dynamic.utils import (
+            validate_and_normalize_dynamic_sd_schedule,
+        )
+
+        speculative_config.num_speculative_tokens_per_batch_size = (
+            validate_and_normalize_dynamic_sd_schedule(schedule)
+        )
+
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
     ) -> None:
@@ -1843,6 +1870,7 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_disable_dynamic_sd_for_v1()
+        self._validate_dynamic_sd_schedule()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
@@ -2500,25 +2528,21 @@ class VllmConfig:
                         # Read the tiers off the dense lookup the scheduler
                         # runs on, so the clamp against num_speculative_tokens
                         # and the carry-forward through gaps and the tail
-                        # cannot drift from it. Validation lives elsewhere; an
-                        # invalid schedule keeps the single-tier default.
-                        try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
-                                schedule,
-                                vllm_max_batch_size=max_num_seqs,
-                                vllm_num_speculative_tokens=self.num_speculative_tokens,
-                            )
-                        except ValueError:
-                            pass
-                        else:
-                            # Ascending batch size, so the last write per
-                            # query length is the widest batch running at it.
-                            widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
-                            ):
-                                widest_batch[num_spec + 1] = batch_size
-                            decode_tiers = list(widest_batch.items())
+                        # cannot drift from it. _validate_dynamic_sd_schedule
+                        # has already validated the schedule.
+                        dense_schedule = build_dynamic_sd_schedule_lookup(
+                            schedule,
+                            vllm_max_batch_size=max_num_seqs,
+                            vllm_num_speculative_tokens=self.num_speculative_tokens,
+                        )
+                        # Ascending batch size, so the last write per query
+                        # length is the widest batch running at it.
+                        widest_batch: dict[int, int] = {}
+                        for batch_size, num_spec in enumerate(
+                            dense_schedule[1:], start=1
+                        ):
+                            widest_batch[num_spec + 1] = batch_size
+                        decode_tiers = list(widest_batch.items())
 
                     uniform_decode_sizes = sorted(
                         {

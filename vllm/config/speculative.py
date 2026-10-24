@@ -519,7 +519,10 @@ class SpeculativeConfig:
     """Batch-size schedule used to dynamically choose speculative-token count.
 
     Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
-    inclusive batch-size range.
+    inclusive batch-size range. The first range must start at 1 and ranges
+    must not overlap; batch sizes in a gap or past the last range use the
+    preceding range's value, capped at ``num_speculative_tokens``. An empty
+    list falls back to the static ``num_speculative_tokens``.
     """
 
     # params generated in the post-init stage
