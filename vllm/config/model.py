@@ -1381,6 +1381,9 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
+        from vllm.config.quantization import resolve_quantization_config
+
+        requested_quantization = self.quantization
         supported_quantization = me_quant.QUANTIZATION_METHODS
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
@@ -1461,13 +1464,36 @@ class ModelConfig:
                     f"({self.quantization})."
                 )
 
+        if (
+            quant_cfg is not None
+            and requested_quantization == "mxfp4"
+            and self.quantization == "modelopt_fp4"
+        ):
+            self.quantization_config = resolve_quantization_config(
+                requested_quantization, self.quantization_config or {}
+            )
+
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            current_platform.verify_quantization(self.quantization)
+            online_args = resolve_quantization_config(
+                self.quantization, self.quantization_config
+            )
+            execution_quantization = self.quantization
+            if (
+                self.quantization == "modelopt_fp4"
+                and online_args is not None
+                and online_args.linear is not None
+                and online_args.linear.weight is not None
+                and online_args.moe is not None
+                and online_args.moe.weight is not None
+                and not online_args.ignore
+            ):
+                execution_quantization = "online"
+            current_platform.verify_quantization(execution_quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
             if self.allow_deprecated_quantization:
