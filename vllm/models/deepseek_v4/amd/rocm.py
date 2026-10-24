@@ -35,7 +35,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
+from vllm.platforms.rocm import _ON_GFX950, on_gfx1250, on_rdna
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -1465,7 +1465,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         fuse_inv_rope = self._wo_a_fp8_weight is None
         rotated = 0
         if num_decodes > 0:
-            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
+            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250() and not on_rdna()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=(
