@@ -1326,11 +1326,28 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt_kernels.cu"
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1504,6 +1521,32 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (CDNA/gfx9xx is wave64, RDNA is wave32).
+  set(TOPK_WAVE_ONLY_DEFINE "")
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (CDNA archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (RDNA archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
