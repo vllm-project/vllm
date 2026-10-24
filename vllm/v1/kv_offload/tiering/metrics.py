@@ -126,6 +126,10 @@ class TieringMetricsTracker:
         self._observe_finished_job_stats(job_metadata, result)
         if job_metadata.transfer_job.is_promotion:
             self._observe_promotion_latency(job_metadata, result)
+        if result.memory_safe:
+            self._decrement_tier_state(job_metadata)
+
+    def on_quarantined_job_released(self, job_metadata: _JobMetadataLike) -> None:
         self._decrement_tier_state(job_metadata)
 
     def on_promotion_allocation_failure(self) -> None:

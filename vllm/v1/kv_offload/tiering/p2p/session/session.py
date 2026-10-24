@@ -89,7 +89,7 @@ class SessionCloseResult(NamedTuple):
 
     `failed_jobs`/`failed_stores` are the in-flight jobs (client loads /
     server stores) the manager must mark failed. `failed_req_ids` is every
-    client-side kv_request_id whose lookup() must fail (in-flight loads plus
+    client-side kv_request_id whose lookup() must fail (newly failed loads plus
     unresolved probes); `failed_serves` is the server-side lookup state the
     dead peer can no longer resolve.
     """
@@ -98,6 +98,7 @@ class SessionCloseResult(NamedTuple):
     failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    memory_safe_jobs: frozenset[int] = frozenset()  # fetches never sent
 
 
 class P2PSession:
@@ -375,7 +376,7 @@ class P2PSession:
         """Shut down.
 
         failed_jobs: client load job_ids to fail.
-        failed_req_ids: client kv_request_ids to fail — in-flight loads plus
+        failed_req_ids: client kv_request_ids to fail — unreported loads plus
             requests with an unresolved symmetric-P2P probe toward the
             now-dead peer. The manager fails these so the consumer's lookup()
             falls back to local prefill instead of deferring forever on an
@@ -407,6 +408,7 @@ class P2PSession:
             failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
+            memory_safe_jobs=client_result.memory_safe_jobs,
         )
 
     # ------------------------------------------------------------------
@@ -500,12 +502,14 @@ class P2PSession:
         self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
-        # Drop messages buffered before disconnect: a poll batch can
-        # contain msg-after-DisconnectMsg, and dispatching them would
-        # mutate state on a dead session.
-        if self._conn is not None and not self._conn.alive:
-            return
         msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else None
+        # Buffered terminals still establish WRITE safety after disconnect.
+        if (
+            self._conn is not None
+            and not self._conn.alive
+            and msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+        ):
+            return
         if msg_type == ConnectMsg.TYPE:
             self._on_connect(msg)
         elif msg_type == ConnectAckMsg.TYPE:
@@ -701,7 +705,14 @@ class P2PSession:
         self._do_send(msg)
 
     def _do_send(self, msg: dict) -> None:
-        if self._conn is None:
+        if self._conn is None or not self._conn.alive:
+            return
+        # A raising send may already have exposed the destination IDs.
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and msg[FetchMsg.BLOCK_INDEXES]
+            and not self._client.mark_fetch_sent(msg)
+        ):
             return
         try:
             self._conn.send(msg)
