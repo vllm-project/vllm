@@ -358,6 +358,7 @@ class ZmqEventPublisher(EventPublisher):
         )
         assert self._endpoint is not None
         self._hwm = hwm
+        self._replay_hwm = buffer_steps + 1
         self._socket_setup()
         self._publisher_config = KVEventsConfig(
             enable_kv_cache_events=True,
@@ -443,6 +444,8 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
+            # Queue a full replay plus its end marker for slow subscribers.
+            self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
             self._replay_endpoint = self._bind(self._replay, self._replay_endpoint)
 
     @staticmethod
