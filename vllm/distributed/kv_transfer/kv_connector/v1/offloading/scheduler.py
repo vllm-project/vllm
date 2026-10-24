@@ -1526,7 +1526,25 @@ class OffloadingConnectorScheduler:
             )
             assert boundary > 0
             assert boundary % self.config.tokens_per_hash == 0
-            assert boundary <= max_boundary
+
+            # The hand-off boundary can exceed the request's current
+            # offloadable window, e.g. a Mamba boundary-state snapshot
+            # retained before the request was resumed with a smaller
+            # max_offload_tokens / num_prompt_tokens. The aligned-boundary
+            # path above skips such out-of-window entries; mirror it here
+            # instead of crashing the EngineCore (issue #61970).
+            if boundary > max_boundary:
+                logger.warning(
+                    "Skipping partial-tail store job for request %s: "
+                    "boundary %d exceeds the max offloadable boundary %d "
+                    "(num_prompt_tokens=%d, max_offload_tokens=%s).",
+                    req_id,
+                    boundary,
+                    max_boundary,
+                    req.num_prompt_tokens,
+                    req_status.max_offload_tokens,
+                )
+                continue
 
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
