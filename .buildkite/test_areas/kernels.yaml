@@ -489,7 +489,7 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py -m 'not nixl_ep' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
   mirror:
@@ -1100,3 +1100,19 @@ steps:
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   commands:
   - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+
+- label: ":nvidia: (H200 MIG 35GB) NIXL EP Components"
+  key: nixl-ep-components
+  device: h200_35gb
+  num_devices: 1
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - tests/kernels/moe/test_nixl_ep.py
+  - tests/v1/worker/test_gpu_ubatch_slicing.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/worker/ubatching.py
+  - vllm/v1/worker/gpu/ubatch_utils.py
+  - vllm/config/
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s kernels/moe/test_nixl_ep.py
