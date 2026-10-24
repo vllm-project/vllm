@@ -23,6 +23,8 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 import torch
@@ -32,6 +34,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_support import mask_below_threshold
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -133,13 +136,17 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
+        threshold = self._draft_support_threshold(logits, idx_map, self.temperature)
+        sampler: Callable[..., torch.Tensor]
+        if self.draft_watermarker is None:
+            sampler = partial(gumbel_sample, logits_threshold=threshold)
+        else:
+            # The watermarker samples from and caches the logits it is given.
+            sampler = self.draft_watermarker.sample
+            if threshold is not None:
+                logits = mask_below_threshold(logits, threshold)
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
-        sampler = (
-            gumbel_sample
-            if self.draft_watermarker is None
-            else self.draft_watermarker.sample
-        )
         return sampler(
             logits,
             idx_map,
@@ -156,14 +163,6 @@ class DSparkSpeculator(DFlashSpeculator):
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
-            return
-        # A draft model can run the Markov steps below with its own kernels.
-        # It returns False, having done nothing, for a step that the loop
-        # below must run.
-        sample_sequential = getattr(self.model, "sample_sequential", None)
-        if sample_sequential is not None and sample_sequential(
-            self, num_reqs, head_hidden
-        ):
             return
 
         # Sequential Markov sampling over the backbone's output hidden states.
