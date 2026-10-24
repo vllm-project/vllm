@@ -946,7 +946,9 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if name is None or not self._accept_tool_name(name):
+        if name is not None:
+            name = name.strip()
+        if not name or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
@@ -1005,7 +1007,7 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
-            name = slot.name or self._try_extract_name(idx) or ""
+            name = (slot.name or self._try_extract_name(idx) or "").strip()
             if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True

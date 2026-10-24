@@ -239,6 +239,7 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser):
         "single_tool_multiline_param",
         "parallel_tools",
         "tool_with_typed_params",
+        "single_zero_arg_tool",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -401,6 +402,21 @@ circle
                 )
             ],
             "Let me calculate that area for you.",
+        ),
+        (
+            """<tool_call>
+<function=describe_cluster>
+</function>
+</tool_call>""",
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="describe_cluster",
+                        arguments="{}",
+                    )
+                )
+            ],
+            None,
         ),
     ],
 )
@@ -689,6 +705,7 @@ true
         "single_tool_multiline_param",
         "parallel_tools",
         "tool_with_typed_params",  # Added this test case
+        "single_zero_arg_tool",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -853,6 +870,21 @@ circle
                 )
             ],
             "Let me calculate that area for you.",
+        ),
+        (
+            """<tool_call>
+<function=describe_cluster>
+</function>
+</tool_call>""",
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="describe_cluster",
+                        arguments="{}",
+                    )
+                )
+            ],
+            None,
         ),
     ],
 )
@@ -1539,3 +1571,23 @@ class TestParameterWhitespace:
                     streamed += tool_call.function.arguments
 
         assert json.loads(streamed)["content"] == EXPECTED_CONTENT
+
+
+def test_adjust_request_skips_json_guided_decoding_for_named_tool_choice(
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
+    tool = request_tools[0]
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+    )
+    req.tool_choice = ChatCompletionNamedToolChoiceParam(
+        type="function",
+        function=ChatCompletionNamedFunction(name=tool.function.name),
+    )
+    parser = Qwen3EngineToolParser(MagicMock(), tools=sample_tools)
+    out = parser.adjust_request(req)
+    assert out.structured_outputs is None
+    assert out.skip_special_tokens is False

@@ -1064,7 +1064,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             stop_sequence,
                             tool_used=tool_used,
                             tool_complete=(
-                                tool_used and _is_json("".join(last_tool_args))
+                                tool_used and _is_json("".join(last_tool_args) or "{}")
                             ),
                         )
                     )

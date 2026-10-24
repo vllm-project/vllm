@@ -463,6 +463,25 @@ class TestStreaming:
 
         name = collect_function_name(results)
         assert name == "refresh"
+        args = collect_tool_arguments(results)
+        assert args == "{}"
+
+    def test_streaming_function_name_with_trailing_whitespace(
+        self, parser, mock_request
+    ):
+        chunks = [
+            "<tool_call>\n",
+            "<function=describe_cluster \n>",
+            "</function>\n",
+            "</tool_call>",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        name = collect_function_name(results)
+        assert name == "describe_cluster"
+        args = collect_tool_arguments(results)
+        assert args == "{}"
 
     def test_streaming_split_parameter_tag(self, parser, mock_request):
         """Parameter tag split across chunks."""
