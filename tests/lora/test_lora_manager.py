@@ -927,6 +927,50 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_activates_in_id_order(
+    dist_init, dummy_model, device, tmp_path
+):
+    """A batch's adapters are activated in lora_int_id order, not in the
+    iteration order of the request set. LoRARequest hashes by name, and string
+    hashes differ between worker processes unless PYTHONHASHSEED is pinned,
+    so set order would let ranks of one engine evict different adapters."""
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
+    )
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.create_lora_manager(dummy_model, vllm_config)
+
+    # Names whose set order in this process disagrees with id order, so the
+    # assertion below cannot pass by luck of the hash seed.
+    suffix = 0
+    while True:
+        batch = {
+            LoRARequest(f"adapter-{i}-{suffix}", i, dummy_lora_files) for i in (1, 2, 3)
+        }
+        if [r.lora_int_id for r in batch] != [1, 2, 3]:
+            break
+        suffix += 1
+
+    manager.set_active_adapters(batch, None)
+
+    adapter_manager = manager._adapter_manager
+    assert list(adapter_manager._registered_adapters.order) == [1, 2, 3]
+    assert list(adapter_manager._active_adapters.order) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(

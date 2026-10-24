@@ -282,8 +282,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 "than the number of GPU LoRA slots "
                 f"({self._adapter_manager.lora_slots})."
             )
-        for lora in loras_map.values():
-            self.add_adapter(lora)
+        for lora_id in sorted(loras_map):
+            self.add_adapter(loras_map[lora_id])
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
