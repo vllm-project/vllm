@@ -9,6 +9,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
 import msgpack
@@ -24,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -38,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOError,
+    MoRIIOHandshakeMetadata,
     MoRIIOMode,
     MoRIIOTransferAck,
     ReqId,
@@ -259,7 +262,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        return False
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return (
+            str(extra_config.get("backend", "rdma")).lower() == "rdma"
+            and get_moriio_mode(kv_transfer_config) == MoRIIOMode.WRITE
+        )
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -383,12 +390,40 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
     ############################################################
     # Worker Side Methods
     ############################################################
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        # A NIC registers a dmabuf of one physical allocation, not ROCm's chunks.
+        if not self._vllm_config.model_config.enable_sleep_mode:
+            return None
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        return CuMemAllocator.get_instance().use_memory_pool(
+            tag="kv_cache", single_allocation=True
+        )
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_handshake_metadata()
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -735,6 +770,8 @@ class MoRIIOConnectorScheduler:
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
+        # Newest KV cache registration epoch of this engine's workers.
+        self._registration_epoch = 0
 
     def get_exchange_clipped_blocks(
         self,
@@ -907,9 +944,21 @@ class MoRIIOConnectorScheduler:
             # local == global.
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
+            "registration_epoch": self._registration_epoch,
         }
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        epochs = [
+            m.registration_epoch
+            for m in metadata.values()
+            if isinstance(m, MoRIIOHandshakeMetadata)
+        ]
+        if epochs:
+            self._registration_epoch = max(epochs)
 
     def _send_transfer_release(self, transfer_id: TransferId, host: str, port: int):
         path = make_zmq_path("tcp", host, port)
@@ -1928,6 +1977,14 @@ class MoRIIOConnectorWorker:
         # Remote engines already covered by the eager pre-forward handshake.
         self._eager_handshaked_engines: set[EngineId] = set()
 
+        # Sleep mode: this worker's KV cache registrations by (address, size),
+        # and the arguments to handshake again with a peer that woke up.
+        self._kv_regions: dict[tuple[int, int], tuple[torch.Tensor, bytes]] = {}
+        self._kv_unregistered = False
+        self._registration_epoch = 0
+        self._agent_metadata: MoRIIOAgentMetadata | None = None
+        self._remote_handshake_args: dict[EngineId, tuple[Any, ...]] = {}
+
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2132,11 +2189,6 @@ class MoRIIOConnectorWorker:
     ):
         """Background thread for getting new MoRIIO handshakes."""
         encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(metadata)
-        size_in_bytes = len(encoded_data)
-        logger.debug(
-            "Size of encoded MoRIIOAgentMetadata: %s bytes", str(size_in_bytes)
-        )
 
         # Listen for new requests for metadata.
         host = "*"
@@ -2155,6 +2207,8 @@ class MoRIIOConnectorWorker:
                     logger.error("Connection listener got unexpected message")
                     raise HandshakeError("handshake failed, unexpected msg type")
                 elif msg == MoRIIOConstants.GET_META_MSG:
+                    # Encoded per request, since a wake-up changes the epoch.
+                    encoded_data = encoder.encode(metadata)
                     sock.send_multipart(
                         (identity, b"", encoded_data)
                     )  # send local mori io engine meta data
@@ -2254,6 +2308,14 @@ class MoRIIOConnectorWorker:
                 msgpack.loads(buf)
             )
             self.remote_moriio_metadata[expected_engine_id] = metadata
+            self._remote_handshake_args[expected_engine_id] = (
+                host,
+                port,
+                remote_tp_size,
+                expected_engine_id,
+                remote_dp_rank,
+                remote_tp_rank,
+            )
             setup_agent_time = time.perf_counter()
             logger.debug(
                 "MoRIIO handshake: add agent took: %s",
@@ -2633,7 +2695,7 @@ class MoRIIOConnectorWorker:
         shared_mr = None
         if shared_backing:
             reg_tensor, self.kv_layer_mr_offset = self._build_shared_kv_mr(kv_caches)
-            shared_mr = self.moriio_wrapper.register_local_tensor(reg_tensor)
+            shared_mr = self._register_kv_region(reg_tensor)
 
         # Say it out loud when the groups disagree. This is expected on a hybrid
         # model and used to be fatal, so a run that silently had one page size
@@ -2682,13 +2744,11 @@ class MoRIIOConnectorWorker:
                 )
                 for tensor in (conv, ssm):
                     alias = self._contiguous_byte_alias(tensor)
-                    meta = self.moriio_wrapper.register_local_tensor(alias)
+                    meta = self._register_kv_region(alias)
                     self.layer_name_to_local_kv_cache_metadata[layer_name].append(meta)
                     self.local_kv_cache_size.append(alias.numel())
             else:
-                moriio_mem_metadata = shared_mr or (
-                    self.moriio_wrapper.register_local_tensor(kv_cache)
-                )
+                moriio_mem_metadata = shared_mr or self._register_kv_region(kv_cache)
                 self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                     moriio_mem_metadata
                 )
@@ -2732,7 +2792,7 @@ class MoRIIOConnectorWorker:
             )
             assert len(self.block_window_per_layer) == self.num_layers
 
-        metadata = MoRIIOAgentMetadata(
+        self._agent_metadata = metadata = MoRIIOAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.moriio_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
@@ -2765,6 +2825,69 @@ class MoRIIOConnectorWorker:
         self._moriio_handshake_listener_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
+
+    def _register_kv_region(self, tensor: torch.Tensor) -> bytes:
+        # Layers sharing a tensor share its registration: MoRI keys a memory
+        # region by its start address and would leak a second one.
+        key = (tensor.data_ptr(), tensor.nelement() * tensor.element_size())
+        if key not in self._kv_regions:
+            region = self.moriio_wrapper.register_local_tensor(tensor)
+            self._kv_regions[key] = (tensor, region)
+        return self._kv_regions[key][1]
+
+    def get_handshake_metadata(self) -> MoRIIOHandshakeMetadata | None:
+        if not self.model_config.enable_sleep_mode:
+            return None
+        return MoRIIOHandshakeMetadata(self._registration_epoch)
+
+    def unregister_kv_caches(self) -> None:
+        if self._kv_unregistered or not self._kv_regions:
+            return
+        # Queued writes would register the released memory with MoRI again.
+        self._writer.release_registration()
+        self.built_write_session.clear()
+        for _, region in self._kv_regions.values():
+            self.moriio_wrapper.deregister_local_tensor(region)
+        self._kv_unregistered = True
+
+    def restore_kv_caches(self) -> None:
+        if not self._kv_unregistered:
+            return
+        new_regions = {}
+        for key, (tensor, region) in self._kv_regions.items():
+            new_region = self.moriio_wrapper.register_local_tensor(tensor)
+            self._kv_regions[key] = (tensor, new_region)
+            new_regions[region] = new_region
+        # In place, before the epoch: the handshake listener serves both.
+        for regions in self.layer_name_to_local_kv_cache_metadata.values():
+            regions[:] = [new_regions[region] for region in regions]
+        self._registration_epoch += 1
+        assert self._agent_metadata is not None
+        self._agent_metadata.registration_epoch = self._registration_epoch
+        self._kv_unregistered = False
+
+    def _refresh_remote_registration(
+        self, remote_engine_id: EngineId, registration_epoch: int
+    ) -> None:
+        """Handshake again with a peer that registered its KV cache anew."""
+        metadata = self.remote_moriio_metadata.get(remote_engine_id)
+        if metadata is None or registration_epoch <= metadata.registration_epoch:
+            return
+        logger.info(
+            "MoRIIO peer %s registered its KV cache again (epoch %d -> %d)",
+            remote_engine_id,
+            metadata.registration_epoch,
+            registration_epoch,
+        )
+        self._handshake_initiation_executor.submit(
+            self._moriio_handshake, *self._remote_handshake_args[remote_engine_id]
+        ).result(timeout=self.moriio_config.transfer_timeout)
+        self.built_write_session.pop(remote_engine_id, None)
+        # A peer rank can serve an older epoch than its engine stamps.
+        metadata = self.remote_moriio_metadata[remote_engine_id]
+        metadata.registration_epoch = max(
+            metadata.registration_epoch, registration_epoch
+        )
 
     def _record_slice_layouts(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Record how to address head and state slices of each layer.

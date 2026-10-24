@@ -1008,6 +1008,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         tp_rank=0,
         dp_rank=0,
         is_producer=False,
+        _kv_regions={},
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x")),
             scheduler_config=SimpleNamespace(

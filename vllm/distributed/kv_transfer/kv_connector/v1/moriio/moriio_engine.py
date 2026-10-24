@@ -110,6 +110,10 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._defer_timeout = worker.moriio_config.defer_timeout
+        # Held while a write runs, so its KV cache registration is not
+        # released under it.
+        self._execution_lock = threading.Lock()
+        self._released_at = float("-inf")
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -194,7 +198,8 @@ class MoRIIOWriter:
         """Main loop for the write worker thread."""
         while True:
             # Process deferred tasks first
-            self._process_deferred_tasks()
+            with self._execution_lock:
+                self._process_deferred_tasks()
 
             # Get new task
             try:
@@ -217,7 +222,8 @@ class MoRIIOWriter:
 
             # Execute the task
             try:
-                self._execute_write_task(task)
+                with self._execution_lock:
+                    self._execute_write_task(task)
             except Exception:
                 logger.exception(
                     "Write task failed for request %s, marking done",
@@ -237,7 +243,9 @@ class MoRIIOWriter:
         for task in self._deferred_tasks:
             if self._is_transfer_terminal(task.transfer_id):
                 continue
-            if self._is_remote_ready(task):
+            if task.enqueue_time < self._released_at:
+                self._fail_released_write(task)
+            elif self._is_remote_ready(task):
                 try:
                     self._execute_write_task(task)
                 except Exception:
@@ -264,8 +272,37 @@ class MoRIIOWriter:
             task.request_id,
             age,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        self._send_write_failed(task)
+
+    def release_registration(self) -> None:
+        """Waits for the writes in flight and fails the queued ones, which
+        belong to aborted requests, before the KV cache registration is
+        released."""
+        wrapper = self.worker.moriio_wrapper
+        with self._execution_lock:
+            self._released_at = time.perf_counter()
+            with wrapper.lock:
+                pending = list(wrapper.done_remote_allocate_req_dict.values())
+            with self._write_state_lock:
+                issued = [s for info in pending for s in info.transfer_statuses]
+            try:
+                wrapper.waiting_for_transfer_complete(issued)
+            except TransferError:
+                logger.warning(
+                    "Writes failed before the KV cache release", exc_info=True
+                )
+
+    def _fail_released_write(self, task: WriteTask) -> None:
+        logger.warning(
+            "Failing the KV cache write of request %s scheduled before a sleep",
+            task.request_id,
+        )
+        self._mark_request_done(task.transfer_id)
+        self._send_write_failed(task)
+
+    def _send_write_failed(self, task: WriteTask) -> None:
+        # No remote allocation may have arrived, so the decode DP rank that
+        # owns the request is unknown. Tell every rank; the others drop it.
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             for remote_ip, remote_port in self._resolve_notify_endpoints(
                 task, decode_dp_rank
@@ -345,6 +382,9 @@ class MoRIIOWriter:
             task: The write task to execute
 
         """
+        if task.enqueue_time < self._released_at:
+            self._fail_released_write(task)
+            return
         # Get remote allocation info
         request_info = self._get_remote_alloc_info(task.transfer_id)
         with self._write_state_lock:
@@ -388,6 +428,9 @@ class MoRIIOWriter:
                 continue
             target_engine_id = self._target_engine_id(
                 task, request_info.decode_dp_rank, target
+            )
+            self.worker._refresh_remote_registration(
+                target_engine_id, request_info.registration_epoch
             )
             # Get or create sessions
             sessions, remote_moriio_meta = self.worker._get_built_session(
@@ -826,6 +869,10 @@ class MoRIIOWrapper:
         self.local_memory_registered = True
         return local_memory_metadata_packed
 
+    def deregister_local_tensor(self, packed_memory_metadata: bytes) -> None:
+        assert self.moriio_engine is not None, "MoRIIO engine must be set first"
+        self.moriio_engine.deregister_memory(MemoryDesc.unpack(packed_memory_metadata))
+
     def get_unpack_memory_metadata(self, packed_memory_metadata):
         return MemoryDesc.unpack(packed_memory_metadata)
 
@@ -1075,6 +1122,7 @@ class MoRIIOWrapper:
                     else block_notify_list
                 ),
                 decode_dp_rank=decode_dp_rank,
+                registration_epoch=data.get("registration_epoch", 0),
             )
 
     def _handle_write_done_message(self, data: dict):
