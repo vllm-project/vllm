@@ -8,6 +8,9 @@
 #
 # Configuration can be customized via environment variables:
 #   MODEL: Model to serve
+#   KV_CONNECTOR: Mooncake connector to run on both the prefiller and the
+#     decoder: MooncakeConnector (prefiller pushes) or MooncakePullConnector
+#     (decoder pulls). The two are protocol-incompatible, so they must match.
 #   PREFILL_GPUS: Comma-separated GPU IDs for prefill servers
 #   DECODE_GPUS: Comma-separated GPU IDs for decode servers
 #   PREFILL_PORTS: Comma-separated ports for prefill servers
@@ -19,6 +22,7 @@
 
 # Configuration - can be overridden via environment variables
 MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
+KV_CONNECTOR=${KV_CONNECTOR:-MooncakeConnector}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1200}
 PROXY_PORT=${PROXY_PORT:-8000}
 
@@ -32,6 +36,7 @@ echo "Warning: Mooncake Connector support for vLLM v1 is experimental and subjec
 echo ""
 echo "Architecture Configuration:"
 echo "  Model: $MODEL"
+echo "  Connector: $KV_CONNECTOR"
 echo "  Prefill GPUs: $PREFILL_GPUS, Ports: $PREFILL_PORTS, Bootstrap Port:$BOOTSTRAP_PORTS"
 echo "  Decode GPUs: $DECODE_GPUS, Ports: $DECODE_PORTS"
 echo "  Proxy Port: $PROXY_PORT"
@@ -159,7 +164,7 @@ main() {
         VLLM_MOONCAKE_BOOTSTRAP_PORT=$bootstrap_port CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
         --port "$port" \
         --kv-transfer-config \
-        "{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_producer\"}" > prefill$((i+1)).log 2>&1 &
+        "{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\"}" > prefill$((i+1)).log 2>&1 &
         PIDS+=($!)
         proxy_args+=(--prefill "http://0.0.0.0:${port}" "$bootstrap_port")
     done
@@ -177,7 +182,7 @@ main() {
         CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
         --port "$port" \
         --kv-transfer-config \
-        "{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\"}" > decode$((i+1)).log 2>&1 &
+        "{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\"}" > decode$((i+1)).log 2>&1 &
         PIDS+=($!)
         proxy_args+=(--decode "http://0.0.0.0:${port}")
     done

@@ -18,6 +18,18 @@ Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) 
 
 ## Usage
 
+Two connectors move KV over Mooncake, and both use the same proxy and the same
+`kv_transfer_config` fields:
+
+| Connector | Who moves the bytes | Metadata on the critical path |
+| ------------- | ------------- | ------------- |
+| `MooncakeConnector` | The prefiller writes into the decoder's registered memory | The decoder sends its KV layout to each prefiller worker once, then block ids and a layout id per request |
+| `MooncakePullConnector` | The decoder reads from the prefiller's registered memory | The decoder fetches the prefiller's KV layout once per peer worker, then caches it, and asks for block ids per request |
+
+Use the same connector name on **both** sides: the two protocols are not
+interchangeable, and a mixed pair fails the request with an error naming both
+connectors.
+
 ### Prefiller Node (192.168.0.2)
 
 ```bash
@@ -40,6 +52,27 @@ Now you can send requests to the proxy server through port 8000.
 
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
+
+### Pull mode
+
+Swap the connector name on both sides and keep the same proxy:
+
+```bash
+# Prefiller node
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8010 --kv-transfer-config '{"kv_connector":"MooncakePullConnector","kv_role":"kv_producer"}'
+# Decoder node
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8020 --kv-transfer-config '{"kv_connector":"MooncakePullConnector","kv_role":"kv_consumer"}'
+```
+
+The decoder issues the reads at its own scheduling pace and releases the
+prefiller's blocks as each read finishes, so the prefiller holds KV only until
+its readers report in. A prefiller also releases the blocks of a request that no
+reader takes within `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
+
+Both sides hash the model, KV cache format, attention backend, speculative
+configuration and connector version at startup, and compare the digests during
+the handshake. A pair that disagrees fails the request with the reason instead of
+transferring bytes neither side can interpret.
 
 ## Environment Variables
 
@@ -77,7 +110,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
 ### kv_connector_extra_config
 
-- **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
+- **num_workers**: Size of the thread pool one worker uses to move KV caches: the prefiller's send pool with `MooncakeConnector`, the decoder's read pool with `MooncakePullConnector`. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.

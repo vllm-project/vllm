@@ -23,6 +23,8 @@ class RegisterWorkerPayload(BaseModel):
     tp_rank: int
     pp_rank: int
     addr: WorkerAddr
+    # Connector this worker runs. Empty means the worker predates the field.
+    connector: str = ""
 
 
 @dataclass
@@ -30,6 +32,8 @@ class EngineEntry:
     engine_id: EngineId
     # {tp_rank: {pp_rank: worker_addr}}
     worker_addr: dict[int, dict[int, WorkerAddr]]
+    # Connector every worker of this engine registered.
+    connector: str = ""
 
 
 class MooncakeBootstrapServer:
@@ -130,6 +134,7 @@ class MooncakeBootstrapServer:
             self.workers[payload.dp_rank] = EngineEntry(
                 engine_id=payload.engine_id,
                 worker_addr={},
+                connector=payload.connector,
             )
 
         dp_entry = self.workers[payload.dp_rank]
@@ -141,6 +146,21 @@ class MooncakeBootstrapServer:
                     f"expected {dp_entry.engine_id}, got {payload.engine_id}"
                 ),
             )
+        if (
+            payload.connector
+            and dp_entry.connector
+            and payload.connector != dp_entry.connector
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Connector mismatch for dp_rank={payload.dp_rank}: "
+                    f"{dp_entry.connector} is already registered, but this "
+                    f"worker runs {payload.connector}"
+                ),
+            )
+        if payload.connector and not dp_entry.connector:
+            dp_entry.connector = payload.connector
         if payload.tp_rank not in dp_entry.worker_addr:
             dp_entry.worker_addr[payload.tp_rank] = {}
 
