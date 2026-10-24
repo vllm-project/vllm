@@ -12,9 +12,16 @@ Layout (content-addressed, one file per KV block):
     <root>/<model>_<hash>_r<TP rank>/<3 hex>/<block>
     blocks are 26_247_168 B (~25 MB) on the Swift-1.5 nvfp4 config.
 
-Cap policy (arbitrated with Maintenance 2026-10-20, corrected 2026-10-21):
-    cap = min(MAX_GIB, guest_free - 12% of guest total,
-              for each guard mount: free - 12% of its total)
+Cap policy (arbitrated with Maintenance 2026-10-20, corrected 2026-10-21,
+2026-10-24):
+    cap = min(MAX_GIB, tier + guest_free - guest_floor,
+              for each guard mount: tier + free - 12% of its total)
+
+The tier's own bytes are part of the room it may occupy: the cap answers "how
+big may the tier be", i.e. how far it may grow before free space reaches the
+reserve. Until 2026-10-24 the formula compared the tier's total with free space
+alone, so the tier could never exceed half of its allowed room (and the bytes it
+already held were counted twice).
 
 The tier physically lives in the Ubuntu WSL ext4.vhdx
 (`C:\\Users\\MYIA\\AppData\\Local\\wsl\\{...}\\ext4.vhdx`, 850 GB, on C:),
@@ -59,8 +66,10 @@ def utcnow() -> str:
 
 
 def compute_cap(root: str, guard_mounts: list[str], max_gib: float,
-                reserve_pct: float, guest_floor_gib: float) -> dict:
-    """cap = min(max_gib, guest_free - guest_floor, for each mount: free - reserve%)."""
+                reserve_pct: float, guest_floor_gib: float,
+                tier_bytes: int = 0) -> dict:
+    """cap = min(max_gib, tier + guest_free - guest_floor,
+                 for each mount: tier + free - reserve%)."""
     checks = {}
     availables = []
     # Guest root filesystem: absolute floor (it hosts the HF cache + WSL system,
@@ -68,7 +77,7 @@ def compute_cap(root: str, guard_mounts: list[str], max_gib: float,
     try:
         usage = shutil.disk_usage(root)
         floor = int(guest_floor_gib * GIB)
-        available = max(0, usage.free - floor)
+        available = max(0, tier_bytes + usage.free - floor)
         checks["guest_root"] = {
             "path": root, "total_bytes": usage.total, "free_bytes": usage.free,
             "floor_bytes": floor, "available_bytes": available,
@@ -84,7 +93,10 @@ def compute_cap(root: str, guard_mounts: list[str], max_gib: float,
             checks[m] = {"path": m, "error": str(exc)}
             continue
         reserve = int(usage.total * reserve_pct / 100.0)
-        available = max(0, usage.free - reserve)
+        # The vhdx never shrinks, so deleting tier files does not give C: its
+        # space back; but the tier reuses the ext4 blocks it frees, so its size
+        # can grow only until C: free reaches the reserve.
+        available = max(0, tier_bytes + usage.free - reserve)
         checks[m] = {
             "path": m, "total_bytes": usage.total, "free_bytes": usage.free,
             "reserve_bytes": reserve, "available_bytes": available,
@@ -165,8 +177,9 @@ def main() -> int:
 
     started = time.time()
     guard = [m.strip() for m in args.guard_mounts.split(",") if m.strip()]
-    cap = compute_cap(args.root, guard, args.max_gib, args.reserve_pct, args.guest_floor_gib)
     candidates, errors, files_total, bytes_total = collect(args.root, args.min_age_min)
+    cap = compute_cap(args.root, guard, args.max_gib, args.reserve_pct, args.guest_floor_gib,
+                      tier_bytes=bytes_total)
 
     over = bytes_total - cap["cap_bytes"]
     deleted_n = 0
