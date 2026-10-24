@@ -10,9 +10,9 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
+from vllm.models.deepseek_v41.cross_layer import get_cross_layer_runtime
 from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
     dsv41_o_proj,
     register_dsv41_o_proj_warmup,
@@ -194,24 +194,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
-        num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         topk_indices = None
         topk_lens = None
         if not swa_only:
-            # Local indices filled by the index-source layer's indexer.
             assert attn_metadata is not None
-            assert swa_metadata.is_valid_token is not None
-            assert self.topk_indices_buffer is not None
-            block_size = attn_metadata.block_size // self.compress_ratio
-            is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
+            global_indices, topk_lens = self._decode_global_topk(
+                swa_metadata, attn_metadata
             )
             topk_indices = global_indices.view(num_decode_tokens, 1, -1)
 
@@ -309,16 +299,22 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             has_compressed=not swa_only,
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
+        combined_indices_cache, combined_lens_cache = self._prefill_combined_indices(
+            swa_metadata,
+            topk_indices,
+            query_start_loc,
+            query_start_loc_cpu,
+            seq_lens,
+            gather_lens,
+            chunk_plan,
+            top_k,
+        )
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            workspace = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
+            (kv,) = workspace_manager.get_simultaneous(
+                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16)
             )
-            kv, combined_indices_out, combined_lens_out = workspace
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
@@ -352,10 +348,54 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             query_end = (
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
-            combined_indices_out = combined_indices_out[: query_end - query_start]
-            combined_lens_out = combined_lens_out[: query_end - query_start]
+            combined_indices = combined_indices_cache[query_start:query_end]
+            combined_lens = combined_lens_cache[query_start:query_end]
+            flash_mla_sparse_fwd(
+                q=q[query_start:query_end, : self._prefill_num_heads],
+                kv=kv.view(-1, 1, q.shape[-1]),
+                indices=combined_indices.unsqueeze(1),
+                sm_scale=self.scale,
+                attn_sink=self.attn_sink[: self._prefill_num_heads],
+                topk_length=combined_lens,
+                out=output[query_start:query_end, : self._prefill_num_heads],
+            )
 
-            combined_indices, combined_lens = combine_topk_swa_indices(
+    def _prefill_combined_indices(
+        self,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        topk_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        gather_lens: torch.Tensor,
+        chunk_plan: list[tuple[int, int, int, int]],
+        top_k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Combined top-k/SWA indices shared by one index-source group."""
+        key = self._cross_layer_prefill_key()
+        runtime = get_cross_layer_runtime()
+        cached = runtime.reuse_prefill_indices(key, self.is_index_source)
+        if cached is not None:
+            return cached
+
+        num_prefill_tokens = topk_indices.shape[0]
+        width = round_up(top_k + self.window_size, 128)
+        combined_indices = torch.empty(
+            (num_prefill_tokens, width), dtype=torch.int32, device=topk_indices.device
+        )
+        combined_lens = torch.empty(
+            num_prefill_tokens, dtype=torch.int32, device=topk_indices.device
+        )
+        num_decodes = swa_metadata.num_decodes
+        prefill_token_base = query_start_loc_cpu[num_decodes]
+        for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
+            query_start = (
+                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+            )
+            query_end = (
+                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            )
+            combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
                 query_start_loc[
                     num_decodes + chunk_start : num_decodes + chunk_end + 1
@@ -367,14 +407,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 top_k,
                 chunk_M,
                 chunk_N,
-                out=(combined_indices_out, combined_lens_out),
+                out=(
+                    combined_indices[query_start:query_end],
+                    combined_lens[query_start:query_end],
+                ),
             )
-            flash_mla_sparse_fwd(
-                q=q[query_start:query_end, : self._prefill_num_heads],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink[: self._prefill_num_heads],
-                topk_length=combined_lens,
-                out=output[query_start:query_end, : self._prefill_num_heads],
-            )
+        result = (combined_indices, combined_lens)
+        runtime.cache_prefill_indices(key, result)
+        return result

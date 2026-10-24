@@ -31,6 +31,7 @@ from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
     dequantize_and_gather_k_cache,
 )
+from vllm.models.deepseek_v41.cross_layer import get_cross_layer_runtime
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
@@ -574,23 +575,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
-        # Decode ragged topk metadata is a pure function of the indices its
-        # index source published, so every consumer of a source rebuilds the
-        # same thing. The source owns one cache per compress ratio, refreshed
-        # when it runs; consumers below it read through.
-        self._topk_ragged_cache: dict[int, _TopkRagged] = {}
-        self._prefill_topk_ragged_cache: dict[
-            str, tuple[torch.Tensor, torch.Tensor]
-        ] = {}
-        self._index_source_prefix: str | None = None
         if self.compress_ratio > 0:
             assert self.index_source_layer_id is not None
-            self._index_source_prefix = _replace_layer_index(
+            index_source_prefix = _replace_layer_index(
                 self.prefix, self.index_source_layer_id
             )
-            if self._index_source_prefix not in self._static_forward_context:
+            if index_source_prefix not in self._static_forward_context:
                 raise NotImplementedError(
-                    f"Index source {self._index_source_prefix} not found on "
+                    f"Index source {index_source_prefix} not found on "
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
@@ -1104,21 +1096,18 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         """Ragged form of the topk indices this layer's index source published.
 
         The packing depends only on the shared ``topk_indices_buffer`` and
-        per-step metadata, apart from the layer's own compress ratio, so the
-        source memoizes one result per ratio for all the layers below it.
+        per-step metadata, apart from the layer's own compress ratio.
         """
         assert attn_metadata is not None
         assert swa_metadata.is_valid_token is not None
         assert self.topk_indices_buffer is not None
-        assert self._index_source_prefix is not None
 
-        source = self._static_forward_context[self._index_source_prefix]
-        if source is self:
-            # Fresh indices as of this layer; drop what the last step cached.
-            source._topk_ragged_cache = {}
-        cached = source._topk_ragged_cache.get(self.compress_ratio)
+        runtime = get_cross_layer_runtime()
+        key = self._cross_layer_decode_key()
+        cached = runtime.reuse_decode_topk(key, self.is_index_source)
         if cached is not None:
-            return cached
+            assert len(cached) == 3
+            return cast(_TopkRagged, cached)
 
         built = compute_global_topk_ragged_indices_and_indptr(
             self.topk_indices_buffer[:num_decode_tokens],
@@ -1127,7 +1116,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.block_size // self.compress_ratio,
             swa_metadata.is_valid_token[:num_decode_tokens],
         )
-        source._topk_ragged_cache[self.compress_ratio] = built
+        runtime.cache_decode_topk(key, built)
         return built
 
     def _forward_decode(
@@ -1399,20 +1388,17 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata,
         compressed_k_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Prefill counterpart of ``_decode_topk_ragged``: layers that share an
-        index source and a compressed cache reuse one build per step."""
+        """Prefill counterpart of ``_decode_topk_ragged``."""
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.query_start_loc is not None
         assert swa_metadata.seq_lens is not None
         assert swa_metadata.is_valid_token is not None
         assert self.topk_indices_buffer is not None
-        assert self._index_source_prefix is not None
         assert self.compressed_cache_prefix is not None
 
-        source = self._static_forward_context[self._index_source_prefix]
-        if source is self:
-            source._prefill_topk_ragged_cache = {}
-        cached = source._prefill_topk_ragged_cache.get(self.compressed_cache_prefix)
+        runtime = get_cross_layer_runtime()
+        key = self._cross_layer_prefill_key()
+        cached = runtime.reuse_prefill_indices(key, self.is_index_source)
         if cached is not None:
             return cached
 
@@ -1434,7 +1420,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             token_offset=num_decode_tokens,
             num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
         )
-        source._prefill_topk_ragged_cache[self.compressed_cache_prefix] = built
+        runtime.cache_prefill_indices(key, built)
         return built
 
     def _forward_prefill_aiter(
