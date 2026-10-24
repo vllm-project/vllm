@@ -173,6 +173,11 @@ class StreamingParserEngine:
         self.reset(initial_state=initial_state)
 
     @property
+    def token_id_to_terminal(self) -> dict[int, str]:
+        """Terminals that arrive as a single special token, by token ID."""
+        return self._resolved_token_ids
+
+    @property
     def reasoning_token_count(self) -> int:
         return self._reasoning_token_count
 
