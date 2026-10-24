@@ -13,7 +13,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
@@ -363,22 +363,37 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    (
+        "seq_len",
+        "disable_eagle_block_drop",
+        "num_hash_lookahead_tokens",
+        "prefix_match_unit",
+        "expected_offset",
+    ),
     [
-        (100, False, 16, 80),
-        (100, True, 16, 96),
-        (100, False, 8, None),
-        (96, False, 16, 80),
-        (96, True, 16, 80),
+        (100, False, 0, 16, 80),
+        (100, True, 0, 16, 96),
+        (100, False, 1, 16, 96),
+        (100, False, 0, 8, None),
+        (96, False, 0, 16, 80),
+        (96, True, 0, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
+    monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
+    num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
+    """Lookahead hashes need no back-off from the replay boundary."""
+    monkeypatch.setattr(
+        VllmConfig,
+        "num_hash_lookahead_tokens",
+        property(lambda _: num_hash_lookahead_tokens),
+    )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
