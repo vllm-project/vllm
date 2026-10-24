@@ -273,6 +273,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
+    VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
@@ -1950,6 +1951,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
         int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
+    ),
+    # If set, the ROCM_AITER_FA MLA prefill backend quantizes Q/K/V to
+    # per-tensor FP8 and runs AITER's FlyDSL FP8 attention (gfx950, bf16 models).
+    "VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8": lambda: bool(
+        int(os.getenv("VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8", "0"))
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
