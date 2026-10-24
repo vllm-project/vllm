@@ -40,8 +40,7 @@ pub struct CompletionRequest {
 
     /// The prompt(s) to generate completions for.
     ///
-    /// We use [`vllm_text::Prompt`] here to support token-id input.
-    pub prompt: Prompt,
+    pub prompt: CompletionPrompt,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
@@ -225,6 +224,44 @@ pub struct CompletionRequest {
     /// Additional fields
     #[serde(flatten)]
     pub other: Map<String, Value>,
+}
+
+/// Prompt forms accepted by the OpenAI completions route.
+///
+/// This stays route-owned because [`Prompt`] represents exactly one generation
+/// request. Keeping the batch forms here prevents recursive or mixed prompt
+/// arrays from leaking into the shared text API.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CompletionPrompt {
+    Text(String),
+    TextBatch(Vec<String>),
+    TokenIds(Vec<u32>),
+    TokenIdsBatch(Vec<Vec<u32>>),
+}
+
+impl CompletionPrompt {
+    pub(super) fn is_batch(&self) -> bool {
+        matches!(self, Self::TextBatch(_) | Self::TokenIdsBatch(_))
+    }
+
+    pub(super) fn into_prompts(self) -> Vec<Prompt> {
+        match self {
+            Self::Text(prompt) => vec![Prompt::Text(prompt)],
+            Self::TokenIds(token_ids) => vec![Prompt::TokenIds(token_ids)],
+            Self::TextBatch(prompts) => prompts.into_iter().map(Prompt::Text).collect(),
+            Self::TokenIdsBatch(prompts) => prompts.into_iter().map(Prompt::TokenIds).collect(),
+        }
+    }
+}
+
+impl From<Prompt> for CompletionPrompt {
+    fn from(prompt: Prompt) -> Self {
+        match prompt {
+            Prompt::Text(prompt) => Self::Text(prompt),
+            Prompt::TokenIds(token_ids) => Self::TokenIds(token_ids),
+        }
+    }
 }
 
 impl Normalizable for CompletionRequest {

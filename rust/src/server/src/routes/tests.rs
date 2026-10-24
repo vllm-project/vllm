@@ -1361,6 +1361,92 @@ async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
     test_app_with_stream_output_specs(default_stream_output_specs()).await
 }
 
+async fn test_app_with_batch_engine_script<F>(
+    engine_id: Vec<u8>,
+    script: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id,
+        script,
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
+async fn test_app_with_batch_engine(
+    expected_prompts: Vec<Vec<u32>>,
+) -> (axum::Router, MockEngineTask) {
+    test_app_with_batch_engine_script(
+        b"engine-openai-completion-batch".to_vec(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let mut requests = Vec::with_capacity(expected_prompts.len());
+                for expected_prompt in expected_prompts {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    assert_eq!(
+                        request.prompt_token_ids.as_deref(),
+                        Some(expected_prompt.as_slice())
+                    );
+                    requests.push(request);
+                }
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: requests
+                            .iter()
+                            .map(|request| {
+                                request_output_with_logprobs(
+                                    &request.request_id,
+                                    bytes_to_token_ids(b"hi!"),
+                                    Some(EngineCoreFinishReason::Stop),
+                                    None,
+                                    Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi!"))),
+                                    request
+                                        .prompt_token_ids
+                                        .as_deref()
+                                        .filter(|tokens| tokens.len() > 1)
+                                        .map(prompt_logprobs_for_tokens),
+                                )
+                            })
+                            .collect(),
+                        finished_requests: Some(
+                            requests.iter().map(|request| request.request_id.clone()).collect(),
+                        ),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    )
+    .await
+}
+
 async fn test_app_with_stream_output_specs(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (axum::Router, MockEngineTask) {
@@ -4615,6 +4701,411 @@ async fn non_stream_completions_return_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_accept_batch_text_prompts() {
+    let (app, engine_task) = test_app_with_batch_engine(vec![
+        bytes_to_token_ids(b"hello"),
+        bytes_to_token_ids(b"world!"),
+    ])
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": ["hello", "world!"],
+                        "echo": true,
+                        "logprobs": 1,
+                        "stream": false,
+                        "add_special_tokens": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["index"], 0);
+    assert_eq!(json["choices"][1]["index"], 1);
+    assert_eq!(json["choices"][0]["text"], "hellohi");
+    assert_eq!(json["choices"][1]["text"], "world!hi");
+    assert_eq!(
+        json["choices"][0]["logprobs"]["tokens"].as_array().unwrap().len(),
+        8
+    );
+    assert_eq!(
+        json["choices"][1]["logprobs"]["tokens"].as_array().unwrap().len(),
+        9
+    );
+    assert_eq!(json["usage"]["prompt_tokens"], 11);
+    assert_eq!(json["usage"]["completion_tokens"], 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_accept_batch_token_id_prompts() {
+    let prompts = vec![bytes_to_token_ids(b"one"), bytes_to_token_ids(b"two")];
+    let (app, engine_task) = test_app_with_batch_engine(prompts.clone()).await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": prompts,
+                        "stream": false,
+                        "add_special_tokens": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["choices"][0]["index"], 0);
+    assert_eq!(json["choices"][1]["index"], 1);
+    assert_eq!(json["usage"]["prompt_tokens"], 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_reject_empty_prompt_batches_before_streaming() {
+    let app = test_app().await;
+    for stream in [false, true] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": [],
+                            "stream": stream
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(
+            json["error"]["message"],
+            "You must pass at least one prompt"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_stream_invalid_batch_items_as_errors_before_done() {
+    let app = test_app().await;
+    for prompt in [
+        json!([[]]),
+        json!([[1], []]),
+        json!([[], [1]]),
+        json!([""]),
+        json!(["hello", ""]),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": prompt,
+                            "stream": true,
+                            "add_special_tokens": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let payloads = sse_data_payloads(&text);
+        assert_eq!(payloads.len(), 2, "{text}");
+        assert!(sse_json_payloads(&text)[0]["error"].is_object(), "{text}");
+        assert_eq!(payloads[1], "[DONE]");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_single_token_prompt_logprobs_without_engine_prompt_scores() {
+    for (prompt, expected_prompts) in [
+        (json!("H"), vec![bytes_to_token_ids(b"H")]),
+        (
+            json!(["H", "W"]),
+            vec![bytes_to_token_ids(b"H"), bytes_to_token_ids(b"W")],
+        ),
+    ] {
+        for stream in [false, true] {
+            let (mut app, engine_task) = test_app_with_batch_engine(expected_prompts.clone()).await;
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                                "prompt": prompt,
+                                "stream": stream,
+                                "echo": true,
+                                "logprobs": 1,
+                                "add_special_tokens": false
+                            })
+                            .to_string(),
+                        ))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            let chunks = if stream {
+                sse_json_payloads(&text)
+            } else {
+                vec![serde_json::from_str(&text).expect("json response")]
+            };
+            assert!(
+                !chunks.iter().any(|chunk| chunk["error"].is_object()),
+                "{text}"
+            );
+            for (index, tokens) in expected_prompts.iter().enumerate() {
+                let choice = chunks
+                    .iter()
+                    .flat_map(|chunk| chunk["choices"].as_array().expect("choices"))
+                    .find(|choice| {
+                        choice["index"] == index
+                            && choice["logprobs"]["tokens"][0]
+                                == String::from_utf8(vec![tokens[0] as u8]).expect("prompt")
+                    })
+                    .expect("echoed prompt logprobs");
+                assert!(choice["logprobs"]["token_logprobs"][0].is_null());
+                assert!(choice["logprobs"]["top_logprobs"][0].is_null());
+                assert_eq!(choice["logprobs"]["text_offset"][0], 0);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_reject_empty_token_and_invalid_mixed_batches() {
+    let app = test_app().await;
+    for prompt in [json!([[]]), json!(["hello", [1, 2]]), json!([[[1, 2]]])] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": prompt,
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_batch_error_aborts_siblings_before_the_client_reads_done() {
+    use futures::StreamExt as _;
+
+    for stream in [false, true] {
+        let (mut app, engine_task) = test_app_with_batch_engine_script(
+            b"engine-openai-completion-batch-error".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let mut requests = Vec::new();
+                    for _ in 0..2 {
+                        let add = recv_engine_message(dealer).await;
+                        requests.push(
+                            rmp_serde::from_slice::<EngineCoreRequest>(&add[1])
+                                .expect("decode request"),
+                        );
+                    }
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output(
+                                &requests[0].request_id,
+                                Vec::new(),
+                                Some(EngineCoreFinishReason::Error),
+                            )],
+                            finished_requests: Some(BTreeSet::from([requests[0]
+                                .request_id
+                                .clone()])),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+
+                    let abort =
+                        tokio::time::timeout(Duration::from_secs(5), recv_engine_message(dealer))
+                            .await
+                            .expect("unfinished sibling was not aborted");
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let request_ids: Vec<String> =
+                        rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                    assert_eq!(request_ids, vec![requests[1].request_id.clone()]);
+                })
+            },
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": ["hello", "world"],
+                            "stream": stream,
+                            "add_special_tokens": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        if stream {
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body().into_data_stream();
+            loop {
+                let data = body.next().await.expect("error event").expect("body data");
+                let text = std::str::from_utf8(&data).expect("utf8 body");
+                assert!(!text.contains("[DONE]"), "{text}");
+                if sse_json_payloads(text).iter().any(|chunk| chunk["error"].is_object()) {
+                    break;
+                }
+            }
+            engine_task.await.expect("abort before reading more response data");
+            let done = body.next().await.expect("done event").expect("body data");
+            assert_eq!(
+                sse_data_payloads(std::str::from_utf8(&done).unwrap()),
+                ["[DONE]"]
+            );
+            assert!(body.next().await.is_none());
+        } else {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            engine_task.await.expect("mock engine task");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_batch_late_lowering_error_aborts_submitted_prompt() {
+    for stream in [false, true] {
+        let (mut app, engine_task) = test_app_with_batch_engine_script(
+            b"engine-openai-completion-batch-lowering-error".to_vec(),
+            |dealer, _push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode submitted request");
+                    let abort =
+                        tokio::time::timeout(Duration::from_secs(5), recv_engine_message(dealer))
+                            .await
+                            .expect("submitted prompt was not aborted");
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).expect("abort ids");
+                    assert_eq!(ids, [request.request_id]);
+                })
+            },
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "prompt": [vec![1], vec![1; vllm_engine_core_client::mock_engine::DEFAULT_MOCK_MAX_MODEL_LEN as usize]],
+                            "stream": stream,
+                            "max_tokens": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        engine_task.await.expect("cleanup before consuming the error response");
+        if stream {
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+            let text = std::str::from_utf8(&body).expect("utf8");
+            assert!(sse_json_payloads(text)[0]["error"].is_object(), "{text}");
+            assert_eq!(sse_data_payloads(text).last(), Some(&"[DONE]"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_echo_prepends_prompt_text() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
@@ -5976,6 +6467,112 @@ async fn completions_happy_path_returns_sse_stream() {
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
     assert_eq!(usage_chunk["choices"], json!([]));
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_batch_stream_uses_prompt_indices_and_one_total_usage() {
+    let (app, engine_task) = test_app_with_batch_engine(vec![
+        bytes_to_token_ids(b"hello"),
+        bytes_to_token_ids(b"world!"),
+    ])
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": ["hello", "world!"],
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "add_special_tokens": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    let json_payloads = sse_json_payloads(&text);
+    assert_eq!(
+        payloads.iter().filter(|payload| **payload == "[DONE]").count(),
+        1
+    );
+    assert!(json_payloads.iter().any(|payload| payload["choices"][0]["index"] == 0));
+    assert!(json_payloads.iter().any(|payload| payload["choices"][0]["index"] == 1));
+    let usage_chunks: Vec<_> =
+        json_payloads.iter().filter(|payload| payload["choices"] == json!([])).collect();
+    assert_eq!(usage_chunks.len(), 1, "{text}");
+    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 11);
+    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dropping_completions_batch_stream_aborts_every_prompt() {
+    const BATCH_SIZE: usize = 64;
+    let (mut app, engine_task) = test_app_with_batch_engine_script(
+        b"engine-openai-completion-batch-cancel".to_vec(),
+        |dealer, _push| {
+            boxed_test_future(async move {
+                let mut request_ids = BTreeSet::new();
+                for _ in 0..BATCH_SIZE {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    request_ids.insert(request.request_id);
+                }
+                let mut aborted = BTreeSet::new();
+                while aborted.len() < request_ids.len() {
+                    let abort =
+                        tokio::time::timeout(Duration::from_secs(5), recv_engine_message(dealer))
+                            .await
+                            .expect("batch streams were not aborted");
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    aborted.extend(
+                        rmp_serde::from_slice::<Vec<String>>(&abort[1])
+                            .expect("decode abort request IDs"),
+                    );
+                }
+                assert_eq!(aborted, request_ids);
+            })
+        },
+    )
+    .await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": vec!["hello"; BATCH_SIZE],
+                        "stream": true,
+                        "add_special_tokens": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
