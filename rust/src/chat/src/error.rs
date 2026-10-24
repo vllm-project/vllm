@@ -86,11 +86,6 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
-    #[error(
-        "this model's maximum context length is {max_model_len} tokens, \
-         but the prompt contains {prompt_len} input tokens"
-    )]
-    PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
@@ -118,8 +113,7 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::PromptTooLong { .. }
-            | Self::ChatTemplateThrown { .. }
+            Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
@@ -135,6 +129,15 @@ impl Error {
             | Self::MmLimitExceeded { .. } => true,
 
             _ => false,
+        }
+    }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::Text(error) => error.param(),
+            _ => None,
         }
     }
 }
