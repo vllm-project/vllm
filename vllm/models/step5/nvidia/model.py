@@ -84,6 +84,8 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import aux_stream
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
 from .config import (
@@ -1771,6 +1773,25 @@ class Step5MoE(nn.Module):
             can_shard_sequence_parallel=self.use_mega_moe,
             reduce_in_fp32=True,
         )
+        # Small batches run the shared expert on the aux stream, beside the
+        # router and routed experts. It must not issue a collective there,
+        # which fully-sharded LoRA layers do regardless of reduce_results.
+        lora_config = vllm_config.lora_config
+        self.shared_stream = (
+            aux_stream()
+            if (self.tp_size == 1 or not reduce_results)
+            and not self.use_mega_moe
+            and not self.use_sequence_parallel
+            and not self.enable_eplb
+            and not (lora_config is not None and lora_config.fully_sharded_loras)
+            and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+            else None
+        )
+        self.shared_stream_events = (torch.cuda.Event(), torch.cuda.Event())
+        # Above about 64 tokens the overlap stops paying on H200.
+        self.shared_stream_max_tokens = min(
+            envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD, 64
+        )
         # Step5 selects experts with a correction bias but computes routed
         # weights from the unbiased sigmoid scores.
         expert_kwargs = dict(
@@ -1811,15 +1832,27 @@ class Step5MoE(nn.Module):
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        shared_output = self.share_expert(hidden_states)
-
-        router_logits, _ = self.gate(hidden_states)
         expert_kwargs = {"padding": padding} if padding is not None else {}
-        routed_output = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits, **expert_kwargs
-        )
 
+        def routed() -> torch.Tensor:
+            router_logits, _ = self.gate(hidden_states)
+            return self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                **expert_kwargs,
+            )
+
+        stream = (
+            self.shared_stream
+            if hidden_states.shape[0] <= self.shared_stream_max_tokens
+            else None
+        )
+        routed_output, shared_output = maybe_execute_in_parallel(
+            routed,
+            lambda: self.share_expert(hidden_states),
+            *self.shared_stream_events,
+            stream,
+        )
         return shared_output, routed_output
 
 
