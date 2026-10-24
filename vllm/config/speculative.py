@@ -1462,7 +1462,7 @@ class SpeculativeConfig:
                     # max_position_embeddings than the target under-sizes its
                     # rotary cache (#48894, #57941).
                     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-                        self.draft_model_config.hf_config,
+                        self.draft_model_config.hf_text_config,
                         self.target_model_config.max_model_len,
                     )
 
@@ -2110,7 +2110,7 @@ class SpeculativeConfig:
         return (
             self.method != "draft_model"
             and self.draft_model_config is not None
-            and _rope_only_sizes_cache(self.draft_model_config.hf_config)
+            and _rope_only_sizes_cache(self.draft_model_config.hf_text_config)
         )
 
     def use_dflash(self) -> bool:
