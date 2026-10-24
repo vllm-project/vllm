@@ -29,6 +29,8 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    derive_aiter_quant_method,
+    mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -491,6 +493,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 activation=self.activation,
                 expert_mask=self.expert_map,
                 quant_config=quant_config,
+                quant_method=derive_aiter_quant_method(quant_config),
                 output_dtype=x.dtype,
                 moe_sorting_dispatch_policy=(rocm_aiter_ops.get_moe_dispatch_policy()),
                 shared_w1=self.shared_w1,
@@ -498,6 +501,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 shared_w1_scale=self.shared_w1_scale,
                 shared_w2_scale=self.shared_w2_scale,
                 shared_expert_id=self.shared_expert_id,
+                **mxfp4_w4a16_extra_kwargs(quant_config, self.moe_config),
             )
 
         shared_expert = self._shared_expert_ref()
@@ -518,8 +522,10 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             activation=self.activation,
             expert_mask=self.expert_map,
             quant_config=self._routed_quant_config,
+            quant_method=derive_aiter_quant_method(self._routed_quant_config),
             output_dtype=x.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            **mxfp4_w4a16_extra_kwargs(self._routed_quant_config, self.moe_config),
         )
         return routed + shared_out
 

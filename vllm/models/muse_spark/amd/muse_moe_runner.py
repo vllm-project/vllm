@@ -24,6 +24,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
+    derive_aiter_quant_method,
+    mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
@@ -523,12 +525,14 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             activation=activation,
             expert_mask=expert_map,
             quant_config=self.quant_config,
+            quant_method=derive_aiter_quant_method(self.quant_config),
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             apply_router_weight_on_input=False,
+            **mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config),
         )
         self._park_route_output(route_output.view_as(output))
 

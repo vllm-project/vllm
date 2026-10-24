@@ -271,32 +271,11 @@ def aiter_moe_pads(
     )
 
 
-def rocm_aiter_fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    moe_config: FusedMoEConfig,
-    activation: MoEActivation = MoEActivation.SILU,
-    apply_router_weight_on_input: bool = False,
-    expert_mask: torch.Tensor | None = None,
-    quant_config: FusedMoEQuantConfig | None = None,
-    a1q_scale: torch.Tensor | None = None,
-    num_local_tokens: torch.Tensor | None = None,
-    output_dtype: torch.dtype | None = None,
-    moe_sorting_dispatch_policy: int = 0,
-    shared_w1: torch.Tensor | None = None,
-    shared_w2: torch.Tensor | None = None,
-    shared_w1_scale: torch.Tensor | None = None,
-    shared_w2_scale: torch.Tensor | None = None,
-    shared_expert_id: int = -1,
-) -> torch.Tensor:
-    """ROCm AITER fused MoE expert computation."""
-    if quant_config is None:
-        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-
-    # Gate/up interleave hint; only the SWIGLUOAI activations override it.
+def _resolve_aiter_activation(
+    activation: MoEActivation,
+) -> tuple["ActivationMethod | ActivationType", bool | None]:
+    """Map a vLLM activation to AITER's activation_method, plus a gate/up
+    interleave hint (only SWIGLUOAI_UNINTERLEAVE sets it)."""
     activation_interleave = None
     activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
@@ -314,172 +293,275 @@ def rocm_aiter_fused_experts(
         raise ValueError(f"Unsupported activation: {activation}")
     if activation_method is None:
         raise ValueError(f"AITER does not support activation: {activation}")
+    return activation_method, activation_interleave
 
-    # All AITER Fused MoE kernels are expecting the following datatypes
-    topk_weights = topk_weights.to(torch.float32)
-    topk_ids = topk_ids.to(torch.int32)
 
-    # w8a8 per-channel quantization
+def _prepare_aiter_topk(
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """All AITER Fused MoE kernels expect these datatypes."""
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def _assert_topk1_for_router_weight_on_input(topk_weights: torch.Tensor) -> None:
+    assert topk_weights.dim() == 2, (
+        "`topk_weights` should be in shape (num_tokens, topk)"
+    )
+    assert topk_weights.shape[-1] == 1, (
+        "Only support topk=1 when `apply_router_weight_on_input` is True"
+    )
+
+
+def _write_moe_output(output: torch.Tensor, result: torch.Tensor) -> None:
+    # avoid redundant copy when output is a view of the result
     if (
-        quant_config.per_act_token_quant
-        and apply_router_weight_on_input
-        and quant_config.use_fp8_w8a8
+        output.shape == result.shape
+        and output.dtype == result.dtype
+        and output.device == result.device
+        and output.is_contiguous()
+        and result.is_contiguous()
+        and output._base is None
     ):
-        # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
-        # This applies topk_weights on the GEMM output of the first FC layer
-        #  rather than the second FC.
-        assert topk_weights.dim() == 2, (
-            "`topk_weights` should be in shape (num_tokens, topk)"
-        )
-        assert topk_weights.shape[-1] == 1, (
-            "Only support topk=1 when `apply_router_weight_on_input` is True"
-        )
+        output.set_(result)
+    else:
+        output.copy_(result)
+
+
+def derive_aiter_quant_method(quant_config: FusedMoEQuantConfig) -> QuantMethod:
+    """Re-derive the `QuantMethod` an `AiterExperts` leaf would statically set
+    via `_AITER_QUANT_METHOD`. For callers that invoke
+    `rocm_aiter_fused_experts` directly instead of through a leaf."""
+    if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
+        return QuantMethod.BLOCK_1X32
+    if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
+        return QuantMethod.BLOCK_128x128
+    if quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
+        return QuantMethod.PER_TOKEN
+    if quant_config.use_fp8_w8a8:
+        return QuantMethod.PER_TENSOR
+    return QuantMethod.NO
+
+
+def mxfp4_w4a16_extra_kwargs(
+    quant_config: FusedMoEQuantConfig, moe_config: FusedMoEConfig
+) -> dict:
+    """The gate_mode/bias/q_dtype_a overrides `AiterMxfp4Experts` supplies via
+    `_extra_fused_moe_kwargs`. For callers that invoke
+    `rocm_aiter_fused_experts` directly instead of through that leaf."""
+    if not quant_config.use_mxfp4_w4a16:
+        return {}
+
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    if moe_config.use_mxfp4_w4a4_dsv4:
+        from aiter import dtypes
+
+        return {
+            "gate_mode_override": GateMode.SEPARATED.value,
+            "q_dtype_a": dtypes.fp4x2,
+            "bias1": quant_config.w1_bias,
+            "bias2": quant_config.w2_bias,
+        }
+    return {
+        "gate_mode_override": GateMode.INTERLEAVE.value,
+        "bias1": quant_config.w1_bias,
+        "bias2": quant_config.w2_bias,
+    }
+
+
+def _dispatch_aiter_tkw1(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    expert_mask: torch.Tensor | None,
+    activation: MoEActivation,
+) -> torch.Tensor:
+    """AITER's tkw1 kernel applies topk_weights to FC1's GEMM output instead
+    of FC2's, fusing `apply_router_weight_on_input` for FP8 per-channel
+    weights (topk=1 only). See vllm-project/vllm#54966."""
+    _assert_topk1_for_router_weight_on_input(topk_weights)
+    activation_method, _ = _resolve_aiter_activation(activation)
+    topk_weights, topk_ids = _prepare_aiter_topk(topk_weights, topk_ids)
+    return rocm_aiter_ops.asm_moe_tkw1(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        fc1_scale=quant_config.w1_scale,
+        fc2_scale=quant_config.w2_scale,
+        fc1_smooth_scale=None,
+        fc2_smooth_scale=None,
+        a16=False,
+        per_tensor_quant_scale=None,
+        expert_mask=expert_mask,
+        activation_method=activation_method,
+    )
+
+
+def rocm_aiter_fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    moe_config: FusedMoEConfig,
+    quant_method: QuantMethod,
+    activation: MoEActivation = MoEActivation.SILU,
+    apply_router_weight_on_input: bool = False,
+    expert_mask: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
+    a1q_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    moe_sorting_dispatch_policy: int = 0,
+    gate_mode_override: str | None = None,
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
+    q_dtype_a: torch.dtype | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
+) -> torch.Tensor:
+    """ROCm AITER fused MoE expert computation.
+
+    `quant_method` is owned and supplied by the calling `AiterExperts` leaf
+    (`_AITER_QUANT_METHOD`); direct callers should use
+    `derive_aiter_quant_method(quant_config)`. Likewise MXFP4 W4A16's
+    `gate_mode_override`/`bias1`/`bias2`/`q_dtype_a` come from
+    `AiterMxfp4Experts._extra_fused_moe_kwargs`, or `mxfp4_w4a16_extra_kwargs`
+    for direct callers.
+    """
+    if quant_config is None:
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    if apply_router_weight_on_input and quant_method == QuantMethod.PER_TOKEN:
         assert num_local_tokens is None, (
             "AITER tkw1 kernel does not support `num_local_tokens`"
         )
-
-        return rocm_aiter_ops.asm_moe_tkw1(
+        return _dispatch_aiter_tkw1(
             hidden_states,
             w1,
             w2,
             topk_weights,
             topk_ids,
-            fc1_scale=quant_config.w1_scale,
-            fc2_scale=quant_config.w2_scale,
-            fc1_smooth_scale=None,
-            fc2_smooth_scale=None,
-            a16=False,
-            per_tensor_quant_scale=None,
-            expert_mask=expert_mask,
-            activation_method=activation_method,
-        )
-
-    else:
-        quant_method = QuantMethod.NO.value
-        # mxfp4 i.e. w4a4, w4a16 uses BLOCK_1X32
-        # mxfp6 and mxfp8 are unsupported in AITER currently and use emulation instead
-        if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
-            quant_method = QuantMethod.BLOCK_1X32.value
-        # w8a8 block-scaled
-        if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
-            assert not apply_router_weight_on_input, (
-                "apply_router_weight_on_input is not supported for block scaled moe"
-            )
-            assert quant_config.w1_scale is not None
-            assert quant_config.w2_scale is not None
-            quant_method = QuantMethod.BLOCK_128x128.value
-        elif quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
-            quant_method = QuantMethod.PER_TOKEN.value
-        elif quant_config.use_fp8_w8a8:
-            # Currently only per tensor quantization method is enabled.
-            quant_method = QuantMethod.PER_TENSOR.value
-
-        if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, (
-                "`topk_weights` should be in shape (num_tokens, topk)"
-            )
-            _, topk = topk_weights.shape
-            assert topk == 1, (
-                "Only support topk=1 when `apply_router_weight_on_input` is True"
-            )
-
-        # Compute padding on-the-fly for CK MXFP4 kernels
-        hidden_pad = 0
-        intermediate_pad = 0
-        assert moe_config.hidden_dim_unpadded is not None
-        assert moe_config.intermediate_size_per_partition_unpadded is not None
-        hidden_size = hidden_states.shape[1]
-        if hidden_states.dtype == torch.float4_e2m1fn_x2:
-            # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
-            hidden_size *= 2
-        hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
-        intermediate_pad = (
-            (
-                moe_config.intermediate_size_per_partition
-                - moe_config.intermediate_size_per_partition_unpadded
-            )
-            if moe_config.intermediate_pad is None
-            else moe_config.intermediate_pad
-        )
-
-        hidden_pad, intermediate_pad = aiter_moe_pads(
-            hidden_pad,
-            intermediate_pad,
+            quant_config,
+            expert_mask,
             activation,
-            quant_config.use_mxfp4_w4a4,
-            moe_config.tp_size,
         )
 
-        # AITER's stage1 GEMM needs gate_mode to match how weights were
-        # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
-        # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
-        from aiter.ops.flydsl.moe_common import GateMode
+    activation_method, activation_interleave = _resolve_aiter_activation(activation)
+    topk_weights, topk_ids = _prepare_aiter_topk(topk_weights, topk_ids)
 
-        gate_mode = ""
-        q_dtype_a = None
-        if activation == MoEActivation.SITU:
-            gate_mode = (
-                GateMode.INTERLEAVE.value
-                if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
-                else GateMode.SEPARATED.value
-            )
-        elif quant_config.use_mxfp4_w4a16:
-            if moe_config.use_mxfp4_w4a4_dsv4:
-                # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
-                # Must match the SEPARATED weight shuffle from load time.
-                from aiter import dtypes
-
-                gate_mode = GateMode.SEPARATED.value
-                q_dtype_a = dtypes.fp4x2
-            else:
-                gate_mode = GateMode.INTERLEAVE.value
-        elif activation_interleave is not None:
-            gate_mode = (
-                GateMode.INTERLEAVE.value
-                if activation_interleave
-                else GateMode.SEPARATED.value
-            )
-
-        return rocm_aiter_ops.fused_moe(
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            expert_mask=expert_mask,
-            quant_method=quant_method,
-            activation_method=activation_method,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
-            a2_scale=quant_config.a2_scale,
-            doweight_stage1=apply_router_weight_on_input,
-            num_local_tokens=num_local_tokens,
-            output_dtype=output_dtype,
-            hidden_pad=hidden_pad,
-            intermediate_pad=intermediate_pad,
-            gate_mode=gate_mode,
-            bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
-            bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
-            moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-            swiglu_limit=(
-                0.0
-                if moe_config.swiglu_limit is None
-                else float(moe_config.swiglu_limit)
-            ),
-            beta=moe_config.activation_situ_beta,
-            linear_beta=moe_config.activation_situ_linear_beta,
-            shared_w1=shared_w1,
-            shared_w2=shared_w2,
-            shared_w1_scale=shared_w1_scale,
-            shared_w2_scale=shared_w2_scale,
-            shared_expert_id=shared_expert_id,
-            q_dtype_a=q_dtype_a,
+    if apply_router_weight_on_input:
+        _assert_topk1_for_router_weight_on_input(topk_weights)
+    if quant_method == QuantMethod.BLOCK_128x128:
+        assert not apply_router_weight_on_input, (
+            "apply_router_weight_on_input is not supported for block scaled moe"
         )
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
+
+    # Compute padding on-the-fly for CK MXFP4 kernels
+    hidden_pad = 0
+    intermediate_pad = 0
+    assert moe_config.hidden_dim_unpadded is not None
+    assert moe_config.intermediate_size_per_partition_unpadded is not None
+    hidden_size = hidden_states.shape[1]
+    if hidden_states.dtype == torch.float4_e2m1fn_x2:
+        # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
+        hidden_size *= 2
+    hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
+    intermediate_pad = (
+        (
+            moe_config.intermediate_size_per_partition
+            - moe_config.intermediate_size_per_partition_unpadded
+        )
+        if moe_config.intermediate_pad is None
+        else moe_config.intermediate_pad
+    )
+
+    hidden_pad, intermediate_pad = aiter_moe_pads(
+        hidden_pad,
+        intermediate_pad,
+        activation,
+        quant_config.use_mxfp4_w4a4,
+        moe_config.tp_size,
+    )
+
+    # AITER's stage1 GEMM needs gate_mode to match how weights were shuffled
+    # at load time (oracle/mxfp4.py). SITU takes priority (it has its own
+    # gate_up layout); `gate_mode_override` comes from a leaf class (MXFP4);
+    # otherwise the activation's own interleave hint applies.
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    gate_mode = ""
+    if activation == MoEActivation.SITU:
+        gate_mode = (
+            GateMode.INTERLEAVE.value
+            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            else GateMode.SEPARATED.value
+        )
+    elif gate_mode_override is not None:
+        gate_mode = gate_mode_override
+    elif activation_interleave is not None:
+        gate_mode = (
+            GateMode.INTERLEAVE.value
+            if activation_interleave
+            else GateMode.SEPARATED.value
+        )
+
+    return rocm_aiter_ops.fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        expert_mask=expert_mask,
+        quant_method=quant_method.value,
+        activation_method=activation_method,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
+        a2_scale=quant_config.a2_scale,
+        doweight_stage1=apply_router_weight_on_input,
+        num_local_tokens=num_local_tokens,
+        output_dtype=output_dtype,
+        hidden_pad=hidden_pad,
+        intermediate_pad=intermediate_pad,
+        gate_mode=gate_mode,
+        bias1=bias1,
+        bias2=bias2,
+        moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+        swiglu_limit=(
+            0.0 if moe_config.swiglu_limit is None else float(moe_config.swiglu_limit)
+        ),
+        beta=moe_config.activation_situ_beta,
+        linear_beta=moe_config.activation_situ_linear_beta,
+        shared_w1=shared_w1,
+        shared_w2=shared_w2,
+        shared_w1_scale=shared_w1_scale,
+        shared_w2_scale=shared_w2_scale,
+        shared_expert_id=shared_expert_id,
+        q_dtype_a=q_dtype_a,
+    )
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
     consumes_expert_mask = True
+
+    # Set by each leaf class to the AITER QuantMethod it dispatches with.
+    _AITER_QUANT_METHOD: QuantMethod
+
+    def _extra_fused_moe_kwargs(self) -> dict:
+        """Extra `rocm_aiter_fused_experts` kwargs owned by this leaf class
+        (gate_mode/bias overrides etc.). Only `AiterMxfp4Experts` needs any."""
+        return {}
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -597,27 +679,20 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
+            quant_method=self._AITER_QUANT_METHOD,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            **self._extra_fused_moe_kwargs(),
         )
-        # avoid redundant copy when output is a view of the result
-        if (
-            output.shape == result.shape
-            and output.dtype == result.dtype
-            and output.device == result.device
-            and output.is_contiguous()
-            and result.is_contiguous()
-            and output._base is None
-        ):
-            output.set_(result)
-        else:
-            output.copy_(result)
+        _write_moe_output(output, result)
 
 
 class AiterUnquantizedExperts(AiterExperts):
     """Unquantized (bf16/fp16) weights and activations."""
+
+    _AITER_QUANT_METHOD = QuantMethod.NO
 
     @staticmethod
     def _supports_quant_scheme(
@@ -632,6 +707,8 @@ class AiterFp8BlockExperts(AiterExperts):
     """128x128 block-quantized weight scale, 128-grouped dynamic
     activation scale."""
 
+    _AITER_QUANT_METHOD = QuantMethod.BLOCK_128x128
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -644,6 +721,8 @@ class AiterFp8BlockExperts(AiterExperts):
 class AiterFp8TensorExperts(AiterExperts):
     """Per-tensor static weight scale, either per-tensor static or
     per-tensor dynamic activation scale."""
+
+    _AITER_QUANT_METHOD = QuantMethod.PER_TENSOR
 
     @staticmethod
     def _supports_quant_scheme(
@@ -661,6 +740,8 @@ class AiterFp8ChannelExperts(AiterExperts):
     """Per-output-channel static weight scale, per-token dynamic
     activation scale."""
 
+    _AITER_QUANT_METHOD = QuantMethod.PER_TOKEN
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -669,11 +750,65 @@ class AiterFp8ChannelExperts(AiterExperts):
         SUPPORTED_W_A = [(kFp8StaticChannelSym, kFp8DynamicTokenSym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        if not apply_router_weight_on_input:
+            return super().apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=a1q_scale,
+                a2_scale=a2_scale,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
+        assert expert_tokens_meta is None, (
+            "AITER tkw1 kernel does not support `num_local_tokens`"
+        )
+        result = _dispatch_aiter_tkw1(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            self.quant_config,
+            expert_map,
+            activation,
+        )
+        _write_moe_output(output, result)
+
 
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
     MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
     Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
+
+    _AITER_QUANT_METHOD = QuantMethod.BLOCK_1X32
 
     @staticmethod
     def _supports_quant_scheme(
@@ -691,3 +826,6 @@ class AiterMxfp4Experts(AiterExperts):
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
         return on_gfx950() and not on_gfx1250()
+
+    def _extra_fused_moe_kwargs(self) -> dict:
+        return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
