@@ -7,6 +7,9 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
+from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+    DeepGemmMxfp8BmmLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -29,8 +32,8 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
     return max_tokens
 
 
-def _can_fuse_wo_a(layer: nn.Module) -> bool:
-    """Whether the attention layer matches the fused WO-A kernel's layout."""
+def _supports_fused_wo_a_layout(layer: nn.Module) -> bool:
+    """Whether the attention shapes and WO-B support the fused WO-A kernel."""
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
         current_platform.is_device_capability_family(100)
@@ -47,11 +50,20 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
     )
 
 
+def _can_fuse_wo_a(layer: nn.Module) -> bool:
+    """Whether the loaded WO-A kernel and attention layout support fusion."""
+    method = getattr(layer.wo_a, "scheme", layer.wo_a.quant_method)
+    return isinstance(
+        getattr(method, "kernel", None), DeepGemmMxfp8BmmLinearKernel
+    ) and _supports_fused_wo_a_layout(layer)
+
+
 def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
     """Warm the fused WO-A token counts ``dsv41_o_proj`` can dispatch."""
     # Draft models load outside the warmup registry; their layers share the
     # target's attention shapes, so the target's registration covers them too.
-    if _can_fuse_wo_a(layer):
+    # The BMM kernel is selected after loading; registration happens earlier.
+    if _supports_fused_wo_a_layout(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
         _FUSED_WO_A_KERNEL.register_warmup(

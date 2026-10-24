@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.kernels.linear.mxfp8.humming import HummingMxfp8LinearKernel
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -58,7 +59,9 @@ def deep_gemm_fp8_o_proj(
     kernel, one ``wo_a`` group per slot with the live groups first, so only
     the padding groups are sliced off.
     """
-    use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
+    method = getattr(wo_a, "scheme", wo_a.quant_method)
+    use_humming = isinstance(getattr(method, "kernel", None), HummingMxfp8LinearKernel)
+    use_fp8 = not use_humming and wo_a.weight.dtype == torch.float8_e4m3fn
     if isinstance(o, QuantizedActivation):
         assert use_fp8
         o_proj_input, o_scale = o.data[:, :n_groups], o.scale[:, :n_groups]
@@ -75,6 +78,8 @@ def deep_gemm_fp8_o_proj(
             tma_aligned_scales=tma_aligned_scales,
             quantize=use_fp8,
         )
+    if use_humming:
+        return wo_b(wo_a(o_proj_input).flatten(1))
     z = torch.empty(
         (o_proj_input.shape[0], n_groups, o_lora_rank),
         device=o_proj_input.device,
