@@ -144,6 +144,86 @@ def test_fused_engram_post_wkv_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "num_tokens,num_kv_tokens,carried",
+    [(0, 0, False), (1, 1, True), (7, 5, False), (7, 7, True)],
+)
+def test_engram_mhc_preserves_delayed_input_on_replay(
+    num_tokens, num_kv_tokens, carried
+):
+    """Preserve gate masks, both BF16 boundaries and new coefficients on replay."""
+    pytest.importorskip("tilelang")
+    from vllm.model_executor.kernels.mhc.tilelang import mhc_pre_delayed_tilelang
+
+    torch.manual_seed(3)
+    hc, dim = 4, 5120
+    hidden = torch.randn(num_tokens, hc, dim, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(num_kv_tokens, (hc + 1) * dim, device="cuda", dtype=torch.bfloat16)
+    mask = torch.arange(num_kv_tokens, device="cuda") % 2 == 1
+    premix = torch.rand(num_tokens, hc, device="cuda") if carried else None
+    weight = torch.ones(dim, device="cuda", dtype=torch.bfloat16)
+    if num_tokens:
+        hidden[0].fill_(1)
+        if premix is not None:
+            premix[0].zero_()
+            premix[0, 0] = 1.003  # The collapse must round before RMSNorm.
+    if num_tokens > 2:
+        kv[2, hc * dim] = float("nan")  # Zero gate must still preserve 0 * NaN.
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.dim, module.hc_mult = dim, hc
+    module.eps, module.clamp_value = 1e-20, 1e-6
+    module.use_sequence_parallel = False
+    module._batch = SimpleNamespace(wkv_input=lambda *_: kv)
+    module.wkv = torch.nn.Identity()
+    module.q_weight = torch.nn.Parameter(
+        torch.ones(hc, dim, device="cuda", dtype=torch.bfloat16)
+    )
+    module.k_weight = torch.nn.Parameter(
+        torch.randn(hc, dim, device="cuda", dtype=torch.bfloat16)
+    )
+    ids = torch.zeros(num_kv_tokens, 1, device="cuda", dtype=torch.int32)
+    fn = torch.randn(hc * (hc + 2), hc * dim, device="cuda") * 0.02
+    scale, base = (
+        torch.ones(3, device="cuda"),
+        torch.randn(hc * (hc + 2), device="cuda"),
+    )
+    args = (fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20)
+    kwargs = dict(pre_mix=premix, norm_weight=weight, norm_eps=1e-6)
+
+    def run_fused():
+        residual, layer_input = module.forward_with_mhc(
+            hidden, ids, mask, premix, weight, 1e-6
+        )
+        post, comb, unused, next_pre = mhc_pre_delayed_tilelang(
+            residual, *args, **kwargs, stats_only=True
+        )
+        assert unused.shape == (0,)
+        assert unused.dtype == torch.bfloat16 and unused.device == residual.device
+        return residual, post, comb, layer_input, next_pre
+
+    actual = run_fused()
+    graph = None
+    if num_tokens:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run_fused()
+    saved_hidden, saved_mask = hidden.clone(), mask.clone()
+    for changed in (False, True, False):
+        hidden.copy_(saved_hidden * 2 if changed else saved_hidden)
+        mask.copy_(~saved_mask if changed else saved_mask)
+        residual = module(hidden, ids, mask)
+        expected = (residual, *mhc_pre_delayed_tilelang(residual, *args, **kwargs))
+        if graph is not None:
+            graph.replay()
+        for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
+            # Reuse the delayed-mHC normalization tolerance; all other values
+            # must match the original gate and coefficient paths exactly.
+            atol, rtol = (1.6e-2, 1e-2) if index == 3 else (0, 0)
+            torch.testing.assert_close(got, want, atol=atol, rtol=rtol, equal_nan=True)
+
+
 def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state = NgramHashState.__new__(NgramHashState)
     torch.nn.Module.__init__(state)
