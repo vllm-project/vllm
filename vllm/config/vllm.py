@@ -2201,6 +2201,20 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.rejection_sample_method == "approximate"
+        ):
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "Approximate speculative decoding requires Model Runner V2; "
+                    "set VLLM_USE_V2_MODEL_RUNNER=1."
+                )
+            if self.parallel_config.enable_batch_sharded_sampling:
+                raise ValueError(
+                    "ASD does not support batch-sharded sampling: a resumed "
+                    "request may change its owning rank and lose its regret ledger."
+                )
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime
