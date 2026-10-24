@@ -1272,3 +1272,65 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
     assert output.dtype == torch.bfloat16
     assert _calc_diff(output, expected) < 1e-3
     assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
+    ),
+    reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
+)
+def test_deep_gemm_mega_moe_output_does_not_depend_on_buffer_size(dist_init):
+    """A sequence-parallel caller sizes the symmetric buffer for its shard only;
+    outputs must match a buffer sized for the whole batch bit for bit."""
+    torch.manual_seed(0)
+    with torch.device("cuda"):
+        full, shard = (
+            _make_experts(
+                num_experts=NUM_EXPERTS,
+                num_local_experts=NUM_EXPERTS,
+                experts_start_idx=0,
+                top_k=TOP_K,
+                hidden_size=HIDDEN,
+                intermediate_size=INTER,
+                activation=ACTIVATIONS["situ"],
+                max_num_tokens=max_num_tokens,
+                prefix=f"model.layers.0.buffer_{max_num_tokens}.experts",
+            )
+            for max_num_tokens in (8 * NUM_TOKENS, NUM_TOKENS)
+        )
+    for expert_id in range(NUM_EXPERTS):
+        for shard_id, param, rows, cols in (
+            ("w1", "w13", INTER, HIDDEN),
+            ("w3", "w13", INTER, HIDDEN),
+            ("w2", "w2", HIDDEN, INTER),
+        ):
+            w = (torch.randn(rows, cols, device="cuda") / cols**0.5).bfloat16()
+            weight, scale, _, _ = _quantize(w, MEGA_MOE_MXFP4.routed)
+            for suffix, tensor in (("weight", weight), ("weight_scale", scale)):
+                name = f"{param}_{suffix}"
+                assert full.weight_loader(
+                    getattr(full, name),
+                    tensor,
+                    f"experts.{name}",
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+    shard.load_state_dict(full.state_dict())
+    assert shard.get_symm_buffer() is not full.get_symm_buffer()
+
+    for num_tokens in (1, 7, NUM_TOKENS - 1, NUM_TOKENS):
+        hidden_states = torch.randn(num_tokens, HIDDEN, device="cuda").bfloat16()
+        scores = torch.randn(num_tokens, NUM_EXPERTS, device="cuda")
+        topk_weights, topk_ids = torch.topk(scores.softmax(-1), TOP_K, dim=-1)
+        expected = full(hidden_states, topk_weights, topk_ids).clone()
+        assert torch.isfinite(expected.float()).all()
+        assert torch.equal(shard(hidden_states, topk_weights, topk_ids), expected)
+
+    with pytest.raises(ValueError, match=f"sized for {NUM_TOKENS}"):
+        shard(
+            torch.zeros(NUM_TOKENS + 1, HIDDEN, device="cuda", dtype=torch.bfloat16),
+            topk_weights[:1].expand(NUM_TOKENS + 1, -1),
+            topk_ids[:1].expand(NUM_TOKENS + 1, -1),
+        )
