@@ -344,6 +344,9 @@ class CacheConfig:
     for hybrid models where requests occupy multiple KV cache groups."""
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
+    kv_cache_capacity_bytes: dict[int, int] = field(default_factory=dict, init=False)
+    """Device KV backing bytes keyed by global DP rank, excluding host pools."""
+
     # The two differ when hashes are finer than the scheduler block but partial
     # hash hits are off (e.g. a sliding-window group cannot look up sub-block
     # hits), so hits only land on the scheduler block.
@@ -422,6 +425,7 @@ class CacheConfig:
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
+            "kv_cache_capacity_bytes",
             "hash_block_size",
             "cache_hit_alignment_tokens",
             # Feature toggles not impacting compiled graph shape
