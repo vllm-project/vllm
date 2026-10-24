@@ -35,7 +35,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PLAN_SCHEMA_VERSION = 1
+# AuxOutput capture buffers now enter the profiled window outside the weights pool.
+PLAN_SCHEMA_VERSION = 2
 
 
 def compute_plan_fingerprint(

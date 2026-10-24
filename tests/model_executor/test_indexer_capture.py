@@ -7,6 +7,7 @@ import torch
 from transformers import LlamaConfig
 
 from vllm.config import DeviceConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.model_executor.layers.indexer_capture import (
     IndexerCapturer,
     IndexerCaptureSink,
@@ -156,3 +157,23 @@ def test_capturer_rejects_invalid_source_layout(capture_config, layers, topks):
 def test_capturer_rejects_models_without_explicit_capture_support(capture_config):
     with pytest.raises(ValueError, match="No backbone indexer capture sources"):
         IndexerCapturer(torch.nn.Linear(2, 2), capture_config)
+
+
+def test_connector_owns_indexer_capture_before_storage(capture_config, dist_init):
+    """Early capture works without SHM and connector close removes its sink."""
+    capture_config.aux_output_config.enable_return_indexer_topk = True
+    source = CaptureSource(2)
+    connector = AuxOutputWorkerConnector(capture_config)
+    assert source.indexer_capture is None
+    try:
+        connector.initialize_capturers(source)
+        with pytest.raises(RuntimeError, match="already initialized"):
+            connector.initialize_capturers(source)
+        rows = torch.tensor([[7, 1], [3, -1]], dtype=torch.int32)
+        source(rows)
+        assert source.indexer_capture is not None
+        assert torch.equal(source.indexer_capture.rows[:2], rows)
+    finally:
+        connector.close()
+    assert source.indexer_capture is None
+    connector.close()

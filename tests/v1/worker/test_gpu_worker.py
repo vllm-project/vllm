@@ -124,6 +124,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     )
     loading_threads = []
     worker = SimpleNamespace(
+        use_v2_model_runner=False,
         vllm_config=SimpleNamespace(weight_transfer_config=None),
         model_runner=SimpleNamespace(
             load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
