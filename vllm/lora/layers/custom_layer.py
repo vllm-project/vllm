@@ -6,10 +6,18 @@
 Add LoRA support for custom layers that require specialized handling here.
 """
 
+from vllm.distributed.utils import divide
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
+from vllm.model_executor.layers.linear import (
+    MinimaxM3QKVParallelLinearWithIndexer,
+    QKVParallelLinear,
+)
+
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
 )
 
 
@@ -78,5 +86,51 @@ class Step5SparseIndexerWWithLoRA(ColumnParallelLinearWithLoRA):
     ):
         return (
             type(source_layer).__name__ == "Step5SparseIndexerIndexTPLinear"
+            and not lora_config.fully_sharded_loras
+        )
+
+
+class MiniMaxM3QKVIndexerWithLoRA(MergedQKVParallelLinearWithLoRA):
+    def __init__(self, base_layer):
+        super().__init__(base_layer)
+        self.output_slices = tuple(
+            divide(size, self.tp_size) for size in base_layer.output_sizes
+        )
+        self.output_ids = (*self.output_ids, self.kv_shard_id, 0)
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer)
+            is maybe_get_oot_by_class(MinimaxM3QKVParallelLinearWithIndexer)
+            and len(packed_modules_list) == 5
+            and not lora_config.fully_sharded_loras
+        )
+
+
+class MiniMaxM3DenseQKVWithLoRA(MergedQKVParallelLinearWithLoRA):
+    def set_lora(self, index, lora_a, lora_b):
+        assert all(b is None for b in lora_b[3:])
+        super().set_lora(index, lora_a[:3], lora_b[:3])
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
+            and len(packed_modules_list) == 5
             and not lora_config.fully_sharded_loras
         )
