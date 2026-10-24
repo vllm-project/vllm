@@ -331,6 +331,9 @@ def compute_kv_seq_mask(
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    USE_SPAN_MASK: tl.constexpr = False,
+    MAX_SPAN_RANGES: tl.constexpr = 0,
+    span_ranges_ptr=None,
 ):
     """Build the KV mask for one tile.
 
@@ -347,6 +350,11 @@ def compute_kv_seq_mask(
     causal flag via ``per_seq_causal_ptr``; non-causal sequences use a
     simple ``key < seq_len`` bound instead.  ``USE_CAUSAL=False``
     disables causal masking entirely.
+
+    ``USE_SPAN_MASK`` AND-restricts the final mask with per-sequence
+    ``(start, end, owner)`` ownership ranges (DiffusionGemma canvas packing):
+    a query inside an owned range only sees keys that are unowned or share
+    its owner. Since it only removes keys, the tile bounds stay valid.
     """
     if USE_PER_SEQ_CAUSAL:
         is_causal = tl.load(per_seq_causal_ptr + seq_idx)
@@ -416,6 +424,26 @@ def compute_kv_seq_mask(
             if MM_PREFIX_CLAMP_SW and SLIDING_WINDOW > 0:
                 mm_mask = mm_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
             seq_mask |= mm_mask
+
+    if USE_SPAN_MASK:
+        # Owner -1 means unowned. A zero-filled table leaves the mask unchanged.
+        q_owner = query_abs_pos * 0 - 1
+        k_owner = seq_offset[None, :] * 0 - 1
+        for i in range(MAX_SPAN_RANGES):
+            base = seq_idx * MAX_SPAN_RANGES * 3 + i * 3
+            r_start = tl.load(span_ranges_ptr + base)
+            r_end = tl.load(span_ranges_ptr + base + 1)
+            r_owner = tl.load(span_ranges_ptr + base + 2)
+            r_valid = r_start < r_end
+            q_in = (query_abs_pos >= r_start) & (query_abs_pos < r_end) & r_valid
+            k_in = (
+                (seq_offset[None, :] >= r_start)
+                & (seq_offset[None, :] < r_end)
+                & r_valid
+            )
+            q_owner = tl.where(q_in, r_owner, q_owner)
+            k_owner = tl.where(k_in, r_owner, k_owner)
+        seq_mask = seq_mask & ((q_owner < 0) | (k_owner < 0) | (k_owner == q_owner))
     return seq_mask
 
 

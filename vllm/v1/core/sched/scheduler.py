@@ -2740,6 +2740,11 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
+            if request.status == RequestStatus.PREEMPTED:
+                # Drafted against KV that preemption freed. Keeping them would
+                # schedule them alongside the resume prefill.
+                continue
+
             if request.is_prefill_chunk:
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:

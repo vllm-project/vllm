@@ -35,6 +35,7 @@ def ref_paged_attn(
     scale: float,
     per_seq_causal: list[bool],
     sliding_window: int | None = None,
+    span_ranges: list[list[tuple[int, int, int]]] | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables_np = block_tables.cpu().numpy()
@@ -77,6 +78,20 @@ def ref_paged_attn(
                 .logical_not()
             )
             mask |= sw_mask
+
+        if span_ranges is not None:
+            q_owner = torch.full((query_len,), -1, device=attn.device)
+            k_owner = torch.full((kv_len,), -1, device=attn.device)
+            q_pos = torch.arange(kv_len - query_len, kv_len, device=attn.device)
+            k_pos = torch.arange(kv_len, device=attn.device)
+            for start, end, owner in span_ranges[i]:
+                q_owner[(q_pos >= start) & (q_pos < end)] = owner
+                k_owner[(k_pos >= start) & (k_pos < end)] = owner
+            mask |= (
+                (q_owner[:, None] >= 0)
+                & (k_owner[None, :] >= 0)
+                & (q_owner[:, None] != k_owner[None, :])
+            )
 
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
@@ -195,6 +210,101 @@ def test_triton_mixed_causal(
         per_seq_causal,
     )
 
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+# ---- Triton span mask (DiffusionGemma canvas packing) ----
+
+# Two tenants share one sequence: prompts [0, 6) and [6, 10), canvas spans
+# [10, 18) and [18, 26).
+_PACKED_SPANS = [(0, 6, 0), (6, 10, 1), (10, 18, 0), (18, 26, 1)]
+
+
+@pytest.mark.skipif(
+    _major not in (9, 10),
+    reason="Triton mixed causal attention requires Hopper (SM90) or B200 (SM100).",
+)
+@pytest.mark.parametrize("inert", [False, True])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@torch.inference_mode()
+def test_triton_span_mask(inert: bool, num_heads: tuple[int, int]):
+    if not current_platform.is_cuda():
+        pytest.skip("Triton attention requires CUDA")
+
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    set_random_seed(0)
+    device = "cuda"
+    head_size, block_size, dtype = 128, 16, torch.bfloat16
+    num_query_heads, num_kv_heads = num_heads
+
+    # A packed canvas pass, an unpacked canvas pass, and the packed prompt's
+    # causal prefill, in one batch.
+    query_lens = [16, 16, 10]
+    kv_lens = [26, 40, 10]
+    per_seq_causal = [False, False, True]
+    spans: list[list[tuple[int, int, int]]] = [_PACKED_SPANS, [], _PACKED_SPANS]
+    if inert:
+        spans = [[], [], []]
+    num_seqs = len(query_lens)
+
+    max_num_blocks = (max(kv_lens) + block_size - 1) // block_size
+    num_blocks = max_num_blocks * num_seqs + 1
+    scale = head_size**-0.5
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=dtype, device=device
+    )
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.arange(
+        num_seqs * max_num_blocks, dtype=torch.int32, device=device
+    ).view(num_seqs, max_num_blocks)
+    cu_seqlens_q = torch.tensor(
+        [0, *torch.tensor(query_lens).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device=device,
+    )
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+
+    span_table = torch.zeros(num_seqs, 4, 3, dtype=torch.int32, device=device)
+    for i, rows in enumerate(spans):
+        if rows:
+            span_table[i, : len(rows)] = torch.tensor(rows, dtype=torch.int32)
+
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max(query_lens),
+        seqused_k=seqused_k,
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=scale,
+        causal=torch.tensor(per_seq_causal, dtype=torch.int32, device=device),
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0.0,
+        q_descale=None,
+        k_descale=1.0,
+        v_descale=1.0,
+        span_ranges=span_table,
+    )
+
+    ref_output = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens,
+        block_tables,
+        scale,
+        per_seq_causal,
+        span_ranges=spans,
+    )
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
 
 
