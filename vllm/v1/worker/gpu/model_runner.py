@@ -329,6 +329,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        # KV fake quant reads 1-D token positions (sink handling) from this buffer.
+        from vllm.model_executor.layers.attention.kv_fake_quant import (
+            set_kv_fake_quant_positions,
+        )
+
+        set_kv_fake_quant_positions(self.input_buffers.positions)
         self.fast_prefill: FastPrefillHelper | None = None
         if self.use_pp:
             self.pp_handler = PPHandler(

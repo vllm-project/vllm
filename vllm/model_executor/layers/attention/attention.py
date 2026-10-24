@@ -15,6 +15,19 @@ from vllm.config import (
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.kv_fake_quant import (
+    accumulate_sigma,
+    get_kv_fake_quant_format,
+    get_kv_fake_quant_k_calib,
+    get_kv_fake_quant_k_format,
+    get_kv_fake_quant_k_sigma,
+    get_kv_fake_quant_k_sink,
+    get_kv_fake_quant_v_mode,
+    kv_cache_fake_quant,
+    kv_cache_fake_quant_k_aware,
+    kv_cache_fake_quant_k_calib,
+    kv_cache_fake_quant_v_mode,
+)
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
@@ -331,11 +344,21 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.quant_config = quant_config
         self.layer_name = prefix
+        self.kv_fake_quant_format = get_kv_fake_quant_format()
+        self.kv_fake_quant_k_format = get_kv_fake_quant_k_format()
+        if self.kv_fake_quant_format is not None and kv_cache_dtype != "auto":
+            raise ValueError(
+                "KV cache fake quant expects a BF16/FP16 cache "
+                f"(--kv-cache-dtype auto), got {kv_cache_dtype!r} for layer {prefix}"
+            )
 
         self.num_heads = num_heads
         self.head_size = head_size
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
+        self._init_kv_fake_quant_k_calib(prefix)
+        if envs.VLLM_KV_CACHE_SIGMA_CALIB_DIR:
+            self._calib_layer_idx = self._layer_index(prefix)
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
@@ -487,6 +510,65 @@ class Attention(nn.Module, AttentionLayerBase):
                 else GroupShape.PER_TENSOR,
             )
 
+    @staticmethod
+    def _layer_index(prefix: str) -> int:
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(prefix)
+
+    def _kv_heads_of_rank(self, t: torch.Tensor) -> torch.Tensor:
+        """Slice a per-KV-head tensor [Hkv_total, ...] to this TP rank's heads."""
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+
+        total, tp = t.shape[0], get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        start = rank * self.num_kv_heads if total >= tp else rank * total // tp
+        device = torch.device(current_platform.device_type, torch.cuda.current_device())
+        return t[start : start + self.num_kv_heads].float().to(device)
+
+    def _init_kv_fake_quant_k_calib(self, prefix: str) -> None:
+        """Per-layer K centering/balancing tensors for this TP rank's KV heads."""
+        self.kv_fake_quant_k_sink = get_kv_fake_quant_k_sink()
+        self.kv_fake_quant_k_mean = self.kv_fake_quant_k_lam = None
+        self.kv_fake_quant_v_mode = get_kv_fake_quant_v_mode()
+        self.kv_fake_quant_k_sigma = None
+        sigma = get_kv_fake_quant_k_sigma()
+        if sigma is not None:
+            if get_kv_fake_quant_k_calib() is not None or self.kv_fake_quant_k_sink:
+                raise ValueError("K_SIGMA cannot be combined with K_CALIB / K_SINK")
+            self.kv_fake_quant_k_sigma = self._kv_heads_of_rank(
+                sigma["layers"][self._layer_index(prefix)]
+            )
+            return
+        calib = get_kv_fake_quant_k_calib()
+        if self.kv_fake_quant_format is None or (
+            calib is None and not self.kv_fake_quant_k_sink
+        ):
+            return
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        device = torch.device(current_platform.device_type, torch.cuda.current_device())
+        if calib is None:  # sink only: identity centering/balancing
+            mean = torch.zeros(self.num_kv_heads, self.head_size)
+            lam = torch.ones(self.num_kv_heads, self.head_size)
+        else:
+            entry = calib["layers"][extract_layer_index(prefix)]
+            mean, lam = entry["mean"], entry["lam"]
+            total, tp = mean.shape[0], get_tensor_model_parallel_world_size()
+            rank = get_tensor_model_parallel_rank()
+            start = rank * self.num_kv_heads if total >= tp else rank * total // tp
+            mean = mean[start : start + self.num_kv_heads]
+            lam = lam[start : start + self.num_kv_heads]
+        self.kv_fake_quant_k_mean = mean.float().to(device)
+        self.kv_fake_quant_k_lam = lam.float().to(device)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -538,6 +620,29 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
+        if envs.VLLM_KV_CACHE_SIGMA_CALIB_DIR:
+            accumulate_sigma(self, query)
+        if (
+            self.kv_fake_quant_format is not None
+            and key is not None
+            and value is not None
+        ):
+            if self.kv_fake_quant_k_sigma is not None:
+                key = kv_cache_fake_quant_k_aware(key, self.kv_fake_quant_k_sigma)
+            elif self.kv_fake_quant_k_sink or self.kv_fake_quant_k_mean is not None:
+                key = kv_cache_fake_quant_k_calib(
+                    key,
+                    self.kv_fake_quant_k_mean,
+                    self.kv_fake_quant_k_lam,
+                    self.kv_fake_quant_k_format,
+                    self.kv_fake_quant_k_sink,
+                )
+            else:
+                key = kv_cache_fake_quant(key, self.kv_fake_quant_k_format)
+            if self.kv_fake_quant_v_mode:
+                value = kv_cache_fake_quant_v_mode(value, self.kv_fake_quant_v_mode)
+            else:
+                value = kv_cache_fake_quant(value, self.kv_fake_quant_format)
         kv_cache_dummy_dep = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.

@@ -134,6 +134,14 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_KV_CACHE_FAKE_QUANT: str = ""
+    VLLM_KV_CACHE_FAKE_QUANT_K_HADAMARD: int = 0
+    VLLM_KV_CACHE_FAKE_QUANT_K_CALIB: str = ""
+    VLLM_KV_CACHE_FAKE_QUANT_K_SINK: int = 0
+    VLLM_KV_CACHE_FAKE_QUANT_K_SIGMA: str = ""
+    VLLM_KV_CACHE_FAKE_QUANT_V_MODE: str = ""
+    VLLM_KV_CACHE_SIGMA_CALIB_DIR: str = ""
+    VLLM_ULTRAQUANT_QAE_SIGMA: str = ""
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
@@ -1257,6 +1265,46 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
+    # KV-cache fake quantization for accuracy studies ("mxfp4" / "nvfp4" QDQ of
+    # K/V into a BF16 cache). See
+    # vllm/model_executor/layers/attention/kv_fake_quant.py. Empty = off.
+    "VLLM_KV_CACHE_FAKE_QUANT": lambda: os.getenv("VLLM_KV_CACHE_FAKE_QUANT", ""),
+    # Block size of a Hadamard rotation applied to K (along head_dim) before the
+    # fake QDQ and undone after it; 0 disables. Requires VLLM_KV_CACHE_FAKE_QUANT.
+    "VLLM_KV_CACHE_FAKE_QUANT_K_HADAMARD": lambda: int(
+        os.getenv("VLLM_KV_CACHE_FAKE_QUANT_K_HADAMARD", "0")
+    ),
+    # Path to a torch file {"layers": {layer_idx: {"mean": [Hkv, D], "lam": [Hkv, D]}}}:
+    # K is fake-quantized as lam * QDQ((K - mean) / lam) + mean (centering and
+    # per-channel Q/K balancing, both foldable into a real MXFP4 KV cache).
+    "VLLM_KV_CACHE_FAKE_QUANT_K_CALIB": lambda: os.getenv(
+        "VLLM_KV_CACHE_FAKE_QUANT_K_CALIB", ""
+    ),
+    # Keep K of the first N positions of every sequence (attention sinks) unquantized.
+    "VLLM_KV_CACHE_FAKE_QUANT_K_SINK": lambda: int(
+        os.getenv("VLLM_KV_CACHE_FAKE_QUANT_K_SINK", "0")
+    ),
+    # Path to a torch file {"block": 32, "layers": {layer_idx: Sigma [Hkv, G, 32, 32]}}
+    # of calibrated query second moments (Hadamard-32 basis): K is MXFP4-encoded by
+    # attention-aware exponent selection and rounding. Requires FAKE_QUANT=mxfp4.
+    "VLLM_KV_CACHE_FAKE_QUANT_K_SIGMA": lambda: os.getenv(
+        "VLLM_KV_CACHE_FAKE_QUANT_K_SIGMA", ""
+    ),
+    # V encoding: "" = format default, "had32_mse3" = Hadamard-32 + best-of-3
+    # E8M0 exponents by MSE.
+    "VLLM_KV_CACHE_FAKE_QUANT_V_MODE": lambda: os.getenv(
+        "VLLM_KV_CACHE_FAKE_QUANT_V_MODE", ""
+    ),
+    # Directory for in-vLLM Sigma_q calibration (see kv_fake_quant.accumulate_sigma).
+    "VLLM_KV_CACHE_SIGMA_CALIB_DIR": lambda: os.getenv(
+        "VLLM_KV_CACHE_SIGMA_CALIB_DIR", ""
+    ),
+    # Path to calibrated query second moments
+    # {"block": 32, "layers": {L: [Hkv, G, 32, 32]}}
+    # (same file as VLLM_KV_CACHE_FAKE_QUANT_K_SIGMA). With --kv-cache-dtype
+    # ultraquant_4bit, switches the store to query-aware MXFP4 encoding with a
+    # block-diagonal Hadamard-32 key rotation; decode kernels are unchanged.
+    "VLLM_ULTRAQUANT_QAE_SIGMA": lambda: os.getenv("VLLM_ULTRAQUANT_QAE_SIGMA", ""),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),

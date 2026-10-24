@@ -20,11 +20,13 @@ carry no UltraQuant knowledge.
 import contextlib
 import math
 from dataclasses import replace
+from functools import cache
 from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -58,6 +60,20 @@ logger = init_logger(__name__)
 # CK FlashAttention on ROCm has no compiled kernel above head_dim 256 and no
 # sinks argument; those cases route through the Triton unified kernel instead.
 _CK_MAX_HEAD_DIM = 256
+
+
+@cache
+def _load_qae_sigma(path: str) -> dict:
+    sigma = torch.load(path, map_location="cpu")
+    if sigma.get("block") != 32:
+        raise ValueError(f"{path}: query-aware encoding needs a Hadamard-32 Sigma file")
+    logger.info(
+        "UltraQuant: query-aware MXFP4 encoding (block-diagonal Hadamard-32 keys) "
+        "from %s (%d layers)",
+        path,
+        len(sigma["layers"]),
+    )
+    return sigma
 
 
 class UltraQuantAttentionBackend(TurboQuantAttentionBackend):
@@ -149,7 +165,12 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         self.sinks = kwargs.get("sinks")
         self._max_model_len = vllm_config.model_config.max_model_len
 
-        self._use_ultraquant_flydsl = is_ultraquant_flydsl_available()
+        # Query-aware encoding changes the key rotation to a block-diagonal
+        # Hadamard-32, which the FlyDSL decode (full-head butterfly) does not do.
+        self._qae_sigma_path = envs.VLLM_ULTRAQUANT_QAE_SIGMA
+        self._use_ultraquant_flydsl = (
+            is_ultraquant_flydsl_available() and not self._qae_sigma_path
+        )
         # FlyDSL decode eligibility is static per layer config; compute once.
         self._flydsl_decode_eligible = ultraquant_flydsl_decode_eligible(
             head_size=self.head_size,
@@ -203,7 +224,15 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
             D = self.head_size
             # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
             # in-kernel butterfly fusion and trivial inverse for continuation.
-            H = _build_hadamard(D, str(device))
+            if self._qae_sigma_path:
+                from vllm.v1.attention.ops.ultraquant.triton_store_qae import (
+                    hadamard32_block_pit,
+                )
+
+                H = hadamard32_block_pit(D, torch.device(device))
+                layer._uq_qae_sigma = self._qae_sigma_for_layer(layer, device)
+            else:
+                H = _build_hadamard(D, str(device))
             layer._tq_PiT = H
             layer._tq_Pi = H
             layer._tq_Pi_half = H.to(torch.float16)
@@ -212,6 +241,26 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
             # tensor satisfies the read.
             layer._tq_centroids = torch.empty(0, device=device, dtype=torch.float32)
             layer._tq_cached = True
+
+    def _qae_sigma_for_layer(self, layer: Any, device) -> torch.Tensor:
+        """This TP rank's [Hkv, D // 32, 32, 32] slice of the layer's Sigma."""
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        full = _load_qae_sigma(self._qae_sigma_path)["layers"][
+            extract_layer_index(layer.layer_name)
+        ]
+        total, tp = full.shape[0], get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        start = rank * self.num_kv_heads if total >= tp else rank * total // tp
+        return (
+            full[start : start + self.num_kv_heads]
+            .to(device=device, dtype=torch.float32)
+            .contiguous()
+        )
 
     def _store_kv(
         self,
@@ -222,6 +271,15 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         layer: Any,
     ):
         """Rotate K by the Hadamard and pack K+V into FP4/UE8M0 slots."""
+        if self._qae_sigma_path:
+            from vllm.v1.attention.ops.ultraquant.triton_store_qae import (
+                ultraquant_store_qae,
+            )
+
+            ultraquant_store_qae(
+                key, value, kv_cache, slot_mapping, layer._uq_qae_sigma
+            )
+            return
         from vllm.v1.attention.ops.ultraquant.triton_store import ultraquant_store
 
         ultraquant_store(
