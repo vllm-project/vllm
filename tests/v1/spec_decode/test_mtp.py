@@ -57,6 +57,96 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     assert layer.shared_head.head is None
 
 
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        (
+            "vllm.model_executor.models.glm4_moe_lite_mtp",
+            "Glm4MoeLiteMultiTokenPredictorLayer",
+        ),
+        (
+            "vllm.model_executor.models.glm4_moe_mtp",
+            "Glm4MoeMultiTokenPredictorLayer",
+        ),
+        (
+            "vllm.model_executor.models.glm_ocr_mtp",
+            "GlmOcrMultiTokenPredictorLayer",
+        ),
+    ],
+)
+def test_glm_mtp_layer_recycles_post_final_norm_hidden(
+    default_vllm_config, module_path, class_name
+):
+    # GLM MTP is a DeepSeek-NextN clone. The layer forward must apply the final
+    # norm exactly once (shared_head.norm, fused add+norm over the mtp_block
+    # output + residual) and return that POST-final-norm hidden for BOTH tuple
+    # positions, so the speculator recycles post-norm into the next step's hnorm
+    # and compute_logits consumes it directly. This is the contract fixed in
+    # #47448 and vllm/models/glm5next/common/mtp.py. Returning the single
+    # pre-norm tensor recycled a hidden one RMSNorm short on chained draft steps
+    # (k>=2) — lossless, but lowers draft acceptance.
+    #
+    # A real RMSNorm with NON-UNIFORM weights is used so that a missing, extra,
+    # or wrong normalization is actually caught (a scalar stub would not).
+    import importlib
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+
+    hidden_size = 8
+    torch.manual_seed(0)
+    final_norm = RMSNorm(hidden_size, eps=1e-6)
+    with torch.no_grad():
+        final_norm.weight.copy_(torch.linspace(0.5, 1.5, hidden_size))
+
+    # Deterministic, distinct block output and residual.
+    block_hidden = torch.randn(3, hidden_size)
+    block_residual = torch.randn(3, hidden_size)
+
+    # Independently compute the expected post-final-norm hidden BEFORE calling
+    # the layer (the fused norm may mutate its inputs in place).
+    expected_post, _ = final_norm.forward_native(
+        block_hidden.clone(), residual=block_residual.clone()
+    )
+    pre_norm = block_hidden.clone() + block_residual.clone()
+
+    layer = object.__new__(cls)
+    layer.enorm = lambda x: x
+    layer.hnorm = lambda x: x
+    layer.eh_proj = lambda x: x[..., :hidden_size]
+    layer.mtp_block = lambda positions, hidden_states, residual: (
+        block_hidden,
+        block_residual,
+    )
+    layer.shared_head = SimpleNamespace(norm=final_norm)
+
+    out = layer.forward(
+        input_ids=None,
+        positions=torch.tensor([1, 2, 3]),
+        previous_hidden_states=torch.randn(3, hidden_size),
+        inputs_embeds=torch.randn(3, hidden_size),
+    )
+
+    assert isinstance(out, tuple) and len(out) == 2
+    logits_hidden, recycle_hidden = out
+    # Both tuple positions carry the same post-final-norm hidden.
+    assert torch.allclose(logits_hidden, recycle_hidden)
+    # It equals the real fused final norm of (block_hidden + residual) — i.e. the
+    # correct normalization is recycled (and, since compute_logits now consumes
+    # this directly, the logits path is unchanged from before the fix).
+    assert torch.allclose(recycle_hidden, expected_post, atol=1e-5)
+    # And it is NOT the pre-norm hidden (the old, buggy recycle value).
+    assert not torch.allclose(recycle_hidden, pre_norm)
+    # Logits-equivalence: the fused add+norm equals the previous eager
+    # `shared_head(residual + hidden)` path, so the draft-logits input is
+    # preserved (compute_logits now consumes this post-norm hidden directly).
+    # Any runtime difference is floating-point from fusing the add into the norm.
+    eager_post = final_norm(pre_norm.clone())
+    assert torch.allclose(expected_post, eager_post, atol=1e-5)
+
+
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(
@@ -135,9 +225,16 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert all_attn_layers["draft_attn_1"].is_draft_layer is True
 
 
-@pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly."""
+@pytest.mark.parametrize("num_speculative_tokens", [1, 2])
+@pytest.mark.parametrize("returns_tuple", [False, True])
+def test_mtp_propose(num_speculative_tokens, returns_tuple, monkeypatch):
+    """Validate the MTP proposer consumes the draft model output, including the
+    (logits_hidden, feedback_hidden) tuple returned by GLM/DeepSeek-style MTP.
+
+    returns_tuple=True exercises the tuple path (model_returns_tuple() True): the
+    proposer must unpack it at every draft step (num_speculative_tokens 1 and 2)
+    rather than index the tuple as a single tensor.
+    """
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -150,9 +247,16 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     # Mock the MTP model to verify it returns hidden states directly
     model_mock = mock.MagicMock()
 
+    def _ret(x):
+        # GLM/DeepSeek MTP return (logits_hidden, feedback_hidden); for the GLM
+        # post-final-norm contract both positions are the same tensor.
+        return (x, x) if returns_tuple else x
+
     # MTP returns hidden states directly
     if num_speculative_tokens == 1:
-        model_mock.return_value = torch.zeros(total_tokens, hidden_size, device=device)
+        model_mock.return_value = _ret(
+            torch.zeros(total_tokens, hidden_size, device=device)
+        )
     else:
         # Multiple forward passes for multi-token speculation
         forward_returns = []
@@ -161,7 +265,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
                 h_states = torch.zeros(total_tokens, hidden_size, device=device)
             else:
                 h_states = torch.zeros(batch_size, hidden_size, device=device)
-            forward_returns.append(h_states)
+            forward_returns.append(_ret(h_states))
         model_mock.side_effect = forward_returns
 
     # Mock compute_logits
@@ -183,6 +287,17 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     proposer.model = model_mock
     proposer._draft_attn_layer_names = {"layer.0"}
+    # Attention-backend compatibility (the num_speculative_tokens > 1 type check)
+    # is out of scope here: the model is mocked, so the per-group attn metadata is
+    # itself a mock. Disable the check to exercise the multi-step proposer logic.
+    proposer.allowed_attn_types = None
+    # Multi-step drafting (num_speculative_tokens > 1) reads block_size to build
+    # per-step slot mappings; match the mocked attention metadata's block size.
+    proposer.block_size = 16
+    if returns_tuple:
+        # GLM/DeepSeek-style MTP architectures report a tuple return; force it
+        # here so the proposer takes the unpacking path for the mocked model.
+        monkeypatch.setattr(proposer, "model_returns_tuple", lambda: True)
 
     # Prepare inputs
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
