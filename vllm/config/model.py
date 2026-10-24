@@ -455,9 +455,10 @@ class ModelConfig:
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        """WARNING: All fields are included in the hash by default.
+        When adding a new field, add it to `ignored_factors` below
+        if it does NOT affect the computation graph (e.g. runtime
+        knobs or derived values); otherwise no action is needed.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
