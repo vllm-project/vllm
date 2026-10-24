@@ -16,7 +16,30 @@ from vllm.utils.torch_utils import (
     set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    weak_ref_tensors,
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_weak_ref_tensors_does_not_keep_nested_tensors_alive() -> None:
+    # CUDA graph wrappers weak-ref model outputs such as
+    # (hidden_states, [aux_hidden_states, ...]); no tensor may stay pinned.
+    hidden, aux = (torch.empty(1 << 20, device="cuda") for _ in range(2))
+    out = weak_ref_tensors((hidden, [aux], 3))
+    assert isinstance(out, tuple)
+    weak_hidden, weak_list, size = out
+    assert isinstance(weak_list, list) and size == 3
+    assert weak_hidden.data_ptr() == hidden.data_ptr()
+    assert weak_list[0].data_ptr() == aux.data_ptr()
+    nbytes = hidden.nbytes + aux.nbytes
+    allocated = torch.accelerator.memory_allocated()
+    del hidden, aux
+    assert torch.accelerator.memory_allocated() == allocated - nbytes
+
+
+def test_weak_ref_tensors_rejects_unknown_nested_types() -> None:
+    with pytest.raises(ValueError):
+        weak_ref_tensors((1, [None]))
 
 
 def test_nvfp4_4over6_cache_dtype() -> None:
