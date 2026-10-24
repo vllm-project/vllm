@@ -76,6 +76,7 @@ SILENT_GROUPS = [
     "tests/v1/e2e",
     "tests/v1/ec_connector",
     "tests/v1/executor",
+    "tests/v1/kv_connector",
     "tests/v1/kv_offload",
     "tests/v1/logits_processors",
     "tests/v1/metrics",
@@ -99,7 +100,6 @@ SEPARATE_GROUPS = [
     "tests/v1",
     "tests/v1/core",
     "tests/v1/engine",
-    "tests/v1/kv_connector",
 ]
 
 

@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
 import numpy as np
@@ -49,6 +49,9 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    from vllm.forward_context import ForwardContext
 
 EOS_TOKEN_ID = 50256
 
@@ -336,6 +339,7 @@ class TestExampleConnector(ExampleConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ):
+        assert config.kv_transfer_config is not None
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
@@ -468,7 +472,9 @@ class MockKVConnector(KVConnectorBase_V1):
             metadata.requests.append({"req_id": req_id})
         return metadata
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(
+        self, forward_context: "ForwardContext", **kwargs: object
+    ) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -575,7 +581,6 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
-        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
@@ -683,7 +688,8 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._sealed_writes = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
-    writer.ensure_worker_started = lambda: None
+    # Tests execute write tasks directly, without starting a background thread.
+    writer._write_worker_started = True
     return writer
 
 

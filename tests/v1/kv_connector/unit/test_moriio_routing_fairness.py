@@ -94,8 +94,8 @@ def make_decode_worker(*, world_size: int, tp_rank: int, dp_rank: int):
 def make_meta(*, p_tp: int, p_dp: int, remote_dp_rank: int, host: str = "phost0"):
     return ReqMeta(
         transfer_id="t",
-        local_block_ids=[1],
-        remote_block_ids=[2],
+        local_block_ids=[[1]],
+        remote_block_ids=[[2]],
         remote_host=host,
         remote_port=1234,
         remote_handshake_port=6301,
