@@ -20,12 +20,12 @@ from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerMetadata
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
 from vllm.platforms import current_platform
 
-from ..mono.layer.config import HIDDEN, MAX_INDEX_BLOCKS, MAX_TOKENS, O_K
-from ..mono.layer.kernels.post_attn import K4_ABI, build_post_attn_kernel
-from ..mono.layer.kernels.pre_attn import K1_ARGS
-from ..mono.layer.kernels.pre_attn import SCRATCH_BYTES as PRE_BYTES
-from ..mono.layer.layout import SCRATCH, SCRATCH_BYTES, sym_layout
-from ..mono.layer.step import (
+from ..mono.config import HIDDEN, MAX_INDEX_BLOCKS, MAX_TOKENS, O_K
+from ..mono.kernels.post_attn import K4_ABI, build_post_attn_kernel
+from ..mono.kernels.pre_attn import K1_ARGS
+from ..mono.kernels.pre_attn import SCRATCH_BYTES as PRE_BYTES
+from ..mono.layout import SCRATCH, SCRATCH_BYTES, sym_layout
+from ..mono.step import (
     ERROR_BYTES,
     ERROR_WORDS,
     FENCE_BYTES,
@@ -33,7 +33,7 @@ from ..mono.layer.step import (
     check_diagnostics,
     expand_rows,
 )
-from ..mono.layer.weights import LayerWeights
+from ..mono.weights import LayerWeights
 from .compile import _writable_flydsl_cache, active_workgroups_per_cu
 from .decode import tp_agree
 
@@ -129,7 +129,7 @@ class LayerExecutor:
                     debug=True,
                 )
                 compiled = flyc.compile(launch, *K4_ABI.zeros())
-                from ..mono.layer.support.device.ops import kernel_symbol
+                from ..mono.support.device.ops import kernel_symbol
 
                 name = kernel_symbol(
                     "minimax_m3_mono_layer",

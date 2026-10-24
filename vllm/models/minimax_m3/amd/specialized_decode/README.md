@@ -1,7 +1,7 @@
 # MiniMax M3 specialized decode
 
 `--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as one persistent
-FlyDSL launch (`mono/layer/`), adapted from ATOM: input norm, FP8 QKV projection,
+FlyDSL launch (`mono/`), adapted from ATOM: input norm, FP8 QKV projection,
 head norms and RoPE, KV/index cache updates, index scoring and selection,
 sparse attention, FP8 output projection, both TP all-reduces, post-attention
 norm, routing and the shared/routed experts. The kernels and runtime live in
@@ -44,7 +44,7 @@ any rank, nor from any later step. There is no host synchronization per step;
 the check is two small kernels a forward (inside the FULL graph when one is
 replayed). The cause (rank, epoch, site) stays in the device word: the worker
 reports only the GPU queue exception. `test_host_abort_returns_no_tokens_from_full_graphs` checks this through
-`LLM` in `test_model.py`.
+`LLM` in `test_layers.py`.
 
 ## ATOM provenance
 
@@ -57,12 +57,12 @@ that work into vLLM's Model Runner V2 lifecycle.
 
 | Local path | Upstream path at that commit |
 | --- | --- |
-| `mono/layer/config.py`, `layout.py`, `kernels/` | [`atom/models/minimax_m3/mono/`](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/models/minimax_m3/mono) |
-| `mono/layer/support/` | [`atom/mono/`](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/mono) |
+| `mono/config.py`, `layout.py`, `kernels/` | [`atom/models/minimax_m3/mono/`](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/models/minimax_m3/mono) |
+| `mono/support/` | [`atom/mono/`](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/mono) |
 
 Each ported source file identifies its upstream path and retains AMD's
 copyright notice. The original ATOM code is MIT-licensed; its complete,
-unchanged [license](mono/layer/LICENSE) is included. The vLLM integration uses
+unchanged [license](mono/LICENSE) is included. The vLLM integration uses
 the project's Apache-2.0 license.
 
 The vLLM adaptation adds native weight/cache binding, independent main/index
@@ -75,6 +75,17 @@ continue to use native vLLM modules. ATOM is not an external runtime dependency.
 FlyDSL and AITER supply the existing compiler and primitive helpers. The
 qualified environment uses FlyDSL 0.4.0 and AITER 0.1.26. Startup compiles every
 supported width and checks that the persistent grid can reside on the GPU.
-`test_ops.py` checks the sparse-layer arithmetic and TP failure fence;
-`test_model.py` checks graph replay, speculative verification and fail-stop
-through `LLM`.
+
+The CI suites follow the three test categories used by
+[#61482](https://github.com/vllm-project/vllm/pull/61482):
+
+- `test_decode.py`: CPU routing, startup refusals and cache lifecycle, selected
+  by the MI355 Basic Models job.
+- `test_numerics.py`: independent MXFP8 references, cache mappings, padding and
+  the TP failure fence.
+- `test_layers.py`: native-versus-MonoKernel layer states on the same seeded
+  five-layer model, plus graph replay, accepted EAGLE3 verification and fail-stop
+  through `LLM`.
+
+The latter two suites run in the four-GPU MI355 job. The AMD pipeline also
+selects each suite explicitly.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layer-mode specialized-decode lifecycle and per-forward plan."""
+"""MonoKernel specialized-decode lifecycle and per-forward plan."""
 
 from __future__ import annotations
 
