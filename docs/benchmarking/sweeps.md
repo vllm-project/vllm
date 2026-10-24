@@ -210,6 +210,13 @@ vllm bench sweep startup \
 
 Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
+Wrap an entire filter value in single or double quotes if it contains commas. Only commas outside quoted values separate filters. Unterminated quoted values are rejected.
+
+```bash
+vllm bench sweep plot benchmarks/results/demo \
+    --filter-by '_benchmark_name=="fp8,tp2",max_concurrency>=8'
+```
+
 Example commands for visualizing [Workload Explorer](#workload-explorer) results:
 
 ```bash
