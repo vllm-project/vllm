@@ -11,6 +11,10 @@ import openai
 import pytest
 import pytest_asyncio
 import soundfile as sf
+from openai.types.audio import (
+    TranscriptionTextDeltaEvent,
+    TranscriptionTextDoneEvent,
+)
 
 from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.media.audio import load_audio
@@ -206,16 +210,25 @@ async def test_streaming_response(winning_call, whisper_client):
         stream=True,
         timeout=30,
     )
-    # Reconstruct from chunks and validate
-    async for chunk in res:
-        text = chunk.choices[0]["delta"]["content"]
-        transcription += text
+    done_event = None
+    async for event in res:
+        if isinstance(event, TranscriptionTextDeltaEvent):
+            transcription += event.delta
+        else:
+            assert isinstance(event, TranscriptionTextDoneEvent)
+            done_event = event
 
     assert transcription == res_no_stream.text
+    assert done_event is not None
+    assert done_event.text == res_no_stream.text
+    assert done_event.usage is not None
+    assert done_event.usage.type == "tokens"
 
 
 @pytest.mark.asyncio
-async def test_stream_options(winning_call, whisper_client):
+async def test_stream_options_preserve_transcription_event_contract(
+    winning_call, whisper_client
+):
     res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
@@ -225,15 +238,17 @@ async def test_stream_options(winning_call, whisper_client):
         extra_body=dict(stream_include_usage=True, stream_continuous_usage_stats=True),
         timeout=30,
     )
-    final = False
-    continuous = True
-    async for chunk in res:
-        if not len(chunk.choices):
-            # final usage sent
-            final = True
-        else:
-            continuous = continuous and hasattr(chunk, "usage")
-    assert final and continuous
+    done_events = []
+    async for event in res:
+        assert isinstance(
+            event, TranscriptionTextDeltaEvent | TranscriptionTextDoneEvent
+        )
+        if isinstance(event, TranscriptionTextDoneEvent):
+            done_events.append(event)
+
+    assert len(done_events) == 1
+    assert done_events[0].usage is not None
+    assert done_events[0].usage.type == "tokens"
 
 
 @pytest.mark.asyncio
