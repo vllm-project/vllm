@@ -12,7 +12,10 @@ import time
 import pytest
 import requests
 
-from tests.models.kimi_k3.amd_specialized_decode.test_numerics import needs_gfx950
+from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
+    ARCH,
+    needs_mono_gpu,
+)
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 
 MODEL = "riverclouds/Kimi-K3-8L-dummy"
@@ -65,6 +68,22 @@ class _Finder(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, _Finder())
 """
 
+# gfx942 has no MXFP4 MFMA, so the kernels read vLLM's packed-int4 requant of
+# the experts. Its MLA backends run neither the non-causal draft under DCP nor
+# an fp8 KV cache past 4 query rows.
+GFX942 = ARCH == "gfx942"
+GFX942_ARGS = [
+    "--quantization-config",
+    json.dumps({"moe": {"weight": "int4_per_group_32"}}),
+]
+GFX950_ARGS = [
+    "--decode-context-parallel-size",
+    "8",
+    "--dcp-comm-backend",
+    "a2a",
+    "--kv-cache-dtype",
+    "fp8",
+]
 SERVER_ARGS = [
     "--trust-remote-code",
     "--language-model-only",
@@ -72,12 +91,7 @@ SERVER_ARGS = [
     "dummy",
     "--tensor-parallel-size",
     "8",
-    "--decode-context-parallel-size",
-    "8",
-    "--dcp-comm-backend",
-    "a2a",
-    "--kv-cache-dtype",
-    "fp8",
+    *(GFX942_ARGS if GFX942 else GFX950_ARGS),
     "--max-model-len",
     "8192",
     "--max-num-seqs",
@@ -90,7 +104,7 @@ SERVER_ARGS = [
             "method": "dspark",
             "model": DRAFT,
             "num_speculative_tokens": 7,
-            "attention_backend": "ROCM_AITER_MLA",
+            "attention_backend": "TRITON_MLA" if GFX942 else "ROCM_AITER_MLA",
             "draft_sample_method": "probabilistic",
             "rejection_sample_method": "block",
         }
@@ -102,7 +116,7 @@ SERVER_ARGS = [
 ]
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_a_stalled_rank_stops_the_engine(tmp_path):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import WAIT_TICKS

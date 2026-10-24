@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3's MonoKernels on MI355X against the ops vLLM runs for the same
-spec-verify step, random weights in the checkpoint's formats at TP8 shapes:
+"""Kimi-K3's MonoKernels on MI355X and MI300X / MI325X against the ops vLLM runs
+for the same spec-verify step, random weights in the formats vLLM holds at TP8
+shapes (the routed experts MXFP4 on gfx950, vLLM's packed-int4 requant on gfx942):
 
 - K1 (one GPU): AttnRes -> in_proj -> f_b -> conv -> KDA recurrence -> gated
   norm, the conv / SSM state updates and a block-write layer's block store.
 - K2 (eight GPUs): o_proj + all-reduce + the MLP AttnRes + the latent MoE. The
   MoE is compared on the kernel's own MLP input, where routing cannot differ.
-  Then a CUDA graph of K2 replayed 300 times, bit-identical, and a stalled rank
-  (the fault hook): every rank's launch finishes and the output rank's flags
-  fail the step.
+  Then a CUDA graph of K2 at each width replayed 300 times, bit-identical, and a
+  stalled rank (the fault hook): every rank's launch finishes and the output
+  rank's flags fail the step.
 """
+
+import itertools
 
 import pytest
 import ray
@@ -30,17 +33,24 @@ bf = torch.bfloat16
 COS_MIN = 0.9999
 
 
-def _on_gfx950() -> bool:
+def _mono_arch() -> str | None:
+    """The GPU's arch, if the K3 mono kernels run on it."""
     if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
+        return None
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    return on_gfx950()
+    if on_gfx950():
+        return "gfx950"
+    return "gfx942" if on_gfx942() else None
 
 
-needs_gfx950 = pytest.mark.skipif(
-    not _on_gfx950(), reason="the K3 mono kernels need gfx950 (MI355X)"
+ARCH = _mono_arch()
+needs_mono_gpu = pytest.mark.skipif(
+    ARCH is None,
+    reason="the K3 mono kernels need gfx950 (MI355X) or gfx942 (MI300X / MI325X)",
 )
+# gfx942 splits K1's x rows and the experts' LDS stages by width (6: K2's most LDS)
+WIDTHS = (8, 6, 4, 2) if ARCH == "gfx942" else (8,)
 
 
 def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -179,14 +189,15 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     }
 
 
-@needs_gfx950
+@needs_mono_gpu
 @pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize("nacc", [1, 3])
 @pytest.mark.parametrize("write", [False, True])
-def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
+@pytest.mark.parametrize("S", WIDTHS)
+def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool, S: int) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
     fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
-    request, 8 tokens), including the state each step leaves behind."""
+    request, S tokens), including the state each step leaves behind."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
@@ -195,7 +206,7 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
 
-    S, nb = 8, 4
+    nb, nacc = 4, min(nacc, S)
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
     write_idx = nb if write else -1
     w = _kda_inputs(nb, nacc, dim_first, S)
@@ -272,7 +283,7 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
 
 def _moe_reference(x, mw, rank: int):
     """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
-    down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
+    down, aiter's 4-bit experts, the latent all-reduce + RMSNorm, this rank's
     up_proj rows into the shared experts' output, the final all-reduce."""
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -316,6 +327,32 @@ def _moe_reference(x, mw, rank: int):
     return _all_reduce_fp32(shared)
 
 
+def _int4_experts(g, e: int, n: int, k: int, scale: float):
+    """Experts as vLLM's packed-int4 requant leaves them on gfx942: shuffled
+    int4 pairs with their group-32 bf16 scales."""
+    from aiter import dtypes
+    from aiter.ops.quant import per_1x32_i4_quant
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+
+    chunk, groups = 64, k // 32
+    w = torch.empty(e, n, k // 2, dtype=torch.uint8, device=g.device)
+    s = torch.empty(e * n * groups, dtype=bf, device=g.device)
+    for lo in range(0, e, chunk):
+        q, sc = per_1x32_i4_quant(_randn(g, chunk, n, k, scale=scale))
+        q = q.view(dtypes.i4x2).view(chunk, n, k)
+        packed = pack_int8_to_packed_int4(shuffle_weight(q.view(dtypes.i8), (16, 16)))
+        w[lo : lo + chunk] = packed.view(chunk, n, k // 2)
+        sc = shuffle_scale_for_int4(sc, group_size=32).view(-1)
+        s[lo * n * groups : (lo + chunk) * n * groups] = sc
+    w = w.view(dtypes.i4x2)
+    w.is_shuffled = True
+    return w, s
+
+
 def _moe_weights(rank: int, device):
     from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -337,7 +374,7 @@ def _moe_weights(rank: int, device):
 
     fp4, e8 = torch.float4_e2m1fn_x2, torch.float8_e8m0fnu
     w_up = _randn(gc, HIDDEN, LAT, scale=0.02)
-    return {
+    mw = {
         "w_gate": _randn(gc, E, HIDDEN, scale=0.02),
         "bias": _randn(gc, E, scale=0.02, dtype=torch.float32),
         "w_ld": _randn(gc, LAT, HIDDEN, scale=0.02),
@@ -345,6 +382,12 @@ def _moe_weights(rank: int, device):
         "w_up_shard": w_up[rank * UP_N : (rank + 1) * UP_N].contiguous(),
         "w_sgu": _randn(gr, 2 * SI, HIDDEN, scale=0.02),
         "w_sd": _randn(gr, HIDDEN, SI, scale=0.03),
+    }
+    if ARCH == "gfx942":
+        mw["w13"], mw["w13s"] = _int4_experts(gr, E, 2 * RI, LAT, 0.03)
+        mw["w2"], mw["w2s"] = _int4_experts(gr, E, LAT, RI, 0.05)
+        return mw
+    return mw | {
         "w13": rocm_aiter_ops.shuffle_weight_a16w4(
             u8(gr, E, 2 * RI, LAT // 2).view(fp4), 16, False
         ),
@@ -378,7 +421,7 @@ def _moe_args(mw):
     }
 
 
-def _k2_inputs(rank: int, device):
+def _k2_inputs(rank: int, device, S: int = 8):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN,
         PROJ,
@@ -387,10 +430,10 @@ def _k2_inputs(rank: int, device):
     gc = torch.Generator(device=device).manual_seed(11)
     gr = torch.Generator(device=device).manual_seed(200 + rank)
     return {
-        "core": _randn(gr, 8, PROJ),
+        "core": _randn(gr, S, PROJ),
         "w_o": _randn(gr, HIDDEN, PROJ, scale=0.02),
-        "prefix": _randn(gc, 8, HIDDEN, scale=2.0),
-        "blocks": _randn(gc, 8, 8, HIDDEN, scale=2.0),
+        "prefix": _randn(gc, S, HIDDEN, scale=2.0),
+        "blocks": _randn(gc, S, 8, HIDDEN, scale=2.0),
         "ares_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
         "ares_qk": _randn(gc, HIDDEN, scale=0.05),
         "in_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
@@ -400,7 +443,9 @@ def _k2_inputs(rank: int, device):
 def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
-    key = k2.K2Build(tokens=8, nblocks=nb + int(reset), reset=reset, **runner.fault)
+    key = k2.K2Build(
+        tokens=w["core"].size(0), nblocks=nb + int(reset), reset=reset, **runner.fault
+    )
     k2.k2_launch(
         key,
         core=w["core"],
@@ -442,12 +487,12 @@ def _k2_worker(
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
-    S, nb = 8, 4
+    nb = 4
     runner = MonoRunner(device)
     mw = _moe_weights(rank, device)
-    w = _k2_inputs(rank, device)
 
-    for reset in (False, True):
+    for S, reset in itertools.product(WIDTHS, (False, True)):
+        w = _k2_inputs(rank, device, S)
         runner.step_begin()
         prefix = w["prefix"].clone()
         out = torch.empty(S, HIDDEN, dtype=bf, device=device)
@@ -471,34 +516,37 @@ def _k2_worker(
             1e-5,
         )
         # the kernel sums the ranks in rank order, NCCL in its own order
-        assert _rel_l2(prefix, ref_prefix) < 1e-2
+        assert _rel_l2(prefix, ref_prefix) < 1e-2, (S, reset)
         lay = k2.scratch_layout(key)["xrow"][0]
         x = runner.scratch[lay : lay + S * HIDDEN * 2].view(bf).view(S, HIDDEN)
-        assert _cos(x, x_ref) > COS_MIN
-        assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
+        assert _cos(x, x_ref) > COS_MIN, (S, reset)
+        assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN, (S, reset)
         outs = [torch.empty_like(out) for _ in range(tp_size)]
         dist.all_gather(outs, out)
         assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
 
-    # A graph of one step (the epoch bump captured with it), replayed: a
-    # block-write launch writes its prefix, so every replay must match the first.
-    prefix = torch.empty_like(w["prefix"])
-    out = torch.empty(S, HIDDEN, dtype=bf, device=device)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        runner.step_begin()
-        _k2_launch(runner, w, mw, prefix, out, reset=True)
-    graph.replay()
-    torch.accelerator.synchronize()
-    want_prefix, want_out = prefix.clone(), out.clone()
-    for _ in range(300):
+    # A graph of one step (the epoch bump captured with it) at each width,
+    # replayed: a block-write launch writes its prefix, so every replay must
+    # match the first.
+    for S in WIDTHS:
+        w = _k2_inputs(rank, device, S)
+        prefix = torch.empty_like(w["prefix"])
+        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            runner.step_begin()
+            _k2_launch(runner, w, mw, prefix, out, reset=True)
         graph.replay()
-    torch.accelerator.synchronize()
-    assert torch.equal(prefix, want_prefix) and torch.equal(out, want_out)
+        torch.accelerator.synchronize()
+        want_prefix, want_out = prefix.clone(), out.clone()
+        for _ in range(300):
+            graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(prefix, want_prefix) and torch.equal(out, want_out), S
     assert not runner.health.any() and not runner.flags.any()
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
@@ -552,7 +600,7 @@ def _fault_worker(
         assert runner.flags.any(), "the output rank's flags missed the failure"
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_stalled_rank_fails_the_step_without_a_hang(
     monkeypatch: pytest.MonkeyPatch,
@@ -560,7 +608,7 @@ def test_stalled_rank_fails_the_step_without_a_hang(
     multi_process_parallel(monkeypatch, 8, 1, _fault_worker)
 
 
-@needs_gfx950
+@needs_mono_gpu
 def test_warmup_compiles_without_launching() -> None:
     """The JIT warm-up compiles K1 and K2 before capture without running them:
     a launch on its null arguments would fault."""

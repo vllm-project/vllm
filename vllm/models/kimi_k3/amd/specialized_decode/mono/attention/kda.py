@@ -39,6 +39,10 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.arch import (
+    GFX942,
+    LDS_BYTES,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.debug import (
     region_ids,
 )
@@ -51,6 +55,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     hw_exp2,
     hw_rsq,
     ld_i32,
+    lds_bytes,
     mfma_bf16,
     row_sum,
     rsrc,
@@ -73,6 +78,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
     publish,
     sreg,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv
 
 HIDDEN = 7168
 NA = 56  # attn CTAs
@@ -459,7 +465,7 @@ def load_x(c):
 @traced
 def stage_gemv(c, rg, ops):
     """Rows 16 rg .. of in_proj against the LDS x -> bf16 PROJ."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    s, lane, wave = c["S"], c["lane"], c["wave"]
     g = lane // ROWS
     t = fx.min(lane % ROWS, s - 1)
     row = HIDDEN + LDS_PAD
@@ -476,6 +482,61 @@ def stage_gemv(c, rg, ops):
             acc = mfma_bf16(
                 ops[i][q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc
             )
+    gemv_out(c, rg, acc)
+
+
+GEMV_AHEAD = 4  # gfx942: rounds of both groups' weights in flight
+
+
+@traced
+def stage_gemv_pair(c, rg0, rg1):
+    """gfx942: both row groups against x a K window at a time (LDS holds
+    ``gemv.win_rounds`` rounds of the S rows): the next window's x is loaded
+    under the current one's MFMAs, before the weights of GEMV_AHEAD rounds on
+    (loads retire in order: x waits on no weights it does not need)."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    ahead = min(GEMV_AHEAD, PER_WAVE)
+    w = [None] * PER_WAVE
+    for i in range_constexpr(ahead):
+        w[i] = (gemv_loads(c, rg0, [i])[0], gemv_loads(c, rg1, [i])[0])
+    if tid < NA:
+        c["poll"]([(c["xrdy"], tid, 1)])
+    gpu.barrier()
+    r = gemv.win_rounds(s, HIDDEN)
+    wk = r * gemv.ROUND_K
+    xrow = gemv.win_row(s, HIDDEN)
+    nw = gemv.windows(s, HIDDEN)
+    acc0 = fx.Vector.filled(4, 0.0, fx.Float32)
+    acc1 = fx.Vector.filled(4, 0.0, fx.Float32)
+    pre = gemv.window_loads(tid, c["xbuf"], HIDDEN, 0, s, min(wk, HIDDEN), CM_DEV)
+    for p in range_constexpr(nw):
+        kw = min(wk, HIDDEN - p * wk)
+        if p > 0:
+            gpu.barrier()
+        gemv.window_store(tid, pre, s, kw, c["xl"], xrow)
+        if p + 1 < nw:
+            k1 = (p + 1) * wk
+            pre = gemv.window_loads(
+                tid, c["xbuf"], HIDDEN, k1, s, min(wk, HIDDEN - k1), CM_DEV
+            )
+        gpu.barrier()
+        for i in range_constexpr(p * r, min((p + 1) * r, PER_WAVE)):
+            if i + ahead < PER_WAVE:
+                w[i + ahead] = (
+                    gemv_loads(c, rg0, [i + ahead])[0],
+                    gemv_loads(c, rg1, [i + ahead])[0],
+                )
+            kk = (wave + WAVES * i) * KCH - p * wk
+            acc0 = gemv.chunk_mfmas(lane, c["xl"], xrow, s, w[i][0], kk, acc0)
+            acc1 = gemv.chunk_mfmas(lane, c["xl"], xrow, s, w[i][1], kk, acc1)
+    gemv_out(c, rg0, acc0)
+    gemv_out(c, rg1, acc1)
+
+
+@traced
+def gemv_out(c, rg, acc):
+    """The waves' accumulators of rows 16 rg .. summed -> bf16 PROJ."""
+    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     if (tid < ROWS * s) & (rg < GEMV_TASKS):
@@ -730,8 +791,8 @@ def build(key: KdaPreBuild):
     s, L = key.tokens, key.qlen
     ns = key.nblocks + 1
     lay = scratch_layout(key)
-    xrow = HIDDEN + LDS_PAD
-    assert s * xrow * 2 <= 136 * 1024, "x rows exceed LDS"
+    # gfx942: x a K window at a time (``stage_gemv_pair``)
+    xrow = gemv.win_row(s, HIDDEN) if GFX942 else HIDDEN + LDS_PAD
     assert L <= 16 and key.nblocks >= 1
 
     @fx.struct
@@ -761,6 +822,7 @@ def build(key: KdaPreBuild):
     class Smem:
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
 
+    assert lds_bytes(Smem) + lds_bytes(RoleLds) <= LDS_BYTES, "LDS overflow"
     keyed = key_tuple(key, _SOURCES)
     name = f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
 
@@ -871,13 +933,16 @@ def build(key: KdaPreBuild):
             gi = bid - NA
             rg0 = 2 * gi
             rg1 = 2 * gi + 1
-            ops0 = gemv_loads(c, rg0, range(PER_WAVE))
-            load_x(c)
-            # the second group's first half in flight under the first's MFMAs
-            ops1 = gemv_loads(c, rg1, range(4))
-            stage_gemv(c, rg0, ops0)
-            ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
-            stage_gemv(c, rg1, ops1)
+            if const_expr(GFX942):
+                stage_gemv_pair(c, rg0, rg1)
+            else:
+                ops0 = gemv_loads(c, rg0, range(PER_WAVE))
+                load_x(c)
+                # the second group's first half in flight under the first's MFMAs
+                ops1 = gemv_loads(c, rg1, range(4))
+                stage_gemv(c, rg0, ops0)
+                ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
+                stage_gemv(c, rg1, ops1)
         kda_tasks(c)
 
     @flyc.jit
