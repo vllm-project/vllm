@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
@@ -221,6 +222,32 @@ def test_safety_identifier_is_echoed() -> None:
 
 def test_safety_identifier_defaults_to_none() -> None:
     assert _echoed_response()["safety_identifier"] is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["completed", "queued", "in_progress", "incomplete", "failed", "cancelled"],
+)
+def test_completed_at_only_set_when_completed(status: str) -> None:
+    """OpenAI sets completed_at only for a completed Response."""
+    request = ResponsesRequest(model="test-model", input="hi")
+    before = int(time.time())
+    response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=request.to_sampling_params(default_max_tokens=16),
+        model_name="test-model",
+        created_time=before,
+        output=[],
+        status=status,
+    ).model_dump(mode="json")
+    after = int(time.time())
+
+    assert "completed_at" in response
+    if status == "completed":
+        assert before <= response["completed_at"] <= after
+        assert response["completed_at"] >= response["created_at"]
+    else:
+        assert response["completed_at"] is None
 
 
 @pytest.mark.parametrize(
