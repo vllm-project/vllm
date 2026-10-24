@@ -705,11 +705,13 @@ class Qwen3ASRForConditionalGeneration(
         """Get the generation prompt to be used for transcription requests.
 
         Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
-        is only emitted when the caller supplied a ``prompt``, mirroring the
-        SDK's ``_build_messages`` (which omits the system role when context is
-        empty) and preserving the prior no-prompt behavior:
+        holds the SDK's free-form ``context``: the ``hotwords`` list, then the
+        request ``prompt``, one per line (hotwords first recalls more hotwords
+        on Mandarin and is on par on English). The SDK always emits a system
+        turn (empty without context); it is omitted here when there is no
+        context, preserving the prior no-prompt behavior:
 
-          [system: {context}]                         # only when prompt given
+          [system: {hotwords}\n{prompt}]              # only when either given
           user: {audio}
           assistant: [language {Lang}<asr_text>]      # when language is forced
         """
@@ -729,7 +731,13 @@ class Qwen3ASRForConditionalGeneration(
                 "Supported task types are 'transcribe' and 'translate'."
             )
 
-        context = _sanitize_transcription_user_text(request_prompt)
+        context = "\n".join(
+            text
+            for text in map(
+                _sanitize_transcription_user_text, (stt_params.hotwords, request_prompt)
+            )
+            if text.strip()
+        )
         system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
 
         prompt = (

@@ -101,7 +101,8 @@ Currently “verbose_json” response format doesn’t support no_speech_prob.
 
 For models with hotword support, `hotwords` takes a comma-separated list of terms
 (names, jargon) to bias recognition toward. Currently, this is supported by
-`FunAudioLLM/Fun-ASR-Nano-2512-vllm` and `OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+`FunAudioLLM/Fun-ASR-Nano-2512-vllm`, `OpenMOSS-Team/MOSS-Transcribe-Diarize`
+and the `Qwen/Qwen3-ASR` models.
 Keep the list short and relevant to the audio: long or unrelated lists can
 degrade accuracy.
 
