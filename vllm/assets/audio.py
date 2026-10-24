@@ -35,4 +35,4 @@ class AudioAsset:
 
     @property
     def url(self) -> str:
-        return urljoin(VLLM_S3_BUCKET_URL, f"{ASSET_DIR}/{self.name}.ogg")
+        return urljoin(VLLM_S3_BUCKET_URL, f"{ASSET_DIR}/{self.name}.og g")
