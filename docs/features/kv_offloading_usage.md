@@ -305,6 +305,18 @@ Block content hashes must match across instances for peers to exchange blocks (s
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
 
+If a load fails without confirmation that the producer has stopped writing,
+its destination CPU slots are quarantined. Loads whose fetch was never sent do
+not need quarantine. The failed keys become cache misses,
+allowing local recomputation, but those slots cannot be allocated to another
+request. A late completion or abort acknowledgement releases them. Disconnecting
+a peer does not prove that its remote writes stopped, so unresolved slots remain
+quarantined after a disconnect and reduce available CPU cache capacity.
+Resetting the cache is rejected while any slots remain quarantined; stop the
+peers before restarting the engine to recover that capacity. Apply the lifetime
+fix to both producers and consumers: an older producer may acknowledge an abort
+before its WRITE has stopped.
+
 A producer parks a request's blocks until the consumer's `FetchMsg` arrives; if none arrives
 within `unbound_store_timeout_s` the blocks are released so they stop pinning primary-tier
 slots. Raise it when prefills legitimately take longer than the default:
