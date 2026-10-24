@@ -22,9 +22,9 @@ Both paths are exercised through the REAL ``_forward_core``:
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
-The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
-must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
-portable check of the split wiring).
+The device's supported chunk backend is forced so the prefill-only
+``chunk_indices`` must stay consistent with the rebased ``cu_seqlens`` (a
+stringent, backend-portable check of the split wiring).
 """
 
 from __future__ import annotations
@@ -38,12 +38,9 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-):
+if not (current_platform.is_cuda() and current_platform.has_device_capability(90)):
     pytest.skip(
-        reason="GDN _forward_core split test uses the CuteDSL prefill backend "
-        "(requires CUDA SM10x).",
+        reason="GDN _forward_core split tests require CUDA SM90+.",
         allow_module_level=True,
     )
 
@@ -88,17 +85,17 @@ PREFIX = "model.layers.0.linear_attn"
 
 def _make_vllm_config():
     # A small, ungated GDN model whose config is cached locally; only the config
-    # (scheduler/cache/compilation/hf) is used here, never the weights. Inject
-    # linear_key_head_dim=128 and request the CuteDSL prefill backend -- the
-    # supported GDN chunk kernel on Blackwell (the Triton/FLA chunk kernel is
-    # unsupported on SM10x). CuteDSL consumes chunk_indices/chunk_offsets, so
-    # this also exercises the prefill-only chunk-metadata wiring.
+    # (scheduler/cache/compilation/hf) is used here, never the weights. Use
+    # Triton on Hopper and CuteDSL on Blackwell.
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    backend = (
+        "cutedsl" if current_platform.is_device_capability_family(100) else "triton"
+    )
+    cfg.additional_config = {"gdn_prefill_backend": backend}
     return cfg
 
 
@@ -126,6 +123,7 @@ def _build_layer(
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
+        "_forward_core_decode_non_spec",
     ):
         setattr(
             layer,
@@ -193,7 +191,10 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    assert builder.gdn_prefill_backend == "cutedsl"
+    assert (
+        builder.gdn_prefill_backend
+        == vllm_config.additional_config["gdn_prefill_backend"]
+    )
 
     num_tokens = sum(query_lens)
 
@@ -300,3 +301,73 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("splits", [[23] + [1] * 74, [31, 1, 65]])
+def test_recurrent_bic_prefill_matches_decode_replay(
+    splits: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying generated tokens as prefill must preserve outputs and state."""
+    monkeypatch.setattr(qwen_gdn_linear_attn.envs, "VLLM_BATCH_INVARIANT", True)
+    torch.manual_seed(19)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    config = _make_vllm_config()
+    conv_shape, state_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        1, H, HV, K, V, CONV_KERNEL, num_spec=0
+    )
+    conv = torch.zeros(2, *conv_shape, device=device, dtype=dtype)
+    state = torch.randn(2, *state_shape, device=device) * 0.01
+    A_log = torch.randn(HV, device=device) * 0.1
+    dt_bias = torch.randn(HV, device=device) * 0.1
+    weight = torch.randn(CONV_DIM, 1, CONV_KERNEL, device=device, dtype=dtype) * 0.1
+    bias = torch.randn(CONV_DIM, device=device, dtype=dtype) * 0.1
+    x = torch.randn(97, CONV_DIM, device=device, dtype=dtype) * 0.1
+    a = torch.randn(97, HV, device=device, dtype=dtype) * 0.1
+    b = torch.randn_like(a)
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(  # type: ignore[arg-type]
+            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
+        ),
+        layer_names=[PREFIX],
+        vllm_config=config,
+        device=device,
+    )
+
+    def run(partitions):
+        layer = _build_layer(
+            config, conv.clone(), state.clone(), A_log, dt_bias, weight, bias
+        )
+        layer.enable_packed_recurrent_decode = True
+        outputs = []
+        start = 0
+        for count in partitions:
+            common = create_common_attn_metadata(
+                BatchSpec(seq_lens=[start + count + 1], query_lens=[count]),
+                BLOCK_SIZE,
+                device,
+                arange_block_indices=True,
+            )
+            with set_current_vllm_config(config):
+                meta = builder.build(common_prefix_len=0, common_attn_metadata=common)
+            indices = torch.ones(1, device=device, dtype=torch.int32)
+            meta.non_spec_state_indices_tensor = indices
+            if meta.num_prefills:
+                meta.prefill_state_indices = indices
+            token_slice = slice(start, start + count)
+            outputs.append(
+                _run_forward_core(
+                    layer, meta, x[token_slice], b[token_slice], a[token_slice], count
+                )
+            )
+            layer.kv_cache = tuple(t.clone() for t in layer.kv_cache)
+            start += count
+        return torch.cat(outputs), layer.kv_cache
+
+    expected_output, expected_states = run([97])
+    output, states = run(splits)
+    for actual, expected in zip(
+        (output, *states), (expected_output, *expected_states), strict=True
+    ):
+        assert torch.isfinite(actual).all()
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
