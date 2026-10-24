@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pybase64
 import pytest
+import torch
 from PIL import Image
 
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image import (
     ALLOWED_IMAGE_FORMATS,
     open_image,
 )
 from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
+from vllm.multimodal.media import image as image_media
+from vllm.multimodal.media.video import VideoMediaIO
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -452,3 +458,161 @@ showpage
 def test_open_image_does_not_accept_format_override():
     """The allowlist helper must not expose a formats override."""
     assert "formats" not in inspect.signature(open_image).parameters
+
+
+requires_torchcodec_images = pytest.mark.skipif(
+    image_media.torchcodec_decode_image is None,
+    reason="requires torchcodec >= 0.16",
+)
+
+
+def _encode(image: Image.Image, fmt: str, **save_kwargs) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, fmt, **save_kwargs)
+    return buffer.getvalue()
+
+
+def _noisy_rgb_image(width: int = 48, height: int = 32) -> Image.Image:
+    rng = np.random.default_rng(0)
+    return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
+
+
+def _to_hwc(media: Image.Image | torch.Tensor) -> np.ndarray:
+    if isinstance(media, torch.Tensor):
+        return media.permute(1, 2, 0).numpy()
+    return np.asarray(media)
+
+
+@requires_torchcodec_images
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP", "AVIF"])
+@pytest.mark.parametrize("mode", ["RGB", "L"])
+@pytest.mark.parametrize("orientation", [None, *range(1, 9)])
+def test_torchcodec_backend_matches_pil(fmt, mode, orientation):
+    """The torchcodec backend must return the same pixels as Pillow, including
+    grayscale-to-RGB conversion and EXIF orientation."""
+    save_kwargs = {}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif.tobytes()
+    data = _encode(_noisy_rgb_image().convert(mode), fmt, **save_kwargs)
+
+    pil = ImageMediaIO().load_bytes(data)
+    tc = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+
+    assert isinstance(pil.media, Image.Image)
+    assert isinstance(tc.media, torch.Tensor)
+    assert tc.media.dtype == torch.uint8 and tc.media.shape[0] == 3
+    np.testing.assert_array_equal(_to_hwc(tc.media), _to_hwc(pil.media))
+    assert tc.io_config == pil.io_config
+
+
+@requires_torchcodec_images
+@pytest.mark.parametrize(
+    ("data", "image_mode"),
+    [
+        (_encode(Image.new("RGBA", (8, 8), (255, 0, 0, 128)), "PNG"), "RGB"),
+        (_encode(Image.new("RGB", (8, 8)), "PNG", transparency=(0, 0, 0)), "RGB"),
+        (_encode(Image.new("CMYK", (8, 8), (0, 255, 0, 0)), "JPEG"), "RGB"),
+        (_encode(Image.new("I;16", (8, 8), 1000), "PNG"), "RGB"),
+        (_encode(Image.new("RGB", (8, 8)), "GIF"), "RGB"),
+        (
+            _encode(
+                Image.new("RGB", (8, 8)),
+                "WEBP",
+                save_all=True,
+                append_images=[Image.new("RGB", (8, 8), (255, 255, 255))],
+            ),
+            "RGB",
+        ),
+        (_encode(Image.new("RGB", (8, 8)), "JPEG"), None),
+        (_encode(Image.new("RGB", (8, 8)), "JPEG"), "L"),
+    ],
+    ids=[
+        "rgba",
+        "rgb_png_trns",
+        "cmyk",
+        "16bit",
+        "gif",
+        "animated_webp",
+        "no_mode_conversion",
+        "non_rgb_target",
+    ],
+)
+def test_torchcodec_backend_uses_pil_when_outputs_would_differ(data, image_mode):
+    result = ImageMediaIO(image_mode, image_backend="torchcodec").load_bytes(data)
+    assert isinstance(result.media, Image.Image)
+    expected = ImageMediaIO(image_mode).load_bytes(data)
+    np.testing.assert_array_equal(np.asarray(result.media), np.asarray(expected.media))
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_checks_limits_before_decoding(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("torchcodec must not decode an over-limit image")
+
+    import vllm.envs as envs
+
+    monkeypatch.setattr(image_media, "torchcodec_decode_image", fail)
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 100)
+    data = _encode(Image.new("RGB", (11, 10)), "JPEG")
+    with pytest.raises(ValueError, match="exceed the maximum of 100 pixels"):
+        ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_falls_back_to_pil_on_decode_error(monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("JPEG decoding was disabled at build time")
+
+    monkeypatch.setattr(image_media, "torchcodec_decode_image", fail)
+    data = _encode(_noisy_rgb_image(), "PNG")
+    result = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+    assert isinstance(result.media, Image.Image)
+
+    # Corrupt input still surfaces as a client error.
+    with pytest.raises(ValueError, match="Failed to load image"):
+        ImageMediaIO(image_backend="torchcodec").load_bytes(data[: len(data) // 2])
+
+
+def test_torchcodec_backend_unavailable_uses_pil(monkeypatch):
+    monkeypatch.setattr(image_media, "torchcodec_decode_image", None)
+    image_io = ImageMediaIO(image_backend="torchcodec")
+    assert image_io.image_backend == "pil"
+    result = image_io.load_bytes(_encode(_noisy_rgb_image(), "JPEG"))
+    assert isinstance(result.media, Image.Image)
+
+
+def test_unknown_image_backend_rejected():
+    with pytest.raises(ValueError, match="Unknown image_backend"):
+        ImageMediaIO(image_backend="opencv")
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_hash_matches_pil():
+    """The decoding backend must not change the multimodal cache key."""
+    for mode in ["RGB", "L"]:
+        data = _encode(_noisy_rgb_image().convert(mode), "JPEG")
+        pil = ImageMediaIO().load_bytes(data)
+        tc = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+        assert MultiModalHasher.hash_kwargs(
+            "blake3", image=tc
+        ) == MultiModalHasher.hash_kwargs("blake3", image=pil)
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_jpeg_frame_list_video():
+    frames = [_noisy_rgb_image(), _noisy_rgb_image().transpose(Image.FLIP_LEFT_RIGHT)]
+    data = ",".join(
+        pybase64.b64encode(_encode(frame, "JPEG")).decode() for frame in frames
+    )
+
+    def load(image_io):
+        video_io = VideoMediaIO(image_io, num_frames=-1)
+        frames, _ = video_io.load_base64("video/jpeg", data).media
+        return frames
+
+    expected = load(ImageMediaIO())
+    actual = load(ImageMediaIO(image_backend="torchcodec"))
+    assert actual.shape == (2, 32, 48, 3)
+    np.testing.assert_array_equal(actual, expected)
