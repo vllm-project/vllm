@@ -650,16 +650,6 @@ class ParallelConfig:
         return 2 if self.enable_dbo else self.ubatch_size
 
     @property
-    def dbo_tp_only(self) -> bool:
-        """DBO with one DP rank and no EP: microbatches overlap TP all-reduces."""
-        return (
-            self.use_ubatching
-            and self.data_parallel_size == 1
-            and not self.enable_expert_parallel
-            and self.tensor_parallel_size > 1
-        )
-
-    @property
     def local_engines_only(self) -> bool:
         """Client manages local+remote EngineCores in pure internal LB case.
         Client manages local EngineCores in hybrid and external LB case.

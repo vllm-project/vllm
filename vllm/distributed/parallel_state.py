@@ -746,11 +746,6 @@ class GroupCoordinator:
             return self._all_reduce_out_place(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        # Under the vllm.all_reduce custom op, so compiled graphs reach it too.
-        if _dbo_tp_all_reduce_hook is not None and not torch.compiler.is_compiling():
-            out = _dbo_tp_all_reduce_hook(self, input_)
-            if out is not None:
-                return out
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
@@ -1590,16 +1585,6 @@ def _replace_active_groups(
     _EPLB = eplb
     _NODE_COUNT = node_count
     return old_groups
-
-
-# Set by vllm.v1.worker.ubatching.init_dbo_tp_comms.
-_DboTpAllReduceHook = Callable[[GroupCoordinator, torch.Tensor], torch.Tensor | None]
-_dbo_tp_all_reduce_hook: _DboTpAllReduceHook | None = None
-
-
-def set_dbo_tp_all_reduce_hook(hook: _DboTpAllReduceHook | None) -> None:
-    global _dbo_tp_all_reduce_hook
-    _dbo_tp_all_reduce_hook = hook
 
 
 _TP: GroupCoordinator | None = None
