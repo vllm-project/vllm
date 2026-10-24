@@ -45,6 +45,126 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
   }
 }
 
+constexpr int REG_KERNEL_MAX_THREADS = 512;
+
+// Same as rms_norm_dynamic_per_token_quant_vec, but each thread keeps its
+// part of the token in registers, so input and residual are read once.
+// hidden_size must be <= 4 * max_vecs_per_thread * blockDim.x (checked by
+// the dispatch).
+template <typename scalar_t, typename scalar_out_t, bool has_residual,
+          int max_vecs_per_thread>
+__global__ void __launch_bounds__(REG_KERNEL_MAX_THREADS)
+    rms_norm_dynamic_per_token_quant_reg_kernel(
+        scalar_out_t* __restrict__ out,       // [..., hidden_size]
+        float* __restrict__ scales,           // [num_tokens]
+        scalar_t const* __restrict__ input,   // [..., hidden_size]
+        scalar_t const* __restrict__ weight,  // [hidden_size]
+        float const* scale_ub, float const var_epsilon,
+        int32_t const hidden_size, int32_t const input_stride,
+        scalar_t* __restrict__ residual) {
+  constexpr int VEC_SIZE = 4;
+  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
+  constexpr bool is_int8 = std::is_same_v<scalar_out_t, int8_t>;
+  int32_t const num_vec_elems = hidden_size >> 2;
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+
+  vec4_t<scalar_t> const* vec_input =
+      reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
+  vec4_t<scalar_t> const* vec_weight =
+      reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+  q8x4_t<scalar_out_t>* vec_output =
+      reinterpret_cast<q8x4_t<scalar_out_t>*>(&out[token_offset]);
+  vec4_t<scalar_t>* vec_residual = nullptr;
+  if constexpr (has_residual) {
+    vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
+  }
+
+  vec4_t<float> x[max_vecs_per_thread];
+  float ss = 0.0f;
+#pragma unroll
+  for (int k = 0; k < max_vecs_per_thread; ++k) {
+    int32_t const i = threadIdx.x + k * blockDim.x;
+    if (i < num_vec_elems) {
+      vec4_t<scalar_t> const in = vec_input[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        x[k].val[j] = static_cast<float>(in.val[j]);
+      }
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> const r = vec_residual[i];
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          x[k].val[j] += static_cast<float>(r.val[j]);
+        }
+      }
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        ss += x[k].val[j] * x[k].val[j];
+      }
+    }
+  }
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
+  __shared__ float s_rms;
+  if (threadIdx.x == 0) {
+    s_rms = rsqrtf(ss / hidden_size + var_epsilon);
+  }
+  __syncthreads();
+  float const rms = s_rms;
+
+  float absmax = 0.0f;
+#pragma unroll
+  for (int k = 0; k < max_vecs_per_thread; ++k) {
+    int32_t const i = threadIdx.x + k * blockDim.x;
+    if (i < num_vec_elems) {
+      vec4_t<scalar_t> const w = vec_weight[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        absmax = fmaxf(
+            absmax, fabs(static_cast<scalar_t>(x[k].val[j] * rms) * w.val[j]));
+      }
+    }
+  }
+  absmax = BlockReduce(reduceStore).Reduce(absmax, CubMaxOp{}, blockDim.x);
+  __shared__ float s_token_scale;
+  if (threadIdx.x == 0) {
+    float scale = scale_ub ? min(absmax, *scale_ub) : absmax;
+    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+    s_token_scale = scale;
+    scales[blockIdx.x] = scale;
+  }
+  __syncthreads();
+  // int8 multiplies by the inverse scale; fp8 divides for FBGemm parity.
+  float const scale_val = is_int8 ? 1.0f / s_token_scale : s_token_scale;
+
+#pragma unroll
+  for (int k = 0; k < max_vecs_per_thread; ++k) {
+    int32_t const i = threadIdx.x + k * blockDim.x;
+    if (i < num_vec_elems) {
+      vec4_t<scalar_t> const w = vec_weight[i];
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> r;
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          r.val[j] = static_cast<scalar_t>(x[k].val[j]);
+        }
+        vec_residual[i] = r;
+      }
+      q8x4_t<scalar_out_t> q;
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        q.val[j] = ScaledQuant<scalar_out_t, is_int8>::quant_fn(
+            static_cast<scalar_t>(x[k].val[j] * rms) * w.val[j], scale_val);
+      }
+      vec_output[i] = q;
+    }
+  }
+}
+
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __global__ void rms_norm_dynamic_per_token_quant_kernel(
@@ -152,21 +272,44 @@ void rms_norm_dynamic_per_token_quant_dispatch(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
+  // Use the register kernel (4 or 8 vec4s per thread) from two tokens per SM;
+  // with fewer tokens its smaller blocks underfill the GPU. Batch-invariant
+  // mode keeps the existing block so the reduction order does not depend on
+  // num_tokens.
+  bool const can_vectorize = hidden_size % 4 == 0 and input_stride % 4 == 0;
+  bool const use_register_path =
+      can_vectorize && !vllm::vllm_is_batch_invariant() &&
+      num_tokens >= 2 * get_device_prop()->multiProcessorCount &&
+      hidden_size <= 4 * 8 * vllm::REG_KERNEL_MAX_THREADS;
+  int const vecs_per_thread =
+      use_register_path ? (hidden_size <= 4096 ? 4 : 8) : 0;
+  if (use_register_path) {
+    block = dim3(round_to_next_multiple_of(
+        div_ceil(hidden_size / 4, vecs_per_thread), 32));
+  }
+
   VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
     VLLM_STABLE_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        has_residual>
-              <<<grid, block, 0, stream>>>(
-                  out.mutable_data_ptr<scalar_t>(),
-                  scales.mutable_data_ptr<float>(),
-                  input.const_data_ptr<scalar_in_t>(),
-                  weight.const_data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
-                                       : nullptr,
-                  var_epsilon, hidden_size, input_stride,
-                  has_residual ? residual->mutable_data_ptr<scalar_in_t>()
-                               : nullptr);
+          auto kernel = vllm::rms_norm_dynamic_per_token_quant_kernel<
+              scalar_in_t, scalar_t, has_residual>;
+          if (vecs_per_thread == 4) {
+            kernel = vllm::rms_norm_dynamic_per_token_quant_reg_kernel<
+                scalar_in_t, scalar_t, has_residual, 4>;
+          } else if (vecs_per_thread == 8) {
+            kernel = vllm::rms_norm_dynamic_per_token_quant_reg_kernel<
+                scalar_in_t, scalar_t, has_residual, 8>;
+          }
+          kernel<<<grid, block, 0, stream>>>(
+              out.mutable_data_ptr<scalar_t>(),
+              scales.mutable_data_ptr<float>(),
+              input.const_data_ptr<scalar_in_t>(),
+              weight.const_data_ptr<scalar_in_t>(),
+              scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                   : nullptr,
+              var_epsilon, hidden_size, input_stride,
+              has_residual ? residual->mutable_data_ptr<scalar_in_t>()
+                           : nullptr);
         });
   });
 }
