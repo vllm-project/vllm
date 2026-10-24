@@ -103,9 +103,45 @@ def on_mi355x(monkeypatch):
     monkeypatch.setattr(runtime, "platform_reasons", lambda: [])
 
 
-@pytest.mark.parametrize("k, want", [(7, (8,)), (3, (4, 8)), (1, (2, 4, 6, 8))])
-def test_widths_are_whole_requests_up_to_eight_rows(k, want):
+@pytest.mark.parametrize(
+    "k, want",
+    [
+        (7, (8, 16, 24, 32)),
+        (5, (6, 12, 18, 24, 30)),
+        (3, (4, 8, 12, 16, 20, 24, 28, 32)),
+        (2, (3, 6, 9, 12, 15, 18, 24, 30)),
+    ],
+)
+def test_widths_are_whole_requests_up_to_32_measured_rows(k, want):
+    """Every whole-request width up to 16 rows; past it only the widths measured
+    faster than vLLM's decode (e.g. no 21 or 27 rows at k=2)."""
     assert DecodeConfig(q=k + 1).widths == want
+
+
+@pytest.mark.parametrize("width, post", [(24, False), (28, False), (30, True)])
+def test_the_widest_kda_layers_run_vllms_in_proj(width, post):
+    """From KDA_POST_TOKENS rows a KDA layer runs vLLM's AttnRes and in_proj,
+    then the kernel's KDA (``kda_post``), instead of K1."""
+    pytest.importorskip("flydsl")
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        kda,
+        local_post,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import WholeLayer
+
+    attn = SimpleNamespace(o_norm=SimpleNamespace(eps=1e-5), gate_lower_bound=-5.0)
+    norm = SimpleNamespace(variance_epsilon=1e-5)
+    layer = SimpleNamespace(
+        layer_idx=1,
+        self_attn=attn,
+        prev_valid_blocks=4,
+        is_block_write_layer=False,
+        self_attention_res_norm=norm,
+        input_layernorm=norm,
+    )
+    runner = SimpleNamespace(first_layer=1, num_spec=1)
+    k1 = WholeLayer(layer, runner, width)._k1_key(2, 4, True)
+    assert isinstance(k1, local_post.KdaPostBuild if post else kda.KdaPreBuild)
 
 
 def _k3_text_config():

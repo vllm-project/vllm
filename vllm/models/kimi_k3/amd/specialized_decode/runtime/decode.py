@@ -35,6 +35,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
     FfnLayer,
     WholeLayer,
     compile_build,
+    scratch_bytes,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.peer import tp_agree
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
@@ -120,6 +121,7 @@ class SpecializedDecode:
             b for by in self.kernels.values() for k in by.values() for b in k.builds()
         }
         for build in builds:
+            assert scratch_bytes(build) <= runner.scratch.numel(), build
             compile_build(build)
         self.failstop = FailStop(
             runner.health[FAILED : FAILED + 1], runner.rank, tp.world_size, tp.cpu_group
@@ -159,7 +161,7 @@ class SpecializedDecode:
         - pipeline-parallel stage inputs, and steps before a KV cache is bound
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
-        - widths without kernels (more than MAX_TOKENS rows);
+        - widths without kernels (not in ``DecodeConfig.widths``);
         - steps that are not pure spec-verify steps of whole uniform requests
           (``step_reason``).
 
