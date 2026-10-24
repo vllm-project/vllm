@@ -215,3 +215,54 @@ def test_layerwise_reload_of_drafter_keeps_copy(
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor), name
+
+
+def _drafter(head: torch.nn.Module | None, has_own: bool) -> torch.nn.Module:
+    drafter = torch.nn.Module()
+    if head is not None:
+        drafter.lm_head = head
+    drafter.has_own_lm_head = has_own
+    return drafter
+
+
+@requires_cuda
+def test_own_head_drafter_quantizes_its_own_head(
+    default_vllm_config, dist_init, monkeypatch
+):
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import resolve_draft_lm_head
+
+    target, own = _target_head(monkeypatch, seed=0), _target_head(monkeypatch, seed=1)
+    drafter = _drafter(own, has_own=True)
+    resolve_draft_lm_head(drafter, torch.nn.Module(), target, "fp8")
+
+    assert drafter.lm_head is not own and drafter.lm_head is not target
+    assert drafter.lm_head.weight.dtype != torch.bfloat16
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(256, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    out = logits_processor(drafter.lm_head, hidden).float()
+    own_ref = logits_processor(own, hidden).float()
+    target_ref = logits_processor(target, hidden).float()
+    # the copy follows the drafter's head, not the target's
+    assert (out - own_ref).norm() / own_ref.norm() < 0.05
+    assert (out - target_ref).norm() / target_ref.norm() > 0.5
+
+
+@requires_cuda
+def test_own_head_drafter_unquantized_keeps_its_head(
+    default_vllm_config, dist_init, monkeypatch
+):
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import resolve_draft_lm_head
+
+    target, own = _target_head(monkeypatch, seed=0), _target_head(monkeypatch, seed=1)
+    drafter = _drafter(own, has_own=True)
+    resolve_draft_lm_head(drafter, torch.nn.Module(), target, None)
+    assert drafter.lm_head is own
+
+
+def test_quantization_without_any_head_raises():
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import resolve_draft_lm_head
+
+    with pytest.raises(ValueError, match="drafter with an lm_head"):
+        resolve_draft_lm_head(
+            _drafter(None, has_own=True), torch.nn.Module(), None, "fp8"
+        )
