@@ -235,8 +235,8 @@ services:
             | awk '/^vllm:prompt_tokens_total\{/{p=$$2} /^vllm:generation_tokens_total\{/{g=$$2} END{printf "%d %d", p, g}'
         }
 
-        echo "Watchdog v6 for Swift-1.5-27B (v5 + prefill-in-flight gate)"
-        echo "  Interval: $${INTERVAL}s. Probes host.docker.internal. BUSY ceiling $${BUSY_MAX} cycles."
+        echo "Watchdog v6.1 for Swift-1.5-27B (v5 + prefill-in-flight gate, no restart while counters advance)"
+        echo "  Interval: $${INTERVAL}s (a WEDGE cycle lasts ~2 min). Probes host.docker.internal. BUSY alert every $${BUSY_MAX} cycles."
 
         while true; do
           TS=$$(date '+%Y-%m-%d %H:%M:%S')
@@ -276,20 +276,12 @@ services:
                 PT="$${CT%% *}"; GT="$${CT##* }"
                 if [ "$$SNAP_PTOKS" -ge 0 ] && { [ "$$PT" -gt "$$SNAP_PTOKS" ] || [ "$$GT" -gt "$$SNAP_GTOKS" ]; }; then
                   BUSY_COUNT=$$((BUSY_COUNT + 1))
-                  echo "$$TS WEDGE-BUSY health=200 decode=$$G — counters ADVANCED (p $$SNAP_PTOKS->$$PT g $$SNAP_GTOKS->$$GT), engine is working, NOT restarting ($$BUSY_COUNT/$$BUSY_MAX)"
+                  echo "$$TS WEDGE-BUSY health=200 decode=$$G — counters ADVANCED (p $$SNAP_PTOKS->$$PT g $$SNAP_GTOKS->$$GT), engine is working, NOT restarting (streak $$BUSY_COUNT, alert every $$BUSY_MAX)"
                   SNAP_PTOKS=$$PT
                   SNAP_GTOKS=$$GT
                   WEDGE_FAIL=$$((WEDGE_MAX - 1))
-                  if [ $$BUSY_COUNT -ge $$BUSY_MAX ]; then
-                    echo "$$TS RESTARTING $$CONTAINER (BUSY ceiling $$BUSY_MAX reached ~5min — anti-drift fallback)"
-                    docker restart $$CONTAINER
-                    WEDGE_FAIL=0
-                    BUSY_COUNT=0
-                    SNAP_PTOKS=-1
-                    WARMUP_LEFT=$$WARMUP_PROBES
-                    echo "$$TS Restart issued. Waiting 600s for boot..."
-                    sleep 600
-                    continue
+                  if [ $$((BUSY_COUNT % BUSY_MAX)) -eq 0 ]; then
+                    echo "$$TS BUSY-LONG ALERT $$CONTAINER busy $$BUSY_COUNT cycles (~$$((BUSY_COUNT * 2)) min) with counters advancing — overload, NOT restarting (a restart empties GPU/RAM caches and does not reduce the incoming load; user arbitration Q29=b, 2026-10-24)"
                   fi
                 else
                   echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters flat p=$$PT g=$$GT)"
