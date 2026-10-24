@@ -10,10 +10,17 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
+from tests.v1.core.utils import create_scheduler
+from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
+    create_request,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -32,6 +39,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlRequestMetrics,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -1042,6 +1055,115 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+@pytest.mark.cpu_test
+def test_multi_connector_request_metrics_no_mutation_or_aliasing():
+    expected = {"request": {"kv_transfer_bytes": 128, "kv_transfer_worker_time_ms": 3}}
+    nixl = NixlRequestMetrics(requests={"request": dict(expected["request"])})
+    offloading = OffloadingWorkerMetadata(completed_jobs={7: 1})
+    metadata = MultiKVConnectorWorkerMetadata(metadata=(nixl, offloading, None))
+
+    metrics = metadata.get_request_metrics()
+    assert metrics == expected
+    assert metadata.get_request_metrics() == expected
+    assert nixl.requests == expected
+    assert offloading.completed_jobs == {7: 1}
+    assert metrics is not nixl.requests
+    assert metrics["request"] is not nixl.requests["request"]
+    metrics["request"]["kv_transfer_bytes"] = -1
+    metrics["other"] = {"kv_transfer_bytes": 9}
+    assert metadata.get_request_metrics() == expected
+    assert nixl.requests == expected
+    assert offloading.completed_jobs == {7: 1}
+
+
+@pytest.mark.cpu_test
+def test_multi_connector_request_metrics_nested_additive():
+    metadata = MultiKVConnectorWorkerMetadata(
+        metadata=(
+            NixlRequestMetrics(requests={"request": {"kv_transfer_bytes": 128}}),
+            MultiKVConnectorWorkerMetadata(
+                metadata=(
+                    None,
+                    OffloadingWorkerMetadata(completed_jobs={7: 1}),
+                    NixlRequestMetrics(
+                        requests={
+                            "request": {
+                                "kv_transfer_bytes": 256,
+                                "kv_transfer_worker_time_ms": 2,
+                            },
+                            "other": {"kv_transfer_bytes": 64},
+                        }
+                    ),
+                )
+            ),
+        )
+    )
+    expected = {
+        "request": {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 2},
+        "other": {"kv_transfer_bytes": 64},
+    }
+    assert metadata.get_request_metrics() == expected
+    assert metadata.get_request_metrics() == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "children",
+    [
+        (),
+        (None, None),
+        (NixlRequestMetrics(), OffloadingWorkerMetadata(completed_jobs={7: 1})),
+        (MultiKVConnectorWorkerMetadata(metadata=(None,)),),
+    ],
+)
+def test_multi_connector_request_metrics_empty(children):
+    metadata = MultiKVConnectorWorkerMetadata(metadata=children)
+    metrics = metadata.get_request_metrics()
+    assert metrics == {}
+    metrics["request"] = {"kv_transfer_bytes": 1}
+    assert metadata.get_request_metrics() == {}
+
+
+@pytest.mark.cpu_test
+def test_multi_connector_request_metrics_rank_aggregation_once(tmp_path):
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(model=str(tmp_path), skip_tokenizer_init=True)
+    request = create_request(request_id=1)
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    outputs = [
+        create_model_runner_output(
+            [request],
+            kv_connector_worker_meta=MultiKVConnectorWorkerMetadata(
+                metadata=(
+                    NixlRequestMetrics(
+                        requests={
+                            request.request_id: {
+                                "kv_transfer_bytes": transfer_bytes,
+                                "kv_transfer_worker_time_ms": transfer_time,
+                            }
+                        }
+                    ),
+                    OffloadingWorkerMetadata(completed_jobs={7: 1}),
+                )
+            ),
+        )
+        for transfer_bytes, transfer_time in [(128, 3), (256, 2)]
+    ]
+    output = KVOutputAggregator(expected_finished_count=2).aggregate(outputs)
+    assert output is not None
+    scheduler.update_from_output(scheduled, output)
+    expected = {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 5}
+    assert request.kv_transfer_metrics == expected
+    metadata = output.kv_connector_output.kv_connector_worker_meta
+    assert isinstance(metadata, MultiKVConnectorWorkerMetadata)
+    assert metadata.get_request_metrics() == {request.request_id: expected}
+    assert metadata.get_request_metrics() == {request.request_id: expected}
+    assert metadata.metadata[1].completed_jobs == {7: 2}
 
 
 def test_multi_connector_worker_metadata(mc):

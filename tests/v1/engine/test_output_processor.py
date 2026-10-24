@@ -53,6 +53,34 @@ from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
 
 
+def test_remote_kv_wait_time_is_added_to_request_stats():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    output_processor.add_request(request, None)
+    request_state = output_processor.request_states[request.request_id]
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request", new_token_ids=[7], remote_kv_wait_time=0.75
+            )
+        ],
+        engine_core_timestamp=1.0,
+        iteration_stats=IterationStats(),
+    )
+    assert request_state.stats.remote_kv_wait_time == 0.75
+
+
 @pytest.mark.parametrize("flat_logprobs", [False, True])
 def test_delta_output_without_new_tokens_returns_empty_logprobs(
     flat_logprobs: bool,

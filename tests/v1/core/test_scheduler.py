@@ -3253,6 +3253,50 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
         assert connector_stats.hits_by_source == {}
 
 
+@pytest.mark.parametrize("remote_load", [False, True])
+def test_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path, remote_load):
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=16 if remote_load else 0, is_async=remote_load
+        ),
+        block_size=16,
+    )
+    request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
+    scheduler.add_request(request)
+    request.kv_queue_started_at["initial"] -= 1
+    with monkeypatch.context() as context:
+        context.setattr(
+            scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
+        )
+        scheduler.schedule()
+    assert request.kv_allocation_started_at is not None
+    assert request.kv_transfer_metrics["kv_initial_queue_wait_time_ms"] >= 1000
+    assert not request.kv_queue_started_at
+    assert request.remote_kv_wait_started_at is None
+    assert "kv_allocation_wait_time_ms" not in request.kv_transfer_metrics
+    request.kv_allocation_started_at -= 1
+    scheduler.schedule()
+    assert request.kv_allocation_started_at is None
+    assert request.kv_transfer_metrics["kv_allocation_wait_time_ms"] >= 1000
+    if remote_load:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert request.remote_kv_wait_started_at is not None
+        scheduler.finished_recving_kv_req_ids.add(request.request_id)
+        assert scheduler._handle_blocked_waiting_request(request)
+        request.kv_queue_started_at["post_receive"] -= 1
+        scheduler.schedule()
+        assert request.kv_transfer_metrics["kv_post_receive_queue_wait_time_ms"] >= 1000
+        assert not request.kv_queue_started_at
+    else:
+        assert request.status == RequestStatus.RUNNING
+        assert request.remote_kv_wait_started_at is None
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """Test whether Scheduler with KVConnector schedules tokens, allocates
@@ -3302,6 +3346,12 @@ def test_kv_connector_basic(is_async: bool):
 
     # Ensure ScheduleOutput is correct.
     output = scheduler.schedule()
+    for request in requests:
+        if is_async:
+            assert request.remote_kv_wait_time > 0
+            assert request.remote_kv_wait_started_at is None
+        else:
+            assert request.remote_kv_wait_time == 0
     _assert_right_scheduler_output(
         output=output,
         num_requests=NUM_REQUESTS,

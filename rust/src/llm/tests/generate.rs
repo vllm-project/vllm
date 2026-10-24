@@ -364,6 +364,10 @@ async fn generate_merges_outputs_by_stream_interval() {
                         Some(token_logprobs(token_ids)),
                         None,
                     );
+                    if output.finish_reason.is_some() {
+                        output.remote_kv_wait_time = Some(0.25);
+                        output.kv_transfer_metrics = Some(serde_json::json!({"recv_time_ms": 2.0}));
+                    }
                     // One [layer, top_k] = [1, 2] routing row per token.
                     let rows: Vec<u8> = token_ids.iter().flat_map(|&id| [id as u8, 0]).collect();
                     output.routed_experts = Some(Box::new(WireNdArray::from_raw(
@@ -428,6 +432,13 @@ async fn generate_merges_outputs_by_stream_interval() {
     for output in &outputs {
         assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
     }
+    let terminal = outputs.last().unwrap();
+    assert_eq!(terminal.remote_kv_wait_time, Some(0.25));
+    assert_eq!(
+        terminal.kv_transfer_metrics,
+        Some(serde_json::json!({"recv_time_ms": 2.0}))
+    );
+    assert!(terminal.request_timings.is_some());
     let span = |version: &str, start, end| WeightVersionSpan {
         version: version.into(),
         start,
@@ -581,6 +592,9 @@ async fn collect_output_rejects_partial_sampling_mask() {
         weight_versions: None,
         routed_experts: None,
         timestamps: Default::default(),
+        remote_kv_wait_time: None,
+        kv_transfer_metrics: None,
+        request_timings: None,
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();

@@ -125,6 +125,8 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    remote_kv_wait_time: float | None = None
+    kv_transfer_metrics: dict[str, float] | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):

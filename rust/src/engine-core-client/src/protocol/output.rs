@@ -149,6 +149,10 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    #[serde(default)]
+    pub remote_kv_wait_time: Option<f64>,
+    #[serde(default)]
+    pub kv_transfer_metrics: Option<serde_json::Value>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -595,6 +599,8 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            remote_kv_wait_time: None,
+                            kv_transfer_metrics: None,
                         },
                     ],
                     scheduler_stats: None,

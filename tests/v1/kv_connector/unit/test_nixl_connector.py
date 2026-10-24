@@ -51,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
+    NixlRequestMetrics,
     RemoteMeta,
     ReqMeta,
     compute_nixl_compatibility_hash,
@@ -89,6 +90,48 @@ from .utils import (
     make_kv_cache_config,
     maybe_update_block_size,
 )
+
+
+def test_request_transfer_metrics_aggregate():
+    first = NixlRequestMetrics(
+        {"req": {"kv_transfer_bytes": 128, "kv_transfer_worker_time_ms": 3}}
+    )
+    second = NixlRequestMetrics(
+        {"req": {"kv_transfer_bytes": 256, "kv_transfer_worker_time_ms": 2}}
+    )
+    merged = first.aggregate(second).get_request_metrics()
+    assert merged == {
+        "req": {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 5}
+    }
+
+
+def test_request_handshake_timing_precedes_ready_publication():
+    worker = object.__new__(NixlConnectorWorker)
+    future: Future[None] = Future()
+    worker._ensure_handshake = MagicMock(return_value=future)
+    worker._ready_requests = queue.Queue()
+    meta = ReqMeta(
+        local_block_ids=([],),
+        local_physical_block_ids=([],),
+        remote=RemoteMeta(
+            block_ids=([],),
+            host="localhost",
+            port=1234,
+            engine_id="engine",
+            request_id="req",
+        ),
+        tp_size=1,
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.time.perf_counter",
+        side_effect=[10.0, 12.5],
+    ):
+        worker._background_nixl_handshake("req", "engine", meta)
+        assert worker._ready_requests.empty()
+        future.set_result(None)
+    request_id, ready_meta = worker._ready_requests.get_nowait()
+    assert request_id == "req"
+    assert ready_meta.handshake_wait_time == 2.5
 
 
 @pytest.fixture(scope="module", autouse=True)

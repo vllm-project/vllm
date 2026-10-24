@@ -55,6 +55,17 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
 class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     metadata: tuple[KVConnectorWorkerMetadata | None, ...]
 
+    def get_request_metrics(self) -> dict[str, dict[str, float]]:
+        requests: dict[str, dict[str, float]] = {}
+        for metadata in self.metadata:
+            if metadata is None:
+                continue
+            for request_id, metrics in metadata.get_request_metrics().items():
+                target = requests.setdefault(request_id, {})
+                for name, value in metrics.items():
+                    target[name] = target.get(name, 0) + value
+        return requests
+
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, MultiKVConnectorWorkerMetadata)
 

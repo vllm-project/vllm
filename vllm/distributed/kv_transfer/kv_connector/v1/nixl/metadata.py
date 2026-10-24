@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 
@@ -17,6 +18,22 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+
+
+@dataclass
+class NixlRequestMetrics(KVConnectorWorkerMetadata):
+    requests: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    def get_request_metrics(self) -> dict[str, dict[str, float]]:
+        return self.requests
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> "NixlRequestMetrics":
+        for request_id, metrics in other.get_request_metrics().items():
+            target = self.requests.setdefault(request_id, {})
+            for name, value in metrics.items():
+                target[name] = target.get(name, 0) + value
+        return self
+
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -264,6 +281,7 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    handshake_wait_time: float = 0.0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

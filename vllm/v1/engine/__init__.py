@@ -245,6 +245,8 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+    remote_kv_wait_time: float | None = None
+    kv_transfer_metrics: dict[str, float] | None = None
 
     @property
     def finished(self) -> bool:

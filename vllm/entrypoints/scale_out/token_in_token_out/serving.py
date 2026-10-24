@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
@@ -131,6 +132,7 @@ class ServingTokens(GenerateBaseServing):
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
+        enable_per_request_metrics: bool = False,
         enable_log_outputs: bool = False,
     ):
         super().__init__(
@@ -142,6 +144,7 @@ class ServingTokens(GenerateBaseServing):
         self.online_renderer = online_renderer
         self.online_derenderer = online_derenderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
         self.has_tokenizer = (
@@ -565,6 +568,19 @@ class ServingTokens(GenerateBaseServing):
         else:
             response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
+        metrics = response.metrics
+        if (
+            self.enable_per_request_metrics
+            and metrics is not None
+            and response.kv_transfer_params is not None
+        ):
+            response.kv_transfer_params["prefill_metrics"] = {
+                "queue_time_ms": metrics.queue_time_ms,
+                "time_to_first_token_ms": metrics.time_to_first_token_ms,
+                "kv_allocation_wait_time_ms": metrics.kv_allocation_wait_time_ms,
+                "kv_initial_queue_wait_time_ms": metrics.kv_initial_queue_wait_time_ms,
+            }
+
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
             for choice in response.choices:
@@ -618,11 +634,20 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        per_request_metrics = None
+        per_request_metrics = (
+            build_per_request_timing_metrics(
+                final_res.metrics,
+                num_generated_tokens,
+                request.kv_transfer_params,
+            )
+            if self.enable_per_request_metrics and request.sampling_params.n == 1
+            else None
+        )
         if request.sampling_params.n == 1:
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
-                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
+                per_request_metrics = per_request_metrics or PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
         return dict(
             request_id=request_id,
             created=created_time,
@@ -783,13 +808,20 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
-                per_request_metrics = None
+                per_request_metrics = (
+                    build_per_request_timing_metrics(
+                        last_res.metrics if last_res is not None else None,
+                        total_completion_tokens,
+                        request.kv_transfer_params,
+                    )
+                    if self.enable_per_request_metrics and sampling_params.n == 1
+                    else None
+                )
                 if sampling_params.n == 1:
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
-                        per_request_metrics = PerRequestMetrics(
-                            speculative_decoding=spec_stats
-                        )
+                        per_request_metrics = per_request_metrics or PerRequestMetrics()
+                        per_request_metrics.speculative_decoding = spec_stats
                 final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                 if text_mode:
                     final_chunk = GenerateTextStreamResponse(
