@@ -14,6 +14,11 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    SPLIT_KDA_CHECKPOINT_ALIGNMENT,
+    KDAPrefillCheckpointSplit,
+    build_kda_prefill_checkpoint_split,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -97,6 +102,7 @@ class GDNAttentionMetadata:
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
+    checkpoint_split: KDAPrefillCheckpointSplit | None = None
     has_initial_state: torch.Tensor | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
@@ -166,6 +172,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
             and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
+        )
+        self.build_kda_checkpoint_split = (
+            kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            and checkpoint_alignment == SPLIT_KDA_CHECKPOINT_ALIGNMENT
         )
 
         if self.speculative_config:
@@ -601,6 +611,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 rows=plan[len(cu_starts) :],
             )
 
+        checkpoint_split: KDAPrefillCheckpointSplit | None = None
+        if checkpoint is not None and self.build_kda_checkpoint_split:
+            assert spec_sequence_masks is None
+            assert checkpoint.offsets is not None
+            assert non_spec_query_start_loc_cpu is not None
+            checkpoint_split = build_kda_prefill_checkpoint_split(
+                non_spec_query_start_loc_cpu.tolist(),
+                checkpoint.offsets,
+                num_decodes,
+                query_start_loc.device,
+            )
+
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
@@ -680,6 +702,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_actual_tokens=m.num_actual_tokens,
             checkpoint=checkpoint,
             flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
+            checkpoint_split=checkpoint_split,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
