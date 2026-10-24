@@ -108,6 +108,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    device_memory_in_use,
     has_compiled_submodule,
     make_cudagraph_stats,
 )
@@ -1091,7 +1092,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         with freeze_gc_for_cudagraph_capture():
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            # Same counter as the graph memory estimate, so the two compare.
+            start_memory = device_memory_in_use(self.device)
 
             with self.maybe_setup_dummy_loras(self.lora_config):
                 if capture_encoder:
@@ -1137,7 +1139,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         torch.accelerator.empty_cache()
                     self.kv_connector.reset_capture_state()
 
-            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            end_memory = device_memory_in_use(self.device)
 
         if not profile_only:
             # Lock workspace to prevent resizing during execution. A resize after
@@ -1146,7 +1148,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        cuda_graph_size = end_memory - start_memory
         # This usually takes 5~20 seconds.
         logger.info(
             "Graph capturing finished in %.0f secs, took %.2f GiB",

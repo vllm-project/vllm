@@ -38,6 +38,7 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -492,7 +493,7 @@ class CudaGraphManager:
                         get_offloader().sync_prev_onload()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
+                            used_before = device_memory_in_use(self.device)
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
                             torch.cuda.graph(
@@ -507,8 +508,8 @@ class CudaGraphManager:
                             get_offloader().join_after_forward()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            self._capture_mem_samples.append(free_before - free_after)
+                            used_after = device_memory_in_use(self.device)
+                            self._capture_mem_samples.append(used_after - used_before)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
 
@@ -925,7 +926,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     Called during memory profiling, *before* the real KV cache is allocated,
     so that ``Worker.determine_available_memory`` can reserve headroom for
     graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
-    once, then releases everything so the real init/capture path starts clean.
+    once, then releases profiling graphs and KV state. Persistent allocations
+    remain and are accounted for by the worker's post-profiling snapshot.
 
     FULL graphs bake in KV cache pointers, so only the largest few are
     captured (into a throwaway pool) and their total cost is extrapolated.
@@ -969,6 +971,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
         spec_manager_names: list[str] = []
+        used_with_graphs: DeviceMemoryInUse | None = None
+        uncaptured_graph_memory = 0
+        graph_memory = 0
         try:
             if not manager.needs_capture():
                 return 0
@@ -994,16 +999,15 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             manager._capture_mem_samples = mem_samples
 
             with capture_outside_cumem_pool():
-                measured = int(runner.capture_model(profile_only=True))
+                runner.capture_model(profile_only=True)
 
-            # The measured delta covers PIECEWISE, encoder and speculator graphs
-            # plus the sampled FULL graphs; swap the sampled FULL cost for the
-            # extrapolated total. FULL and PIECEWISE share one pool here just as
-            # they share the global pool at runtime, so the overlap is not
-            # double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
-            return max(measured - sum(mem_samples) + full_estimate, 0)
+            uncaptured_graph_memory = max(full_estimate - sum(mem_samples), 0)
+            torch.accelerator.synchronize()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            used_with_graphs = device_memory_in_use(runner.device)
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
             compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
@@ -1017,12 +1021,73 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # release the throwaway pool here rather than after the real init.
             for name in spec_manager_names:
                 setattr(speculator, name, None)
-            # Drop local references before teardown detaches the runner's
-            # manager and flushes the allocator.
+            # Release graph owners while keeping the profiling KV cache alive.
             del manager
+            runner.cudagraph_manager = None
+            runner.fast_prefill = None
+            if runner.model_state.supports_mm_inputs:
+                runner.model_state.encoder_runner.clear()
+            if used_with_graphs is not None:
+                # Include builder/context workspace, keeping the dummy KV alive.
+                # Retained workspaces are charged separately by the worker.
+                torch.accelerator.synchronize()
+                if hasattr(runner, "attn_groups"):
+                    runner.attn_groups.clear()
+                if hasattr(runner.model_state, "_mamba_ctx"):
+                    runner.model_state._mamba_ctx = None
+                gc.collect()
+                torch.accelerator.empty_cache()
+                graph_memory = max(
+                    used_with_graphs - device_memory_in_use(runner.device), 0
+                )
+                logger.info(
+                    "CUDA graph memory estimate: %.2f GiB (%.2f GiB released by "
+                    "the profiling graphs, %.2f GiB extrapolated for FULL graphs "
+                    "not captured during profiling).",
+                    (graph_memory + uncaptured_graph_memory) / GiB_bytes,
+                    graph_memory / GiB_bytes,
+                    uncaptured_graph_memory / GiB_bytes,
+                )
             _teardown_profiling_state(runner)
+        return graph_memory + uncaptured_graph_memory
     finally:
         platform_cls._global_graph_pool = saved_global_pool
+
+
+@dataclass(frozen=True)
+class DeviceMemoryInUse:
+    """One reading of device memory in use. Subtract two readings for the
+    memory used in between; both sides then come from the same counter."""
+
+    # This process's device memory, where the platform counts it (ROCm).
+    process: int | None
+    # Device-wide total minus free memory.
+    device: int
+
+    def __sub__(self, earlier: "DeviceMemoryInUse") -> int:
+        if self.process is not None and earlier.process is not None:
+            return self.process - earlier.process
+        return self.device - earlier.device
+
+
+def device_memory_in_use(device: torch.device) -> DeviceMemoryInUse:
+    """Device memory in use, for the difference between two readings.
+
+    Where the platform counts this process's device memory (ROCm), differences
+    use that count: it is exact and per process, and it includes memory the
+    GPU runtime allocates for graphs outside torch. ROCm's free memory rounds
+    every allocation up to 2 MB, which inflates graph estimates several times
+    over, since each captured graph makes small runtime allocations. Otherwise
+    differences use the device-wide total minus free memory, so they equal the
+    free-memory deltas used before.
+    """
+    process = current_platform.get_process_device_memory_bytes(device)
+    # Torch's reserved memory is part of this process's memory; a lower
+    # reading means the counter is not what we expect, so it is not used.
+    if process is not None and process < torch.accelerator.memory_reserved(device):
+        process = None
+    free, total = torch.accelerator.get_memory_info()
+    return DeviceMemoryInUse(process, total - free)
 
 
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
@@ -1060,7 +1125,7 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
-    """Release the profiling KV cache and captured graphs while keeping model
+    """Release the profiling KV cache and metadata while keeping model
     weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
@@ -1079,12 +1144,6 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.attn_groups.clear()
     if hasattr(runner, "kv_cache_config"):
         del runner.kv_cache_config
-    # Dropping the manager releases the profiling graphs and throwaway pool.
-    runner.cudagraph_manager = None
-    # Release encoder graphs captured during profiling; the real
-    # capture_model() re-captures them.
-    if runner.model_state.supports_mm_inputs:
-        runner.model_state.encoder_runner.clear()
     # Detach profiling KV tensors held by attention layers. The layers live
     # in the static forward context for compiled models.
     layers: Iterable[Any] = runner.compilation_config.static_forward_context.values()
