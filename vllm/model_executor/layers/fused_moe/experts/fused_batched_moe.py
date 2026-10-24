@@ -678,12 +678,18 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
 
         N = w1.size(1) // 2
 
+        # Copy expert_num_tokens to CPU once to avoid per-expert GPU sync.
+        if _is_capturing_or_compiling():
+            expert_num_tokens_cpu = None
+        else:
+            expert_num_tokens_cpu = expert_num_tokens.tolist()
+
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
             if _is_capturing_or_compiling():
                 num = hidden_states.shape[1]
             else:
-                num = int(expert_num_tokens[expert].item())
+                num = expert_num_tokens_cpu[expert]
 
             if num == 0:
                 continue
