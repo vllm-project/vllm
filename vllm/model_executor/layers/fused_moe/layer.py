@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import ParallelConfig, get_current_vllm_config
+from vllm.config import LoRAConfig, ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_pcp_group,
@@ -373,7 +373,7 @@ def FusedMoEFactory(
         max_num_tokens=max_num_batched_tokens,
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
-        is_lora_enabled=vllm_config.lora_config is not None,
+        is_lora_enabled=_is_moe_lora_target(vllm_config.lora_config, layer_name),
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
@@ -468,6 +468,15 @@ def FusedMoEFactory(
     )
 
     return runner
+
+
+def _is_moe_lora_target(lora_config: LoRAConfig | None, layer_name: str) -> bool:
+    """Whether the LoRA manager wraps this MoE (same target_modules check)."""
+    if lora_config is None:
+        return False
+    from vllm.lora.utils import is_in_target_modules  # import cycle
+
+    return is_in_target_modules(layer_name, lora_config.target_modules)
 
 
 def fused_moe_make_expert_params_mapping(
