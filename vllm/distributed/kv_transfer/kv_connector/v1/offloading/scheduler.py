@@ -34,8 +34,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -127,32 +125,6 @@ class GroupOffloadConfig(NamedTuple):
         return window
 
 
-def get_sliding_window_size_in_chunks(
-    kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
-) -> int | None:
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        assert kv_cache_spec.sliding_window > 0
-        return max(
-            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
-            cdiv(
-                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
-                tokens_per_chunk,
-            ),
-        )
-
-    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
-        # Attention never reaches back past one chunk
-        assert kv_cache_spec.attention_chunk_size > 0
-        return cdiv(kv_cache_spec.attention_chunk_size, tokens_per_chunk)
-
-    if isinstance(kv_cache_spec, MambaSpec):
-        # Mamba depends on a single state
-        return 1
-
-    assert isinstance(kv_cache_spec, FullAttentionSpec)
-    return None
-
-
 def resolve_mamba_align_size(
     spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
 ) -> int | None:
@@ -199,13 +171,10 @@ class SchedulerOffloadConfig(NamedTuple):
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_tokens_per_chunk: set[int] = set()
         for group in spec.config.groups:
-            tokens_per_block = group.tokens_per_block
-            kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
-            if sw is None:
-                full_attn_tokens_per_chunk.add(tokens_per_block * spec.blocks_per_chunk)
+            if group.sliding_window_size_in_chunks is None:
+                full_attn_tokens_per_chunk.add(
+                    group.tokens_per_block * spec.blocks_per_chunk
+                )
 
         # Only apply the optimization if there's a single consistent
         # full-attention alignment size.  For pure SWA/Mamba models (no
@@ -264,9 +233,6 @@ class SchedulerOffloadConfig(NamedTuple):
             tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
             kv_spec = kv_cache_group.kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
             manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
             assert manager_cls is not None, (
                 f"No manager found for KV cache spec {type(kv_spec).__name__}"
@@ -280,7 +246,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
-                    sliding_window_size_in_chunks=sw,
+                    sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
