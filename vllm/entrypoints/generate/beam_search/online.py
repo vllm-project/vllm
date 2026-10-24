@@ -21,6 +21,9 @@ from .utils import (
     BeamSearchSequence,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
+    resolve_returned_logprobs_cap,
+    trim_step_logprobs,
+    validate_beam_width,
 )
 
 
@@ -69,9 +72,18 @@ class BeamSearchOnlineMixin(ABC):
             temperature=temperature,
             watermarking=False,
             detokenize=False,
+            logprobs_are_internal=True,
         )
         params.configure_logprobs(
             sampling_params, self.engine_client.input_processor.vllm_config
+        )
+        validate_beam_width(
+            beam_width, sampling_params, self.engine_client.input_processor.vllm_config
+        )
+        # Each returned beam carries no more per-step logprobs than a client may be
+        # returned, though the search looked at 2 * beam_width candidates.
+        returned_logprobs_cap = resolve_returned_logprobs_cap(
+            self.engine_client.input_processor.vllm_config
         )
         allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
         eos_token_ids = get_beam_search_eos_token_ids(
@@ -172,7 +184,14 @@ class BeamSearchOnlineMixin(ABC):
                                     tokens=current_beam.tokens + [token_id]
                                     if include_stop_str_in_output
                                     else current_beam.tokens,
-                                    logprobs=current_beam.logprobs + [logprobs],
+                                    logprobs=current_beam.logprobs
+                                    + [
+                                        trim_step_logprobs(
+                                            logprobs,
+                                            token_id,
+                                            returned_logprobs_cap,
+                                        )
+                                    ],
                                     cum_logprob=candidate_logprob,
                                     finish_reason="stop",
                                     stop_reason=token_id,
@@ -210,7 +229,12 @@ class BeamSearchOnlineMixin(ABC):
                     BeamSearchSequence(
                         orig_prompt=prompt,
                         tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs + [logprobs],
+                        logprobs=current_beam.logprobs
+                        + [
+                            trim_step_logprobs(
+                                logprobs, token_id, returned_logprobs_cap
+                            )
+                        ],
                         lora_request=current_beam.lora_request,
                         cum_logprob=cum_logprob,
                     )
