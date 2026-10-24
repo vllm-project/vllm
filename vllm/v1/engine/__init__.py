@@ -56,8 +56,7 @@ class CheckpointState(enum.StrEnum):
 
     @property
     def is_restored(self) -> bool:
-        """Whether external state is back, so memory may wake and scheduling
-        may resume."""
+        """Whether released state is back, so memory may wake and scheduling resume."""
         return self in (CheckpointState.RUNNING, CheckpointState.RESUMING)
 
 

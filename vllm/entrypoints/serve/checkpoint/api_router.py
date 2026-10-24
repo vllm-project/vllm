@@ -24,9 +24,8 @@ def _state_response(
 
 @router.post("/checkpoint/prepare")
 async def checkpoint_prepare(raw_request: Request, mode: PauseMode = "wait"):
-    """Drain with `mode` and release what a process checkpoint must not
-    contain. Returns once started: poll /checkpoint/status until it is 200.
-    Repeating is a no-op."""
+    """Drain with `mode` and release what a checkpoint must not contain.
+    Returns once started; poll /checkpoint/status. Repeating is a no-op."""
     client = engine_client(raw_request)
     state, error = await client.checkpoint_state()
     if state == CheckpointState.RUNNING:
@@ -40,9 +39,8 @@ async def checkpoint_prepare(raw_request: Request, mode: PauseMode = "wait"):
 
 @router.post("/checkpoint/resume")
 async def checkpoint_resume(raw_request: Request):
-    """Bring back what preparing released and serve, in the restored process
-    or in place. Orchestrators may deliver this more than once, so a resume in
-    progress or done returns 200."""
+    """Bring back what preparing released and serve. Orchestrators may
+    redeliver, so a resume in progress or done returns 200."""
     client = engine_client(raw_request)
     state, error = await client.checkpoint_state()
     if state in (CheckpointState.PREPARING, CheckpointState.FAILED):
@@ -55,8 +53,8 @@ async def checkpoint_resume(raw_request: Request):
 
 @router.get("/checkpoint/status")
 async def checkpoint_status(raw_request: Request):
-    # Orchestrators poll this route to learn when the process is safe to
-    # capture: 200 once prepared, 503 until then and 500 if that cannot happen.
+    # Polled by orchestrators: 200 once prepared (safe to capture), 503 until
+    # then, 500 after a failure.
     state, error = await engine_client(raw_request).checkpoint_state()
     if state == CheckpointState.PREPARED:
         status_code = 200
