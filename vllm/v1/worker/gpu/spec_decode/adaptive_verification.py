@@ -175,14 +175,18 @@ class AdaptiveVerificationManager:
             for _ in range(2)
         ]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
-        self._pending_resets: list[int] = []
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+        # A slot's row is valid only if the slot was copied after the row's request
+        # arrived; older copies hold a previous request's confidences.
+        self._step = 0
+        self._copy_step = [0, 0]
+        # int64 so step counts never overflow (~29M years at 10k steps/s).
+        self._added_step = np.zeros(max_num_reqs, dtype=np.int64)
 
     def add_request(self, req_idx: int) -> None:
-        self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
-        self._pending_resets.append(req_idx)
+        self._added_step[req_idx] = self._step
         self._confidence_probs[req_idx].fill_(1.0)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
@@ -259,21 +263,19 @@ class AdaptiveVerificationManager:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
         num_reqs = input_batch.num_reqs
-        ready_idx = self._stale_idx ^ 1
-        with gpu_sync_allowed():
-            self._copy_events[ready_idx].synchronize()
-        if self._pending_resets:
-            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
-            self._pending_resets.clear()
-        # Last step's copy has landed: budgets read it, this step overwrites the
-        # slot they were reading before.
-        self._stale_idx, write_idx = ready_idx, self._stale_idx
+        # Budgets read last step's slot, this step overwrites the slot they were
+        # reading before. get_num_tokens waits for last step's copy, not this.
+        self._stale_idx, write_idx = self._stale_idx ^ 1, self._stale_idx
+        self._step += 1
+        self._copy_step[write_idx] = self._step
 
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
         write_slot = self._stale_confidences[write_idx]
+        current_stream = torch.cuda.current_stream(self.req_states.device)
+        # The slot's previous copy may still read its GPU buffer (waits on device).
+        current_stream.wait_event(self._copy_events[write_idx])
         write_slot.gpu.copy_(self._confidence_probs)
 
-        current_stream = torch.cuda.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
@@ -306,7 +308,13 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=num_reqs,
         )
+        if scheduled_drafts.any():
+            # A step after it was issued, this copy has almost always landed.
+            with gpu_sync_allowed():
+                self._copy_events[self._stale_idx].synchronize()
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        is_new = self._added_step[slots] >= self._copy_step[self._stale_idx]
+        stale_confidences[is_new] = 1.0
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]

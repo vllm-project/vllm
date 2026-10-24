@@ -26,6 +26,9 @@ def make_manager(
     manager.num_speculative_steps = num_steps
     manager._stale_confidences = [SimpleNamespace(np=confidences)]  # type: ignore[list-item]  # CPU-only confidence buffer.
     manager._stale_idx = 0
+    manager._copy_events = [SimpleNamespace(synchronize=lambda: None)]  # type: ignore[list-item]
+    manager._copy_step = [1]  # Copied after every request below arrived.
+    manager._added_step = np.zeros(num_reqs, dtype=np.int64)
     manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),
