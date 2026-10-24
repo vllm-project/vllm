@@ -95,6 +95,20 @@ vllm serve <model> \
   }'
 ```
 
+## Canonical Offloading for Chunked-Local Attention
+
+Chunked-local attention (including mixed chunked-local/full-attention models)
+supports canonical KV offloading across compatible tensor-parallel sizes. Set
+`canonical_layout: true` in `kv_connector_extra_config` on every instance sharing
+the cache; the option defaults to `false`. For filesystem sharing, add this
+option to the `TieringOffloadingSpec` configuration in [Multi-Tier Setup](#multi-tier-setup)
+and use the same `root_dir` on the producer and consumer.
+
+Only live blocks needed by the current attention chunk are restored. Canonical
+offloading still requires compatible KV head counts and runtime tensor layouts;
+this support does not enable per-token-head KV quantization or pipeline/context
+parallelism.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |

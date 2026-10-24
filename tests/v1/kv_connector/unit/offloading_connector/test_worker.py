@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -39,6 +46,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 NUM_BLOCKS = 10
 BLOCK_SIZE = 16
@@ -522,6 +530,75 @@ def test_register_kv_caches(backend):
             assert actual.page_size_bytes == expected.page_size_bytes
             # Every layer gets a canonical mapping, certified or opaque
             assert actual.mapping is not None
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("padding", [0, 128])
+def test_register_chunked_local_canonical_cpu(tp_size, padding):
+    """Real CPU allocation preserves per-layer mappings and padded byte views."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+
+    kwargs = dict(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS // tp_size,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page = 2 * BLOCK_SIZE * kwargs["num_kv_heads"] * HEAD_SIZE * get_dtype_size(DTYPE)
+    specs = [
+        ChunkedLocalAttentionSpec(
+            **kwargs, attention_chunk_size=128, page_size_padded=page + padding
+        ),
+        FullAttentionSpec(**kwargs, page_size_padded=page + padding),
+    ]
+    layer_bytes = NUM_BLOCKS * (page + padding)
+    kv_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * layer_bytes,
+                layers=[name],
+                offset=i * layer_bytes,
+                layer_stride=layer_bytes,
+                block_stride=page + padding,
+            )
+            for i, name in enumerate(("local", "full"))
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec([name], spec)
+            for name, spec in zip(("local", "full"), specs)
+        ],
+    )
+    caches = _allocate_kv_caches(kv_config, [], torch.device("cpu"))
+    assert caches["full"].storage_offset() > 0
+    config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        extra_config={"canonical_layout": True, "cpu_bytes_to_use": 1 << 20},
+    )
+    for rank in range(tp_size):
+        config.parallel_config.rank = rank
+        spec = TieringOffloadingSpec(build_offloading_config(config, kv_config))
+        assert spec.config.parallel.is_parallelism_agnostic
+        worker = OffloadingConnectorWorker(spec, config, kv_config)
+        with patch.object(spec, "get_worker") as get_worker:
+            worker.register_kv_caches(caches)
+        canonical = get_worker.call_args.args[0]
+        spec._validate_canonical_refs(canonical)
+        assert spec.all_layers_portable
+        assert len(canonical.tensors) == len(canonical.group_data_refs) == 2
+        for i, name in enumerate(("local", "full")):
+            [ref] = canonical.group_data_refs[i]
+            assert ref.tensor_idx == i
+            assert ref.page_size_bytes == page
+            assert ref.mapping is not None and ref.mapping.parallelism_agnostic
+            assert ref.mapping.local_page_size_bytes == page
+            assert ref.mapping.canonical_page_size_bytes == page * tp_size
+            tensor = canonical.tensors[ref.tensor_idx].tensor
+            assert tensor.data_ptr() == caches[name].data_ptr()
+            assert tensor.shape == (NUM_BLOCKS, page + padding)
+            assert tensor.stride() == (page + padding, 1)
 
 
 def test_register_packed_kv_caches_skips_scratch_group():

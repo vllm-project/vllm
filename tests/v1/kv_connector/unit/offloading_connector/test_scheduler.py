@@ -50,6 +50,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
     FullAttentionManager,
     SlidingWindowManager,
 )
@@ -4653,6 +4654,143 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def _make_chunked_local_scheduler(prompt_tokens):
+    cache_spec = ChunkedLocalAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        attention_chunk_size=8,
+    )
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    config.cache_config.block_size = 4
+    config.model_config.get_total_num_kv_heads.return_value = 1
+    config.speculative_config = None
+    kv_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["local"], cache_spec)],
+    )
+    spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
+    assert spec.config.parallel.is_parallelism_agnostic
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = MagicMock()
+    request.request_id = "local"
+    request.kv_transfer_params = None
+    request.num_tokens = request.num_prompt_tokens = prompt_tokens
+    request.num_computed_tokens = 0
+    request.block_hashes = [
+        BlockHash(f"h{i}".encode()) for i in range(prompt_tokens // 4)
+    ]
+    request.is_finished.return_value = False
+    request.skip_reading_prefix_cache = False
+    request.status = RequestStatus.RUNNING
+    scheduler.on_new_request(request)
+    manager = ChunkedLocalAttentionManager(
+        kv_cache_spec=cache_spec,
+        block_pool=BlockPool(32, enable_caching=True, hash_block_size=4),
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    return scheduler, request, manager
+
+
+@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 31, 32, 33])
+@pytest.mark.parametrize("step_size", [4, 32])
+def test_chunked_local_prefill_store_boundaries(prompt_tokens, step_size):
+    """Prefill stores complete live blocks once, never released or partial blocks."""
+    scheduler, request, manager = _make_chunked_local_scheduler(prompt_tokens)
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    blocks = manager.block_pool.get_new_blocks((prompt_tokens + 3) // 4)
+    manager.req_to_blocks[request.request_id] = blocks
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, ctx: generate_store_output(keys)
+    )
+    stored: set[int] = set()
+    for start in range(0, prompt_tokens, step_size):
+        end = min(start + step_size, prompt_tokens)
+        request.num_computed_tokens = start
+        manager.remove_skipped_blocks(request.request_id, start)
+        state.group_states[0].block_ids[:] = [b.block_id for b in blocks]
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = {request.request_id: end - start}
+        jobs = scheduler._build_store_jobs(output)
+        expected_indices = set(range(start // 8 * 2, end // 4)) - stored
+        actual_keys = {key for jid in jobs for key in scheduler._jobs[jid].keys}
+        assert actual_keys == {
+            make_offload_key(request.block_hashes[i], 0) for i in expected_indices
+        }
+        assert [bid for job in jobs.values() for bid in job.src_spec.block_ids] == [
+            blocks[i].block_id for i in sorted(expected_indices)
+        ]
+        stored.update(expected_indices)
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={jid: 1 for jid in jobs}
+                )
+            )
+        )
+    assert stored == set(range(prompt_tokens // 4))
+
+
+def test_chunked_local_store_retry_skips_released_blocks():
+    """A failed store must not retry keys whose GPU blocks have since been freed."""
+    scheduler, request, manager = _make_chunked_local_scheduler(13)
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    blocks = manager.block_pool.get_new_blocks(4)
+    manager.req_to_blocks[request.request_id] = blocks
+    state.group_states[0].block_ids[:] = [b.block_id for b in blocks]
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {request.request_id: 8}
+    scheduler.manager.prepare_store.return_value = None
+    assert not scheduler._build_store_jobs(output)
+    assert state.group_states[0].next_stored_chunk_idx == 0
+
+    request.num_computed_tokens = 8
+    manager.remove_skipped_blocks(request.request_id, 8)
+    assert all(b.is_null for b in blocks[:2])
+    state.group_states[0].block_ids[:] = [b.block_id for b in blocks]
+    output.num_scheduled_tokens = {request.request_id: 4}
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, ctx: generate_store_output(keys)
+    )
+    jobs = scheduler._build_store_jobs(output)
+    [job_id] = jobs
+    assert scheduler._jobs[job_id].keys == {
+        make_offload_key(request.block_hashes[2], 0)
+    }
+    assert jobs[job_id].src_spec.block_ids.tolist() == [blocks[2].block_id]
+
+
+@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 31, 32, 33])
+def test_chunked_local_load_skips_previous_attention_chunks(prompt_tokens):
+    """Load jobs restore only the live chunk, including an empty tail at its start."""
+    scheduler, request, manager = _make_chunked_local_scheduler(prompt_tokens)
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    external, asynchronous = scheduler.get_num_new_matched_tokens(request, 0)
+    # A cached full block may supply all but the final prompt token.
+    boundary = min(prompt_tokens // 4 * 4, prompt_tokens - 1)
+    assert (external, asynchronous) == (boundary, True)
+    manager.add_local_computed_blocks(request.request_id, [], 0, boundary)
+    manager.allocate_external_computed_blocks(request.request_id, 0, boundary)
+    blocks = manager.req_to_blocks[request.request_id]
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), boundary)
+    [job] = scheduler._current_batch_load_jobs.values()
+    first_live = boundary // 8 * 2
+    assert job.src_spec.offload_keys == [
+        make_offload_key(request.block_hashes[i], 0)
+        for i in range(first_live, (boundary + 3) // 4)
+    ]
+    assert job.dst_spec.block_ids.tolist() == [
+        block.block_id for block in blocks[first_live : (boundary + 3) // 4]
+    ]
+    assert all(block.is_null for block in blocks[:first_live])
 
 
 def test_chunked_local_attention_reports_its_chunk_window():
