@@ -120,6 +120,12 @@ class TranscriptionRequest(OpenAIBaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+
+    include_word_probabilities: bool = False
+    """With word timestamps, also return each word's ``probability``: the mean
+    probability of its tokens as sampled, leaving out punctuation-only tokens at
+    the word's edges. Off by default because it reads the sampled token's
+    logprob for every decoded token, which adds latency."""
     # --8<-- [end:transcription-extra-params]
 
     to_language: str | None = None
@@ -343,6 +349,12 @@ class TranscriptionWord(OpenAIBaseModel):
 
     word: str
     """The text content of the word."""
+
+    probability: float | None = Field(default=None, exclude_if=lambda v: v is None)
+    """Mean probability of the word's tokens as sampled during decoding, with
+    punctuation-only tokens at the word's edges left out. Only present when the
+    request set ``include_word_probabilities`` (vLLM extension, not part of the
+    OpenAI schema); otherwise omitted from the response."""
 
 
 class TranscriptionSegment(OpenAIBaseModel):
