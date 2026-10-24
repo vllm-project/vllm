@@ -1429,6 +1429,71 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def _finish_step(scheduler, output, sampled: dict[str, list[int]] | None = None):
+    req_ids = list(output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[(sampled or {}).get(r, []) for r in req_ids],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
+def test_context_budget_shortens_then_defers_deep_prefill_chunks():
+    """Prefill chunks deep into long prompts are shortened, then deferred, so
+    the step's summed context (computed + new tokens per chunk) stays within
+    max_num_batched_context_tokens; the step's first prefill chunk is not."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=256,
+        max_num_batched_context_tokens=1000,
+    )
+    first, second = create_requests(num_requests=2, num_tokens=2000)
+    for request in (first, second):
+        scheduler.add_request(request)
+
+    # Context so far is small: both get the full 256-token chunk.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[first.request_id] == 256
+    assert output.num_scheduled_tokens[second.request_id] == 256
+    _finish_step(scheduler, output)
+
+    # first: 256 + 256 = 512. second fits 1000 - 512 - 256 = 232 new tokens.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[first.request_id] == 256
+    assert output.num_scheduled_tokens[second.request_id] == 232
+    _finish_step(scheduler, output)
+
+    # first: 512 + 256 = 768 leaves no room over second's 488 computed tokens.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[first.request_id] == 256
+    assert second.request_id not in output.num_scheduled_tokens
+
+
+def test_context_budget_ignores_decode_tokens():
+    """Decodes do not count against the prefill context budget."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=4096,
+        max_num_batched_context_tokens=600,
+    )
+    decoding = create_requests(num_requests=1, num_tokens=1000, req_ids=["dec"])[0]
+    scheduler.add_request(decoding)
+    output = scheduler.schedule()
+    _finish_step(scheduler, output, {decoding.request_id: [0]})
+
+    prefills = create_requests(num_requests=2, num_tokens=200, req_ids=["a", "b"])
+    for request in prefills:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[decoding.request_id] == 1
+    assert all(output.num_scheduled_tokens[r.request_id] == 200 for r in prefills)
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
