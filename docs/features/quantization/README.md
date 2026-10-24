@@ -40,6 +40,15 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+On Hopper (compute capability 9.0), automatic selection gives weight-only
+layers with 4-bit integer weights and FP16/BF16 activations (GPTQ, AWQ and
+compressed-tensors W4A16 checkpoints) to Humming first, then Machete and
+Marlin: Humming's 4-bit GEMM is faster than Machete at decode-sized batches
+and on par at prefill sizes. Layers with 8-bit integer weights keep Machete
+first. To use Machete for the 4-bit layers, pass
+`--kernel-config '{"linear_backend_per_quant":{"mixed_precision":"machete"}}'`
+or `--linear-backend machete`.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

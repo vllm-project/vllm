@@ -26,8 +26,10 @@ def prefers_humming(compute_capability: int | None = None) -> bool:
 def prioritize_humming(
     kernels: list[_KernelT],
     compute_capability: int | None = None,
+    ahead_of: str = "marlin",
 ) -> list[_KernelT]:
-    """Move Humming directly ahead of Marlin where Humming is preferred.
+    """Move Humming directly ahead of the first ``ahead_of`` kernel (Marlin
+    by default) where Humming is preferred.
 
     Every other entry keeps its relative order and the input list is not
     modified. Match kernel class names or MoE backend enum names.
@@ -40,9 +42,9 @@ def prioritize_humming(
         for kernel in kernels
     ]
     humming = next((i for i, name in enumerate(names) if "humming" in name), None)
-    marlin = next((i for i, name in enumerate(names) if "marlin" in name), None)
-    if humming is None or marlin is None or humming < marlin:
+    target = next((i for i, name in enumerate(names) if ahead_of in name), None)
+    if humming is None or target is None or humming < target:
         return kernels
     kernels = kernels.copy()
-    kernels.insert(marlin, kernels.pop(humming))
+    kernels.insert(target, kernels.pop(humming))
     return kernels

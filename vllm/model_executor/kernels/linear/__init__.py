@@ -914,6 +914,15 @@ def choose_mp_linear_kernel(
         quantization="mixed_precision",
         compute_capability=compute_capability,
     )
+    # On SM90, Humming's 4-bit GEMM beats Machete at decode-sized M and matches
+    # it at prefill sizes; with 8-bit weights it is slower at prefill.
+    if config.weight_type.size_bits == 4 and config.act_type in (
+        torch.float16,
+        torch.bfloat16,
+    ):
+        platform_kernels = prioritize_humming(
+            platform_kernels, compute_capability, ahead_of="machete"
+        )
 
     failure_reasons = []
     for kernel in platform_kernels:
