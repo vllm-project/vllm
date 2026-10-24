@@ -1000,12 +1000,13 @@ async def test_messages_render_system_and_multi_turn(client):
 
 
 @pytest.mark.asyncio
-async def test_messages_render_merges_inline_system(client):
-    """Inline system messages merge into the leading system block.
+async def test_messages_render_folds_inline_system(client):
+    """Inline system messages fold into the next user message.
 
     The model's chat template rejects non-leading system messages, so the
-    /v1/messages server path detects merge_inline_system=True and render must
-    produce the same tokens as the manually pre-merged request.
+    /v1/messages server path detects merge_inline_system=True. Folding in
+    place keeps the leading system prompt stable across turns (#63331), so
+    render must produce the same tokens as the manually folded request.
     """
     inline = await client.post(
         "/v1/messages/render",
@@ -1023,22 +1024,22 @@ async def test_messages_render_merges_inline_system(client):
     )
     assert inline.status_code == 200
 
-    merged = await client.post(
+    folded = await client.post(
         "/v1/messages/render",
         json={
             "model": MODEL_NAME,
             "max_tokens": 16,
-            "system": "You are a helpful assistant.Be brief.",
+            "system": "You are a helpful assistant.",
             "messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi! How can I help?"},
-                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "user", "content": "Be brief.\n\nWhat is 2 + 2?"},
             ],
         },
     )
-    assert merged.status_code == 200
+    assert folded.status_code == 200
 
-    assert inline.json()["token_ids"] == merged.json()["token_ids"]
+    assert inline.json()["token_ids"] == folded.json()["token_ids"]
 
 
 @pytest.mark.asyncio

@@ -291,10 +291,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.warning_once(
                 "The chat template requires system-first ordering, so inline "
                 "system messages in /v1/messages requests (e.g. Claude Code's "
-                "per-turn reminders) are merged into the leading system prompt. "
-                "Each new one changes the prompt prefix, so the rest of the "
-                "conversation misses the prefix cache. Pass a --chat-template "
-                "that accepts non-leading system messages to avoid this."
+                "per-turn reminders) are folded into the neighbouring user or "
+                "tool message and lose their system role. Pass a "
+                "--chat-template that accepts non-leading system messages to "
+                "keep them as system messages."
             )
         return merge
 
@@ -401,13 +401,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
-        # When the template requires system-first ordering, extract inline
-        # system messages from the messages array and merge them into the
-        # top-level block so the template doesn't reject them.
+        # When the template requires system-first ordering, merge the system
+        # messages that lead the messages array into the top-level block.
+        # Later ones are folded in place by _convert_messages.
         if merge_inline_system:
             for msg in anthropic_request.messages:
                 if msg.role != "system":
-                    continue
+                    break
                 text = cls._extract_system_text(msg)
                 if text:
                     system_parts.append(text)
@@ -440,6 +440,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic messages to OpenAI format."""
+        leading = True
+        pending_system: list[str] = []
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -447,13 +449,22 @@ class AnthropicServingMessages(OpenAIServingChat):
             # doesn't strip billing headers and may produce messages with
             # no "content" key.
             if msg.role == "system":
-                if merge_inline_system:
-                    continue  # already merged into top-level by _convert_system_message
                 text = cls._extract_system_text(msg)
-                if text:
-                    openai_messages.append({"role": "system", "content": text})
+                if not merge_inline_system:
+                    if text:
+                        openai_messages.append({"role": "system", "content": text})
+                elif leading or not text:
+                    pass  # leading ones were merged by _convert_system_message
+                elif openai_messages and cls._can_fold_system_into(openai_messages[-1]):
+                    # Fold in place so a per-turn system message doesn't
+                    # change the prompt prefix and defeat prefix caching.
+                    cls._fold_system_text(openai_messages[-1], text)
+                else:
+                    pending_system.append(text)
                 continue
 
+            leading = False
+            start = len(openai_messages)
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
 
             if isinstance(msg.content, str):
@@ -463,6 +474,49 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             if not (msg.role == "user" and "content" not in openai_msg):
                 openai_messages.append(openai_msg)
+
+            if pending_system:
+                target = next(
+                    (
+                        m
+                        for m in openai_messages[start:]
+                        if cls._can_fold_system_into(m)
+                    ),
+                    None,
+                )
+                if target is not None:
+                    cls._fold_system_text(
+                        target, "\n\n".join(pending_system), prepend=True
+                    )
+                    pending_system.clear()
+
+        if pending_system:
+            openai_messages.append(
+                {"role": "user", "content": "\n\n".join(pending_system)}
+            )
+
+    @staticmethod
+    def _can_fold_system_into(message: dict[str, Any]) -> bool:
+        """Structured tool content (e.g. tool_reference) is left untouched."""
+        return message["role"] == "user" or (
+            message["role"] == "tool" and isinstance(message.get("content"), str)
+        )
+
+    @staticmethod
+    def _fold_system_text(
+        message: dict[str, Any], text: str, *, prepend: bool = False
+    ) -> None:
+        """Add inline system text to a user or tool message's content."""
+        content = message.get("content")
+        if isinstance(content, list):
+            part = {"type": "text", "text": text}
+            message["content"] = [part, *content] if prepend else [*content, part]
+        elif content:
+            message["content"] = (
+                f"{text}\n\n{content}" if prepend else f"{content}\n\n{text}"
+            )
+        else:
+            message["content"] = text
 
     @classmethod
     def _convert_message_content(
