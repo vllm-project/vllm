@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_FP8_PREFILL: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -1360,6 +1361,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
+    ),
+    # Whether the ROCM_AITER_FA backend runs eligible head-dim-256 prefill and
+    # extend attention through aiter's Triton MHA with per-tensor FP8 Q/K/V
+    # instead of the CK kernel. Lossy and not batch invariant (one scale per
+    # call). Ineligible calls keep the CK kernel. gfx942 only.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_FP8_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_FP8_PREFILL", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel for MLA kv_b_proj.
     # By default is disabled: it re-quantizes the projection weights online,
