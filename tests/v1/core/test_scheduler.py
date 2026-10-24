@@ -1429,6 +1429,39 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def _defer_scheduler():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=256, long_prefill_token_threshold=64
+    )
+    scheduler.scheduler_config.long_prefill_token_threshold_defer = True
+    return scheduler
+
+
+def test_long_prefill_defer_runs_after_waiting_requests():
+    """The long prefill gets the leftover after the waiting requests, sits out
+    if that is below the threshold, and then runs first."""
+    scheduler = _defer_scheduler()
+    long_req = create_requests(num_requests=1, num_tokens=1000)[0]
+    long_id = long_req.request_id
+    scheduler.add_request(long_req)
+    assert scheduler.schedule().num_scheduled_tokens == {long_id: 256}
+    for req in create_requests(2, num_tokens=75, req_ids=["a", "b"]):
+        scheduler.add_request(req)
+    assert scheduler.schedule().num_scheduled_tokens == {"a": 75, "b": 75, long_id: 106}
+    for req in create_requests(2, num_tokens=220, req_ids=["c", "d"]):
+        scheduler.add_request(req)
+    assert scheduler.schedule().num_scheduled_tokens == {"c": 220, "d": 36}
+    assert scheduler.schedule().num_scheduled_tokens == {long_id: 256}
+
+
+def test_long_prefill_defer_takes_turns():
+    scheduler = _defer_scheduler()
+    for req in create_requests(num_requests=2, num_tokens=2000):
+        scheduler.add_request(req)
+    turns = [list(scheduler.schedule().num_scheduled_tokens) for _ in range(6)]
+    assert turns == [["0"], ["1"]] * 3
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()

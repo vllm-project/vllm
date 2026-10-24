@@ -143,6 +143,8 @@ class Scheduler(SchedulerInterface):
         self.adaptive_long_prefill_threshold = (
             self.scheduler_config.long_prefill_token_threshold_adaptive
         )
+        self.last_long_req_id: str | None = None
+        self.long_prefill_skipped = False
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -739,6 +741,32 @@ class Scheduler(SchedulerInterface):
             if num_eligible_reqs > 1
             else 0
         )
+        # Defer mode: a long prefill (one that cannot finish this step) pays a
+        # per-step cost that grows with its context, so rather than splitting the
+        # budget, long prefills take turns, each running after the WAITING
+        # requests with the leftover. One that sat out its turn runs first next.
+        long_req: Request | None = None
+        held_long_req_ids: set[str] = set()
+        if (
+            long_prefill_token_threshold > 0
+            and self.scheduler_config.long_prefill_token_threshold_defer
+        ):
+            long_prefill_token_threshold = 0
+            long_reqs = [
+                r
+                for r in self.running
+                if r.num_tokens - r.num_computed_tokens > input_budget - draft_slots
+            ]
+            ids = [r.request_id for r in long_reqs]
+            held_long_req_ids = set(ids)
+            if ids:
+                last = self.last_long_req_id
+                i = ids.index(last) if last in ids else -1
+                if self.long_prefill_skipped and i >= 0:
+                    held_long_req_ids.remove(ids[i])
+                else:
+                    i = (i + 1) % len(ids)
+                long_req = long_reqs[i]
         if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
             # Floor the cap at a fair share of the input budget so it never
             # cuts a request below max_num_batched_tokens / num requests.
@@ -800,6 +828,10 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if request.request_id in held_long_req_ids:
                 req_index += 1
                 continue
 
@@ -1562,6 +1594,30 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+
+        if long_req is not None:
+            num_new_tokens = self._reserve_prefill_lookahead(
+                long_req,
+                long_req.num_computed_tokens,
+                min(token_budget, input_budget - draft_slots),
+            )
+            new_blocks = None
+            if (
+                long_req.request_id in held_long_req_ids
+                and not preempted_reqs
+                and num_new_tokens >= self.scheduler_config.long_prefill_token_threshold
+            ):
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    long_req,
+                    num_new_tokens,
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
+            if new_blocks is not None:
+                scheduled_running_reqs.append(long_req)
+                req_to_new_blocks[long_req.request_id] = new_blocks
+                num_scheduled_tokens[long_req.request_id] = num_new_tokens
+            self.last_long_req_id = long_req.request_id
+            self.long_prefill_skipped = long_req.request_id not in num_scheduled_tokens
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
