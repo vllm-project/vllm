@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -625,6 +626,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        # Set by process_weights_after_loading when in_proj_ba is folded into
+        # the in_proj_qkvz GEMM: (qkvz width, ba width) of the fused output.
+        self.in_proj_fused_split: tuple[int, int] | None = None
+        self._lora_enabled = vllm_config.lora_config is not None
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -877,6 +882,62 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b[:, ba_start : ba_start + ba_chunk]
             a = a[:, ba_start : ba_start + ba_chunk]
         return b, a
+
+    def _can_fuse_in_proj(self) -> bool:
+        qkvz, ba = self.in_proj_qkvz, self.in_proj_ba
+        return (
+            current_platform.is_cuda()
+            and not self._lora_enabled
+            and not self.disable_tp_for_ba_proj
+            and type(qkvz.quant_method) is UnquantizedLinearMethod
+            and type(ba.quant_method) is UnquantizedLinearMethod
+            and qkvz.bias is None
+            and ba.bias is None
+            and qkvz.weight.dim() == 2
+            and ba.weight.dim() == 2
+            and qkvz.weight.shape[1] == ba.weight.shape[1]
+            and qkvz.weight.dtype == ba.weight.dtype
+            and qkvz.weight.device == ba.weight.device
+        )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Fold in_proj_ba into the in_proj_qkvz GEMM.
+
+        in_proj_ba has only 2 * num_v_heads / tp output features, so as its own
+        GEMM it costs a full launch (often with a split-K reduction) per layer
+        and token. Its rows are appended to in_proj_qkvz's weight, zero-padded
+        to a multiple of 16 rows, and the forward slices the qkvz and ba parts
+        out of one GEMM output. The padding keeps the fused output's row stride
+        divisible by 16 like an unfused qkvz output, so Triton kernels that read
+        these views (the spec-decode conv, for one) keep the stride
+        specialization that warmup and graph capture compiled. Both
+        layers keep their weights as views of the fused tensor, so the weight
+        loaders keep writing to the right rows.
+        """
+        if self.in_proj_fused_split is not None or not self._can_fuse_in_proj():
+            return
+        qkvz_w = self.in_proj_qkvz.weight
+        ba_w = self.in_proj_ba.weight
+        n_qkvz, n_ba = qkvz_w.shape[0], ba_w.shape[0]
+        n_pad = -(n_qkvz + n_ba) % 16
+        fused = torch.cat(
+            [qkvz_w.data, ba_w.data, ba_w.data.new_zeros(n_pad, ba_w.shape[1])]
+        )
+        qkvz_w.data = fused
+        ba_w.data = fused[n_qkvz : n_qkvz + n_ba]
+        self.in_proj_fused_split = (n_qkvz, n_ba)
+
+    def project_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the (qkvz, ba) input projections, from one GEMM if fused."""
+        if self.in_proj_fused_split is None:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            return mixed_qkvz, ba
+        n_qkvz, n_ba = self.in_proj_fused_split
+        fused, _ = self.in_proj_qkvz(hidden_states)
+        return fused[..., :n_qkvz], fused[..., n_qkvz : n_qkvz + n_ba]
 
     def fix_query_key_value_ordering(
         self,
@@ -1144,8 +1205,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self.project_input(hidden_states)
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
@@ -1195,10 +1255,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        # b and a stay strided views of the projection: the packed decode
+        # kernel reads them as they are, every other path makes them
+        # contiguous inside _forward_core.
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
@@ -1565,6 +1628,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv: packed [q, k, v] projection (num_tokens, qkv_dim)
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
+               (b and a may be views with a token stride; the packed decode
+               kernel reads them in place, the other paths copy them)
             core_attn_out: Pre-allocated output buffer for attention results.
 
         """
@@ -1593,6 +1658,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
             )
+        b = b.contiguous()
+        a = a.contiguous()
 
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -2173,22 +2240,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         x_shape = x.shape
         assert output_gate.shape == x_shape
         assert out.shape == x_shape
-        x_2d = x.reshape(-1, x_shape[-1])
-        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
-        out_2d = out.reshape(-1, x_shape[-1])
+        group_size = (
+            x_shape[-1] if self.norm.group_size is None else self.norm.group_size
+        )
+        weight = self.norm.weight.contiguous()
+        if (
+            x.dim() == 3
+            and group_size == x_shape[-1]
+            and output_gate.stride(-1) == 1
+            and output_gate.stride(-2) == x_shape[-1]
+            and x.is_contiguous()
+            and out.is_contiguous()
+        ):
+            # One row per token, one group per head sharing the weight: the
+            # gate is a strided view of the input projection, and flattening
+            # it per head would copy it.
+            x_2d = x.view(x_shape[0], -1)
+            output_gate_2d = output_gate.flatten(-2)
+            out_2d = out.view(x_shape[0], -1)
+        else:
+            x_2d = x.reshape(-1, x_shape[-1])
+            output_gate_2d = output_gate.reshape(-1, x_shape[-1])
+            out_2d = out.reshape(-1, x_shape[-1])
         assert x_2d.stride(-1) == 1
         assert output_gate_2d.stride(-1) == 1
         assert out_2d.stride(-1) == 1
         layer_norm_fwd(
             x_2d,
-            self.norm.weight.contiguous(),
+            weight,
             self.norm.bias,
             self.norm.eps,
             z=output_gate_2d,
             out=out_2d,
-            group_size=(
-                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
-            ),
+            group_size=group_size,
             norm_before_gate=self.norm.norm_before_gate,
             is_rms_norm=True,
             activation=self.norm.activation,
