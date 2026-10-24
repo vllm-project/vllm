@@ -1024,10 +1024,11 @@ async def _e2e_render_chat(
     client: httpx.AsyncClient,
     model: str,
     messages: list[dict],
+    **extra,
 ) -> dict:
     resp = await client.post(
         "/v1/chat/completions/render",
-        json={"model": model, "messages": messages},
+        json={"model": model, "messages": messages, **extra},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -1308,6 +1309,62 @@ async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
     )
     assert resp.status_code == 400
     assert "chat_request" in resp.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# E2E: Qwen3 reasoning parser, which reads the prompt
+# ---------------------------------------------------------------------------
+
+QWEN3_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen3_server():
+    args = ["--reasoning-parser", "qwen3"]
+    with RemoteLaunchRenderServer(QWEN3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def qwen3_client(qwen3_server):
+    async with httpx.AsyncClient(
+        base_url=qwen3_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
+    """The parser reads the caller's prompt_token_ids, so output after a
+    prompt that already closes reasoning is content. Generate omits
+    prompt_token_ids unless return_token_ids is set."""
+    messages = [
+        {"role": "user", "content": "What is 6*7?"},
+        {"role": "assistant", "content": "<think>\nEasy.\n</think>\n\nThe answer"},
+    ]
+    continuation = {"add_generation_prompt": False, "continue_final_message": True}
+    gen_req = await _e2e_render_chat(
+        qwen3_client, QWEN3_MODEL, messages, **continuation
+    )
+    output_ids = _encode(get_tokenizer(QWEN3_MODEL), " is 42.")
+
+    resp = await qwen3_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": QWEN3_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": {
+                "model": QWEN3_MODEL,
+                "messages": messages,
+                **continuation,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert message["content"] == " is 42."
+    assert message["reasoning"] is None
 
 
 # ---------------------------------------------------------------------------

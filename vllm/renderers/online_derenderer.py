@@ -335,7 +335,9 @@ class OnlineDerenderer:
                     choice.token_ids,
                     chat_request,
                     chat_template_kwargs,
-                    generate_response.prompt_token_ids,
+                    # The engine's ids are the full prompt; the caller's may
+                    # be a suffix.
+                    generate_response.prompt_token_ids or prompt_token_ids,
                 )
             else:
                 message = ChatMessage(role="assistant", content=decoded_text)
