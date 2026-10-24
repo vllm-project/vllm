@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     VLLM_BI_MEGA_GATE: bool = False
     VLLM_BI_MXFP8_PREQUANT: bool = False
     VLLM_BI_MHC_OVERLAP: bool = False
+    VLLM_BI_WO_FP8_EPILOGUE: bool = False
     VLLM_BI_REPLAY_STAGE_LAYERS: int = 0
     VLLM_BI_BF16_SPLITK: int = 0
     VLLM_BI_TOPK_TRITON: bool = False
@@ -688,6 +689,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kernels (pinned 16-way prenorm GEMM) and, inside FULL graphs, generate the
     # coefficients on the side stream at every batch size.
     "VLLM_BI_MHC_OVERLAP": lambda: bool(int(os.getenv("VLLM_BI_MHC_OVERLAP", "0"))),
+    # Under VLLM_BATCH_INVARIANT with mega attention, wo_a's fp8_einsum emits
+    # MXFP8 codes and packed UE8M0 scales from its epilogue and wo_b runs on
+    # DeepGEMM fp8_fp4_gemm_nt, as DeepInfer does. Bitwise equal to the BF16
+    # einsum output quantized for the pinned FlashInfer wo_b, so the trainer
+    # needs no change. Requires VLLM_BI_MXFP8_GEMM=tensor_core and
+    # VLLM_BI_MXFP8_PREQUANT.
+    "VLLM_BI_WO_FP8_EPILOGUE": lambda: bool(
+        int(os.getenv("VLLM_BI_WO_FP8_EPILOGUE", "0"))
+    ),
     # Batch-invariant exact SWA replay: run the decoder replay layers in stages
     # of this many layers, each on only the trailing rows its layers need for
     # the last window to come out exact (0: every replay layer on the same rows).

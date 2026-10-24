@@ -228,6 +228,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         groups = self.n_local_groups
         if envs.VLLM_BATCH_INVARIANT:
             self._compile_einsum_configs(attn_out.data.shape[0])
+            if envs.VLLM_BI_WO_FP8_EPILOGUE:
+                return self._wo_b_proj(self._wo_a_fp8(attn_out))
         z = torch.empty(
             (attn_out.data.shape[0], groups, self.o_lora_rank),
             dtype=torch.bfloat16,
@@ -241,6 +243,40 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             recipe=self._einsum_recipe,
         )
         return self._wo_b_proj(z.flatten(1))
+
+    def _wo_a_fp8(self, attn_out: QuantizedActivation) -> QuantizedActivation:
+        """``wo_a`` with an MXFP8 epilogue: DeepGEMM quantizes the FP32
+        accumulator per 32 outputs, the same bits as quantizing its BF16
+        output, and writes wo_b's input in DeepGEMM's scale layout."""
+        num_tokens = attn_out.data.shape[0]
+        groups = self.n_local_groups
+        width = groups * self.o_lora_rank
+        data = torch.empty(
+            (num_tokens, groups, self.o_lora_rank),
+            dtype=torch.float8_e4m3fn,
+            device=attn_out.data.device,
+        )
+        scale = torch.empty_strided(
+            (num_tokens, width // (_QUANT_GROUP * 4)),
+            (1, get_tma_aligned_size(num_tokens, torch.int32.itemsize)),
+            dtype=torch.int32,
+            device=attn_out.data.device,
+        )
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
+            (self.wo_a.weight, self.wo_a.weight_scale),
+            (data, scale),
+            recipe=self._einsum_recipe,
+        )
+        data = data.view(num_tokens, width)
+        return QuantizedActivation(
+            data=data,
+            scale=scale,
+            orig_dtype=torch.bfloat16,
+            orig_shape=data.shape,
+            quant_key=kMxfp8Dynamic,
+        )
 
     def _compile_einsum_configs(self, num_tokens: int) -> None:
         """DeepGEMM's grouped einsum picks a tile config from M and
@@ -259,6 +295,10 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         for m in range(done + 1, num_tokens):
             out = alloc_mega_attn_output(m, self.n_wv_group, device)
+            if envs.VLLM_BI_WO_FP8_EPILOGUE:
+                # JIT the FP8-epilogue einsum and wo_b's DeepGEMM per M too.
+                self.wo_b(self._wo_a_fp8(out))
+                continue
             fp8_einsum(
                 "bhr,hdr->bhd",
                 (out.data[:, :groups], out.scale[:, :groups]),

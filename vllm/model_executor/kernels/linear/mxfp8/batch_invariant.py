@@ -42,6 +42,21 @@ def supports_ds41_mxfp8_bi() -> bool:
     )
 
 
+@functools.cache
+def _deep_gemm():
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    return _import_deep_gemm()
+
+
+def _deep_gemm_weight_scale(scale: torch.Tensor, n: int, k: int) -> torch.Tensor:
+    """[N, K/32] E8M0 bytes -> DeepGEMM's packed UE8M0 weight-scale layout."""
+    sf = torch.exp2(scale.view(torch.uint8).float() - 127)
+    return _deep_gemm().transform_sf_into_required_layout(
+        sf, n, k, recipe=(1, 1, 32), is_sfa=False
+    )
+
+
 def block32_scaled_mm(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -159,6 +174,15 @@ class BatchInvariantMxfp8LinearKernel(Mxfp8LinearKernel):
         n, k = weight.shape
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         scale = layer.weight_scale.data[:n, : k // 32].contiguous()
+        if envs.VLLM_BI_WO_FP8_EPILOGUE and _uses_tensor_core((n, k)):
+            # DeepGEMM's packed-UE8M0 weight scales for a pre-quantized input
+            # in DeepGEMM's layout (wo_a's FP8 epilogue). A buffer, so a
+            # layerwise reload refreshes it in place.
+            dg_scale = _deep_gemm_weight_scale(scale, n, k)
+            if isinstance(getattr(layer, "weight_scale_dg", None), torch.Tensor):
+                layer.weight_scale_dg.copy_(dg_scale)
+            else:
+                layer.register_buffer("weight_scale_dg", dg_scale, persistent=False)
         if _uses_tensor_core((n, k)):
             scale = swizzle_mxfp8_scale(scale, M=n, K=k)
         layer.weight_scale = Parameter(scale, requires_grad=False)
@@ -181,7 +205,21 @@ class BatchInvariantMxfp8LinearKernel(Mxfp8LinearKernel):
             codes, scales = mxfp8_e4m3_quantize(
                 x.reshape(-1, k), is_sf_swizzled_layout=tensor_core
             )
-        if tensor_core:
+        if tensor_core and scales.dtype == torch.int32:
+            # DeepGEMM-layout scales (packed UE8M0, MN-major): same bits as the
+            # pinned FlashInfer GEMM on the same codes.
+            output = torch.empty(
+                (codes.shape[0], layer.weight.shape[0]),
+                dtype=dtype,
+                device=codes.device,
+            )
+            _deep_gemm().fp8_fp4_gemm_nt(
+                (codes, scales),
+                (layer.weight, layer.weight_scale_dg),
+                output,
+                recipe=(1, 1, 32),
+            )
+        elif tensor_core:
             output = torch.ops.vllm.bi_pinned_mxfp8_mm(
                 codes, layer.weight.t(), scales, layer.weight_scale, dtype
             )
