@@ -1431,6 +1431,22 @@ class GPUModelRunner(
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
+            if req_id in req_data.redo_prompt_logprobs_req_ids:
+                # The dropped stale output carried this request's completed
+                # prompt logprobs; register the requirement again for the
+                # re-run prefill (#61490).
+                prompt_logprobs = (
+                    req_state.sampling_params.prompt_logprobs
+                    if req_state.sampling_params
+                    else None
+                )
+                if prompt_logprobs is not None:
+                    self.num_prompt_logprobs[req_id] = (
+                        self.input_batch.vocab_size
+                        if prompt_logprobs == -1
+                        else prompt_logprobs
+                    )
+
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
