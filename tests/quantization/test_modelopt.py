@@ -55,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -921,10 +922,15 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
     assert gate_up_proj.weight.dtype == fp8_dtype
     assert down_proj.weight.dtype == fp8_dtype
 
+    expected_scale_dtype = (
+        torch.int32
+        if DeepGemmQuantScaleFMT.from_oracle() is DeepGemmQuantScaleFMT.UE8M0
+        else torch.float32
+    )
     # Block scales are materialized as a 2D [out_blk, in_blk] tensor.
     for projection in (qkv_proj, o_proj, gate_up_proj, down_proj):
         assert hasattr(projection, "weight_scale")
-        assert projection.weight_scale.dtype == torch.float32
+        assert projection.weight_scale.dtype == expected_scale_dtype
         assert projection.weight_scale.dim() == 2
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
