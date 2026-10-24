@@ -66,6 +66,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     bf16_pair,
     bf_hi,
     bf_lo,
+    butterfly,
     hw_exp2,
     hw_rcp,
     ld_i32,
@@ -92,6 +93,8 @@ OU = KVL // 4  # the LSE's pair in a CMB row
 TT = 4  # tokens a combine task
 KS = KVL // 128  # W_UV's 128-k MFMA steps
 LROW = KVL // 2 + 4  # an LDS latent row (words, padded)
+WMAX = 128  # M1c splits a request at most (an LDS weight row)
+CB = 8  # combine_splits' o loads in flight a thread (1 with M1c in the launch)
 # timeline points: start, push, combine, W_UV
 TL_POINTS = 4
 
@@ -110,6 +113,7 @@ class MlaPostBuild:
     peer_off: int = 0  # CMB's byte offset in a rank's peer buffer
     timeline: bool = False
     splits: int = 0  # DCP1: M1c's KV splits (0: ``o`` the attention's output)
+    ctok: int = 0  # tokens a combine task (0: ``ctok``'s)
 
 
 ABI = KernelAbi(
@@ -219,7 +223,7 @@ def stage_combine(c, h, t0):
     cc = tid % (KVL // 4)
     t = fx.min(t0 + tt, s - 1)
     if const_expr(R == 1 and c["splits"] > 0):
-        combine_splits(c, t0, tt, cc, t, h)
+        combine_splits(c, t0, h)
     if const_expr(R == 1 and c["splits"] == 0):
         a = c["args"]
         o = fx.Vector(
@@ -240,62 +244,130 @@ def stage_combine(c, h, t0):
 
 
 @traced
-def combine_splits(c, t0, tt, cc, t, h):
+def combine_splits(c, t0, h):
     """``stage_combine`` at DCP1 over M1c's partials: token t's request's splits
-    (``splits / requests`` of them, request-major), LSE-weighted."""
-    s, q, n, a = c["S"], c["Q"], c["splits"], c["args"]
+    (``splits / requests`` of them, request-major), LSE-weighted. Wave tt < tc
+    (the task's tokens) turns token t0 + tt's LSEs into weights (LDS ``cw``);
+    then a token's WAVES / tc waves (parts) sum the splits part, part + parts,
+    .. a thread 8 latents of a token (16 B loads, CB in flight), the parts'
+    sums halved through ``cw`` (the upper half's handed over) to part 0."""
+    s, q, n, a, tid, tc = c["S"], c["Q"], c["splits"], c["args"], c["tid"], c["TC"]
     per = n // (s // q)
-    sp0 = t // q * per
+    sp0 = t0 // q * per
+    wv, lane = tid // 64, tid % 64
     if const_expr("ardy" in c):
-        # M1c in this launch: its CTAs' flags (split, head group), a thread each
-        ht = 16 // q
-        if c["tid"] < per:
-            c["poll"](
-                [(c["ardy"], (t0 // q * per + c["tid"]) * (NH // ht) + h // ht, 1)]
-            )
+        # M1c in this launch (its VGPRs at the limit): the wave index scalar
+        wv = uniform(wv)
+        # its CTAs' flags (split, head group of M1c's ``ht`` heads), a thread each
+        ht = c["m1c_ht"]
+        if tid < per:
+            c["poll"]([(c["ardy"], (sp0 + tid) * (NH // ht) + h // ht, 1)])
         gpu.barrier()
-    lse = [
-        sane(
-            fx.Int32(
+    if wv < tc:
+        t = fx.min(t0 + wv, s - 1)
+        lse = []
+        for k in range_constexpr((per + 63) // 64):
+            i = lane + 64 * k
+            v = fx.Int32(
                 bo.buffer_load(
-                    rsrc(a["lse"]), ((sp0 + i) * s + t) * NH + h, vec_width=1,
+                    rsrc(a["lse"]),
+                    ((sp0 + fx.min(i, per - 1)) * s + t) * NH + h,
+                    vec_width=1,
                     dtype=T.i32,
                 )
             ).bitcast(fx.Float32)
-        )
-        for i in range(per)
-    ]  # fmt: skip
-    m = lse[0]
-    for i in range_constexpr(1, per):
-        m = fx.max(m, lse[i])
-    m = (m == fx.Float32(float("-inf"))).select(fx.Float32(0.0), m)
-    e = [hw_exp2((lse[i] - m) * fx.Float32(LOG2E)) for i in range(per)]
-    tot = e[0]
-    for i in range_constexpr(1, per):
-        tot = tot + e[i]
-    # a padded request (no KV): every split empty, its rows 0
-    inv = (tot == fx.Float32(0.0)).select(fx.Float32(0.0), hw_rcp(tot))
-    acc = [fx.Float32(0.0)] * 4
-    for i in range_constexpr(per):
-        o = fx.Vector(
-            bo.buffer_load(
-                rsrc(a["o"]),
-                (((sp0 + i) * s + t) * NH + h) * (KVL // 2) + 2 * cc,
-                vec_width=2,
-                dtype=T.i32,
+            lse.append((i < per).select(sane(v), fx.Float32(float("-inf"))))
+        m = lse[0]
+        for k in range_constexpr(1, len(lse)):
+            m = fx.max(m, lse[k])
+        m = butterfly(m, (32, 16, 8, 4, 2, 1), fx.max)
+        m = (m == fx.Float32(float("-inf"))).select(fx.Float32(0.0), m)
+        e = [hw_exp2((x - m) * fx.Float32(LOG2E)) for x in lse]
+        tot = e[0]
+        for k in range_constexpr(1, len(e)):
+            tot = tot + e[k]
+        tot = butterfly(tot, (32, 16, 8, 4, 2, 1))
+        # a padded request (no KV): every split empty, its rows 0
+        inv = (tot == fx.Float32(0.0)).select(fx.Float32(0.0), hw_rcp(tot))
+        for k in range_constexpr(len(e)):
+            fx.ptr_store(e[k] * inv, c["cw"] + wv * WMAX + lane + 64 * k)
+    gpu.barrier()
+    parts = WAVES // tc
+    part, tt = wv // tc, wv % tc
+    t = fx.min(t0 + tt, s - 1)
+    nj = per // parts  # splits a part
+    src = (((sp0 + part) * s + t) * NH + h) * (KVL // 2) + 4 * lane
+    wrow = c["cw"] + tt * WMAX + part
+    stride = parts * s * NH * KVL * 2  # bytes between a part's splits
+    acc = [fx.Float32(0.0)] * 8
+
+    def batch(acc, j0, nb):
+        os_ = [
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(a["o"]),
+                    src,
+                    vec_width=4,
+                    dtype=T.i32,
+                    soffset_bytes=(j0 + j) * stride,
+                )
             )
-        )
+            for j in range(nb)
+        ]
         # an empty split: weight 0, its o 0
-        wt = e[i] * inv
-        pv = [bf_lo(o[0]), bf_hi(o[0]), bf_lo(o[1]), bf_hi(o[1])]
-        for j in range_constexpr(4):
-            acc[j] = acc[j] + pv[j] * wt
-    live = t0 + tt < s
-    w0 = live.select(bf16_pair(acc[0], acc[1]).bitcast(fx.Int32), fx.Int32(0))
-    w1 = live.select(bf16_pair(acc[2], acc[3]).bitcast(fx.Int32), fx.Int32(0))
-    base = c["lat"] + tt * LROW + 2 * cc
-    fx.ptr_store(w0, base)
-    fx.ptr_store(w1, base + 1)
+        wts = [fx.ptr_load(wrow + (j0 + j) * parts) for j in range(nb)]
+        acc = list(acc)
+        for j in range_constexpr(nb):
+            o, wt = os_[j], wts[j]
+            for k in range_constexpr(4):
+                acc[2 * k] = acc[2 * k] + bf_lo(o[k]) * wt
+                acc[2 * k + 1] = acc[2 * k + 1] + bf_hi(o[k]) * wt
+        return acc
+
+    if const_expr("ardy" in c):
+        # with M1c: unrolled, a load a batch (a loop, or wider batches, spill
+        # M1c's Q fragment in its loop)
+        for j0 in range_constexpr(nj):
+            acc = batch(acc, j0, 1)
+    else:
+        # CB loads in flight a batch (a loop over the batches: the scheduler
+        # hoists no further), the rest unrolled
+        jb = fx.Int32(0)
+        while jb < nj // CB * CB:
+            acc = batch(acc, jb, CB)
+            jb = jb + CB
+        if const_expr(nj % CB):
+            acc = batch(acc, nj // CB * CB, nj % CB)
+    # parts p >= hf hand their sums to p - hf, halving
+    for hf in [parts >> k for k in range(1, parts.bit_length())]:
+        red = c["cw"] + TT * WMAX + (tt * 64 + lane) * 8
+        if (part >= hf) & (part < 2 * hf):
+            at = red + (part - hf) * (tc * 64 * 8)
+            for k in range_constexpr(2):
+                fx.ptr_store(
+                    fx.Vector.from_elements(acc[4 * k : 4 * k + 4], fx.Float32),
+                    at + 4 * k,
+                )
+        gpu.barrier()
+        if const_expr(hf > 1):
+            at = red + fx.min(part, hf - 1) * (tc * 64 * 8)
+            acc = [
+                (part < hf).select(acc[i] + fx.ptr_load(at + i), acc[i])
+                for i in range(8)
+            ]
+            gpu.barrier()  # read before the next half's stores
+        else:
+            acc = [acc[i] + fx.ptr_load(red + i) for i in range(8)]
+    if part == 0:
+        live = t0 + tt < s
+        for k in range_constexpr(4):
+            fx.ptr_store(
+                live.select(
+                    bf16_pair(acc[2 * k], acc[2 * k + 1]).bitcast(fx.Int32),
+                    fx.Int32(0),
+                ),
+                c["lat"] + tt * LROW + 4 * lane + k,
+            )
 
 
 @traced
@@ -369,14 +441,14 @@ def wv_loads(c, h):
 def stage_uv(c, h, t0, ops):
     """The LDS latents of tokens t0 .. t0 + 4 against W_V[h]'s 16 rows of this
     wave -> bf16, times the gate -> ``core``."""
-    s, lane, wave, a = c["S"], c["lane"], c["wave"], c["args"]
+    s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
     tl = lane % 16
     kb = lane // 16
-    row = c["lat"] + fx.min(tl, TT - 1) * LROW
+    row = c["lat"] + fx.min(tl, tc - 1) * LROW
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for st in range_constexpr(KS):
         ws = [
-            (tl < TT).select(fx.ptr_load(row + st * 64 + kb * 16 + i), fx.Int32(0))
+            (tl < tc).select(fx.ptr_load(row + st * 64 + kb * 16 + i), fx.Int32(0))
             for i in range(16)
         ]
         am = fx.Int32(0)
@@ -397,14 +469,14 @@ def stage_uv(c, h, t0, ops):
     t = t0 + tl
     v0 = wave * 16 + 4 * kb
     col = h * VD + v0
-    tc = fx.min(t, s - 1)
+    tg = fx.min(t, s - 1)
     gw = fx.Vector(
-        bo.buffer_load(rsrc(a["gate"]), (tc * GROWS + col) // 2, vec_width=2,
+        bo.buffer_load(rsrc(a["gate"]), (tg * GROWS + col) // 2, vec_width=2,
                        dtype=T.i32)
     )  # fmt: skip
     g = [bf_lo(gw[0]), bf_hi(gw[0]), bf_lo(gw[1]), bf_hi(gw[1])]
     out = [bf16r(acc[j]) * g[j] for j in range(4)]
-    if (tl < TT) & (t < s):
+    if (tl < tc) & (t < s):
         # fused into K2 (``c["core_cm"]``): read by other CTAs, device scope
         bo.buffer_store(
             fx.Vector.from_elements(
@@ -417,19 +489,30 @@ def stage_uv(c, h, t0, ops):
     gpu.barrier()
 
 
-def tasks(s: int) -> int:
-    """Combine tasks: a (head, 4 tokens), head-minor (task h + 12 tile)."""
-    return NH * ((s + TT - 1) // TT)
+def ctok(s: int, q: int, splits: int, ctas: int = BLOCKS) -> int:
+    """Tokens a combine task: TT, or with M1c's splits the fewest of 1, 2, 4
+    whose parts (WAVES / it a token) divide a request's splits and whose tasks
+    fit ``ctas`` (a CTA's reads, a part's splits a thread, over more CTAs)."""
+    if not splits:
+        return TT
+    per = splits // (s // q)
+    ok = [tc for tc in (1, 2, 4) if per % (WAVES // tc) == 0]
+    return next((tc for tc in ok if tasks(s, tc) <= ctas), ok[-1])
+
+
+def tasks(s: int, tc: int = TT) -> int:
+    """Combine tasks: a (head, ``tc`` tokens), head-minor (task h + 12 tile)."""
+    return NH * ((s + tc - 1) // tc)
 
 
 @traced
 def combine_tasks(c, ctas=BLOCKS, done=None):
     """The combine + W_UV tasks over CTAs 0 .. ``ctas``; ``done(task)`` after
     each task's ``core`` rows are stored (K2's fused M1b: their flag)."""
-    s, bid = c["S"], c["bid"]
-    for task in range(first_task(bid, 0), tasks(s), ctas):
+    s, bid, tc = c["S"], c["bid"], c["TC"]
+    for task in range(first_task(bid, 0), tasks(s, tc), ctas):
         h = task % NH
-        t0 = task // NH * TT
+        t0 = task // NH * tc
         ops = wv_loads(c, h)
         stage_combine(c, h, t0)
         stage_uv(c, h, t0, ops)
@@ -450,12 +533,19 @@ def build(key: MlaPostBuild):
     @fx.struct
     class Smem:
         lat: fx.Array[fx.Int32, TT * LROW, 16]
+        cw: fx.Array[fx.Float32, TT * (WMAX + KVL) if key.splits else 1, 16]
         tls: fx.Array[fx.Int64, TL_POINTS, 16]
 
     keyed = key_tuple(key, _SOURCES)
     name = f"k3_mono_mla_post_s{s}_q{key.qlen}_r{R}_t{int(key.timeline)}"
-    name += f"_sp{key.splits}" if key.splits else ""
+    tc = key.ctok or ctok(s, key.qlen, key.splits)
+    assert tc in (1, 2, 4) and (
+        not key.splits or key.splits // (s // key.qlen) % (WAVES // tc) == 0
+    )
+    name += f"_sp{key.splits}_c{tc}" if key.splits else ""
     assert not key.splits or (R == 1 and key.splits % (s // key.qlen) == 0)
+    assert key.splits // (s // key.qlen) % 2 == 0
+    assert key.splits // (s // key.qlen) <= WMAX
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def mla_post(
@@ -497,6 +587,7 @@ def build(key: MlaPostBuild):
             "Q": key.qlen,
             "R": R,
             "splits": key.splits,
+            "TC": tc,
             "tid": tid,
             "bid": bid,
             "lane": tid % 64,
@@ -505,6 +596,7 @@ def build(key: MlaPostBuild):
             "put_words": mb.put_words,
             "poll": mb.poll,
             "lat": lds.lat.ptr,
+            "cw": lds.cw.ptr,
             "cmb": [preg(b, key.peer_off, "cmb") for b in bases],
             "cmb_own": preg(own, key.peer_off, "cmb"),
             "args": {

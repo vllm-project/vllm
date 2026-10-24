@@ -624,7 +624,8 @@ def _mla_attn_reference(qb, kv8, idx, lens, q, scale):
 
 @needs_gfx950
 @pytest.mark.parametrize(
-    "q, lens", [(8, [8704]), (8, [3000, 0]), (4, [5000, 17, 9000, 64]), (8, [9])]
+    "q, lens",
+    [(8, [8704]), (8, [3000, 0]), (4, [5000, 17, 9000, 64]), (8, [9]), (8, [40000])],
 )
 def test_m1c_m1b_splits_single_gpu(q: int, lens: list) -> None:
     """M1c (``mla_attn``: bf16 query, fp8 KV, the splits' partials) against

@@ -23,7 +23,7 @@ tokens), and the o_proj CTAs, their weights in flight, poll the flags of a core
 tile before they load it. That removes the M1b -> K2 launch boundary.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -55,12 +55,14 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.debug import (
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     CM_DEV,
     ld_i32,
+    lds_bytes,
     load_ptr64,
     traced,
     uniform,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     BLOCKS,
+    LDS_BYTES,
     THREADS,
     WAVES,
     KernelAbi,
@@ -126,6 +128,7 @@ class K2Build:
     # DCP1: M1c (``mla_attn.cta``) in this launch too, first, on its CTAs: the
     # partials stored device-scope, a flag a CTA (``ardy``) the combine polls
     m1c: bool = False
+    m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
 
 
 ABI = KernelAbi(
@@ -208,10 +211,17 @@ def scratch_layout(key: K2Build) -> dict:
     lay["xrow"] = ((end + 15) // 16 * 16, s * HIDDEN * 2)
     end = max(o + n for o, n in lay.values())
     # the fused M1b's flags, a combine task each
-    lay["crdy"] = ((end + 15) // 16 * 16, m1b.tasks(s) * 8)
+    lay["crdy"] = ((end + 15) // 16 * 16, m1b.tasks(s, m1b_ctok(key)) * 8)
     # the fused M1c's flags, a CTA each
     lay["ardy"] = ((lay["crdy"][0] + lay["crdy"][1] + 15) // 16 * 16, BLOCKS * 8)
     return lay
+
+
+def m1b_ctok(key: K2Build) -> int:
+    """The fused M1b's tokens a combine task (over its NA CTAs)."""
+    if not key.m1b_qlen:
+        return m1b.TT
+    return m1b.ctok(key.tokens, key.m1b_qlen, key.m1b_splits, NA)
 
 
 def scratch_bytes(key: K2Build) -> int:
@@ -236,10 +246,11 @@ def stage_oproj(c, gi):
     for t0, n in gemv.token_tiles(c["S"]):
         cm = 0
         if const_expr(c["m1b"]):
-            # the fused M1b's tasks of these rows (a head, 4 tokens), a thread a
-            # flag
-            f0 = t0 // m1b.TT * m1b.NH
-            nf = ((t0 + n + m1b.TT - 1) // m1b.TT) * m1b.NH - f0
+            # the fused M1b's tasks of these rows (a head, ``TC`` tokens), a
+            # thread a flag
+            tc = c["TC"]
+            f0 = t0 // tc * m1b.NH
+            nf = ((t0 + n + tc - 1) // tc) * m1b.NH - f0
             tid = c["tid"]
             if tid < nf:
                 c["poll"]([(c["crdy"], f0 + tid, 1)])
@@ -263,6 +274,7 @@ def build(key: K2Build):
     fused = key.m1b_qlen > 0
     assert not fused or (s % key.m1b_qlen == 0 and key.m1b_ranks in (1, TP_))
     assert not key.m1c or (fused and key.m1b_ranks == 1 and key.m1b_splits)
+    assert key.m1c or not key.m1c_wide
     if key.m1c:
         m1c.check(s, key.m1b_qlen)
         assert key.m1b_splits == m1c.splits(key.m1b_qlen)
@@ -332,12 +344,15 @@ def build(key: K2Build):
     @fx.struct
     class M1bLds:
         lat: fx.Array[fx.Int32, m1b.TT * m1b.LROW if fused else 1, 16]
+        cw: fx.Array[
+            fx.Float32, m1b.TT * (m1b.WMAX + m1b.KVL) if key.m1b_splits else 1, 16
+        ]
 
     @fx.struct
     class NoLds:
         v: fx.Array[fx.Int32, 1, 16]
 
-    M1cLds = m1c.smem() if key.m1c else NoLds
+    M1cLds = m1c.smem(key.m1b_qlen) if key.m1c else NoLds
 
     @fx.union
     class StageLds:
@@ -346,11 +361,28 @@ def build(key: K2Build):
         ug: UgLds
         down: DownLds
         m1b: M1bLds
+
+    # the stages' LDS: M1c runs first in a CTA and is done (a barrier) before
+    # any of it is touched, so M1c's LDS shares it all
+    @fx.struct
+    class K2Lds:
+        red: RedLds
+        route: RouteLds
+        stage: StageLds
+
+    @fx.union
+    class MainLds:
+        k2: K2Lds
         m1c: M1cLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
         tls: fx.Array[fx.Int64, TL_POINTS, 16]
+
+    # LLVM's own over-the-limit error doesn't stop a build (COMPILE_ONLY)
+    assert lds_bytes(Smem) + lds_bytes(MainLds) <= LDS_BYTES, lds_bytes(
+        Smem
+    ) + lds_bytes(MainLds)
 
     keyed = key_tuple(key, _SOURCES)
     name = (
@@ -361,6 +393,7 @@ def build(key: K2Build):
         name += f"_m{key.m1b_qlen}_{key.m1b_ranks}"
         name += f"_sp{key.m1b_splits}" if key.m1b_splits else ""
         name += "_c" if key.m1c else ""
+        name += "w" if key.m1c_wide else ""
     if key.fault_rank >= 0:
         name += (
             f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_layer}_{key.fault_ticks}"
@@ -425,9 +458,10 @@ def build(key: K2Build):
         bid = fx.block_idx.x
         alloc = fx.SharedAllocator()
         lds = alloc.allocate(Smem).peek()
-        rd = alloc.allocate(RedLds)
-        rl = alloc.allocate(RouteLds).peek()
-        st = alloc.allocate(StageLds)
+        main = alloc.allocate(MainLds)
+        rd = main.k2.red
+        rl = main.k2.route.peek()
+        st = main.k2.stage
         el, al, ul, dl = st.early.peek(), st.attn.peek(), st.ug.peek(), st.down.peek()
         if const_expr(key.fault_rank >= 0):
             stall(
@@ -552,7 +586,9 @@ def build(key: K2Build):
                 Q=key.m1b_qlen,
                 R=R,
                 splits=key.m1b_splits,
+                TC=m1b_ctok(key),
                 lat=st.m1b.peek().lat.ptr,
+                cw=st.m1b.peek().cw.ptr,
                 core_cm=CM_DEV,
                 cmb=[preg(b, key.m1b_off, "cmb") for b in bases] if R > 1 else [],
                 cmb_own=preg(own, key.m1b_off, "cmb"),
@@ -577,19 +613,26 @@ def build(key: K2Build):
             )
             if const_expr(key.m1c):
                 c["ardy"] = sreg(scratch, lay["ardy"][0], "ardy")
-                ml = st.m1c.peek()
+                c["m1c_ht"] = m1c.geometry(key.m1b_qlen)[0]
+                ml = main.m1c.peek()
                 m1c.cta(
                     {
                         "S": s,
                         "Q": key.m1b_qlen,
                         "stamps": False,
                         "dbg": 0,
+                        "wide": key.m1c_wide,
+                        # no warp specialization in here: with it the fused
+                        # TP8 builds fault (memory access) where M1c alone
+                        # passes (not root-caused)
+                        "ws": 0,
                         "bid": bid,
                         "tid": tid,
                         "cm": CM_DEV,
-                        "vt": ml.vt.ptr,
+                        "ks": ml.ks.ptr,
                         "xm": ml.xm.ptr,
                         "xp": ml.xp.ptr,
+                        "xi": ml.xi.ptr,
                         "args": {
                             "qb": m1c_q,
                             "kv": m1c_kv,
@@ -603,6 +646,9 @@ def build(key: K2Build):
                         "done": lambda f: publish(c["put"], c["ardy"], f, 1, tid == 0),
                     }
                 )
+                # M1c's LDS is the stages' (``MainLds``): its last DMAs (a
+                # block past its end, prefetched) landed, every wave done
+                m1c.wait_dma()
             if const_expr(R > 1):
                 m1b.stage_push(c)
             stamp(on, tls, tid, 14)
@@ -864,6 +910,8 @@ def k2_launch(
     scale, kv_scale), its partials M1b's o / lse (split 0's views)."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
+    if m1c_in is not None and m1c.wide_kv(m1c_in["kv"]):
+        key = replace(key, m1c_wide=True)
     f = build(key)
     f(
         core.data_ptr(),
