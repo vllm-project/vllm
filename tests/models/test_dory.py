@@ -402,6 +402,7 @@ def test_self_speculation_reuses_prefix_and_preserves_kv_after_rejection(
     torch.manual_seed(42)
     kwargs = dict(num_draft_loops=num_draft_loops, num_shared_loops=num_shared_loops)
     model = model_factory(**kwargs)
+    assert all(not list(stage.parameters()) for stage in model.backbone.stages.values())
     reference = model_factory(**kwargs)
     target_reference = model_factory()
     draft_reference = model_factory(n_recurrent_loops=num_draft_loops)
@@ -523,3 +524,35 @@ def test_self_speculation_reuses_prefix_and_preserves_kv_after_rejection(
 def test_self_draft_rejects_incompatible_model_layout(model_factory, kwargs, match):
     with pytest.raises(ValueError, match=match):
         model_factory(**kwargs)
+
+
+def test_self_draft_compile_opt_out_runs_stages_eagerly(model_factory):
+    model = model_factory(num_draft_loops=1, num_shared_loops=1)
+    assert set(model.backbone.stages) == {"prefix", "target", "draft", "fill"}
+    assert all(stage.do_not_compile for stage in model.backbone.stages.values())
+    assert model.backbone.do_not_compile
+
+
+@torch.inference_mode()
+def test_self_draft_tensor_stages_trace_without_python_cache_control(model_factory):
+    """Dynamo can trace each stage as a full graph, including private draft KV."""
+    model = model_factory(num_draft_loops=2, num_shared_loops=1)
+    for param in model.parameters():
+        param.normal_(std=0.02)
+    tokens = positions = torch.arange(3)
+    model(tokens, positions)
+    graphs = []
+
+    def backend(graph, inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    for name, stage in model.backbone.stages.items():
+        args = (tokens, positions)
+        if name != "prefix":
+            input_hidden, hidden = model.backbone._shared_prefix(tokens, positions)
+            args = (positions, hidden, input_hidden)
+        expected = stage.forward(*args)
+        compiled = torch.compile(stage.forward, backend=backend, fullgraph=True)
+        torch.testing.assert_close(compiled(*args), expected, rtol=0, atol=0)
+    assert len(graphs) == 4

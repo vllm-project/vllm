@@ -65,7 +65,7 @@ class LoopedSelfDraftModelState(DefaultModelState):
             return False
         cache.allowed = not dummy_run and cache.can_reuse(scheduler_output)
         cache.verify = False
-        # Only the reuse path is captured; all other batches recompute eagerly.
+        # Only reuse batches replay the captured graph.
         return not cache.allowed
 
     def prepare_attn(

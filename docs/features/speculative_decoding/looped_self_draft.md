@@ -9,8 +9,7 @@ The following command enables looped self-drafting for Dory:
 ```bash
 vllm serve nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16 \
     --hf-overrides '{"n_recurrent_loops": 4}' \
-    --speculative-config '{"method": "looped_self_draft", "num_speculative_tokens": 4, "num_draft_loops": 1, "draft_sample_method": "probabilistic"}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    --speculative-config '{"method": "looped_self_draft", "num_speculative_tokens": 4, "num_draft_loops": 1, "draft_sample_method": "probabilistic"}'
 ```
 
 ## Configuration
@@ -26,6 +25,7 @@ For example, `num_draft_loops=2` and `num_shared_loops=1` run two draft loops bu
 ## Notes
 
 - This method requires Model Runner V2. Dory requires `recurrent_kv_cache_mode="per_loop"` and tensor, pipeline, and prefill context parallel sizes of `1`.
-- Activation reuse supports `FULL_DECODE_ONLY` CUDA graphs or eager execution with `--enforce-eager`. Batches without reusable activations, including prefill and mixed batches, run eagerly and recompute the shared layers.
+- `torch.compile` is on by default. vLLM selects `FULL_DECODE_ONLY` CUDA graphs automatically; an explicit graph mode must be `FULL_DECODE_ONLY` or `NONE` when compiling or reusing activations. Batches without reusable activations run without graph replay.
+- Set `--compilation-config '{"mode": 0}'` to disable compilation while retaining decode CUDA graphs with activation reuse, or use `--enforce-eager` to disable both. Optimization level `-O0` also leaves both disabled by default.
 - Prompt embeddings, microbatching, parallel drafting, adaptive verification, and dynamic speculation schedules are not supported.
-- Floating-point differences can change outputs. See [Lossless guarantees of Speculative Decoding](README.md#lossless-guarantees-of-speculative-decoding).
+- Compiled and uncompiled execution need not be bitwise identical; floating-point differences can change outputs. See [Lossless guarantees of Speculative Decoding](README.md#lossless-guarantees-of-speculative-decoding).

@@ -4239,6 +4239,110 @@ def looped_self_draft_target_config(tmp_path):
     return ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
 
 
+@pytest.fixture
+def looped_self_draft_vllm_config(looped_self_draft_target_config, monkeypatch):
+    # Exercise configuration ordering without loading weights or requiring a GPU.
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+
+    def build(*, reuse=True, enforce_eager=False, speculative=True, **kwargs):
+        target = looped_self_draft_target_config
+        target.enforce_eager = enforce_eager
+        parallel = ParallelConfig()
+        return VllmConfig(
+            model_config=target,
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=parallel,
+            speculative_config=SpeculativeConfig(
+                method="looped_self_draft",
+                num_speculative_tokens=4,
+                target_model_config=target,
+                target_parallel_config=parallel,
+                reuse_draft_activations=reuse,
+            )
+            if speculative
+            else None,
+            **kwargs,
+        )
+
+    return build
+
+
+@pytest.mark.parametrize(
+    "mode,reuse,graph_mode,expected",
+    [
+        (None, False, None, "FULL_DECODE_ONLY"),
+        (0, True, None, "FULL_DECODE_ONLY"),
+        (0, True, "PIECEWISE", "NONE"),
+        (0, False, "FULL", "FULL"),
+    ],
+)
+def test_looped_self_draft_resolves_graph_mode_at_config_time(
+    looped_self_draft_vllm_config, mode, reuse, graph_mode, expected
+):
+    config = looped_self_draft_vllm_config(
+        reuse=reuse,
+        compilation_config=CompilationConfig(mode=mode, cudagraph_mode=graph_mode),
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode[expected]
+
+
+@pytest.mark.parametrize(
+    "mode,reuse,graph_mode,match",
+    [
+        (3, False, "FULL_AND_PIECEWISE", "FULL_DECODE_ONLY or NONE"),
+        (1, True, "NONE", "VLLM_COMPILE or NONE"),
+        (2, True, "NONE", "VLLM_COMPILE or NONE"),
+    ],
+)
+def test_looped_self_draft_rejects_unsupported_compilation_config(
+    looped_self_draft_vllm_config, mode, reuse, graph_mode, match
+):
+    with pytest.raises(ValueError, match=match):
+        looped_self_draft_vllm_config(
+            reuse=reuse,
+            compilation_config=CompilationConfig(mode=mode, cudagraph_mode=graph_mode),
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"optimization_level": OptimizationLevel.O0},
+        {
+            "enforce_eager": True,
+            "compilation_config": CompilationConfig(mode=1, cudagraph_mode="FULL"),
+        },
+    ],
+)
+def test_looped_self_draft_preserves_eager_opt_out(
+    looped_self_draft_vllm_config, kwargs
+):
+    config = looped_self_draft_vllm_config(**kwargs).compilation_config
+    assert config.mode == CompilationMode.NONE
+    assert config.cudagraph_mode == CUDAGraphMode.NONE
+
+
+def test_plain_model_keeps_standard_compilation_defaults(looped_self_draft_vllm_config):
+    config = looped_self_draft_vllm_config(speculative=False).compilation_config
+    assert config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_looped_self_draft_checks_final_platform_graph_mode(
+    looped_self_draft_vllm_config, monkeypatch
+):
+    monkeypatch.setattr(
+        current_platform,
+        "check_and_update_config",
+        lambda config: setattr(
+            config.compilation_config, "cudagraph_mode", CUDAGraphMode.FULL
+        ),
+    )
+    with pytest.raises(ValueError, match="FULL_DECODE_ONLY or NONE; resolved to FULL"):
+        looped_self_draft_vllm_config()
+
+
 @pytest.mark.parametrize(
     "overrides,match",
     [

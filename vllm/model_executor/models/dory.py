@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -234,6 +235,67 @@ class DoryDecoderLayer(nn.Module):
         return slerp_alpha(residual, out, self.mlp_alpha, self._alpha_scale)
 
 
+class DoryStage(nn.Module):
+    """A tensor-only stage, sharing the backbone without registering its weights.
+
+    Each subclass needs its own forward code object: vLLM's guard-free compile
+    cache must not alias stages with different attention-cache bindings.
+    """
+
+    def __init__(self, backbone):
+        super().__init__()
+        self._backbone = (backbone,)
+
+
+@support_torch_compile
+class DoryPrefixStage(DoryStage):
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        return self._backbone[0]._shared_prefix(input_ids, positions)
+
+
+@support_torch_compile
+class DoryTargetStage(DoryStage):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_hidden_states: torch.Tensor,
+    ):
+        return self._backbone[0]._target_suffix(
+            positions, hidden_states, input_hidden_states
+        )
+
+
+@support_torch_compile
+class DoryDraftStage(DoryStage):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_hidden_states: torch.Tensor,
+    ):
+        return self._backbone[0]._draft_suffix(
+            positions, hidden_states, input_hidden_states
+        )
+
+
+@support_torch_compile
+class DoryFillStage(DoryStage):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_hidden_states: torch.Tensor,
+    ):
+        backbone = self._backbone[0]
+        return backbone._draft_suffix(
+            positions,
+            hidden_states,
+            input_hidden_states,
+            output_end=backbone.draft_fill_end,
+        )
+
+
 @support_torch_compile(
     enable_if=lambda vllm_config: (
         vllm_config.speculative_config is None
@@ -283,6 +345,18 @@ class DoryBackbone(nn.Module):
                 for i in range(config.num_hidden_layers)
             ]
         )
+        self.stages = nn.ModuleDict()
+        if not self.num_draft_loops:
+            return
+
+        for name, stage in (
+            ("prefix", DoryPrefixStage),
+            ("target", DoryTargetStage),
+            ("draft", DoryDraftStage),
+            ("fill", DoryFillStage),
+        ):
+            with set_model_tag(f"dory_{name}"):
+                self.stages[name] = stage(self)
 
     def _loops(
         self, positions, hidden_states, input_hidden_states, start, end, kv_offset=0
@@ -324,43 +398,7 @@ class DoryBackbone(nn.Module):
             hidden_states = layer(positions, hidden_states, loop_idx=loop_idx)
         return hidden_states
 
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        cache = self.draft_activation_cache
-        if cache is not None and cache.verify:
-            assert input_ids is not None
-            width = cache.num_speculative_tokens + 1
-            tail_positions = positions[width - 1 :: width].contiguous()
-            tail_ids = input_ids[width - 1 :: width].contiguous()
-            with cache.prefix_context():
-                input_hidden_states, hidden_states = self._shared_prefix(
-                    tail_ids, tail_positions
-                )
-                # Earlier rows already filled the private draft KV while proposing.
-                self._draft_suffix(
-                    tail_positions,
-                    hidden_states,
-                    input_hidden_states,
-                    output_end=self.draft_fill_end,
-                )
-            input_hidden_states, hidden_states = cache.merge(
-                input_hidden_states, hidden_states
-            )
-        else:
-            input_hidden_states, hidden_states = self._shared_prefix(
-                input_ids, positions, inputs_embeds
-            )
-            if self.num_draft_loops:
-                self._draft_suffix(
-                    positions,
-                    hidden_states,
-                    input_hidden_states,
-                    output_end=self.draft_fill_end,
-                )
+    def _target_suffix(self, positions, hidden_states, input_hidden_states):
         hidden_states = self._loops(
             positions,
             hidden_states,
@@ -370,13 +408,50 @@ class DoryBackbone(nn.Module):
         )
         return self._output_block(positions, hidden_states)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self.num_draft_loops:
+            input_hidden_states, hidden_states = self._shared_prefix(
+                input_ids, positions, inputs_embeds
+            )
+            return self._target_suffix(positions, hidden_states, input_hidden_states)
+
+        assert input_ids is not None and inputs_embeds is None
+        cache = self.draft_activation_cache
+        if cache is not None and cache.verify:
+            width = cache.num_speculative_tokens + 1
+            tail_positions = positions[width - 1 :: width].contiguous()
+            tail_ids = input_ids[width - 1 :: width].contiguous()
+            with cache.prefix_context():
+                input_hidden_states, hidden_states = self.stages["prefix"](
+                    tail_ids, tail_positions
+                )
+                # Earlier rows already filled the private draft KV while proposing.
+                self.stages["fill"](
+                    tail_positions,
+                    hidden_states,
+                    input_hidden_states,
+                )
+            input_hidden_states, hidden_states = cache.merge(
+                input_hidden_states, hidden_states
+            )
+        else:
+            input_hidden_states, hidden_states = self.stages["prefix"](
+                input_ids, positions
+            )
+            self.stages["fill"](positions, hidden_states, input_hidden_states)
+        return self.stages["target"](positions, hidden_states, input_hidden_states)
+
     def draft_forward(self, input_ids, positions, inputs_embeds=None):
-        input_hidden_states, hidden_states = self._shared_prefix(
-            input_ids, positions, inputs_embeds
-        )
+        assert input_ids is not None and inputs_embeds is None
+        input_hidden_states, hidden_states = self.stages["prefix"](input_ids, positions)
         if self.draft_activation_cache is not None:
             self.draft_activation_cache.record(input_hidden_states, hidden_states)
-        return self._draft_suffix(positions, hidden_states, input_hidden_states)
+        return self.stages["draft"](positions, hidden_states, input_hidden_states)
 
 
 class DoryForCausalLM(nn.Module):

@@ -1044,6 +1044,21 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _looped_self_draft_needs_decode_graphs(self) -> bool:
+        """Validate the compile mode and check whether graph modes are restricted."""
+        speculative = self.speculative_config
+        if speculative is None or speculative.method != "looped_self_draft":
+            return False
+        mode = self.compilation_config.mode
+        if mode not in (CompilationMode.NONE, CompilationMode.VLLM_COMPILE):
+            raise ValueError(
+                "Looped self-drafting supports VLLM_COMPILE or NONE; "
+                "set --compilation-config '{\"mode\": 3}' or '{\"mode\": 0}'."
+            )
+        return (
+            speculative.reuse_draft_activations or mode == CompilationMode.VLLM_COMPILE
+        )
+
     def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1830,6 +1845,14 @@ class VllmConfig:
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
 
+        # Resolve self-draft defaults before generic graph-mode normalization.
+        if (
+            self._looped_self_draft_needs_decode_graphs()
+            and self.optimization_level > OptimizationLevel.O0
+            and self.compilation_config.cudagraph_mode is None
+        ):
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            logger.info_once("Looped self-drafting selects FULL_DECODE_ONLY graphs.")
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
         if self.kernel_config.enable_flashinfer_autotune is None:
@@ -2140,6 +2163,16 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
+
+        if self._looped_self_draft_needs_decode_graphs() and (
+            self.compilation_config.cudagraph_mode
+            not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+        ):
+            raise ValueError(
+                "Looped self-drafting requires cudagraph_mode FULL_DECODE_ONLY or "
+                f"NONE; resolved to {self.compilation_config.cudagraph_mode.name}. "
+                "Check compilation settings and platform/KV-connector overrides."
+            )
 
         # final check of cudagraph mode after all possible updates
         if (

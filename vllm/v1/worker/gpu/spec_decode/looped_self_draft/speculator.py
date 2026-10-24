@@ -52,12 +52,6 @@ class LoopedSelfDraftSpeculator(TargetDependentARSpeculator):
         super().load_model(target_model)
         self.draft_attn_layer_names = set(target_model.get_draft_attn_layer_names())
         if self.speculative_config.reuse_draft_activations:
-            mode = self.vllm_config.compilation_config.cudagraph_mode
-            if mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
-                raise ValueError(
-                    "Looped self-draft activation reuse requires cudagraph_mode "
-                    "FULL_DECODE_ONLY or NONE"
-                )
             target_model.draft_activation_cache = LoopedSelfDraftActivationCache(self)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

@@ -167,7 +167,7 @@ class ModelState(ABC):
     def prepare_execution(
         self, scheduler_output: SchedulerOutput, dummy_run: bool = False
     ) -> bool:
-        """Prepare batch-dependent model state before dispatch; return force-eager."""
+        """Prepare state; return True to run without CUDA-graph replay."""
         return False
 
     def postprocess_state(

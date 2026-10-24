@@ -1786,7 +1786,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )
 
-        skip_compiled = self.model_state.prepare_execution(scheduler_output, dummy_run)
+        skip_cudagraphs = self.model_state.prepare_execution(
+            scheduler_output, dummy_run
+        )
+        skip_compiled = False
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Encoder-decoder models such as Whisper should run eager/non-compiled
             # when encoder inputs are scheduled, because this step updates
@@ -1801,7 +1804,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_size,
             self.dp_rank,
             max_query_len=max_query_len,
-            need_eager=is_profile or skip_compiled,
+            need_eager=is_profile or skip_cudagraphs or skip_compiled,
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
