@@ -614,7 +614,7 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool use_ue8m0);
+    bool use_ue8m0, double clamp_limit);
 
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
