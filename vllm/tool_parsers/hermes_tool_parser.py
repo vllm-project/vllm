@@ -55,6 +55,10 @@ class Hermes2ProToolParser(ToolParser):
 
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0
+        self._current_text: str = ""
+        # A `<tool_call>` that cannot be a real call. Everything after it,
+        # including later tags, is ordinary content.
+        self._suppress_tool_calls: bool = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -119,18 +123,58 @@ class Hermes2ProToolParser(ToolParser):
                     tools_called=False, tool_calls=[], content=model_output
                 )
 
-    def _extract_content(self, current_text: str) -> str | None:
+    def _region_is_prose(self, current_text: str, start: int, *, final: bool) -> bool:
+        """Return whether the `<tool_call>` at `start` cannot be a real call.
+
+        A real call is a JSON object, which may still be streaming. A closed
+        region with no tool name, or any other text, is prose.
+        """
+        json_start = start + len(self.tool_call_start_token)
+        end = current_text.find(self.tool_call_end_token, json_start)
+        if end != -1:
+            body = current_text[json_start:end]
+            closed = True
+        else:
+            body = current_text[json_start:]
+            overlap = partial_tag_overlap(body, self.tool_call_end_token)
+            if overlap:
+                body = body[:-overlap]
+            closed = False
+
+        stripped = body.strip()
+        if not stripped:
+            return closed or final
+        if stripped[0] != "{":
+            return True
+        if self._extract_tool_name(stripped):
+            return False
+        return closed or final
+
+    def _extract_content(self, current_text: str, *, final: bool = False) -> str | None:
         """Return unsent non-tool-call text, or None.
 
-        Holds back any suffix that could be a partial <tool_call> tag.
+        Holds back any suffix that could be a partial <tool_call> tag, and
+        holds back from a `<tool_call>` that may still be a real call. A
+        start token that is only prose is sent as content.
         """
-        if self.tool_call_start_token not in current_text:
-            overlap_length = partial_tag_overlap(
-                current_text, self.tool_call_start_token
-            )
-            sendable_idx = len(current_text) - overlap_length
+        if self._suppress_tool_calls:
+            sendable_idx = len(current_text)
         else:
-            sendable_idx = current_text.index(self.tool_call_start_token)
+            start = current_text.find(
+                self.tool_call_start_token, self._sent_content_idx
+            )
+            if start == -1:
+                overlap_length = (
+                    0
+                    if final
+                    else partial_tag_overlap(current_text, self.tool_call_start_token)
+                )
+                sendable_idx = len(current_text) - overlap_length
+            elif self._region_is_prose(current_text, start, final=final):
+                self._suppress_tool_calls = True
+                sendable_idx = len(current_text)
+            else:
+                sendable_idx = start
 
         if sendable_idx > self._sent_content_idx:
             content = current_text[self._sent_content_idx : sendable_idx]
@@ -201,6 +245,13 @@ class Hermes2ProToolParser(ToolParser):
         self.prev_tool_call_arr[index]["arguments"] = args
         return diff
 
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Return held text that never became a tool call, at end of stream."""
+        if any("name" in call for call in self.prev_tool_call_arr):
+            return None
+        content = self._extract_content(self._current_text, final=True)
+        return DeltaMessage(content=content) if content else None
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -221,8 +272,13 @@ class Hermes2ProToolParser(ToolParser):
         text preceding any tool call) or one or more ``DeltaToolCall``
         entries, or ``None`` if there is nothing new to send yet."""
         try:
-            # Extract any content before tool calls.
+            self._current_text = current_text
+            # Extract any content before tool calls. A stray `<tool_call>`
+            # in prose is content, not a call that never closes.
             content = self._extract_content(current_text)
+            if self._suppress_tool_calls:
+                return DeltaMessage(content=content) if content else None
+
             tool_call_jsons = self._extract_tool_call_jsons(current_text)
             tool_call_deltas: list[DeltaToolCall] = []
 

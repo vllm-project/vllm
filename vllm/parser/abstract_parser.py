@@ -1015,7 +1015,7 @@ class DelegatingParser(Parser):
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None
     ) -> DeltaMessage | None:
-        """Flush buffered state from engine-based parsers at stream end."""
+        """Flush buffered parser state at stream end."""
         reasoning_ended = self._stream_state.reasoning_ended
         for parser in (self._reasoning_parser, self._tool_parser):
             if not getattr(parser, "engine_based_streaming", False):
@@ -1048,4 +1048,27 @@ class DelegatingParser(Parser):
                     delta_message.tool_calls = (
                         delta_message.tool_calls or []
                     ) + flush_delta.tool_calls
+        return self._flush_legacy_tool_parser(delta_message)
+
+    def _flush_legacy_tool_parser(
+        self, delta_message: DeltaMessage | None
+    ) -> DeltaMessage | None:
+        """Flush a non-engine tool parser that implements `finish_streaming`.
+
+        Engine parsers are flushed above. Legacy parsers such as Hermes hold
+        text after a `<tool_call>` until it is clearly a call, and that text
+        has to be emitted when generation ends without one.
+        """
+        tool_parser = self._tool_parser
+        if tool_parser is None or tool_parser.engine_based_streaming:
+            return delta_message
+        finish = getattr(tool_parser, "finish_streaming", None)
+        if finish is None:
+            return delta_message
+        flush_delta = finish()
+        if flush_delta is None or not flush_delta.content:
+            return delta_message
+        if delta_message is None:
+            return DeltaMessage(content=flush_delta.content)
+        delta_message.content = (delta_message.content or "") + flush_delta.content
         return delta_message

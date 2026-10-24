@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from tests.tool_parsers.utils import get_function_delta
+from tests.tool_parsers.utils import get_function_delta, run_tool_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -420,3 +420,130 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+# Prose that mentions the tag, plus bodies that never become a tool call.
+# Streaming must return the same content as the non-streaming fallback.
+_STRAY_TOOL_CALL_TEXTS = [
+    "The literal <tool_call> tag opens a call. Done.",
+    'Mention <tool_call> and "name": "foo" in prose.',
+    "Ends with <tool_call>",
+    "prefix <tool_call>\n",
+]
+
+
+@pytest.mark.parametrize("text", _STRAY_TOOL_CALL_TEXTS)
+def test_hermes_stray_tool_call_streaming_matches_nonstreaming(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    text: str,
+) -> None:
+    """Literal <tool_call> in prose must not drop the rest of the text.
+
+    Regression for https://github.com/vllm-project/vllm/issues/63309.
+    """
+    assert qwen_tokenizer.decode(qwen_tokenizer.encode(text)) == text
+
+    content_ns, tools_ns = run_tool_extraction(
+        Hermes2ProToolParser(qwen_tokenizer),
+        text,
+        request=any_chat_request,
+        streaming=False,
+    )
+    content_s, tools_s = run_tool_extraction(
+        Hermes2ProToolParser(qwen_tokenizer),
+        text,
+        request=any_chat_request,
+        streaming=True,
+    )
+
+    assert not tools_ns
+    assert not tools_s
+    assert content_ns == text
+    assert content_s == content_ns
+
+
+def test_hermes_streaming_real_tool_call_still_parses(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """A normal streamed tool call is unchanged by stray-tag recovery."""
+    text = (
+        "Checking weather."
+        '<tool_call>{"name": "get_weather", '
+        '"arguments": {"city": "NYC"}}</tool_call>'
+    )
+    content, tool_calls = run_tool_extraction(
+        Hermes2ProToolParser(qwen_tokenizer),
+        text,
+        request=any_chat_request,
+        streaming=True,
+    )
+
+    assert content == "Checking weather."
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "get_weather"
+    assert json.loads(tool_calls[0].function.arguments) == {"city": "NYC"}
+
+
+@pytest.mark.parametrize("stream_interval", [1, 3, 8])
+def test_hermes_streaming_stray_tool_call_with_stream_interval(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """Text after a stray <tool_call> survives every stream interval."""
+    text = "The literal <tool_call> tag opens a call. Done."
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer,
+        parser,
+        any_chat_request,
+        text,
+        stream_interval,
+    )
+    finish = getattr(parser, "finish_streaming", None)
+    if finish is not None:
+        flushed = finish()
+        if flushed is not None and flushed.content:
+            deltas.append(flushed)
+
+    assert all(not delta.tool_calls for delta in deltas)
+    assert "".join(delta.content or "" for delta in deltas) == text
+
+
+def test_hermes_delegating_parser_flushes_stray_tool_call_at_eos(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """The serving parser flushes a trailing stray tag when the stream ends."""
+    from vllm.parser.abstract_parser import DelegatingParser
+
+    class _HermesOnlyParser(DelegatingParser):
+        tool_parser_cls = Hermes2ProToolParser
+
+    text = "Ends with <tool_call>"
+    parser = _HermesOnlyParser(qwen_tokenizer)
+    token_ids = qwen_tokenizer.encode(text, add_special_tokens=False)
+    parts: list[str] = []
+    tool_calls: list = []
+    previous = ""
+    for index in range(len(token_ids)):
+        current = qwen_tokenizer.decode(token_ids[: index + 1])
+        message = parser.parse_delta(
+            current[len(previous) :],
+            [token_ids[index]],
+            any_chat_request,
+            prompt_token_ids=[],
+            finished=index == len(token_ids) - 1,
+        )
+        previous = current
+        if message is None:
+            continue
+        if message.content:
+            parts.append(message.content)
+        if message.tool_calls:
+            tool_calls.extend(message.tool_calls)
+
+    assert not tool_calls
+    assert "".join(parts) == text
