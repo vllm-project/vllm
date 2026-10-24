@@ -2067,6 +2067,20 @@ def test_moe_layer_mori_graph(m: int, n: int, monkeypatch):
     parallel_launch_with_config(2, _mori_graph_worker, vllm_config, None, m, n)
 
 
+@pytest.mark.cpu_test
+def test_expanded_recv_topk_ids() -> None:
+    """The worst-case expanded layout's global expert IDs come from the
+    per-expert prefix sum, -1 past the received rows."""
+    from vllm.model_executor.layers.fused_moe.utils import expanded_recv_topk_ids
+
+    psum = torch.tensor([2, 2, 5], dtype=torch.int32)
+    ids = expanded_recv_topk_ids(psum, 8, 12, torch.int64)
+    assert ids.dtype == torch.int64
+    assert ids.tolist() == [[12], [12], [14], [14], [14], [-1], [-1], [-1]]
+    empty = torch.zeros(2, dtype=torch.int32)
+    assert (expanded_recv_topk_ids(empty, 4, 12, torch.int64) == -1).all()
+
+
 # TODO: add torch.compile tests and graph coverage for other backends.
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)

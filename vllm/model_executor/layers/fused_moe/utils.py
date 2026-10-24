@@ -201,6 +201,37 @@ def count_expert_num_tokens(
     return expert_num_tokens
 
 
+def expanded_recv_topk_ids(
+    psum_per_expert: torch.Tensor,
+    num_rows: int,
+    rank_expert_offset: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expert IDs of an expanded receive layout, without a host sync.
+
+    Valid for dispatches with expert alignment 1 (the kernels' default, which
+    vLLM uses): with a larger alignment, the gap rows after an expert would be
+    labelled as the next expert.
+
+    Args:
+        psum_per_expert: The inclusive prefix sum of the rows of each local
+            expert; its last element is the received row count.
+        num_rows: The rows allocated for the worst case.
+        rank_expert_offset: The global ID of this rank's first expert.
+        dtype: The ID dtype.
+
+    Returns:
+        [num_rows, 1] global expert IDs; -1 for the rows past the count.
+
+    """
+    rows = torch.arange(
+        num_rows, dtype=psum_per_expert.dtype, device=psum_per_expert.device
+    )
+    local = torch.searchsorted(psum_per_expert, rows, right=True)
+    ids = torch.where(local < psum_per_expert.numel(), local + rank_expert_offset, -1)
+    return ids.to(dtype).unsqueeze(1)
+
+
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
