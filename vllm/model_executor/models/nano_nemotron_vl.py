@@ -79,6 +79,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     cached_encode,
 )
+from vllm.multimodal.utils import get_use_audio_in_video
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
     compute_retention_mask,
@@ -706,7 +707,9 @@ class NanoNemotronVLMultiModalProcessor(
         merged_kwargs = mm_config.merge_mm_processor_kwargs(
             inputs.hf_processor_mm_kwargs
         )
-        use_audio_in_video = bool(merged_kwargs.get("use_audio_in_video", False))
+        # Resolve from the merged kwargs, honoring the HF `videos_kwargs` scope
+        # like the renderer's media loading does.
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
 
         inputs.hf_processor_mm_kwargs = {
             k: v
