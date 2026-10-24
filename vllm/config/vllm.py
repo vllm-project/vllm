@@ -3412,6 +3412,28 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+            # Intermediate prefill chunks end on the block grid, so a long
+            # prompt prefills only the largest block multiple of the budget.
+            sched = self.scheduler_config
+            if sched.long_prefill_token_threshold == 0:
+                budget = sched.max_num_scheduled_tokens or sched.max_num_batched_tokens
+                usable = budget // block_size * block_size
+                if block_size <= budget and usable < 0.75 * budget:
+                    decode_tokens = sched.max_num_seqs * (
+                        1 + self.num_speculative_tokens
+                    )
+                    logger.warning(
+                        "Mamba prefix caching ends intermediate prefill chunks "
+                        "on the %d-token block grid, so a long prompt prefills "
+                        "at most %d of the %d-token budget per step. Set "
+                        "--max-num-batched-tokens to a multiple of %d plus "
+                        "decode headroom (e.g. %d) to use it fully.",
+                        block_size,
+                        usable,
+                        budget,
+                        block_size,
+                        usable + block_size + decode_tokens,
+                    )
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
