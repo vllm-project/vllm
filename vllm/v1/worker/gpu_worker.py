@@ -155,6 +155,43 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
     return torch_reserved
 
 
+def compute_suggested_kv_cache_memory_bytes(
+    *,
+    total_consumed: int,
+    peak_activation_memory: int,
+    cuda_graph_memory_bytes: int,
+    requested_memory: int,
+    init_free_memory: int,
+    redundancy_buffer_memory: int = 150 * (1 << 20),
+) -> tuple[int, int]:
+    """Suggested ``--kv-cache-memory`` values after CUDA-graph capture.
+
+    Returns ``(fit_requested, fit_gpu)``. ``peak_activation_memory`` is the
+    transient activation headroom only; CUDAGraph bytes are the actual
+    captured pool. Folding an estimated graph size into peak activation
+    double-counts it and can make both suggestions negative (#37426, #57936).
+    """
+    non_kv_cache_memory = (
+        total_consumed + peak_activation_memory + cuda_graph_memory_bytes
+    )
+    to_requested = (
+        int(requested_memory) - non_kv_cache_memory - redundancy_buffer_memory
+    )
+    to_gpu = init_free_memory - non_kv_cache_memory - redundancy_buffer_memory
+    return to_requested, to_gpu
+
+
+def startup_plan_kv_cache_memory_bytes(available_kv_cache_memory_bytes: int) -> int:
+    """KV bytes to persist so the next boot repeats this allocation.
+
+    This is the budget this boot actually gave the KV cache, not the
+    printed ``--kv-cache-memory`` suggestion. The suggestion also
+    subtracts the captured CUDAGraph pool and a 150 MiB buffer, so
+    saving it shrinks the next boot's cache (#57936).
+    """
+    return int(available_kv_cache_memory_bytes)
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -739,9 +776,11 @@ class Worker(WorkerBase):
             )
 
         self.total_consumed = profile_result.total_consumed
-        self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
-        )
+        # Transient activation headroom only. CUDAGraph memory is reserved
+        # via cudagraph_memory_estimate_applied below, and the
+        # --kv-cache-memory suggestion uses the actual captured pool.
+        # Adding the estimate here double-counts it (#37426, #57936).
+        self.peak_activation_memory = profile_result.transient_peak_headroom
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         self.available_kv_cache_memory_bytes = (
@@ -1017,22 +1056,15 @@ class Worker(WorkerBase):
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
-            redundancy_buffer_memory = 150 * (1 << 20)
-
-            non_kv_cache_memory = (
-                self.total_consumed
-                + self.peak_activation_memory
-                + cuda_graph_memory_bytes
-            )
-            kv_cache_memory_bytes_to_gpu_limit = (
-                self.init_snapshot.free_memory
-                - non_kv_cache_memory
-                - redundancy_buffer_memory
-            )
-            kv_cache_memory_bytes_to_requested_limit = (
-                int(self.requested_memory)
-                - non_kv_cache_memory
-                - redundancy_buffer_memory
+            (
+                kv_cache_memory_bytes_to_requested_limit,
+                kv_cache_memory_bytes_to_gpu_limit,
+            ) = compute_suggested_kv_cache_memory_bytes(
+                total_consumed=self.total_consumed,
+                peak_activation_memory=self.peak_activation_memory,
+                cuda_graph_memory_bytes=cuda_graph_memory_bytes,
+                requested_memory=int(self.requested_memory),
+                init_free_memory=self.init_snapshot.free_memory,
             )
 
             msg = (
@@ -1059,7 +1091,13 @@ class Worker(WorkerBase):
 
             logger.info(msg)
 
-            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
+            # The suggestion above is a tighter hint than the budget this
+            # boot allocated. Persisting the hint makes the next boot
+            # smaller (#57936).
+            persisted_kv_bytes = startup_plan_kv_cache_memory_bytes(
+                self.available_kv_cache_memory_bytes
+            )
+            maybe_save_startup_plan(self, persisted_kv_bytes)
 
         if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
