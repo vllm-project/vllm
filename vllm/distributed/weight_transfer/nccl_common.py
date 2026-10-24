@@ -128,20 +128,18 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
 
 
 def build_worker_init_payload(
+    init_info: "NCCLRendezvous",
     *,
-    master_address: str,
-    master_port: int,
-    world_size: int,
     packed: bool = False,
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> dict:
     # Workers sit at rank_offset 1, after the single trainer sender rank 0.
     worker_init_info = NCCLWeightTransferInitInfo(
-        master_address=master_address,
-        master_port=master_port,
+        master_address=init_info.master_address,
+        master_port=init_info.master_port,
         rank_offset=1,
-        world_size=world_size,
+        world_size=init_info.world_size,
         packed=packed,
         packed_buffer_size_bytes=packed_buffer_size_bytes,
         packed_num_buffers=packed_num_buffers,
@@ -161,7 +159,7 @@ def run_trainer_rendezvous(
 
 
 class NCCLRendezvous(Protocol):
-    """The TCP rendezvous fields `trainer_init` needs.
+    """The TCP rendezvous fields used by trainer initialization helpers.
 
     Structural so each backend can keep its own trainer init info next to its
     engine (dense `NCCLTrainerInitInfo`, `SparseNCCLTrainerInitInfo`) without

@@ -284,9 +284,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     @classmethod
     def _build_worker_init_payload(cls, init_info: NCCLTrainerInitInfo) -> dict:
         return build_worker_init_payload(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            world_size=init_info.world_size,
+            init_info,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,

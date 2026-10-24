@@ -232,11 +232,7 @@ class SparseNCCLTrainerWeightTransferEngine(
 
     @classmethod
     def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
-        return build_worker_init_payload(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            world_size=init_info.world_size,
-        )
+        return build_worker_init_payload(init_info)
 
     @classmethod
     def trainer_init(
