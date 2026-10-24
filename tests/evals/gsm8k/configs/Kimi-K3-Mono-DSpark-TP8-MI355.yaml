@@ -1,0 +1,32 @@
+model_name: "moonshotai/Kimi-K3"
+# Not yet measured with this harness: InferenceX's MI355X Kimi-K3 lane scored
+# 0.969 on GSM8K (recipes/models/moonshotai/Kimi-K3.yaml).
+accuracy_threshold: 0.93
+tolerance: 0.05
+min_acceptance_length: 3.0
+num_questions: 1319
+num_fewshot: 5
+# One request x (1 + 7 drafts) = 8 rows, the monokernel's limit.
+max_concurrency: 1
+startup_max_wait_seconds: 3600
+startup_rpc_checks:
+  - start_monokernel_count
+final_rpc_checks:
+  - check_monokernel_ran
+server_args: >-
+  --language-model-only
+  --tensor-parallel-size 8
+  --max-model-len 8192
+  --max-num-seqs 1
+  --kv-cache-dtype fp8
+  --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_FA"}'
+  --speculative-config '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark",
+  "num_speculative_tokens":7,"attention_backend":"ROCM_AITER_MLA",
+  "kv_cache_dtype":"fp8","draft_sample_method":"probabilistic",
+  "rejection_sample_method":"block"}'
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+  --additional-config '{"decode_backend":"latency_specialized"}'
+  --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
+env:
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_ROCM_USE_AITER: "1"

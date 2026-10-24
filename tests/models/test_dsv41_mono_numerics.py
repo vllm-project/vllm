@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numerics of the DeepSeek-V4.1 mono decode kernels at TP2 on CDNA4 against the
-ops vLLM runs for the same decode step: random weights in the checkpoint's
-formats, the step's KV caches as vLLM's insert writes them.
+"""Numerics of the DeepSeek-V4.1 mono decode kernels at TP2 and TP4 on CDNA4
+against the ops vLLM runs for the same decode step: random weights in the
+checkpoint's formats, the step's KV caches as vLLM's insert writes them.
 
 - The whole layer (K1 + K2) against the mHC seams, the ROCm attention op chain,
   the TP all-reduce and ``DeepseekV4MoE``.
 - The FFN launch against the same FFN half, from wo_b's unreduced output.
+- The key table K2 attends over and the KV records K1 writes, against the
+  step's metadata and vLLM's insert.
+- The DSpark draft layers' runner (128 / 3 routing, the block's non-causal SWA
+  rows) against the same chain with the draft's MoE.
 
 Each stage is compared on its own input, so a failure names the stage; the MoE
 is checked on the kernels' own FFN input, where routing cannot differ.
@@ -15,6 +19,8 @@ On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
 gfx942 are checked by ``test_dsv41_mono_layers.py``."""
+
+from typing import NamedTuple
 
 import pytest
 import ray
@@ -35,6 +41,26 @@ WINDOW, TOPK, SWA_BLOCK, CACHE_BLOCK = 128, 512, 32, 128
 RECORD, DATA, ALIGN = 584, 576, 576
 REPLAYS = 300
 HC = 4
+DRAFTS = 5  # DSpark's num_speculative_tokens: a request's rows in a draft step
+# contexts under the window and under a ratio's top-k
+SHORT_CONTEXTS = (1, 7, 64, 127, 129, 300)
+
+
+class Case(NamedTuple):
+    """A decode step of R requests x T tokens on a layer of compress ratio
+    ``ratio``. ``entry``: the residual K1 takes, "fold" (the previous layer's
+    output folded in), "settled" (after an Engram write) or "embedding" (the
+    first layer's). ``pad``: rows a FULL graph pads the step with (slot -1).
+    ``short``: SHORT_CONTEXTS among the long contexts. ``index``: an index
+    source, its top-k selected between K1 and K2."""
+
+    ratio: int
+    R: int
+    T: int
+    entry: str = "fold"
+    pad: int = 0
+    short: bool = False
+    index: bool = False
 
 
 def _on_cdna4() -> bool:
@@ -76,6 +102,23 @@ def _paged_cache(num_blocks: int, block: int, device) -> torch.Tensor:
     return torch.as_strided(raw, (num_blocks, block, RECORD), (page, RECORD, 1))
 
 
+def _flat(cache: torch.Tensor) -> torch.Tensor:
+    """Every byte of the cache's pages."""
+    n = cache.untyped_storage().nbytes() - cache.storage_offset()
+    return torch.as_strided(cache, (n,), (1,))
+
+
+def _record_bytes(cache: torch.Tensor, block: int, slots: torch.Tensor):
+    """The offsets in ``_flat(cache)`` of the records at ``slots``: their data
+    bytes [n, 576] and their scale bytes [n, 8]."""
+    slots = slots.to(cache.device).long()
+    b, o = slots // block, slots % block
+    d0 = b * cache.stride(0) + o * DATA
+    s0 = b * cache.stride(0) + block * DATA + o * 8
+    ar = torch.arange(DATA, device=cache.device)
+    return d0[:, None] + ar, s0[:, None] + ar[:8]
+
+
 def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
     """GPT-J RoPE of the last 64 dims (fp32 math, bf16 out)."""
     cs = cos_sin[positions.long()]
@@ -108,16 +151,10 @@ def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
     )
     scales = torch.zeros(kv.shape[0], 8, dtype=torch.uint8, device=kv.device)
     scales[:, :7] = (exp + 127).clamp(0, 255).to(torch.uint8)
-    n = cache.untyped_storage().nbytes() - cache.storage_offset()
-    flat = torch.as_strided(cache, (n,), (1,))
-    slots = slots.to(kv.device).long()
-    b, o = slots // block, slots % block
-    d0 = b * cache.stride(0) + o * DATA
-    s0 = b * cache.stride(0) + block * DATA + o * 8
-    ar = torch.arange(DATA, device=kv.device)
-    flat[(d0[:, None] + ar).reshape(-1)] = data.reshape(-1)
-    ar = torch.arange(8, device=kv.device)
-    flat[(s0[:, None] + ar).reshape(-1)] = scales.reshape(-1)
+    flat = _flat(cache)
+    d, s = _record_bytes(cache, block, slots)
+    flat[d.reshape(-1)] = data.reshape(-1)
+    flat[s.reshape(-1)] = scales.reshape(-1)
 
 
 def _normed_kv(n: int, kv_norm, g, device):
@@ -127,16 +164,34 @@ def _normed_kv(n: int, kv_norm, g, device):
 
 
 def _decode_step(
-    ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int, fnuz: bool = False
+    ratio: int,
+    R: int,
+    T: int,
+    kv_norm,
+    cos_sin,
+    seed: int,
+    fnuz: bool = False,
+    short: bool = False,
+    pad: int = 0,
+    causal: bool = True,
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
     cache filled, a random top-512 a token. ``fnuz``: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
-    compressor writes them on gfx942 too."""
+    compressor writes them on gfx942 too. ``short``: SHORT_CONTEXTS among
+    them. ``pad``: rows after the step's, as a FULL graph pads it (slot -1, no
+    window). ``causal=False``: the DSpark draft block's rows, each the window
+    before the block and the whole block."""
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
     g = torch.Generator().manual_seed(seed)
     dev = kv_norm.device
     ctx = [int(c) for c in torch.randint(2000, 40000, (R,), generator=g)]
+    if short:
+        ctx[: len(SHORT_CONTEXTS)] = SHORT_CONTEXTS
     M = R * T
     spans = [
         (max(0, c - WINDOW - T) // SWA_BLOCK, (c + T - 1) // SWA_BLOCK) for c in ctx
@@ -154,11 +209,16 @@ def _decode_step(
 
     pos = [ctx[r] + t for r in range(R) for t in range(T)]
     t2r = [r for r in range(R) for _ in range(T)]
-    swa_idx = torch.full((M, WINDOW), -1, dtype=torch.int32)
-    swa_len = torch.zeros(M, dtype=torch.int32)
+    width = WINDOW if causal else get_dspark_swa_index_width(WINDOW, T)
+    swa_idx = torch.full((M + pad, width), -1, dtype=torch.int32)
+    swa_len = torch.zeros(M + pad, dtype=torch.int32)
     for i in range(M):
-        ps = range(max(pos[i] - WINDOW + 1, 0), pos[i] + 1)
-        swa_idx[i, : len(ps)] = torch.tensor([slot(t2r[i], p) for p in ps])
+        r = t2r[i]
+        lo, hi = pos[i] - WINDOW + 1, pos[i] + 1
+        if not causal:
+            lo, hi = ctx[r] - WINDOW, ctx[r] + T
+        ps = range(max(lo, 0), hi)
+        swa_idx[i, : len(ps)] = torch.tensor([slot(r, p) for p in ps])
         swa_len[i] = len(ps)
     hist = [
         (r, p) for r in range(R) for p in range(max(0, ctx[r] - WINDOW - T), ctx[r])
@@ -170,12 +230,14 @@ def _decode_step(
     )
 
     step = dict(
-        M=M,
-        positions=torch.tensor(pos, dtype=torch.int64, device=dev),
+        M=M + pad,
+        positions=torch.tensor(pos + [0] * pad, dtype=torch.int64, device=dev),
         slot_mapping=torch.tensor(
-            [slot(t2r[i], pos[i]) for i in range(M)], dtype=torch.int64, device=dev
+            [slot(t2r[i], pos[i]) for i in range(M)] + [-1] * pad,
+            dtype=torch.int64,
+            device=dev,
         ),
-        token_to_req=torch.tensor(t2r, dtype=torch.int32, device=dev),
+        token_to_req=torch.tensor(t2r + [0] * pad, dtype=torch.int32, device=dev),
         swa_indices=swa_idx.to(dev),
         swa_lens=swa_len.to(dev),
         swa_cache=swa,
@@ -201,7 +263,7 @@ def _decode_step(
                 _normed_kv(lens[r], kv_norm, g, dev), (idx * ratio).to(dev), cos_sin
             )
             _write_records(comp, entries, slots, kv)
-        topk = torch.full((M, TOPK), -1, dtype=torch.int32)
+        topk = torch.full((M + pad, TOPK), -1, dtype=torch.int32)
         for i in range(M):
             cand = (pos[i] + 1) // ratio
             n = min(cand, TOPK)
@@ -225,6 +287,33 @@ def _rows(s: dict, a: int, b: int) -> dict:
     if s["topk"] is not None:
         cut["topk"] = s["topk"][a:b]
     return cut
+
+
+def _key_table(s: dict, ratio: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The keys K2 attends over, as K1 lists them from the step's metadata:
+    a row's top-k compressed slots (with bit 31 set) then its window slots,
+    -1 past them and for a pad row, [M, 640]; and each row's (keys, top-k
+    keys), [2, M]."""
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import KEYS
+
+    M = s["M"]
+    slots, pos = s["slot_mapping"].tolist(), s["positions"].tolist()
+    swa_idx, swa_len = s["swa_indices"].cpu(), s["swa_lens"].tolist()
+    keys = torch.full((M, KEYS), -1, dtype=torch.int64)
+    lens = torch.zeros(2, M, dtype=torch.int32)
+    for t in range(M):
+        if slots[t] < 0:
+            continue
+        ntopk = min((pos[t] + 1) // ratio, TOPK) if ratio else 0
+        if ntopk:
+            local = s["topk"][t, :ntopk].long().cpu()
+            e = s["comp_entries"]
+            blk = s["comp_block_table"][s["token_to_req"][t]].long().cpu()
+            comp = blk[local.clamp_min(0) // e] * e + local.clamp_min(0) % e
+            keys[t, :ntopk] = torch.where(local >= 0, comp - 2**31, -1)
+        keys[t, ntopk : ntopk + swa_len[t]] = swa_idx[t, : swa_len[t]]
+        lens[:, t] = torch.tensor([ntopk + swa_len[t], ntopk])
+    return keys.to(torch.int32), lens
 
 
 # ---------------------------------------------------------------- weights
@@ -274,8 +363,7 @@ def _random_moe(moe, gd, gr, inter: int) -> None:
 # ---------------------------------------------------------------- the worker
 
 
-@ray.remote(num_gpus=1, max_calls=1)
-def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+def _in_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, check):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -291,13 +379,43 @@ def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         init_workspace_manager(device)
-        _check_layers(rank, tp_size, device)
+        check(rank, tp_size, device)
 
 
-def _check_layers(rank: int, tp: int, device) -> None:
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _in_worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, _check_layers
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_variants(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _in_worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, _check_variants
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_draft(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _in_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, _check_draft)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_index(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _in_worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, _check_index_source
+    )
+
+
+def _bench(rank: int, tp: int, device, draft: bool = False):
+    """The process's mono runner of the target's layers, or of the DSpark
+    draft's (``draft``), on random weights of one layer, and ``check(case)``:
+    the case's step against vLLM's ops, which returns the step's launches on
+    fixed buffers for the replay stress."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+    from vllm.distributed import tensor_model_parallel_all_reduce
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
@@ -309,18 +427,19 @@ def _check_layers(rank: int, tp: int, device) -> None:
     )
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.common.ops import fused_q_kv_rmsnorm
+    from vllm.models.deepseek_v41.amd import mono_decode
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import KEYS, Dims
     from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
-    from vllm.models.deepseek_v41.amd.mono.runner import (
-        AttnWeights,
-        DSV41MonoLayer,
-        MonoLayerWeights,
-    )
+    from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights, MonoLayerWeights
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
     from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
     from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         build_ragged_indices_from_dense,
         rocm_inverse_rope_mxfp8_rows,
@@ -343,8 +462,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
     H, G = N_HEADS // tp, O_GROUPS // tp
     bf = torch.bfloat16
 
+    # a layer past the backbone's is a draft layer, with the draft's routing
+    layer_id = cfg.num_hidden_layers if draft else 21
     with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
-        moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
+        moe = DeepseekV4MoE(vc, prefix=f"model.layers.{layer_id}.ffn")
         mhc = MHCPreDelayedOp()
     _random_moe(
         moe,
@@ -353,6 +474,18 @@ def _check_layers(rank: int, tp: int, device) -> None:
         inter=2304 // tp,
     )
     process_weights_after_loading(moe, vc.model_config, device)
+    experts, topk_k = moe.n_routed_experts, moe.n_activated_experts
+    if draft:
+        assert (experts, topk_k) == (128, 3), (experts, topk_k)
+        width = get_dspark_swa_index_width(cfg.sliding_window, DRAFTS)
+        runner = mono_decode._mono_runner(
+            device,
+            mono_decode.MonoDecodeLayer(
+                draft=True, experts=experts, topk=topk_k, swa_width=width
+            ),
+        )
+    else:
+        runner = mono_decode._mono_runner(device)
 
     def f32(*shape, s=1.0, gen=g):
         return (torch.randn(*shape, generator=gen) * s).to(device)
@@ -378,9 +511,14 @@ def _check_layers(rank: int, tp: int, device) -> None:
         )  # fmt: skip
 
     def moe_out(x):
+        # the rows tiled to a full step: at some small token counts aiter picks
+        # fused-FP8 stage-1 kernels with another MXFP8 scale rule (1.5-1.9%,
+        # https://github.com/ROCm/aiter/issues/6548)
+        rows = torch.arange(max(x.shape[0], mono_decode.MAX_ROWS), device=device)
+        rows %= x.shape[0]
         with set_forward_context(None, vc):
-            ids = torch.zeros(x.shape[0], dtype=torch.int64, device=device)
-            return moe(x.clone(), ids)
+            ids = torch.zeros(rows.numel(), dtype=torch.int64, device=device)
+            return moe(x[rows], ids)[: x.shape[0]]
 
     wqkv, wqkv_s = _mxfp8(1792, HIDDEN, g, device)
     wq_b, wq_b_s = _mxfp8(H * HEAD_DIM, Q_RANK, gs, device)
@@ -390,16 +528,15 @@ def _check_layers(rank: int, tp: int, device) -> None:
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
-    def top6(x):
-        """The top-6 experts as vLLM routes: sqrt(softplus(logits)) + bias."""
+    def top(x):
+        """The experts vLLM routes to: sqrt(softplus(logits)) + bias."""
         sc = torch.nn.functional.softplus(x.float() @ gw.T).sqrt() + bias
-        return sc.topk(6, dim=1).indices.sort(1).values
+        return sc.topk(topk_k, dim=1).indices.sort(1).values
 
-    steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
+    def check(case: Case):
+        ratio, R, T = case.ratio, case.R, case.T
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -407,11 +544,14 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 compress_ratio=ratio,
             )  # fmt: skip
         cos_sin = rope.cos_sin_cache.to(device=device, dtype=torch.float32)
-        s = _decode_step(ratio, R, T, kv_norm, cos_sin, seed=7 + ratio)
-        M = s["M"]
+        s = _decode_step(
+            ratio, R, T, kv_norm, cos_sin, seed=7 + ratio, short=case.short,
+            pad=case.pad, causal=not draft,
+        )  # fmt: skip
+        M, n = s["M"], R * T
         mw = MonoLayerWeights(
             attn=AttnWeights(
-                layer_id=21, wqkv=wqkv, wqkv_scale=wqkv_s, q_norm=q_norm,
+                layer_id=layer_id, wqkv=wqkv, wqkv_scale=wqkv_s, q_norm=q_norm,
                 kv_norm=kv_norm, wq_b=wq_b, wq_b_scale=wq_b_s, wo_a=wo_a,
                 wo_a_scale=wo_a_s, wo_b=wo_b, wo_b_scale=wo_b_s, attn_sink=sink,
                 cos_sin=cos_sin, ratio=ratio,
@@ -426,6 +566,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
             sgu_s=u8(sh.gate_up_proj.weight_scale), sw2=sh.down_proj.weight,
             sw2_s=u8(sh.down_proj.weight_scale),
         )  # fmt: skip
+        # the layouts vLLM's loading leaves, as the model checks them
+        mw.attn.check(Dims(tp))
+        mw.check(tp, experts)
 
         # the layer's inputs at the attention seam (the same on every rank)
         gi = torch.Generator().manual_seed(11)
@@ -441,18 +584,32 @@ def _check_layers(rank: int, tp: int, device) -> None:
         comb0 = comb0.to(device)
         post0 = (torch.sigmoid(torch.randn(M, HC, 1, generator=gi)) * 2).to(device)
         pre0 = (torch.sigmoid(torch.randn(M, HC, generator=gi)) + 1e-6).to(device)
+        if case.entry == "embedding":
+            # the embedding broadcast to the streams; vLLM's seam takes stream
+            # 0 without a pre-mix, the kernels with runner.first_pre_mix
+            res0 = x0.unsqueeze(1).expand(-1, HC, -1).contiguous()
+            pre0 = runner.first_pre_mix(M)
 
         # vLLM's decode chain
-        res, post, comb, xa, attn_pre = seam("attn", res0, x0, post0, comb0, pre0)
+        if case.entry == "fold":
+            res, post, comb, xa, attn_pre = seam("attn", res0, x0, post0, comb0, pre0)
+        else:
+            res, post, comb, xa, attn_pre = seam(
+                "attn",
+                res0,
+                None,
+                None,
+                None,
+                pre0 if case.entry == "settled" else None,
+            )
         swa_ind, swa_ptr = build_ragged_indices_from_dense(
             s["swa_indices"].reshape(M, -1), s["swa_lens"]
         )
         top_ind = top_ptr = None
         if ratio:
-            valid = torch.ones(M, dtype=torch.bool, device=device)
             top_ind, top_ptr, _ = compute_global_topk_ragged_indices_and_indptr(
                 s["topk"], s["token_to_req"], s["comp_block_table"],
-                s["comp_entries"], valid,
+                s["comp_entries"], s["slot_mapping"] >= 0,
             )  # fmt: skip
         x8, xs = mxfp8_e4m3_quantize(xa)
         qr_kv = rocm_mxfp8_block32_gemm(x8, xs, wqkv, wqkv_s, bf)
@@ -462,10 +619,13 @@ def _check_layers(rank: int, tp: int, device) -> None:
         q8, qs = mxfp8_e4m3_quantize(qr)
         q = rocm_mxfp8_block32_gemm(q8, qs, wq_b, wq_b_s, bf).view(M, H, HEAD_DIM)
         swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
+        cache = _flat(s["swa_cache"])
+        empty = cache.clone()
         q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
             cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
         )  # fmt: skip
+        inserted = cache.clone()
         attn = torch.empty(M, H, HEAD_DIM, dtype=bf, device=device)
         rocm_aiter_ops.triton_sparse_mla_fwd(
             q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
@@ -483,67 +643,104 @@ def _check_layers(rank: int, tp: int, device) -> None:
         out = moe_out(xf)
 
         # ---- the whole layer: K1 + K2
-        o = runner.forward(
+        meta = dict(
+            topk_indices=s["topk"], comp_cache=s["comp_cache"],
+            comp_block_table=s["comp_block_table"], fold=case.entry == "fold",
+        )  # fmt: skip
+        if case.index:
+            topk = torch.full_like(s["topk"], -1)
+            meta.update(topk_indices=topk, select=lambda *_: topk.copy_(s["topk"]))
+        args = (
             mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
             s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            comp_block_table=s["comp_block_table"],
         )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
+        cache.copy_(empty)
+        o = runner.forward(*args, **meta)
+        tag = f"{'draft ' if draft else ''}{case}"
+        # the keys K2 attended over, as the step's metadata lists them; the KV
+        # records K1 wrote, byte for byte vLLM's insert's, and nothing else
+        keys, lens = _key_table(s, ratio)
+        assert torch.equal(runner.kt[: M * KEYS].view(M, KEYS).cpu(), keys), tag
+        assert torch.equal(runner.klen[: 2 * M].view(2, M).cpu(), lens), tag
+        assert torch.equal(cache, inserted) and not torch.equal(empty, inserted), tag
+
+        off = scratch_layout(M, tp, experts, topk_k, runner.ug_groups)["normed"][0]
         normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
-        tag = f"ratio {ratio}, {R} x {T}"
-        assert _cos(runner.res_mid[:M], res) > 0.99999, tag
+        res_n, res2_n, xf_n, normed_n = res[:n], res2[:n], xf[:n], normed[:n]
+        o_n = [t[:n] for t in o]
+        assert _cos(runner.res_mid[:n], res_n) > 0.99999, tag
         for got, want in (
             (runner.post_a, post),
             (runner.comb_a, comb),
             (runner.pre_a, attn_pre),
         ):
             torch.testing.assert_close(
-                got[:M].view_as(want), want, rtol=1e-4, atol=1e-5
+                got[:n].view_as(want[:n]), want[:n], rtol=1e-4, atol=1e-5
             )
-        same_in = moe_out(normed)
-        # relative errors about 3x what the kernels show (0.3-0.5%)
-        assert _cos(o[1], res2) > 0.9999 and _rel(o[1], res2) < 0.01, tag
-        assert _cos(normed, xf) > 0.999 and _rel(normed, xf) < 0.012, tag
-        # TODO: back to cos > 0.9999, rel < 0.015 once
-        # https://github.com/ROCm/aiter/issues/6548 is fixed: aiter's fused-FP8
-        # stage-1 MoE kernels use another MXFP8 scale rule (1.53% at TP4)
-        assert _cos(o[0], same_in) > 0.9998 and _rel(o[0], same_in) < 0.02, tag
+        same_in = moe_out(normed_n)
+        # relative errors about 3x what the kernels show (0.3-0.5%). The
+        # residual's error is 2.3-3.3% of the attention output's share, which
+        # is 36-50% of its norm over a window only (11-22% with top-k): 1.05%
+        res_bound = 0.02 if ratio == 0 else 0.01
+        assert _cos(o_n[1], res2_n) > 0.9999, tag
+        assert _rel(o_n[1], res2_n) < res_bound, tag
+        assert _cos(normed_n, xf_n) > 0.999 and _rel(normed_n, xf_n) < 0.012, tag
+        assert _cos(o_n[0], same_in) > 0.9999 and _rel(o_n[0], same_in) < 0.015, tag
         # per token, where both FFN inputs pick the same experts
-        same = (top6(xf) == top6(normed)).all(1)
+        same = (top(xf_n) == top(normed_n)).all(1)
         assert same.float().mean() >= 0.5, tag
-        tok = torch.nn.functional.cosine_similarity(o[0].float(), out.float(), dim=1)
+        tok = torch.nn.functional.cosine_similarity(
+            o_n[0].float(), out[:n].float(), dim=1
+        )
         assert tok[same].min() > 0.99, tag
 
-        # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
-        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
-        torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
-        # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
-        assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
+        if case.pad:
+            # the pad rows leave the step's rows as they are without them
+            cut = _rows(s, 0, n)
+            alone = runner.forward(
+                mw, *(t[:n].contiguous() for t in (x0, res0, post0, comb0, pre0)),
+                *(cut[k] for k in (
+                    "positions", "slot_mapping", "swa_cache", "swa_indices",
+                    "swa_lens", "token_to_req",
+                )),
+                **meta,
+            )  # fmt: skip
+            for got, want in zip(o_n, alone):
+                assert torch.equal(got, want), tag
+
+        ffn = None
+        if not draft:
+            # ---- the FFN launch, from the same unreduced wo_b output
+            f = runner.ffn(mw, part, res, post, comb, attn_pre)
+            torch.testing.assert_close(f[1][:n], res2_n, rtol=2**-8, atol=1e-6)
+            torch.testing.assert_close(normed_n, xf_n, rtol=2**-7, atol=1e-6)
+            assert _cos(f[0][:n], out[:n]) > 0.9999, tag
+            assert _rel(f[0][:n], out[:n]) < 0.015, tag
+            ffn = runner._outs(M, res)
         torch.accelerator.synchronize()
 
-        whole, ffn = runner._outs(M, res0), runner._outs(M, res)
-        args = (s["positions"], s["slot_mapping"], s["swa_cache"], s["swa_indices"])
-        meta = dict(
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            comp_block_table=s["comp_block_table"],
-        )  # fmt: skip
+        whole = runner._outs(M, res0)
 
-        def step(mw=mw, x0=x0, res0=res0, post0=post0, comb0=comb0, pre0=pre0,
-                 args=args, s=s, meta=meta, whole=whole, part=part, res=res,
-                 post=post, comb=comb, attn_pre=attn_pre, ffn=ffn):  # fmt: skip
-            runner.forward(
-                mw, x0, res0, post0, comb0, pre0, *args, s["swa_lens"],
-                s["token_to_req"], **meta, outs=whole,
-            )  # fmt: skip
+        def step():
+            runner.forward(*args, **meta, outs=whole)
+            if ffn is None:
+                return [*whole]
             runner.ffn(mw, part, res, post, comb, attn_pre, outs=ffn)
             return [*whole, *ffn]
 
-        steps.append(step)
+        return step
 
-    # ---- the hand-off protocol under back-to-back launches: both step widths
-    # alternating in one graph, every replay bit for bit the first's
+    return runner, check
+
+
+def _replay(steps: list, launches: dict) -> None:
+    """The hand-off protocol under back-to-back launches: the steps alternating
+    in one graph, every replay bit for bit the first's. ``launches``: each
+    runner's launches in a run of the steps; every one moves its runner's
+    epoch, which the ranks agree on."""
+    from vllm.distributed import tensor_model_parallel_all_gather
+
+    first = {r: int(r.epoch[0]) for r in launches}
     outs = [t for step in steps for t in step()]
     torch.accelerator.synchronize()
     ref = [t.clone() for t in outs]
@@ -559,6 +756,54 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 j for j, (t, r) in enumerate(zip(outs, ref)) if not torch.equal(t, r)
             ]
             assert not bad, f"replay {i}: outputs {bad} differ from the first run"
+    for runner, n in launches.items():
+        epoch = runner.epoch[:1].clone()
+        assert int(epoch) == first[runner] + n * (REPLAYS + 1), (int(epoch), first)
+        ranks = tensor_model_parallel_all_gather(epoch, 0)
+        assert torch.equal(ranks, epoch.expand_as(ranks)), ranks.tolist()
+
+
+def _check_layers(rank: int, tp: int, device) -> None:
+    runner, check = _bench(rank, tp, device)
+    steps = [check(Case(1, 1, 6)), check(Case(2, 8, 6))]
+    _replay(steps, {runner: 2 * len(steps)})
+
+
+def _check_variants(rank: int, tp: int, device) -> None:
+    """Steps of 1 to 33 rows (a GEMV pass takes 16), the first layer's and an
+    Engram layer's settled residual, a pad row alone in a pass, contexts under
+    the window and the top-k."""
+    runner, check = _bench(rank, tp, device)
+    steps = [
+        check(Case(0, 1, 1, entry="embedding")),
+        check(Case(0, 16, 1, pad=1, short=True)),
+        check(Case(2, 17, 1, short=True)),
+        check(Case(1, 33, 1, entry="settled", short=True)),
+    ]
+    _replay(steps, {runner: 2 * len(steps)})
+
+
+def _check_draft(rank: int, tp: int, device) -> None:
+    """The DSpark draft's runner on its first layer (the broadcast embedding)
+    and a later one, beside the target's runner in one graph: each has its own
+    epoch and peer memory."""
+    draft, check_draft = _bench(rank, tp, device, draft=True)
+    target, check_target = _bench(rank, tp, device)
+    drafts = [
+        check_draft(Case(0, 8, DRAFTS, entry="embedding", short=True)),
+        check_draft(Case(0, 1, DRAFTS)),
+    ]
+    steps = [check_target(Case(1, 1, 6)), *drafts]
+    _replay(steps, {target: 2, draft: len(drafts)})
+
+
+def _check_index_source(rank: int, tp: int, device) -> None:
+    """An index source's K2 lists its keys itself, after vLLM's indexer: it
+    must not see the key counts the previous launch (a window-only layer's)
+    left."""
+    _, check = _bench(rank, tp, device)
+    check(Case(0, 17, 1, short=True))
+    check(Case(2, 17, 1, short=True, index=True))
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
@@ -566,8 +811,37 @@ def _check_layers(rank: int, tp: int, device) -> None:
 def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
-    pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.parametrize("tp", [2, 4])
+def test_mono_decode_variants_match_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    multi_process_parallel(monkeypatch, tp, 1, _mono_variants)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.parametrize("tp", [2, 4])
+def test_mono_draft_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    multi_process_parallel(monkeypatch, tp, 1, _mono_draft)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="K2's stage_combine (mono/attention/back.py) reads klen without "
+    "awaiting krdy, so an index source merges the chunks of the previous "
+    "launch's key counts",
+)
+def test_mono_index_source_matches_vllm(monkeypatch: pytest.MonkeyPatch):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    multi_process_parallel(monkeypatch, 2, 1, _mono_index)
 
 
 # ---------------------------------------------------------------- gfx942
@@ -796,5 +1070,4 @@ def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch):
     # The gfx942 kernels build for TP4 only.
     if torch.accelerator.device_count() < 4:
         pytest.skip("needs 4 GPUs")
-    pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, 4, 1, _mono_replay_942)

@@ -385,12 +385,14 @@ def _config(monokernel=True, **parallel):
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 num_hidden_layers=40,
+                sliding_window=128,
                 dspark_n_routed_experts=DRAFT_ROUTING[0],
                 dspark_num_experts_per_tok=DRAFT_ROUTING[1],
             )
         ),
         parallel_config=SimpleNamespace(**parallel),
         kernel_config=SimpleNamespace(monokernel=monokernel),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
     )
 
 
@@ -459,6 +461,61 @@ def test_opt_in_with_another_arch_for_flydsl_raises(monkeypatch, cdna, tp, targe
     _deployment(monkeypatch, cdna=cdna, tp=tp, target=target)
     with pytest.raises(ValueError, match=f"makes it compile for {target}"):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+@pytest.mark.parametrize("tp", [1, 8])
+def test_opt_in_outside_the_kernels_tp_raises(monkeypatch, tp):
+    _deployment(monkeypatch, tp=tp)
+    with pytest.raises(ValueError, match="tensor parallel size 2 or 4"):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+def test_opt_in_without_flydsl_raises(monkeypatch):
+    """The kernels are FlyDSL launches: an image without FlyDSL or AITER's
+    FlyDSL helpers stops the server instead of serving without them."""
+    _deployment(monkeypatch)
+    monkeypatch.setitem(sys.modules, "vllm.models.deepseek_v41.amd.mono.runner", None)
+    with pytest.raises(ValueError, match="needs FlyDSL"):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+def test_draft_layer_runs_whole_on_the_dspark_rows(monkeypatch):
+    """A DSpark draft layer runs whole with the draft's routing, its SWA rows
+    the window and the block, padded: 128 + 5 drafts -> 192."""
+    _deployment(monkeypatch)
+    layer = _decoder_layer(layer_id=40, routing=DRAFT_ROUTING, compress_ratio=0)
+    mono = md.MonoDecodeLayer.create(layer, _config())
+    assert mono is not None and mono.draft and not mono.ffn_only
+    assert (mono.experts, mono.topk, mono.swa_width) == (*DRAFT_ROUTING, DRAFT_WIDTH)
+
+
+def _declined(**changes):
+    layer = _decoder_layer(**changes.pop("attn", {}))
+    for name, value in changes.items():
+        target = layer.ffn if hasattr(layer.ffn, name) else layer
+        setattr(target, name, value)
+    return layer
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        dict(use_sequence_parallel=True),
+        dict(fuse_seam_norm=False),
+        dict(gate=SimpleNamespace(tid2eid=object())),
+        dict(scoring_func="sigmoid"),
+        dict(attn=dict(layer_id=40, compress_ratio=1), n_routed_experts=128,
+             n_activated_experts=3),
+    ],
+    ids=["sequence-parallel", "no-fused-seam", "hash-moe", "scoring",
+         "draft-compressed"],
+)  # fmt: skip
+def test_layers_outside_the_kernels_run_vllm_path(monkeypatch, changes):
+    """A layer the kernels do not compute keeps vLLM's path, in a deployment
+    they take: that is not an error."""
+    _deployment(monkeypatch)
+    layer = _declined(**changes)
+    assert md.MonoDecodeLayer.create(layer, _config()) is None
 
 
 def _other_backend():

@@ -1,0 +1,36 @@
+model_name: "amd/MiniMax-M3-MXFP4"
+# Mono off: 0.862, 0.864; on: 0.863, 0.861, acceptance length 2.90-2.91.
+# Tolerance as for MiniMax-M3-MXFP4-Mono-TP4-MI355 (runs vary by up to 0.039).
+accuracy_threshold: 0.863
+tolerance: 0.05
+min_acceptance_length: 2.6
+num_questions: 1319
+num_fewshot: 5
+# 4 requests x (1 + 3 drafts) = 16 rows, the monokernel's limit.
+max_concurrency: 4
+startup_max_wait_seconds: 2400
+startup_rpc_checks:
+  - start_monokernel_count
+final_rpc_checks:
+  - check_monokernel_ran
+server_args: >-
+  --language-model-only
+  --tensor-parallel-size 4
+  --max-model-len 8192
+  --max-num-seqs 4
+  --kv-cache-dtype fp8
+  --block-size 128
+  --attention-backend TRITON_ATTN
+  --attention-config '{"indexer_kv_dtype":"fp8"}'
+  --moe-backend aiter
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN"}'
+  --monokernel
+  --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
+env:
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_MOE: "1"
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+  VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"

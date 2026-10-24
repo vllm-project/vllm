@@ -1,0 +1,34 @@
+model_name: "amd/MiniMax-M3-MXFP4"
+# Mono off: 0.889, 0.864, 0.851 (mean 0.868); on: 0.864, 0.883, 0.867. The
+# runs vary by up to 0.039, the mono-on mean is 0.003 above the mono-off one.
+accuracy_threshold: 0.868
+tolerance: 0.05
+num_questions: 1319
+num_fewshot: 5
+# Decode steps of at most 16 rows run the monokernel (DecodeConfig.max_rows).
+max_concurrency: 16
+startup_max_wait_seconds: 2400
+startup_rpc_checks:
+  - start_monokernel_count
+final_rpc_checks:
+  - check_monokernel_ran
+server_args: >-
+  --language-model-only
+  --tensor-parallel-size 4
+  --max-model-len 8192
+  --max-num-seqs 16
+  --kv-cache-dtype fp8
+  --block-size 128
+  --attention-backend TRITON_ATTN
+  --attention-config '{"indexer_kv_dtype":"fp8"}'
+  --moe-backend aiter
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --monokernel
+  --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
+env:
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_MOE: "1"
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+  VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"

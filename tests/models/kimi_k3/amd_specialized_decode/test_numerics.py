@@ -28,6 +28,7 @@ from vllm.platforms import current_platform
 
 bf = torch.bfloat16
 COS_MIN = 0.9999
+K1_STEPS = 6
 
 
 def _on_gfx950() -> bool:
@@ -60,7 +61,11 @@ def _randn(g, *shape, scale=1.0, dtype=bf):
 # ---------------------------------------------------------------- K1
 
 
-def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
+def _kda_inputs(
+    nacc: list[int], dim_first: bool, q: int, slots: int = 16, seed: int = 0
+):
+    """``len(nacc)`` requests of ``q`` tokens, request r's last step having
+    accepted ``nacc[r]`` of them."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HD,
         HIDDEN,
@@ -70,8 +75,9 @@ def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
         QKV,
     )
 
-    g = torch.Generator(device="cuda").manual_seed(0)
-    sl = 3 + (S - 1)
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    S = q * len(nacc)
+    sl = 3 + (q - 1)
     w = {
         "prefix": _randn(g, S, HIDDEN, scale=2.0),
         "delta": _randn(g, S, HIDDEN, scale=0.5),
@@ -95,12 +101,12 @@ def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
         w["conv_state"] = conv.view(slots, QKV, sl)
     else:
         w["conv_state"] = conv.view(slots, sl, QKV).transpose(-1, -2)
-    w["st_idx"] = torch.arange(3, 3 + S, dtype=torch.int32, device="cuda").view(1, S)
-    w["num_acc"] = torch.full((1,), nacc, dtype=torch.int32, device="cuda")
+    w["st_idx"] = torch.arange(3, 3 + S, dtype=torch.int32, device="cuda").view(-1, q)
+    w["num_acc"] = torch.tensor(nacc, dtype=torch.int32, device="cuda")
     return w
 
 
-def _kda_reference(w, nb: int, S: int, write_idx: int):
+def _kda_reference(w, nb: int, write_idx: int):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
@@ -115,6 +121,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     )
     from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
     prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
     x = attn_res(
         prefix,
@@ -132,7 +139,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     mixed_qkv, g2, f_a, beta = proj.split([QKV, PROJ, HD, NH + 4], dim=-1)[:4]
     g1 = F.linear(f_a, w["w_fb"])
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    qsl = torch.tensor([0, S], dtype=torch.int32, device="cuda")
+    qsl = torch.arange(0, S + 1, q, dtype=torch.int32, device="cuda")
     conv = causal_conv1d_update(
         mixed_qkv.contiguous(),
         conv_state,
@@ -142,16 +149,16 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
         conv_state_indices=w["st_idx"][:, 0].contiguous(),
         num_accepted_tokens=w["num_acc"],
         query_start_loc=qsl,
-        max_query_len=S,
+        max_query_len=q,
         validate_data=False,
         out=torch.empty_like(mixed_qkv),
     )
-    q, k, v = (
+    q_, k, v = (
         rearrange(t, "n (h d) -> 1 n h d", d=HD) for t in conv.split(PROJ, dim=-1)
     )
     core = torch.empty(1, S, NH, HD, dtype=bf, device="cuda")
     fused_recurrent_kda(
-        q=q,
+        q=q_,
         k=k,
         v=v,
         raw_g=rearrange(g1, "n (h d) -> 1 n h d", d=HD),
@@ -163,7 +170,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
         cu_seqlens=qsl,
         ssm_state_indices=w["st_idx"],
         num_accepted_tokens=w["num_acc"],
-        uniform_sequence_length=S,
+        uniform_sequence_length=q,
         out=core,
     )
     with set_current_vllm_config(VllmConfig()):
@@ -179,14 +186,15 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     }
 
 
-@needs_gfx950
-@pytest.mark.parametrize("dim_first", [True, False])
-@pytest.mark.parametrize("nacc", [1, 3])
-@pytest.mark.parametrize("write", [False, True])
-def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
-    """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
-    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
-    request, 8 tokens), including the state each step leaves behind."""
+def _strided_copy(t: torch.Tensor) -> torch.Tensor:
+    """A copy with ``t``'s strides: vLLM's padded state pages stay padded."""
+    out = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, device=t.device)
+    return out.copy_(t)
+
+
+def _k1(w, nb: int, write_idx: int = -1):
+    """K1 on copies of ``w``'s prefix, blocks and states: them updated, and the
+    core output."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
@@ -195,44 +203,38 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
 
-    S, nb = 8, 4
-    # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
-    write_idx = nb if write else -1
-    w = _kda_inputs(nb, nacc, dim_first, S)
-    ref = _kda_reference(w, nb, S, write_idx)
-
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
     key = KdaPreBuild(
         tokens=S,
-        qlen=S,
+        qlen=q,
         nblocks=nb,
         delta=True,
         state_len=w["conv_state"].size(-1),
         write_idx=write_idx,
     )
-    prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
-    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    core = torch.zeros(S, PROJ, dtype=bf, device="cuda")
+    out = {k: _strided_copy(w[k]) for k in ("prefix", "blocks", "conv_state", "rstate")}
+    out["core"] = torch.zeros(S, PROJ, dtype=bf, device="cuda")
     health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
     flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     kda_pre(
         key,
-        prefix=prefix,
+        prefix=out["prefix"],
         delta=w["delta"],
-        blocks=blocks,
+        blocks=out["blocks"],
         ares_nw=w["ares_nw"],
         ares_qk=w["ares_qk"],
         in_nw=w["in_nw"],
         w_in=w["w_in"],
         w_fb=w["w_fb"],
         conv_w=w["conv_w"],
-        conv_state=conv_state,
+        conv_state=out["conv_state"],
         a_log=w["a_log"],
         dt_bias=w["dt_bias"],
         on_w=w["on_w"],
-        rstate=rstate,
+        rstate=out["rstate"],
         st_idx=w["st_idx"],
         num_acc=w["num_acc"],
-        core_out=core,
+        core_out=out["core"],
         scratch=torch.zeros(scratch_bytes(key), dtype=torch.uint8, device="cuda"),
         layer=0,
         epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
@@ -241,17 +243,74 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     )
     torch.accelerator.synchronize()
     assert not health.any() and not flags.any()
+    return out
 
-    torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
-    torch.testing.assert_close(blocks, ref["blocks"], atol=0, rtol=0)
+
+@needs_gfx950
+@pytest.mark.parametrize("dim_first", [True, False])
+@pytest.mark.parametrize("nacc", [1, 3])
+@pytest.mark.parametrize("write", [False, True])
+def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
+    """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
+    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
+    request, 8 tokens), including the state each step leaves behind; a second
+    launch is bit-identical."""
+    nb = 4
+    # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
+    write_idx = nb if write else -1
+    w = _kda_inputs([nacc], dim_first, q=8)
+    ref = _kda_reference(w, nb, write_idx)
+    out = _k1(w, nb, write_idx)
+
+    torch.testing.assert_close(out["prefix"], ref["prefix"], atol=0, rtol=0)
+    torch.testing.assert_close(out["blocks"], ref["blocks"], atol=0, rtol=0)
     # the conv output feeds the recurrence in fp32 here, bf16 in the reference
-    errs = {
-        "conv_state": _rel_l2(conv_state, ref["conv_state"]),
-        "rstate": _rel_l2(rstate, ref["rstate"]),
-        "core": _rel_l2(core, ref["core"]),
-    }
+    errs = {k: _rel_l2(out[k], ref[k]) for k in ("conv_state", "rstate", "core")}
     assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
-    assert _cos(core, ref["core"]) > COS_MIN, errs
+    assert _cos(out["core"], ref["core"]) > COS_MIN and errs["core"] < 3e-3, errs
+    again = _k1(w, nb, write_idx)
+    assert all(torch.equal(out[k], again[k]) for k in out)
+
+
+@needs_gfx950
+@pytest.mark.parametrize(
+    "q, requests, nb",
+    [(2, 1, 1), (2, 3, 8), (2, 4, 2), (4, 1, 3), (4, 2, 7), (8, 1, 8)],
+)
+def test_k1_verify_steps_match_vllm_ops(q: int, requests: int, nb: int) -> None:
+    """Consecutive verify steps of whole requests at every width K1 serves, each
+    request accepting a varying count a step: the states each step leaves feed
+    the next (K1 and the reference each on their own), and the slots no request
+    owns are never written."""
+    gen = torch.Generator().manual_seed(q * 16 + requests)
+    w = _kda_inputs([1] * requests, dim_first=False, q=q)
+    owned = w["st_idx"].flatten().long()
+    state = ref_state = {k: w[k] for k in ("conv_state", "rstate")}
+    for step in range(K1_STEPS):
+        nacc = torch.randint(1, q + 1, (requests,), generator=gen).tolist()
+        x = _kda_inputs(nacc, dim_first=False, q=q, seed=1 + step)
+        step_in = {k: x[k] for k in ("prefix", "delta", "blocks", "num_acc")}
+        out = _k1({**w, **step_in, **state}, nb)
+        ref = _kda_reference({**w, **step_in, **ref_state}, nb, -1)
+        state = {k: out[k] for k in ("conv_state", "rstate")}
+        ref_state = {k: ref[k] for k in ("conv_state", "rstate")}
+        torch.testing.assert_close(out["prefix"], ref["prefix"], atol=0, rtol=0)
+        errs = {
+            "core": _rel_l2(out["core"], ref["core"]),
+            "conv_state": _rel_l2(
+                state["conv_state"][owned[::q]], ref_state["conv_state"][owned[::q]]
+            ),
+            "rstate": _rel_l2(state["rstate"][owned], ref_state["rstate"][owned]),
+        }
+        assert _cos(out["core"], ref["core"]) > COS_MIN, (step, errs)
+        assert errs["core"] < 3e-3, (step, errs)
+        assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, (step, errs)
+    free = torch.ones(w["rstate"].size(0), dtype=torch.bool)
+    free[owned.cpu()] = False
+    assert torch.equal(state["rstate"][free], w["rstate"][free])
+    conv_free = torch.ones_like(free)
+    conv_free[owned[::q].cpu()] = False
+    assert torch.equal(state["conv_state"][conv_free], w["conv_state"][conv_free])
 
 
 # ---------------------------------------------------------------- K2 / MoE
@@ -419,6 +478,22 @@ def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
     return key
 
 
+def _k2_x(runner, key) -> torch.Tensor:
+    """The MLP AttnRes rows K2 left in scratch: the MoE's input."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+
+    lay = k2.scratch_layout(key)["xrow"][0]
+    s = key.tokens
+    return runner.scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
+
+
+def _assert_ranks_agree(out: torch.Tensor, tp_size: int) -> None:
+    outs = [torch.empty_like(out) for _ in range(tp_size)]
+    dist.all_gather(outs, out)
+    assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
+
+
 def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
@@ -438,8 +513,8 @@ def _k2_worker(
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
-    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import TOPK
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
     S, nb = 8, 4
@@ -447,7 +522,7 @@ def _k2_worker(
     mw = _moe_weights(rank, device)
     w = _k2_inputs(rank, device)
 
-    for reset in (False, True):
+    for reset in (True, False):
         runner.step_begin()
         prefix = w["prefix"].clone()
         out = torch.empty(S, HIDDEN, dtype=bf, device=device)
@@ -472,13 +547,31 @@ def _k2_worker(
         )
         # the kernel sums the ranks in rank order, NCCL in its own order
         assert _rel_l2(prefix, ref_prefix) < 1e-2
-        lay = k2.scratch_layout(key)["xrow"][0]
-        x = runner.scratch[lay : lay + S * HIDDEN * 2].view(bf).view(S, HIDDEN)
+        x = _k2_x(runner, key)
         assert _cos(x, x_ref) > COS_MIN
         assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
-        outs = [torch.empty_like(out) for _ in range(tp_size)]
-        dist.all_gather(outs, out)
-        assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
+        _assert_ranks_agree(out, tp_size)
+
+    # hostile routing: every token on the same TOPK experts, then each token on
+    # TOPK of its own (the largest union)
+    same = dict(mw, bias=mw["bias"].clone())
+    same["bias"][:TOPK] += 10.0
+    own = 0.2 * x.float() / x.float().norm(dim=-1, keepdim=True)
+    disjoint = dict(mw, w_gate=mw["w_gate"].clone(), bias=torch.zeros_like(mw["bias"]))
+    disjoint["w_gate"][: S * TOPK] = own.repeat_interleave(TOPK, dim=0).to(bf)
+    dist.broadcast(disjoint["w_gate"], src=0)
+    for case, union in ((same, TOPK), (disjoint, S * TOPK)):
+        runner.step_begin()
+        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+        key = _k2_launch(runner, w, case, w["prefix"].clone(), out, reset=False)
+        torch.accelerator.synchronize()
+        x = _k2_x(runner, key)
+        sig = torch.sigmoid(x.float() @ case["w_gate"].float().t())
+        picks = torch.topk(sig + case["bias"], TOPK, dim=-1).indices
+        assert picks.unique().numel() == union
+        ref = _moe_reference(x, case, rank)
+        assert _cos(out, ref) > COS_MIN and _rel_l2(out, ref) < 6e-3
+        _assert_ranks_agree(out, tp_size)
 
     # A graph of one step (the epoch bump captured with it), replayed: a
     # block-write launch writes its prefix, so every replay must match the first.
@@ -561,15 +654,23 @@ def test_stalled_rank_fails_the_step_without_a_hang(
 
 
 @needs_gfx950
-def test_warmup_compiles_without_launching() -> None:
-    """The JIT warm-up compiles K1 and K2 before capture without running them:
-    a launch on its null arguments would fault."""
+def test_warmup_compiles_every_k3_build_without_launching() -> None:
+    """The JIT warm-up compiles every build Kimi-K3 (93 layers, AttnRes blocks
+    of 12) launches at 7 speculative tokens before capture, without running
+    them: K1 and K2 at 1-8 blocks, and the 7 block-write KDA layers' K1 (writing
+    block nb) and K2 resets. A launch on the null arguments would fault."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        CONV_W,
         KdaPreBuild,
     )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.layer import K2Build
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import compile_build
 
-    compile_build(KdaPreBuild(tokens=8, qlen=8, nblocks=4, delta=True, state_len=10))
-    compile_build(K2Build(tokens=8, nblocks=4))
+    k1 = {"tokens": 8, "qlen": 8, "delta": True, "state_len": CONV_W - 1 + 7}
+    for nb in range(1, 9):
+        compile_build(KdaPreBuild(nblocks=nb, **k1))
+        compile_build(K2Build(tokens=8, nblocks=nb))
+        if nb < 8:
+            compile_build(KdaPreBuild(nblocks=nb, write_idx=nb, **k1))
+            compile_build(K2Build(tokens=8, nblocks=nb + 1, reset=True))
     torch.accelerator.synchronize()

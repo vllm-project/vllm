@@ -30,6 +30,8 @@ SPARSE = (3, 4)
 VOCAB = 4096
 STEPS = 8
 BATCHES = (1, 3, 16)
+FALLBACK_SEQS = 20
+FALLBACK_SHORT = 8
 SEED = 0
 ENV = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
@@ -201,17 +203,36 @@ def _requests():
     return requests
 
 
-def _decode(llm, capture=False):
+def _fallback_requests():
+    """One batch of 4 requests more than ``FALLBACK_SEQS``, the last
+    ``FALLBACK_SHORT`` admitted done after 3 tokens: a decode step of all
+    ``FALLBACK_SEQS`` rows (also when the requests reach the engine over a few
+    steps), then the waiting requests' prefills next to decodes, then 16 rows
+    and fewer."""
+    set_random_seed(SEED + 2)
+    n = FALLBACK_SEQS + 4
+    short = range(FALLBACK_SEQS - FALLBACK_SHORT, FALLBACK_SEQS)
+    prompts = [
+        {"prompt_token_ids": torch.randint(VOCAB, (int(size),)).tolist()}
+        for size in torch.randint(16, 48, (n,))
+    ]
+    traces = [
+        torch.randint(VOCAB, (3 if i in short else STEPS,)).tolist() for i in range(n)
+    ]
+    return [(n, prompts, traces)]
+
+
+def _decode(llm, capture=False, requests=None):
     """Full-vocabulary logprobs of every decode step (the first output token
     comes from prefill, which runs stock), every token forced; ``capture``:
     also each sparse layer's inputs at the first decode step of each batch."""
     from vllm import SamplingParams
 
     rows = []
-    for n, prompts, traces in _requests():
+    for n, prompts, traces in requests or _requests():
         params = [
             SamplingParams(
-                max_tokens=STEPS,
+                max_tokens=len(trace),
                 temperature=0,
                 logprobs=-1,
                 trace_decode_token_ids=trace,
@@ -321,12 +342,12 @@ def _replay(worker):
 
 
 def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
+    extra.setdefault("max_num_seqs", max(BATCHES))
     return vllm_runner(
         model_dir,
         load_format="dummy",
         skip_tokenizer_init=True,
         tensor_parallel_size=4,
-        max_num_seqs=max(BATCHES),
         kv_cache_dtype="fp8",
         block_size=128,
         attention_backend="TRITON_ATTN",
@@ -357,11 +378,14 @@ def _env():
 @pytest.fixture(scope="module")
 def native(vllm_runner, model_dir):
     """Native eager: the reference logprobs and the layer replays."""
-    with _engine(vllm_runner, model_dir, mono=False) as runner:
+    with _engine(
+        vllm_runner, model_dir, mono=False, max_num_seqs=FALLBACK_SEQS
+    ) as runner:
         runner.llm.collective_rpc(_randomize)
         logprobs = _decode(runner.llm, capture=True)
         layers = runner.llm.collective_rpc(_replay)
-    return SimpleNamespace(logprobs=logprobs, layers=layers)
+        fallback = _decode(runner.llm, requests=_fallback_requests())
+    return SimpleNamespace(logprobs=logprobs, layers=layers, fallback=fallback)
 
 
 def test_sparse_layers_match_native(native):
@@ -374,8 +398,117 @@ def test_sparse_layers_match_native(native):
             assert cos > 0.9999 and rel < 1e-2 and row < 1e-2
 
 
+def _specialized(worker):
+    return worker.model_runner.model_state.backbone.specialized_decode
+
+
 def _executor(worker):
-    return worker.model_runner.model_state.backbone.specialized_decode.executor
+    return _specialized(worker).executor
+
+
+def _count_launches(worker):
+    """From here on, the device's launches: its epoch, summed over the epoch
+    resets."""
+    executor = _executor(worker)
+    clear = executor._clear
+    executor.cleared = -_epoch(worker)
+
+    def count_and_clear():
+        executor.cleared += _epoch(worker)
+        clear()
+
+    executor._clear = count_and_clear
+    return _engagement(worker)
+
+
+def _engagement(worker):
+    """Sampled steps, mono and stock forwards, each sparse layer's launches and
+    the device's."""
+    decode = _specialized(worker)
+    executor = decode.executor
+    return (
+        executor.outputs,
+        decode.mono_steps,
+        decode.stock_steps,
+        *executor.launches.values(),
+        executor.cleared + _epoch(worker),
+    )
+
+
+def _engaged(llm, start, forwards):
+    """Since ``start`` (``_count_launches``), alike on every rank: each forward
+    ``_record_forwards`` saw routed as ``decide_step`` decides, and every
+    sampled step but the stock ones (eager forwards or FULL graph replays)
+    ran one launch a sparse layer on the device. Returns the fused steps and
+    the stock forwards' rows, prefills and decodes."""
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
+
+    assert all(rank == forwards[0] for rank in forwards)
+    moved = {
+        tuple(a - b for a, b in zip(after, before))
+        for after, before in zip(llm.collective_rpc(_engagement), start)
+    }
+    assert len(moved) == 1
+    outputs, mono, stock, *launches, device = moved.pop()
+    stocked = []
+    for tokens, _, prefills, decodes, fused, _ in forwards[0]:
+        assert fused == (not prefills and len(tokens) <= MAX_TOKENS)
+        if not fused:
+            stocked.append((len(tokens), prefills, decodes))
+    assert (mono, stock) == (len(forwards[0]) - len(stocked), len(stocked))
+    assert launches == [mono] * len(SPARSE)
+    assert device == len(SPARSE) * (outputs - stock)
+    return outputs - stock, stocked
+
+
+def _record_forwards(worker, native_aux=False):
+    """Every backbone forward from here on: its tokens, positions, prefill and
+    decode counts, whether it ran the fused launches, and on decode steps EAGLE3's
+    auxiliary states (``native_aux``: the hidden states plus residual after
+    the layers before ``AUX_LAYERS``, as a native EAGLE3 target takes them)."""
+    from vllm.forward_context import get_forward_context
+
+    backbone = _backbone(worker)
+    decode = backbone.specialized_decode
+    name = backbone.layers[SPARSE[0]].self_attn.layer_name
+    states: list[torch.Tensor] = []
+    worker._forwards = []
+
+    def pre(mod, args):
+        states.clear()
+        worker._mono_steps = decode.mono_steps if decode else 0
+
+    def post(mod, args, out):
+        metadata = get_forward_context().attn_metadata[name]
+        prefills, decodes = metadata.num_prefills, metadata.num_decodes
+        mono = decode is not None and decode.mono_steps > worker._mono_steps
+        aux = out[1] if isinstance(out, tuple) else states
+        if prefills or not aux:
+            aux = None
+        else:
+            aux = torch.stack(aux).float().cpu().numpy().tobytes()
+        worker._forwards.append(
+            (args[0].tolist(), args[1].tolist(), prefills, decodes, mono, aux)
+        )
+
+    def native_state(mod, args, out):
+        states.append(out[0] + out[1])
+
+    worker._forward_hooks = [
+        backbone.register_forward_pre_hook(pre),
+        backbone.register_forward_hook(post),
+    ]
+    if native_aux:
+        worker._forward_hooks += [
+            backbone.layers[i - 1].register_forward_hook(native_state)
+            for i in AUX_LAYERS
+        ]
+
+
+def _forwards(worker):
+    for hook in worker._forward_hooks:
+        hook.remove()
+    return worker._forwards
 
 
 def _reset_every(worker, steps):
@@ -406,8 +539,13 @@ def test_model_matches_native(vllm_runner, model_dir, native, graphs):
         llm.collective_rpc(_randomize)
         if graphs:
             before = llm.collective_rpc(_reset_every, args=(3,))
+        start = llm.collective_rpc(_count_launches)
+        llm.collective_rpc(_record_forwards)
         logprobs = _decode(llm)
         after = llm.collective_rpc(_reset_state)
+        fused, stocked = _engaged(llm, start, llm.collective_rpc(_forwards))
+    assert fused >= len(BATCHES) * (STEPS - 1)
+    assert all(prefills for _, prefills, _ in stocked)
     cos, rows = _logit_errors(logprobs, native.logprobs)
     close = (rows < 3e-2).float().mean().item()
     print(f"cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}")
@@ -418,6 +556,32 @@ def test_model_matches_native(vllm_runner, model_dir, native, graphs):
     if graphs:
         resets = {n - b for (n, _), b in zip(after, before)}
         assert len(resets) == 1 and resets.pop() >= len(BATCHES) * STEPS // 3 - 1
+
+
+def test_fallback_steps_match_native(vllm_runner, model_dir, native):
+    """--monokernel eager over steps it hands to stock: decode steps of over
+    16 rows and mixed prefill / decode steps, between plain decode steps that
+    run the fused launches; the logprobs match native's."""
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
+
+    with _engine(
+        vllm_runner, model_dir, mono=True, max_num_seqs=FALLBACK_SEQS
+    ) as runner:
+        llm = runner.llm
+        llm.collective_rpc(_randomize)
+        start = llm.collective_rpc(_count_launches)
+        llm.collective_rpc(_record_forwards)
+        logprobs = _decode(llm, requests=_fallback_requests())
+        forwards = llm.collective_rpc(_forwards)
+        _, stocked = _engaged(llm, start, forwards)
+    assert any(rows > MAX_TOKENS and not prefills for rows, prefills, _ in stocked)
+    assert any(prefills and decodes for _, prefills, decodes in stocked)
+    assert forwards[0][-1][4]
+    cos, rows = _logit_errors(logprobs, native.fallback)
+    q75 = rows.quantile(0.75).item()
+    print(f"cos {cos:.5f}, median row {rows.median():.2e}, q75 row {q75:.2e}")
+    # native reruns of this batch differ alike: ~1e-2 a row, ~0.2 on 10-16%
+    assert cos > 0.99 and q75 < 2e-2
 
 
 def _arm_late_fault(worker, rank, ticks):
@@ -451,10 +615,12 @@ def test_late_rank_fault_returns_no_tokens_from_full_graphs(
     assert "hipErrorLaunchFailure" in logs or "HSA_STATUS_ERROR_EXCEPTION" in logs
 
 
-# EAGLE3 verify steps: 1 + SPEC_TOKENS rows a request, up to 4 requests (16
-# rows) fused
-SPEC_TOKENS = 3
+# EAGLE3 verify steps: 1 + k rows a request, up to 4 requests
 SPEC_BATCHES = (1, 2, 3, 4)
+# the draft's auxiliary states: after layer 1 (stock) and layers 3 and 4 (fused)
+AUX_LAYERS = (2, 4, 5)
+# prompt lengths apart by more than a request's decode positions
+PROMPT_STRIDE = 16
 
 
 @pytest.fixture(scope="module")
@@ -484,7 +650,7 @@ def draft_dir(tmp_path_factory):
         torch_dtype="bfloat16",
         fc_norm=True,
         norm_output=True,
-        eagle_aux_hidden_state_layer_ids=[2, 4, 5],
+        eagle_aux_hidden_state_layer_ids=list(AUX_LAYERS),
     )
     (path / "config.json").write_text(json.dumps(config))
     return str(path)
@@ -498,78 +664,137 @@ def _spec_requests():
     set_random_seed(SEED + 1)
     return [
         [
-            {"prompt_token_ids": torch.randint(VOCAB, (int(k),)).tolist()}
-            for k in torch.randint(16, 48, (n,))
+            {"prompt_token_ids": torch.randint(VOCAB, (PROMPT_STRIDE * i,)).tolist()}
+            for i in range(1, n + 1)
         ]
         for n in SPEC_BATCHES
     ]
 
 
-def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
-    """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
-    steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
-    launches (the device epoch moves on); the target's full-vocabulary
-    logprobs along the generated tokens match native eager teacher-forced on
-    them. A late rank fault during a verify step then returns no token."""
+def _aux_states(forwards, sequences):
+    """EAGLE3's auxiliary states of each decode row whose tokens up to it in
+    its forward follow the final sequence, by (request, position)."""
+    states = {}
+    for tokens, positions, _, _, _, aux in forwards:
+        if aux is None:
+            continue
+        aux = torch.frombuffer(bytearray(aux), dtype=torch.float32)
+        aux = aux.view(len(AUX_LAYERS), len(tokens), -1)
+        follows: dict[int, bool] = {}
+        for row, (token, position) in enumerate(zip(tokens, positions)):
+            request = position // PROMPT_STRIDE - 1
+            seq = sequences[request]
+            follows[request] = follows.get(request, True) and (
+                position < len(seq) and seq[position] == token
+            )
+            if follows[request]:
+                states[request, position] = aux[:, row]
+    return states
+
+
+@pytest.mark.parametrize(
+    "graphs, spec_tokens",
+    [(True, 3), (False, 1), (False, 5)],
+    ids=["full_graphs-k3", "eager-k1", "eager-k5"],
+)
+def test_eagle3_verify_steps_match_native(
+    vllm_runner, model_dir, draft_dir, capfd, graphs, spec_tokens
+):
+    """EAGLE3 (random draft) with --monokernel: the verify steps of 1-4
+    requests run the fused launches up to 16 rows (k=5: 18 and 24 rows run
+    stock); the target's full-vocabulary logprobs along the generated tokens,
+    and eager EAGLE3's auxiliary states, match native eager teacher-forced on
+    them. Under FULL graphs a late rank fault during a verify step then
+    returns no token."""
     from vllm import SamplingParams
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
     from vllm.v1.engine.exceptions import EngineDeadError
 
     greedy = SamplingParams(
         max_tokens=STEPS, temperature=0, logprobs=-1, detokenize=False, ignore_eos=True
     )
-    tokens, mono_rows = [], []
+    sequences, mono_rows, mono_aux = [], [], []
+    recorded: list[list] = [[] for _ in range(4)]
     with _engine(
         vllm_runner,
         model_dir,
         mono=True,
-        graphs=True,
+        graphs=graphs,
         speculative_config={
             "method": "eagle3",
             "model": draft_dir,
-            "num_speculative_tokens": SPEC_TOKENS,
+            "num_speculative_tokens": spec_tokens,
         },
     ) as runner:
         llm = runner.llm
         llm.collective_rpc(_randomize)
+        start = llm.collective_rpc(_count_launches)
         for prompts in _spec_requests():
-            before = llm.collective_rpc(_epoch)
+            llm.collective_rpc(_record_forwards)
             outputs = llm.generate(prompts, greedy, use_tqdm=False)
-            moved = {a - b for a, b in zip(llm.collective_rpc(_epoch), before)}
-            assert len(moved) == 1
-            assert moved.pop() > 0
-            tokens.append([list(out.outputs[0].token_ids) for out in outputs])
+            forwards = llm.collective_rpc(_forwards)
+            sequences.append(
+                [
+                    prompt["prompt_token_ids"] + list(out.outputs[0].token_ids)
+                    for prompt, out in zip(prompts, outputs)
+                ]
+            )
             for out in outputs:
                 for step in out.outputs[0].logprobs[1:]:
                     mono_rows.append([step[v].logprob for v in range(VOCAB)])
-        capfd.readouterr()
-        llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
-        outputs = None
-        with pytest.raises(EngineDeadError):
-            outputs = llm.generate(_spec_requests()[0], greedy)
-        assert outputs is None
+            for rank, seen in zip(recorded, forwards):
+                rank += seen
+            fused = [f for f in forwards[0] if f[4]]
+            mono_aux.append(_aux_states(fused, sequences[-1]))
+        fused_steps, stocked = _engaged(llm, start, recorded)
+        wide = [rows for rows, prefills, _ in stocked if not prefills]
+        assert bool(wide) == ((1 + spec_tokens) * max(SPEC_BATCHES) > MAX_TOKENS)
+        if graphs:
+            capfd.readouterr()
+            llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
+            outputs = None
+            with pytest.raises(EngineDeadError):
+                outputs = llm.generate(_spec_requests()[0], greedy)
+            assert outputs is None
 
-    native_rows = []
+    native_rows, native_aux = [], []
     with _engine(vllm_runner, model_dir, mono=False) as runner:
         llm = runner.llm
         llm.collective_rpc(_randomize)
-        for prompts, traces in zip(_spec_requests(), tokens):
+        for prompts, seqs in zip(_spec_requests(), sequences):
             params = [
                 SamplingParams(
                     max_tokens=STEPS,
                     temperature=0,
                     logprobs=-1,
-                    trace_decode_token_ids=trace,
+                    trace_decode_token_ids=seq[len(prompt["prompt_token_ids"]) :],
                     detokenize=False,
                     ignore_eos=True,
                 )
-                for trace in traces
+                for prompt, seq in zip(prompts, seqs)
             ]
+            llm.collective_rpc(_record_forwards, args=(True,))
             for out in llm.generate(prompts, params, use_tqdm=False):
                 for step in out.outputs[0].logprobs[1:]:
                     native_rows.append([step[v].logprob for v in range(VOCAB)])
+            native_aux.append(_aux_states(llm.collective_rpc(_forwards)[0], seqs))
     cos, rows = _logit_errors(torch.tensor(mono_rows), torch.tensor(native_rows))
     close = (rows < 3e-2).float().mean().item()
     print(
         f"EAGLE3 cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}"
     )
     assert cos > 0.99 and close > 0.8
+    if graphs:
+        return
+    keys = [(b, k) for b, aux in enumerate(mono_aux) for k in aux if k in native_aux[b]]
+    assert len(keys) >= fused_steps
+    got = torch.stack([mono_aux[b][k] for b, k in keys], 1)
+    want = torch.stack([native_aux[b][k] for b, k in keys], 1)
+    for layer, g, w in zip(AUX_LAYERS, got, want):
+        err = (g - w).norm(dim=-1) / w.norm(dim=-1)
+        print(f"aux {layer}: median row {err.median():.2e}, max {err.max():.2e}")
+        # native verify rows against native decode rows differ alike: ~5e-3
+        # before the fused layers, after them ~1e-2 and up to 0.23 where
+        # native's BF16 atomics flip a near-tie expert
+        worst = 2e-2 if layer <= SPARSE[0] else 0.5
+        assert err.median() < 2e-2 and err.max() < worst

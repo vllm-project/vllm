@@ -4,7 +4,7 @@
 vLLM's and AITER's native ops, with MXFP4 weights from vLLM's real post-load
 path: stage parity, routing ties, padding, residency, graph replay, fail-stop
 sites, epoch reset, the gfx950 hand-off ISA, and the hand-off stresses (one-GPU
-cross-XCD; TP4 over XGMI, optional)."""
+cross-XCD; TP4 over XGMI)."""
 
 import glob
 import os
@@ -194,7 +194,7 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
     )
 
 
-@pytest.mark.parametrize("s", [1, 3, 16])
+@pytest.mark.parametrize("s", range(1, ffn.MAX_TOKENS + 1))
 def test_ffn_stages_match_native(weights, s):
     """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
     routed A16W4 experts, each against its native op."""
@@ -255,14 +255,16 @@ def test_route_ties_and_near_ties(weights):
     assert torch.equal(r.ids.sort(-1).values[clear], ids.sort(-1).values[clear])
 
 
-def test_padded_rows_are_inert(weights):
+@pytest.mark.parametrize("real, pad", [(3, 5), (1, 15), (15, 1), (8, 8)])
+def test_padded_rows_are_inert(weights, real, pad):
     """Rows whose slot is -1 (graph padding) hold NaN: the real rows match a
     launch without them bit for bit, the padded rows pick no expert and return
     zeros; an all-padded launch completes."""
-    real, pad = 3, 5
     part, residual = _inputs(real)
     nan = torch.full((pad, H), float("nan"), device="cuda").bfloat16()
-    slots = torch.tensor([7, 9, 11] + [-1] * pad, dtype=torch.int64, device="cuda")
+    slots = torch.tensor(
+        [7 + 2 * i for i in range(real)] + [-1] * pad, dtype=torch.int64, device="cuda"
+    )
     padded = _run(
         weights,
         real + pad,
@@ -360,6 +362,26 @@ def test_fail_stop_sites(weights, build, arm, final, want):
         assert got[3] > 0 or not got[0]
     if "drop_mark" in build:
         assert runner.epoch[0].item() == 0
+
+
+def test_launches_up_to_the_epoch_limit(weights):
+    """From two launches short of ``EPOCH_LIMIT`` (both seam parities, the
+    16-bit tags at their top) a launch matches one from epoch 0 bit for bit;
+    the launch at the limit refuses to run."""
+    runner = _runner(weights, 2, wait_ticks=SHORT_WAIT)
+    inputs = _inputs(2)
+    want = [t.clone() for t in runner(*inputs, weights, _slots(2))]
+    runner.reset()
+    runner.epoch[0] = ffn.EPOCH_LIMIT - 2
+    for _ in range(2):
+        got = runner(*inputs, weights, _slots(2))
+        torch.accelerator.synchronize()
+        assert _error(runner.peer_bufs[0])[0] == 0
+        assert torch.equal(got[0], want[0]) and torch.equal(got[1], want[1])
+    assert runner.epoch[0].item() == ffn.EPOCH_LIMIT
+    runner(*inputs, weights, _slots(2))
+    torch.accelerator.synchronize()
+    assert _error(runner.peer_bufs[0]) == [1, 0, ffn.EPOCH_LIMIT, ffn.SITE_WRAP]
 
 
 def _reset_executor(runner, monkeypatch, agree):
@@ -688,7 +710,6 @@ def _stress_rank(rank, port, results):
     dist.destroy_process_group()
 
 
-@pytest.mark.optional
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(torch.accelerator.device_count() < 4, reason="needs 4 GPUs")
 def test_peer_handoffs_under_rank_skew():

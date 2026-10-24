@@ -1,0 +1,30 @@
+model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
+# Not yet measured on MI355: DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml's
+# threshold, with the run-to-run spread of MiniMax-M3-MXFP4-Mono-TP4-MI355.
+accuracy_threshold: 0.88
+tolerance: 0.05
+num_questions: 1319
+num_fewshot: 5
+# Decode steps of at most 48 rows run the monokernel (mono_decode.MAX_ROWS).
+max_concurrency: 48
+startup_max_wait_seconds: 2400
+startup_rpc_checks:
+  - start_monokernel_count
+final_rpc_checks:
+  - check_monokernel_ran
+server_args: >-
+  --tokenizer-mode deepseek_v41
+  --language-model-only
+  --tensor-parallel-size 4
+  --max-model-len 8192
+  --max-num-seqs 48
+  --block-size 128
+  --moe-backend aiter
+  --attention-config '{"indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+  --monokernel
+  --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
+env:
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_MOE: "1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
