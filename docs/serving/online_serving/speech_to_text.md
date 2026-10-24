@@ -64,8 +64,10 @@ The Transcriptions API supports uploading audio files in various formats includi
 - `model`: The model to use for transcription (required)
 - `language`: The language code (e.g., "en", "zh") (optional)
 - `prompt`: Optional text to guide the transcription style (optional)
-- `response_format`: Format of the response ("json", "text", "verbose_json", or
-  "diarized_json") (optional)
+- `response_format`: Format of the response ("json", "text", "srt", "vtt",
+  "verbose_json", or "diarized_json") (optional). `srt` and `vtt` return a
+  plain-text subtitle track and require a model with segment timestamp support
+  (same as `verbose_json`).
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
 For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).
