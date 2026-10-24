@@ -505,6 +505,23 @@ class CudaPlatformBase(Platform):
                     selected_backend.name,
                 )
 
+        # Likewise, name the higher-priority backends that only adaptive
+        # verification ruled out.
+        if attn_selector_config.use_adaptive_verification:
+            excluded = [
+                backend
+                for backend, (priority, reasons) in all_invalid_reasons.items()
+                if priority < selected_priority
+                and all("adaptive verification" in reason for reason in reasons)
+            ]
+            if excluded:
+                logger.info(
+                    "Adaptive verification precluded higher-priority attention "
+                    "backend(s) %s. Using %s instead.",
+                    ", ".join(b.name for b in excluded),
+                    selected_backend.name,
+                )
+
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,

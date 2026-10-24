@@ -41,6 +41,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_adaptive_verification: bool = False
     use_dcp: bool = False
     use_rswa: bool = False
+    use_varlen_decode_cudagraphs: bool = False
 
     def __repr__(self):
         return (
@@ -61,7 +62,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_adaptive_verification={self.use_adaptive_verification}, "
             f"use_pcp={self.use_pcp}, "
             f"use_dcp={self.use_dcp}, "
-            f"use_rswa={self.use_rswa})"
+            f"use_rswa={self.use_rswa}, "
+            f"use_varlen_decode_cudagraphs={self.use_varlen_decode_cudagraphs})"
         )
 
 
@@ -147,12 +149,18 @@ def get_attn_backend(
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
     )
+    use_varlen_decode_cudagraphs = False
     if use_adaptive_verification:
         from vllm.compilation.backends import model_tag
 
         # The drafter always runs full-length blocks; only the verifier sees
         # the trimmed, device-decided query lengths.
         use_adaptive_verification = model_tag != "dspark_head"
+        # EAGLE-style drafters read those lengths too, but replay FULL graphs
+        # only on untrimmed batches, where every request has the same length.
+        use_varlen_decode_cudagraphs = (
+            use_adaptive_verification and model_tag != "eagle_head"
+        )
 
     attn_type = attn_type or AttentionType.DECODER
     attn_selector_config = AttentionSelectorConfig(
@@ -177,6 +185,7 @@ def get_attn_backend(
             vllm_config.model_config is not None
             and vllm_config.model_config.rswa_window is not None
         ),
+        use_varlen_decode_cudagraphs=use_varlen_decode_cudagraphs,
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over

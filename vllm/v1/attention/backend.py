@@ -229,6 +229,17 @@ class AttentionBackend(ABC):
         return not cls.is_ssm()
 
     @classmethod
+    def supports_varlen_decode_cudagraphs(cls) -> bool:
+        """Whether this backend's FULL decode cudagraphs can replay batches whose
+        per-request query lengths vary, which adaptive verification needs.
+
+        The selector skips backends that return False. The metadata builder still
+        checks the per-layer bound at worker startup, see
+        AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len().
+        """
+        return True
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         try:
             return cls.get_impl_cls().supports_pcp
@@ -297,6 +308,7 @@ class AttentionBackend(ABC):
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
         use_rswa: bool = False,
+        use_varlen_decode_cudagraphs: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -351,6 +363,11 @@ class AttentionBackend(ABC):
         ):
             invalid_reasons.append(
                 "device-cpu query lens mismatch not supported, "
+                "this is needed for adaptive verification"
+            )
+        if use_varlen_decode_cudagraphs and not cls.supports_varlen_decode_cudagraphs():
+            invalid_reasons.append(
+                "variable-length decode cudagraphs not supported, "
                 "this is needed for adaptive verification"
             )
         combination_reason = cls.supports_combination(
