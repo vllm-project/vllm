@@ -664,6 +664,14 @@ def _create_backend_impl(
 
     # Create mock layer
     layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
+    for name in (
+        "q_lora_rank",
+        "kv_lora_rank",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+    ):
+        setattr(layer, name, impl_kwargs[name])
 
     # Attach a prefill backend (MLAAttention does this in __init__; the metadata
     # builder reads layer.prefill_backend from static_forward_context).
@@ -678,6 +686,15 @@ def _create_backend_impl(
         qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
         v_head_dim=mla_dims["v_head_dim"],
         vllm_config=vllm_config,
+    )
+
+    from vllm.model_executor.layers.attention.mla_attention import (
+        _DecodeConcatQuantFP8,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    layer._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+        static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
     )
 
     # Create builder instance if needed
@@ -1042,6 +1059,7 @@ def _run_mla_benchmark_batched(
     backend: str,
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
     index_topk: int = 2048,
+    decode_kernel: str | None = None,
     prefill_backend: str | None = None,
     sparse_mla_force_mqa: bool = False,
     output_scale: float | None = None,
@@ -1061,6 +1079,10 @@ def _run_mla_benchmark_batched(
             - threshold: reorder_batch_threshold (FlashAttn/FlashMLA only)
             - num_splits: num_kv_splits (CUTLASS only)
         index_topk: Topk value for sparse MLA backends (default 2048)
+        decode_kernel: ROCM_AITER_MLA only: run single-token decode on an fp8
+            KV cache with "asm" (mla_decode_fwd) or "gluon" (mla_gluon) instead
+            of the kernel the builder's batch-size rule picks. None keeps the
+            rule.
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
         output_scale: Static per-tensor FP8 scale for prefill output. None
@@ -1155,6 +1177,18 @@ def _run_mla_benchmark_batched(
             index_topk=index_topk if is_sparse else None,
             kv_cache_dtype=kv_cache_dtype,
         )
+        if decode_kernel is not None:
+            if decode_kernel not in ("asm", "gluon") or not getattr(
+                builder_instance, "_gluon_fp8_decode_max_batch", 0
+            ):
+                raise ValueError(
+                    f"decode_kernel={decode_kernel!r} needs 'asm' or 'gluon' and "
+                    "ROCM_AITER_MLA where its fp8 decode rule applies (see "
+                    "_gluon_fp8_decode_max_batch)"
+                )
+            builder_instance._gluon_fp8_decode_max_batch = (
+                max_total_q if decode_kernel == "gluon" else 0
+            )
 
         # Verify the actual prefill backend matches what was requested. The
         # selector + impl construction already raise on misuse; here we just
@@ -1278,6 +1312,7 @@ def run_mla_benchmark(
     config,
     reorder_batch_threshold: int | None = None,
     num_kv_splits: int | None = None,
+    decode_kernel: str | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
     sparse_mla_force_mqa: bool = False,
@@ -1298,6 +1333,8 @@ def run_mla_benchmark(
         reorder_batch_threshold: Threshold override for FlashAttn/FlashMLA
                                  (single config mode only)
         num_kv_splits: Number of KV splits for CUTLASS (single config mode only)
+        decode_kernel: ROCM_AITER_MLA fp8-KV decode kernel to pin, "asm" or
+            "gluon". See _run_mla_benchmark_batched.
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
@@ -1334,6 +1371,7 @@ def run_mla_benchmark(
         backend,
         configs_with_params,
         index_topk,
+        decode_kernel=decode_kernel,
         prefill_backend=prefill_backend,
         sparse_mla_force_mqa=sparse_mla_force_mqa,
         output_scale=output_scale,
