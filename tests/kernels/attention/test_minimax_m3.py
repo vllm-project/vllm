@@ -1536,6 +1536,217 @@ def test_decode_index_score_cutedsl_correctness(
             side.synchronize()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Sharded index decode score requires Blackwell.",
+)
+@pytest.mark.parametrize(
+    "world,decode_query_len,max_decode_query_len,split_k",
+    [
+        (world, q, max_q, 128)
+        for world in (2, 4)
+        for q, max_q in ((1, 1), (1, 8), (3, 8), (8, 8))
+    ]
+    + [(2, q, 8, 1) for q in (1, 3, 8)],
+)
+def test_sharded_decode_index_score_matches_reference(
+    world, decode_query_len, max_decode_query_len, split_k
+):
+    pytest.importorskip("cutlass")
+    from vllm.third_party.fmha_sm100.api import sparse_topk_select
+
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        MAX_K_TILES,
+        minimax_m3_index_decode_score_sharded_cutedsl,
+        minimax_m3_index_merge_candidates,
+        minimax_m3_index_publish_candidates,
+    )
+
+    torch.manual_seed(0)
+    heads, head_dim = 4, HEAD_DIM
+    heads_per_rank = heads // world
+    seq_lens = torch.tensor([97, 129, 4097, 0], device="cuda", dtype=torch.int32)
+    num_pages = 4 * 33
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).view(
+        4, 33
+    )
+    total_q = seq_lens.numel() * decode_query_len
+    q = torch.randn(total_q, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
+    kv = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(q.dtype)
+    # Local destinations isolate score/head routing from the real TP transport test.
+    recv = [
+        torch.zeros(
+            (3, world, heads_per_rank, total_q, 33), device="cuda", dtype=torch.int32
+        )
+        for _ in range(world)
+    ]
+    bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
+    errors = torch.zeros(1, device="cuda", dtype=torch.int32)
+    scores = torch.full((total_q, heads, MAX_K_TILES), -float("inf"), device="cuda")
+    all_scores = torch.empty_like(scores)
+    local_ids = torch.empty((total_q, heads, 16), dtype=torch.int32, device="cuda")
+    actual = torch.empty_like(local_ids)
+    positions = (
+        seq_lens.repeat_interleave(decode_query_len)
+        - decode_query_len
+        + torch.arange(total_q, device="cuda") % decode_query_len
+    )
+    valid = (positions // BLOCK_SIZE + 1).clamp_min(0).int()
+    expected = torch.full_like(scores.transpose(0, 1), -float("inf"))
+    active_q = 3 * decode_query_len
+    expected[:, :active_q] = _reference_decode_index_score(
+        q[:active_q],
+        kv,
+        block_table[:3],
+        seq_lens[:3],
+        decode_query_len,
+        MAX_K_TILES,
+    )
+    # Consecutive calls reuse the same slot, including the single-layer case.
+    for _ in range(2):
+        all_scores.fill_(-float("inf"))
+        for rank in range(world):
+            scores.fill_(-float("inf"))
+            minimax_m3_index_decode_score_sharded_cutedsl(
+                q,
+                kv[:, rank::world].contiguous(),
+                block_table,
+                seq_lens,
+                rank,
+                decode_query_len,
+                max_decode_query_len,
+                scores,
+                split_k=split_k,
+            )
+            torch.maximum(all_scores, scores, out=all_scores)
+            sparse_topk_select(
+                scores,
+                16,
+                num_valid_pages=valid,
+                force_begin_blocks=1,
+                force_end_blocks=1,
+                output=local_ids,
+                max_score_layout="THK",
+            )
+            minimax_m3_index_publish_candidates(
+                scores,
+                local_ids,
+                bases,
+                1,
+                rank,
+                total_q,
+                errors,
+                world_size=world,
+                heads_per_rank=heads_per_rank,
+                spin_limit=1 << 20,
+            )
+        for owner, r in enumerate(recv):
+            head = owner * heads_per_rank
+            minimax_m3_index_merge_candidates(
+                r[1],
+                valid,
+                actual[:, head : head + heads_per_rank],
+                errors,
+                init_blocks=1,
+                local_blocks=1,
+                spin_limit=1 << 20,
+            )
+        torch.testing.assert_close(all_scores.transpose(0, 1), expected)
+        _assert_sharded_topk(actual, all_scores, valid, 1, 1)
+        assert errors.item() == 0
+        for r in recv:
+            assert torch.count_nonzero(r[..., 32]).item() == 0
+            assert torch.count_nonzero(r[[0, 2]]).item() == 0
+
+
+def _assert_sharded_topk(actual, scores, num_valid, init_blocks, local_blocks):
+    """Allow cutoff ties, but require every strict winner and forced block."""
+    for ids_by_head, scores_by_head, count in zip(
+        actual.cpu().tolist(), scores.cpu().tolist(), num_valid.cpu().tolist()
+    ):
+        forced = set(range(min(init_blocks, count))) | set(
+            range(max(0, count - local_blocks), count)
+        )
+        for ids, values in zip(ids_by_head, scores_by_head):
+            selected = [i for i in ids if i >= 0]
+            assert len(selected) == min(16, count)
+            assert selected == sorted(set(selected))
+            assert ids == selected + [-1] * (16 - len(selected))
+            assert all(i < count for i in selected)
+            assert forced <= set(selected)
+            ordinary = sorted(
+                (values[i] for i in range(count) if i not in forced), reverse=True
+            )[: len(selected) - len(forced)]
+            assert (
+                sorted((values[i] for i in selected if i not in forced), reverse=True)
+                == ordinary
+            )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA candidate exchange")
+@pytest.mark.parametrize("init_blocks,local_blocks", [(0, 1), (1, 1)])
+@pytest.mark.parametrize("world", [2, 4])
+def test_sharded_candidate_merge_deduplicates_and_forces(
+    init_blocks, local_blocks, world
+):
+    pytest.importorskip("cutlass")
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        minimax_m3_index_merge_candidates,
+    )
+
+    valid = [48, 48, 48, 3, 0, 1]
+    scores = torch.full((world, len(valid), 48), -1000.0)
+    blocks = torch.arange(48)
+    for rank in range(world):
+        scores[rank, 0] = (blocks * 7 + rank * 13) % 53
+    scores[min(2, world - 1), 1] = blocks.float()
+    scores[:, 2] = 7
+    scores[:, 3, :3] = torch.tensor([4, 9, 6])
+    scores[:, :, 0] = -2000
+    for row, count in enumerate(valid):
+        if count:
+            scores[:, row, count - 1] = -2000
+
+    # Duplicate IDs can have different scores on each rank. Padding must not win.
+    recv = torch.zeros((3, world, 1, len(valid) + 2, 33), dtype=torch.int32)
+    recv[1, :, :, : len(valid), 16:32] = -1
+    for rank in range(world):
+        for row, count in enumerate(valid):
+            forced = set(range(min(init_blocks, count))) | set(
+                range(max(0, count - local_blocks), count)
+            )
+            ordinary = sorted(
+                (i for i in range(count) if i not in forced),
+                key=lambda i: (-scores[rank, row, i].item(), i),
+            )
+            ids = sorted(forced | set(ordinary[: max(0, 16 - len(forced))]))
+            recv[1, rank, 0, row, : len(ids)] = scores[rank, row, ids].view(torch.int32)
+            recv[1, rank, 0, row, 16 : 16 + len(ids)] = torch.tensor(ids)
+            recv[1, rank, 0, row, 32] = 1
+    recv[1, :, 0, 3, 3] = torch.tensor(1e9).view(torch.int32)
+    recv[1, :, 0, 3, 19] = 47
+    recv = recv.cuda()
+    before = recv.clone()
+    actual = torch.full((len(valid), 1, 16), -9, dtype=torch.int32, device="cuda")
+    errors = torch.zeros(1, dtype=torch.int32, device="cuda")
+    counts = torch.tensor(valid, dtype=torch.int32, device="cuda")
+    minimax_m3_index_merge_candidates(
+        recv[1],
+        counts,
+        actual,
+        errors,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        spin_limit=1 << 20,
+    )
+    _assert_sharded_topk(
+        actual, scores.max(dim=0).values.unsqueeze(1), counts, init_blocks, local_blocks
+    )
+    assert errors.item() == 0
+    assert torch.count_nonzero(recv[..., 32]).item() == 0
+    torch.testing.assert_close(recv[..., :32], before[..., :32], rtol=0, atol=0)
+
+
 # Sparse attention kernels.
 def _reference_sparse_attn(
     q: torch.Tensor,
@@ -2186,26 +2397,32 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_in
         assert not index_cache_t128
 
 
-def test_indexer_cache_squeezes_to_contiguous_3d():
-    """The indexer side cache is standardized 4D with H=1: under both layouts
-    the allocator's logical view stays contiguous and squeezes (as
-    `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
-    [num_blocks, block_size, head_dim] cache the kernels consume."""
+@pytest.mark.parametrize("tp_shard", [1, 2, 4])
+@pytest.mark.parametrize("index_dtype", ["bf16", "fp8"])
+def test_indexer_cache_squeezes_to_contiguous_3d(tp_shard, index_dtype):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
     nb = 5
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
+    config = VllmConfig(cache_config=CacheConfig(block_size=BLOCK_SIZE))
+    with set_current_vllm_config(config):
+        cache = MiniMaxM3IndexerCache(
+            HEAD_DIM, "index_cache", indexer_kv_dtype=index_dtype, tp_shard=tp_shard
+        )
+    ispec = cache.get_kv_cache_spec(config)
     shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
-    assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
+    content = HEAD_DIM * cache.dtype.itemsize // tp_shard
+    assert shape_bytes == (nb, 1, BLOCK_SIZE, content)
+    assert ispec.page_size_bytes == BLOCK_SIZE * content
     assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
 
     for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
         iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
         view = dense_kv_cache_views(iraw, ispec, nb, 1, layout, BLOCK_SIZE)[0]
-        assert tuple(view.shape) == (nb, 1, BLOCK_SIZE, HEAD_DIM)
-        indexer_cache = view.squeeze(1)
-        assert tuple(indexer_cache.shape) == (nb, BLOCK_SIZE, HEAD_DIM)
-        assert indexer_cache.is_contiguous()
+        cache.bind_kv_cache(view)
+        assert tuple(cache.kv_cache.shape) == (nb, BLOCK_SIZE // tp_shard, HEAD_DIM)
+        assert cache.kv_cache.is_contiguous()
+        assert cache.kv_cache.data_ptr() == iraw.data_ptr()
 
 
 def test_hnd_allocation_is_packed_head_major():
