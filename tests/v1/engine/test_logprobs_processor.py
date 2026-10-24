@@ -10,19 +10,25 @@ row), the trailing positions are populated with sentinel values
 `num_logprobs + 1` entries so those sentinels never reach the user.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import torch
 
-from vllm.logprobs import create_sample_logprobs
+from vllm.logprobs import FlatLogprobs, create_sample_logprobs
+from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
 
-def _make_processor(num_logprobs: int) -> LogprobsProcessor:
+def _make_processor(
+    num_logprobs: int, flat_logprobs: bool = False
+) -> LogprobsProcessor:
     return LogprobsProcessor(
         tokenizer=None,
-        logprobs=create_sample_logprobs(flat_logprobs=False),
+        logprobs=create_sample_logprobs(flat_logprobs=flat_logprobs),
         prompt_logprobs=None,
         cumulative_logprob=0.0,
         num_logprobs=num_logprobs,
@@ -87,3 +93,85 @@ def test_prompt_token_id_logprobs_are_popped_once():
     assert scores is not None
     assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
     assert processor.pop_prompt_token_id_logprobs() is None
+
+
+def _engine_steps(seed: int, width: int, num_steps: int) -> list[LogprobsLists]:
+    """Engine steps of 1-3 rows, some repeating the sampled id in the top-k."""
+    rng = np.random.default_rng(seed)
+    steps = []
+    for _ in range(num_steps):
+        rows = int(rng.integers(1, 4))
+        token_ids = rng.integers(0, 1000, (rows, width)).astype(np.int32)
+        dup = (rng.random(rows) < 0.3) & (width > 1)
+        token_ids[dup, -1] = token_ids[dup, 0]
+        logprobs = -rng.random((rows, width)).astype(np.float32) * 10
+        ranks = rng.integers(0, 50, rows).astype(np.int64)
+        steps.append(LogprobsLists(token_ids, logprobs, ranks))
+    return steps
+
+
+@pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6), (-1, 5)])
+def test_flat_rows_match_list_logprobs(num_logprobs, width):
+    """FlatLogprobs keeps the engine rows but reads like the list path:
+    same positions (first-occurrence keys, last-occurrence values, ranks),
+    same cumulative logprob."""
+    expected = _make_processor(num_logprobs)
+    actual = _make_processor(num_logprobs, flat_logprobs=True)
+    steps = _engine_steps(0, width, 40)
+    for step in steps:
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, FlatLogprobs)
+    assert list(actual.logprobs) == expected.logprobs
+    assert [actual.logprobs[i] for i in range(len(expected.logprobs))] == (
+        expected.logprobs
+    )
+    assert list(actual.logprobs[-3:]) == expected.logprobs[-3:]
+    assert actual.cumulative_logprob == expected.cumulative_logprob
+
+    rows = actual.logprobs.rows()
+    assert rows is not None
+    token_ids, logprobs, ranks = rows
+    slots = width if num_logprobs == -1 else num_logprobs + 1
+    assert token_ids.dtype == np.dtype("<i4") and logprobs.dtype == np.dtype("<f4")
+    assert token_ids.flags.c_contiguous and logprobs.flags.c_contiguous
+    np.testing.assert_array_equal(
+        token_ids, np.concatenate([s.logprob_token_ids[:, :slots] for s in steps])
+    )
+    np.testing.assert_array_equal(
+        logprobs, np.concatenate([s.logprobs[:, :slots] for s in steps])
+    )
+    np.testing.assert_array_equal(
+        ranks, np.concatenate([s.sampled_token_ranks for s in steps])
+    )
+
+
+def test_flat_irregular_rows_have_no_engine_rows():
+    """A row narrower than the stored ones (a co-batched request replaced the
+    batch's logprob tensors) still reads like the list path, but rows() is
+    None."""
+    expected = _make_processor(3)
+    actual = _make_processor(3, flat_logprobs=True)
+    steps = _engine_steps(1, 4, 3) + _engine_steps(2, 2, 2) + _engine_steps(3, 4, 2)
+    for step in steps:
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, FlatLogprobs)
+    assert list(actual.logprobs) == expected.logprobs
+    assert actual.logprobs.rows() is None
+
+
+def test_sample_logprobs_skip_detokenize():
+    """_detokenize_logprobs=False keeps no decoded tokens, even with a
+    tokenizer (which would fail here if used)."""
+    params = SamplingParams(logprobs=2, flat_logprobs=True)
+    params._detokenize_logprobs = False
+    processor = LogprobsProcessor.from_new_request(
+        tokenizer=object(), request=SimpleNamespace(sampling_params=params)
+    )
+    for step in _engine_steps(4, 3, 3):
+        processor._update_sample_logprobs(step)
+    assert isinstance(processor.logprobs, FlatLogprobs)
+    assert set(processor.logprobs.decoded_tokens) == {None}

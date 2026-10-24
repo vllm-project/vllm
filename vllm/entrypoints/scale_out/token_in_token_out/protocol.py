@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -633,6 +634,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """A non-streaming generate response already rendered to its JSON body:
+    the bytes ``JSONResponse`` gives for the equivalent ``GenerateResponse``."""
+
+    body: bytes
 
 
 def output_mode_or_tokens(value: Any) -> Any:
