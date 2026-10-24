@@ -100,9 +100,9 @@ print(response["choices"][0]["token_ids"])
 
 With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
 
-With `output_mode: "derender"`, `parse_context.return_tokens_as_token_ids` overrides the generate server's `--return-tokens-as-token-ids` when it is not `null`: `true` returns `token_id:N` placeholders with `bytes: null`, and `false` returns decoded tokens and UTF-8 bytes even when the server flag is enabled. An omitted or `null` value uses the generate server's flag. `/render` preserves the request's value without applying the render server's flag. This setting affects logprobs only; the assistant message is still parsed from text.
+With `output_mode: "derender"`, `parse_context.return_tokens_as_token_ids` overrides the generate server's `--return-tokens-as-token-ids` when it is not `null`: `true` returns `token_id:N` placeholders with `bytes: null`, and `false` returns decoded tokens and UTF-8 bytes even when the server flag is enabled. An omitted or `null` value uses the generate server's flag. `/render` preserves explicit `true` and `false` without applying the render server's flag, and omits the context field when the request value is omitted or `null`. This setting affects logprobs only; the assistant message is still parsed from text.
 
-Upgrade generate nodes before render nodes: older generate nodes reject the new `parse_context.return_tokens_as_token_ids` field with a 400 in derender mode, including when its value is `null`. Unknown parse-context fields remain ignored in `tokens` and `text` modes.
+Upgrade generate nodes before using explicit request overrides: older generate nodes reject `parse_context.return_tokens_as_token_ids` with a 400 in derender mode. Requests with an omitted or `null` override remain compatible because `/render` leaves that field out. Unknown parse-context fields remain ignored in `tokens` and `text` modes.
 
 ### Errors
 
