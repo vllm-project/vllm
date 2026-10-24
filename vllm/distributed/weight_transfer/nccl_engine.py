@@ -300,6 +300,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 f"NCCL broadcast sends full tensors, but {type(source).__name__} "
                 "does not implement iter_full()."
             )
+        # Identical on every rank, so every rank raises alike.
+        for m in source.metadata:
+            if m.owners is not None and m.owners[0] != 0:
+                raise ValueError(
+                    f"parameter {m.name!r} is sent by its first owner, rank "
+                    f"{m.owners[0]}, but NCCL broadcast has a single sender, "
+                    "rank 0. Every parameter's owners must start at rank 0."
+                )
         engine = cls(
             client=client,
             source=source,
@@ -346,14 +354,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # Metadata is declared without gathering. For Megatron it is itself a
         # collective, so every rank runs it; only the sender ships it.
         meta = source.metadata
-        # Identical on every rank, so every rank raises alike.
-        for m in meta:
-            if m.owners is not None and m.owners[0] != 0:
-                raise ValueError(
-                    f"parameter {m.name!r} is sent by its first owner, rank "
-                    f"{m.owners[0]}, but NCCL broadcast has a single sender, "
-                    "rank 0. Every parameter's owners must start at rank 0."
-                )
 
         if not self.is_sender:
             # Non-sender ranks only join the trainer-side gather collective.

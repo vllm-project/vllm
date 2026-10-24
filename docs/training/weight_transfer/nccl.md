@@ -129,7 +129,7 @@ pass — this is the invariant to test first.
 Each parameter is sent by its first owner, and this backend has a single
 sender, trainer rank 0. Every parameter's `owners` must therefore start at rank
 0 or be unset; a source whose pipeline stages own different parameters is
-rejected at the first `send_weights`. Other owners (FSDP peers of rank 0) only
+rejected at `trainer_init`. Other owners (FSDP peers of rank 0) only
 drive `iter_full()` to take part in the gathers.
 
 ### Metadata is sent once, then reused
@@ -278,7 +278,7 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 - **Pipeline-parallel trainers are not supported yet (work in progress).** Rank 0
   is the only sender, so it must own every parameter (see
   [One sender](#one-sender)). A source whose ranks own different parameters is
-  rejected at the first `send_weights`.
+  rejected at `trainer_init`.
 - **Full tensors on the wire.** Rank 0 materializes each parameter in full and
   every worker receives all of it, whatever its tensor-parallel shard. For
   large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or

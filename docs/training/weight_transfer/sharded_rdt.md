@@ -109,7 +109,7 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `rank` | — | Keyword-only. This trainer rank; **0 is the sender** |
+| `rank` | — | Keyword-only. This trainer rank; **0 is the sender**. Must equal the default process group rank, since `owners` are matched against it |
 | `num_consumers` | — | Inference workers across the whole fleet (TP × DP) |
 | `trainer_actor_namespace` | `None` | Ray namespace for the serve actors; the workers resolve them by name here |
 | `num_rdt_buffers` | 2 | Ring depth on both sides |

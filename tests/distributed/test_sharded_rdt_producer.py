@@ -404,7 +404,6 @@ def _loop_engine(server, n_groups, *, lookahead):
     e._groups = [list(g) for g in groups]
     e._owned_idx = list(range(n_groups))
     e._owned_names = {m.name for m in e._meta}
-    e._legacy_held = False
     e._inflight = _ResidencyDict()
     return e
 

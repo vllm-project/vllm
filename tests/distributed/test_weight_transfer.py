@@ -1918,7 +1918,7 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
         engine.send_weights()
 
 
-def test_nccl_trainer_rejects_a_second_sender(monkeypatch):
+def test_nccl_trainer_rejects_a_second_sender():
     """Each parameter is sent by its first owner and broadcast has one sender,
     so a pipeline stage that does not start at rank 0 cannot be sent; every
     rank sees the same metadata and raises alike."""
@@ -1927,10 +1927,18 @@ def test_nccl_trainer_rejects_a_second_sender(monkeypatch):
         ParamMeta("b", torch.float32, (2,), owners=(2, 3)),
     ]
     source = _ScriptedSource(meta, [])
-    for is_sender, rank in ((True, 0), (False, 2)):
-        engine = _mock_group_engine(source, monkeypatch, is_sender=is_sender, rank=rank)
+    for rank in (0, 2):
         with pytest.raises(ValueError, match="'b' is sent by its first owner, rank 2"):
-            engine.send_weights()
+            NCCLTrainerWeightTransferEngine.trainer_init(
+                NCCLTrainerInitInfo(
+                    master_address="127.0.0.1",
+                    master_port=29500,
+                    world_size=2,
+                    rank=rank,
+                ),
+                client=RecordingClient(),
+                source=source,
+            )
 
 
 def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):
