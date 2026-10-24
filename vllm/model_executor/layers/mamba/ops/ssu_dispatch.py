@@ -518,11 +518,16 @@ def selective_state_update_replayssm_flashinfer(
     update_trackers: bool = True,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
+    rand_seed: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
 ) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU and optionally advance shared trackers."""
+    """Run FlashInfer checkpointing SSU and optionally advance shared trackers.
+
+    With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
+    refreshed by the caller each step; without one, a seed is drawn here.
+    """
     if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
             "FlashInfer ReplaySSM has not been initialized. "
@@ -545,11 +550,12 @@ def selective_state_update_replayssm_flashinfer(
     if scratch is not None:
         cb_scaled, cumAdt_vec, cb_old = scratch
 
-    rand_seed = (
-        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
-        if enable_stochastic_rounding
-        else None
-    )
+    if not enable_stochastic_rounding:
+        rand_seed = None
+    elif rand_seed is None:
+        rand_seed = torch.randint(
+            0, 2**32, (1,), device=state.device, dtype=torch.int64
+        )
     result = _flashinfer_replayssm_kernel(
         state,
         x_cache,
