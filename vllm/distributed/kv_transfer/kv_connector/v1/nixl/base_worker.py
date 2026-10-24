@@ -2763,6 +2763,13 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
             )
+        # DCP shards tokens across ranks at the logical block size, and reads
+        # pair blocks by logical position.
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+            != nixl_agent_meta.block_size * remote_physical_per_logical
+        ):
+            raise NotImplementedError("DCP requires matching P/D logical block sizes")
         if (
             self._has_mamba
             and remote_physical_per_logical
@@ -3289,9 +3296,13 @@ class NixlBaseConnectorWorker:
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
                     # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
+                    covered_sub_blocks = (
+                        meta.covered_sub_blocks[g]
+                        if meta.covered_sub_blocks is not None
+                        else min(
+                            len(local_group) * block_size_ratio,
+                            len(meta.remote.block_ids[g]),
+                        )
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
