@@ -1570,9 +1570,9 @@ class MoRIIOConnectorScheduler:
             params["do_remote_prefill"] = False
             return False, None
 
-        if (
-            not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
+        if not params.get("do_remote_decode") or request.status not in (
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_STOPPED,
         ):
             return False, None
 
