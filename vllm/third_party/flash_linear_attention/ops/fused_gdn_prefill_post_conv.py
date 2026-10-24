@@ -149,6 +149,72 @@ def _fused_post_conv_kernel(
         tl.store(beta_ptr + gb_offsets, beta_vals, mask=mask_t)
 
 
+@triton.jit
+def _fused_split_qkv_post_conv_kernel(
+    q_ptr,
+    k_ptr,
+    a_ptr,
+    b_ptr,
+    A_log_ptr,
+    dt_bias_ptr,
+    g_ptr,
+    beta_ptr,
+    stride_q_tok,
+    stride_k_tok,
+    stride_a_tok,
+    stride_b_tok,
+    L,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    L2NORM_EPS: tl.constexpr,
+    SOFTPLUS_THRESHOLD: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BK: tl.constexpr,
+):
+    """Normalize split Q/K in place and compute GDN gating outputs."""
+    i_tb = tl.program_id(0)
+    i_head = tl.program_id(1)
+
+    offs_t = i_tb * BLOCK_T + tl.arange(0, BLOCK_T)
+    mask_t = offs_t < L
+
+    if i_head < H:
+        offs_k = tl.arange(0, BK)
+        mask_k = offs_k < K
+        mask_2d = mask_t[:, None] & mask_k[None, :]
+
+        q_offsets = offs_t[:, None] * stride_q_tok + i_head * K + offs_k[None, :]
+        k_offsets = offs_t[:, None] * stride_k_tok + i_head * K + offs_k[None, :]
+        q_f32 = tl.load(q_ptr + q_offsets, mask=mask_2d, other=0).to(tl.float32)
+        k_f32 = tl.load(k_ptr + k_offsets, mask=mask_2d, other=0).to(tl.float32)
+
+        q_f32 *= tl.rsqrt(tl.sum(q_f32 * q_f32, axis=1) + L2NORM_EPS)[:, None]
+        k_f32 *= tl.rsqrt(tl.sum(k_f32 * k_f32, axis=1) + L2NORM_EPS)[:, None]
+
+        tl.store(q_ptr + q_offsets, q_f32.to(q_ptr.dtype.element_ty), mask=mask_2d)
+        tl.store(k_ptr + k_offsets, k_f32.to(k_ptr.dtype.element_ty), mask=mask_2d)
+    else:
+        i_hv = i_head - H
+        A_log_val = tl.load(A_log_ptr + i_hv).to(tl.float32)
+        dt_bias_val = tl.load(dt_bias_ptr + i_hv).to(tl.float32)
+
+        a_offsets = offs_t * stride_a_tok + i_hv
+        b_offsets = offs_t * stride_b_tok + i_hv
+        a_vals = tl.load(a_ptr + a_offsets, mask=mask_t, other=0).to(tl.float32)
+        b_vals = tl.load(b_ptr + b_offsets, mask=mask_t, other=0).to(tl.float32)
+
+        x = a_vals + dt_bias_val
+        sp = tl.where(x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x)))
+        sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
+        g_vals = -tl.exp(A_log_val) * sp
+        beta_vals = tl.sigmoid(b_vals)
+
+        gb_offsets = offs_t * HV + i_hv
+        tl.store(g_ptr + gb_offsets, g_vals, mask=mask_t)
+        tl.store(beta_ptr + gb_offsets, beta_vals, mask=mask_t)
+
+
 def fused_post_conv_prep(
     conv_output: torch.Tensor,  # [L, qkv_dim] conv'd mixed_qkv
     a: torch.Tensor,  # [L, HV]
@@ -245,4 +311,66 @@ def fused_post_conv_prep(
         num_stages=2,
     )
 
+    return q, k, v, g, beta
+
+
+def fused_split_qkv_post_conv_prep(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    num_k_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare pre-split Q/K/V tensors for the GDN chunk kernel.
+
+    Q and K are normalized in place because the AITER split-conv op returns
+    fresh output buffers. V is only reshaped, while gating outputs are produced
+    in the same Triton launch as Q/K normalization.
+    """
+    L = q.shape[0]
+    H = num_k_heads
+    K = head_k_dim
+    V = head_v_dim
+    HV = A_log.shape[0]
+
+    q = q.view(L, H, K)
+    k = k.view(L, H, K)
+    v = v.view(L, HV, V)
+    g = torch.empty(L, HV, dtype=torch.float32, device=q.device)
+    beta = torch.empty(L, HV, dtype=torch.float32, device=q.device)
+
+    if L == 0:
+        return q, k, v, g, beta
+
+    BLOCK_T = 16
+    grid = (triton.cdiv(L, BLOCK_T), H + HV)
+    _fused_split_qkv_post_conv_kernel[grid](
+        q_ptr=q,
+        k_ptr=k,
+        a_ptr=a,
+        b_ptr=b,
+        A_log_ptr=A_log,
+        dt_bias_ptr=dt_bias,
+        g_ptr=g,
+        beta_ptr=beta,
+        stride_q_tok=q.stride(0),
+        stride_k_tok=k.stride(0),
+        stride_a_tok=a.stride(0),
+        stride_b_tok=b.stride(0),
+        L=L,
+        H=H,
+        HV=HV,
+        K=K,
+        L2NORM_EPS=1e-6,
+        SOFTPLUS_THRESHOLD=20.0,
+        BLOCK_T=BLOCK_T,
+        BK=triton.next_power_of_2(K),
+        num_warps=4,
+        num_stages=2,
+    )
     return q, k, v, g, beta
