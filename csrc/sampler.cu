@@ -711,36 +711,56 @@ __device__ int gfx950TopK512ActiveBlocks(int rowLength, int numRows,
   return min(min(activeBlocks, maxBlocks), max(1, rowLength / 512));
 }
 
-template <int kNumThreadsPerBlock, bool mergeBlocks = false>
+// Measured gfx950 policy for k=2048 (GLM-5.x index_topk). The merge walks
+// activeBlocks * 2048 candidates in one block per row, so short rows want few
+// splits and only long rows with few of them want more.
+__device__ int gfx950TopK2048ActiveBlocks(int rowLength, int numRows,
+                                          int maxBlocks) {
+  int activeBlocks;
+  if (rowLength < 4 * 1024) {
+    activeBlocks = 2;
+  } else if (rowLength < 16 * 1024) {
+    activeBlocks = 4;
+  } else {
+    activeBlocks = numRows <= 32 ? 6 : numRows <= 64 ? 4 : 2;
+  }
+  // Every block in a merged row must contain at least k real indices.
+  return min(min(activeBlocks, maxBlocks), max(1, rowLength / 2048));
+}
+
+template <int kNumThreadsPerBlock, bool mergeBlocks = false, int topK = 512>
 static __global__
-__launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware(
+__launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeGfx950DeviceLengthAware(
     const float* logits, const int* seqLens, int* outIndices,
     int* outIndicesAux, float* outLogitsAux, int stride0, int next_n,
     int seqLensIs2D, int maxBlocks) {
   #if defined(__gfx950__)
-  constexpr int topK = 512;
+  static_assert(topK == 512 || topK == 2048);
   constexpr int kNumBins = 2048;
+  constexpr bool kTopK512Path = topK == 512;
   const int rowIdx = blockIdx.x;
   const int rowEnd =
       seqLensIs2D
           ? max(0, seqLens[rowIdx])
           : max(0, seqLens[rowIdx / next_n] - next_n + rowIdx % next_n + 1);
   const int activeBlocks =
-      gfx950TopK512ActiveBlocks(rowEnd, gridDim.x, maxBlocks);
+      topK == 512 ? gfx950TopK512ActiveBlocks(rowEnd, gridDim.x, maxBlocks)
+                  : gfx950TopK2048ActiveBlocks(rowEnd, gridDim.x, maxBlocks);
   outIndices += static_cast<int64_t>(rowIdx) * topK;
   if constexpr (mergeBlocks) {
     if (activeBlocks == 1) return;
     const int64_t offset = static_cast<int64_t>(rowIdx) * maxBlocks * topK;
     topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, false, true, false,
-                  true>(outIndicesAux + offset, outLogitsAux + offset, 0,
-                        activeBlocks * topK, outIndices, nullptr, 1, topK);
+                  kTopK512Path>(outIndicesAux + offset, outLogitsAux + offset,
+                                0, activeBlocks * topK, outIndices, nullptr, 1,
+                                topK);
   } else {
     if (blockIdx.y >= activeBlocks) return;
     logits += static_cast<int64_t>(rowIdx) * stride0;
     if (activeBlocks == 1) {
       topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, false, false, false,
-                    true>(nullptr, logits, 0, rowEnd, outIndices, nullptr, 1,
-                          topK);
+                    kTopK512Path>(nullptr, logits, 0, rowEnd, outIndices,
+                                  nullptr, 1, topK);
       return;
     }
     const int blockSize = rowEnd / activeBlocks;
@@ -750,8 +770,9 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
     const int64_t offset =
         (static_cast<int64_t>(rowIdx) * maxBlocks + blockIdx.y) * topK;
     topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, true, false, false,
-                  true>(nullptr, logits, rowStart, blockRowEnd,
-                        outIndicesAux + offset, outLogitsAux + offset, 1, topK);
+                  kTopK512Path>(nullptr, logits, rowStart, blockRowEnd,
+                                outIndicesAux + offset, outLogitsAux + offset,
+                                1, topK);
   }
   #endif
 }
@@ -838,7 +859,7 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
 
     constexpr int kNumThreadsPerSplitBlock = 1024;
     if (multipleBlocksPerRowConfig == 1) {
-      vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
+      vllm::topKPerRowDecodeGfx950DeviceLengthAware<kNumThreadsPerSplitBlock>
           <<<numRows, kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t),
              stream>>>(logits.const_data_ptr<float>(),
                        seqLens.const_data_ptr<int>(),
@@ -853,7 +874,7 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
     const auto outLogitsAux = torch::stable::empty(
         {numRows, multipleBlocksPerRowConfig, topK},
         torch::headeronly::ScalarType::Float, std::nullopt, logits.device());
-    vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
+    vllm::topKPerRowDecodeGfx950DeviceLengthAware<kNumThreadsPerSplitBlock>
         <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerSplitBlock,
            2 * topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -862,7 +883,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             outLogitsAux.mutable_data_ptr<float>(), static_cast<int>(stride0),
             static_cast<int>(next_n), seqLensIs2D, multipleBlocksPerRowConfig);
     constexpr int kNumThreadsPerBlockMerge = 1024;
-    vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerBlockMerge, true>
+    vllm::topKPerRowDecodeGfx950DeviceLengthAware<kNumThreadsPerBlockMerge,
+                                                  true>
         <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
             nullptr, seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(),
@@ -892,6 +914,47 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
   } else {
     // Long sequences are run in two steps
 #ifdef USE_ROCM
+    const bool useGfx950DeviceLengthAwareTopK2048 =
+        topK == 2048 && stride1 == 1 && numRows > 0 && numRows <= 256 &&
+        std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
+    if (useGfx950DeviceLengthAwareTopK2048) {
+      // numColumns is max_model_len here, so each row picks its split count on
+      // device from its live length. Grid and workspace depend on numRows
+      // only and stay capture-stable.
+      constexpr int kTopK = 2048;
+      // Short rows can use 4 splits at any row count, so the grid never
+      // drops below 4.
+      const int multipleBlocksPerRowConfig = numRows <= 32 ? 6 : 4;
+      const auto outIndicesAux = torch::stable::empty(
+          {numRows, multipleBlocksPerRowConfig, kTopK},
+          torch::headeronly::ScalarType::Int, std::nullopt, logits.device());
+      const auto outLogitsAux = torch::stable::empty(
+          {numRows, multipleBlocksPerRowConfig, kTopK},
+          torch::headeronly::ScalarType::Float, std::nullopt, logits.device());
+      constexpr int kNumThreadsPerSplitBlock = 1024;
+      vllm::topKPerRowDecodeGfx950DeviceLengthAware<kNumThreadsPerSplitBlock,
+                                                    false, kTopK>
+          <<<dim3(numRows, multipleBlocksPerRowConfig),
+             kNumThreadsPerSplitBlock, 2 * kTopK * sizeof(int32_t), stream>>>(
+              logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+              indices.mutable_data_ptr<int>(),
+              outIndicesAux.mutable_data_ptr<int>(),
+              outLogitsAux.mutable_data_ptr<float>(), static_cast<int>(stride0),
+              static_cast<int>(next_n), seqLensIs2D,
+              multipleBlocksPerRowConfig);
+      constexpr int kNumThreadsPerBlockMerge = 1024;
+      vllm::topKPerRowDecodeGfx950DeviceLengthAware<kNumThreadsPerBlockMerge,
+                                                    true, kTopK>
+          <<<numRows, kNumThreadsPerBlockMerge, kTopK * sizeof(int32_t),
+             stream>>>(nullptr, seqLens.const_data_ptr<int>(),
+                       indices.mutable_data_ptr<int>(),
+                       outIndicesAux.mutable_data_ptr<int>(),
+                       outLogitsAux.mutable_data_ptr<float>(), 0,
+                       static_cast<int>(next_n), seqLensIs2D,
+                       multipleBlocksPerRowConfig);
+      return;
+    }
+
     const bool useGfx950DeviceLengthAwareTopK1024 =
         topK == 1024 && numRows > 64 && numRows <= 256 &&
         std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
