@@ -691,7 +691,9 @@ def parse_chat_message_content(
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
 
-        if role == "developer":
+        # Message-level tools: DeepSeek-V3.2/V4 encoders render them for both
+        # "system" and "developer" messages.
+        if role == "developer" or (role == "system" and "tools" in message):
             result_msg["tools"] = message.get("tools", None)
     return result
 
