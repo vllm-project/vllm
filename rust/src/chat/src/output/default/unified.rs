@@ -12,13 +12,16 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
 use thiserror_ext::AsReport;
 use tracing::warn;
-use vllm_parser::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
+use vllm_parser::tool::ToolParserError;
+use vllm_parser::unified::{
+    UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
+};
 use vllm_text::output::{DecodedText, DecodedTextEvent, SampledDelta};
 
-use crate::Result;
 use crate::error::Error;
 use crate::event::{AssistantBlockKind, ChatTokenUsage};
 use crate::output::{AssistantEvent, DecodedTextEventStream, generate_tool_call_id};
+use crate::{FinishReason, Result};
 
 /// Per-stream unified parsing state.
 struct UnifiedParserState {
@@ -88,7 +91,12 @@ impl UnifiedParserState {
     }
 
     /// Flush parser state at end-of-stream and close any remaining open calls.
-    fn finish(&mut self) -> Result<Vec<AssistantEvent>> {
+    ///
+    /// When the parser cannot finish, its buffered text is emitted as content.
+    /// The one exception is an incomplete tool call in a generation cut by
+    /// `max_tokens`: the buffer then holds a half-written call, so it is
+    /// dropped instead.
+    fn finish(&mut self, finish_reason: &FinishReason) -> Result<Vec<AssistantEvent>> {
         let mut events = Vec::new();
 
         if self.parser_failed {
@@ -98,14 +106,27 @@ impl UnifiedParserState {
         match self.parser.finish() {
             Ok(output) => self.process_parser_output(output, &mut events)?,
             Err(error) => {
-                warn!(
-                    error = %error.as_report(),
-                    "unified parser finish failed; closing open parser state"
-                );
                 self.parser_failed = true;
                 self.open_call_index = None;
                 let recovered = self.parser.reset();
-                push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
+                if matches!(finish_reason, FinishReason::Length)
+                    && matches!(
+                        error,
+                        UnifiedParserError::Tool(ToolParserError::IncompleteToolCall { .. })
+                    )
+                {
+                    warn!(
+                        error = %error.as_report(),
+                        dropped_len = recovered.len(),
+                        "unified parser finish failed at max_tokens; dropping unfinished parser state"
+                    );
+                } else {
+                    warn!(
+                        error = %error.as_report(),
+                        "unified parser finish failed; closing open parser state"
+                    );
+                    push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
+                }
             }
         }
 
@@ -269,7 +290,7 @@ pub(crate) async fn unified_event_stream(
                     .await;
                 }
                 if let Some(finished) = finished {
-                    for next in state.finish()? {
+                    for next in state.finish(&finished.finish_reason)? {
                         y.yield_ok(next).await;
                     }
                     y.yield_ok(AssistantEvent::Done {
@@ -321,6 +342,7 @@ mod tests {
         tool_call_id: Option<String>,
         finish_output: Option<UnifiedParserOutput>,
         finish_error_reset_text: Option<String>,
+        finish_error_incomplete_tool_call: bool,
     }
 
     impl ScriptedParser {
@@ -331,6 +353,7 @@ mod tests {
                 tool_call_id: Some("call_test".to_string()),
                 finish_output: None,
                 finish_error_reset_text: None,
+                finish_error_incomplete_tool_call: false,
             }
         }
 
@@ -342,6 +365,11 @@ mod tests {
         fn with_finish_error(mut self, reset_text: &str) -> Self {
             self.finish_error_reset_text = Some(reset_text.to_string());
             self
+        }
+
+        fn with_finish_incomplete_tool_call(mut self, reset_text: &str) -> Self {
+            self.finish_error_incomplete_tool_call = true;
+            self.with_finish_error(reset_text)
         }
     }
 
@@ -388,6 +416,13 @@ mod tests {
         fn finish(&mut self) -> vllm_parser::unified::Result<UnifiedParserOutput> {
             if let Some(reset_text) = self.finish_error_reset_text.take() {
                 self.reset_text = reset_text;
+                if self.finish_error_incomplete_tool_call {
+                    return Err(UnifiedParserError::Tool(
+                        vllm_parser::tool::ToolParserError::IncompleteToolCall {
+                            message: "incomplete test tool call".to_string(),
+                        },
+                    ));
+                }
                 return Err(UnifiedParserError::Reasoning(
                     ReasoningError::MissingToken {
                         token: "</tool_call>".to_string(),
@@ -411,12 +446,19 @@ mod tests {
     }
 
     fn finished_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
+        finished_delta_with(delta, crate::FinishReason::Stop(None))
+    }
+
+    fn finished_delta_with(
+        delta: &str,
+        finish_reason: crate::FinishReason,
+    ) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
             decoded: DecodedText::unattributed(delta),
             sampled: vllm_text::SampledDelta::default(),
             finished: Some(Box::new(vllm_text::output::Finished {
                 usage: vllm_llm::TokenUsage::default(),
-                finish_reason: crate::FinishReason::Stop(None),
+                finish_reason,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
@@ -751,6 +793,181 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_incomplete_tool_call_at_max_tokens_drops_only_buffered_text() {
+        let events = collect(
+            ScriptedParser::new([ScriptedStep::Output(combined(
+                reasoning("thinking"),
+                text("Checking."),
+            ))])
+            .with_finish_incomplete_tool_call("\n<｜DSML｜ invoke name=\"lookup\""),
+            vec![finished_delta_with("", crate::FinishReason::Length)],
+        )
+        .await;
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::TextDelta {
+                    kind: AssistantBlockKind::Reasoning,
+                    delta: "thinking".to_string(),
+                    token_count: Some(0),
+                },
+                AssistantEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "Checking.".to_string(),
+                    token_count: None,
+                },
+                AssistantEvent::Done {
+                    usage: done_usage(0),
+                    timestamps: Default::default(),
+                    finish_reason: crate::FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_incomplete_tool_call_at_max_tokens_keeps_completed_tool_call() {
+        let events = collect(
+            ScriptedParser::new([ScriptedStep::Output(tool_call(
+                "get_weather",
+                r#"{"location":"Paris"}"#,
+            ))])
+            .with_finish_incomplete_tool_call("\n<｜DSML｜ invoke name=\"get_weather\""),
+            vec![finished_delta_with("", crate::FinishReason::Length)],
+        )
+        .await;
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::ToolCallStart {
+                    id: "call_test".to_string(),
+                    name: "get_weather".to_string(),
+                },
+                AssistantEvent::ToolCallArgumentsDelta {
+                    delta: r#"{"location":"Paris"}"#.to_string(),
+                },
+                AssistantEvent::Done {
+                    usage: done_usage(0),
+                    timestamps: Default::default(),
+                    finish_reason: crate::FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_other_finish_error_at_max_tokens_recovers_buffered_text() {
+        let events = collect(
+            ScriptedParser::new([ScriptedStep::Output(UnifiedParserOutput::default())])
+                .with_finish_error("buffered"),
+            vec![finished_delta_with("", crate::FinishReason::Length)],
+        )
+        .await;
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "buffered".to_string(),
+                    token_count: None,
+                },
+                AssistantEvent::Done {
+                    usage: done_usage(0),
+                    timestamps: Default::default(),
+                    finish_reason: crate::FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_dsml_half_opener_depends_on_finish_reason() {
+        use vllm_parser::reasoning::{DeepSeekV3ReasoningParser, ReasoningParser as _};
+        use vllm_parser::tool::{DeepSeekV41ToolParser, ToolParser as _};
+        use vllm_tokenizer::DynTokenizer;
+
+        for (finish_reason, expected_text) in [
+            (crate::FinishReason::Stop(None), "Checking.\n\n<｜DSML｜ ca"),
+            (crate::FinishReason::Length, "Checking."),
+        ] {
+            let tokenizer: DynTokenizer = Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("<think>", 256)
+                    .with_special_token("</think>", 257)
+                    .with_regular_token("｜DSML｜", 258),
+            );
+            let reasoning = DeepSeekV3ReasoningParser::create(tokenizer.clone()).unwrap();
+            let tool = DeepSeekV41ToolParser::create(&[], tokenizer.clone()).unwrap();
+            let parser = vllm_parser::unified::CombinedParser::new(Some(reasoning), Some(tool));
+            // Attributed as the frontend decodes it, so `｜DSML｜` is the added token.
+            let attributed = |text: &str| {
+                let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
+                for id in tokenizer.encode(text, false).unwrap() {
+                    decoder.push_token(id).unwrap();
+                }
+                decoder.flush(None).unwrap().1
+            };
+            let mut last = finished_delta_with("", finish_reason);
+            let vllm_text::output::DecodedTextEvent::TextDelta { decoded, .. } = &mut last else {
+                unreachable!()
+            };
+            *decoded = attributed("Checking.\n\n<｜DSML｜ ca");
+            let deltas = vec![
+                vllm_text::output::DecodedTextEvent::TextDelta {
+                    decoded: attributed("<think>plan</think>"),
+                    sampled: vllm_text::SampledDelta::default(),
+                    finished: None,
+                },
+                last,
+            ];
+            let events =
+                unified_event_stream(stream::iter(deltas.into_iter().map(Ok)), Box::new(parser))
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<crate::Result<Vec<_>>>()
+                    .unwrap();
+
+            let reasoning: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    AssistantEvent::TextDelta {
+                        kind: AssistantBlockKind::Reasoning,
+                        delta,
+                        ..
+                    } => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let text: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    AssistantEvent::TextDelta {
+                        kind: AssistantBlockKind::Text,
+                        delta,
+                        ..
+                    } => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reasoning, "plan", "{events:#?}");
+            assert_eq!(text, expected_text, "{events:#?}");
+            assert!(
+                !events.iter().any(|event| matches!(event, AssistantEvent::ToolCallStart { .. }))
+            );
+        }
     }
 
     #[tokio::test]
