@@ -2175,6 +2175,60 @@ def test_wrapped_mamba_group_requires_block_zeroing():
     assert config.needs_kv_cache_zeroing
 
 
+def _layout_test_spec(cls, head_size, quant=KVQuantMode.NVFP4, **kwargs):
+    return cls(
+        block_size=64,
+        num_kv_heads=4,
+        head_size=head_size,
+        dtype=torch.uint8 if quant.is_nvfp4 else torch.bfloat16,
+        kv_quant_mode=quant,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "specs,expected",
+    [
+        # Gemma 4: NVFP4 sliding layers at head_dim 256, global layers at 512.
+        (
+            [
+                _layout_test_spec(SlidingWindowSpec, 256, sliding_window=1024),
+                _layout_test_spec(FullAttentionSpec, 512),
+            ],
+            True,
+        ),
+        # One NVFP4 page layout.
+        (
+            [
+                _layout_test_spec(SlidingWindowSpec, 128, sliding_window=1024),
+                _layout_test_spec(FullAttentionSpec, 128),
+            ],
+            False,
+        ),
+        # Several page layouts, no NVFP4.
+        (
+            [
+                _layout_test_spec(FullAttentionSpec, 256, KVQuantMode.NONE),
+                _layout_test_spec(FullAttentionSpec, 512, KVQuantMode.NONE),
+            ],
+            False,
+        ),
+    ],
+)
+def test_mixed_layout_nvfp4_requires_block_zeroing(specs, expected):
+    """A block reused across NVFP4 groups with different page layouts exposes
+    stale bytes as block scales, so new blocks must be zeroed."""
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)
+        ],
+    )
+    assert config.has_mixed_layout_nvfp4_kv_cache is expected
+    assert config.needs_kv_cache_zeroing is expected
+
+
 def test_null_head_len():
     null = KVCacheBlock(0, is_null=True)
     real = [KVCacheBlock(i) for i in range(1, 4)]
