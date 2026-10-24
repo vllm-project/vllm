@@ -3115,7 +3115,10 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_sleep_unregisters_and_restores_kv_caches(dist_init):
+@pytest.mark.parametrize(
+    "restore_failure", [None, "register_memory", "get_agent_metadata"]
+)
+def test_sleep_unregisters_and_restores_kv_caches(dist_init, restore_failure):
     """Sleep drops everything built on the KV cache registration; wake-up
     registers the same memory again and publishes the new agent metadata."""
     block_size = maybe_update_block_size(16)
@@ -3147,13 +3150,33 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     assert nixl.deregister_memory.call_args_list == [call(d) for d in descs]
     assert not worker._remote_agents
 
-    nixl.get_agent_metadata.return_value = b"re-registered"
-    connector.restore_kv_caches()
-    connector.restore_kv_caches()
-    assert nixl.register_memory.call_count == len(descs)
+    assert worker.nixl_wrapper is None
+    if restore_failure is not None:
+        failed = MagicMock(wraps=FakeNixlWrapper("failed"))
+        getattr(failed, restore_failure).side_effect = RuntimeError("restore failed")
+        with (
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+                return_value=failed,
+            ),
+            pytest.raises(RuntimeError, match="restore failed"),
+        ):
+            connector.restore_kv_caches()
+        assert worker.nixl_wrapper is None
+        assert not worker.src_xfer_handles_by_block_size
+    restored = MagicMock(wraps=FakeNixlWrapper("restored"))
+    restored.get_agent_metadata.return_value = b"re-registered"
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        return_value=restored,
+    ):
+        connector.restore_kv_caches()
+        connector.restore_kv_caches()
+    assert restored.register_memory.call_count == len(descs)
     payload = worker.xfer_handshake_metadata
     agent = msgspec.msgpack.decode(payload.agent_metadata_bytes, type=NixlAgentMetadata)
     assert agent.agent_metadata == b"re-registered"
+    connector.unregister_kv_caches()
     connector.shutdown()
 
 
