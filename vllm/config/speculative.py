@@ -634,8 +634,11 @@ class SpeculativeConfig:
     usage."""
 
     dspark_draft_topk: int | None = Field(default=None, ge=1)
-    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
-    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+    """For Qwen3 DSpark drafting, evaluate the Markov projection on the union
+    of the top-k base-logit and top-k Markov-bias candidates. Markov candidate
+    IDs are computed once at model load, storing k IDs per target token.
+    Unset keeps the full vocabulary.
+    Requires draft tensor parallel size 1."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

@@ -78,6 +78,7 @@ class DSparkSpeculator(DFlashSpeculator):
         self._draft_topk: int | None = getattr(
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
+        self._markov_candidate_ids: torch.Tensor | None = None
 
         self.use_confidence_head: bool = False
 
@@ -111,7 +112,29 @@ class DSparkSpeculator(DFlashSpeculator):
             # The acceptance estimator is not needed when a trained confidence head
             # is available.
             self.use_acceptance_estimator = False
+        if self._draft_topk is not None:
+            self._init_markov_candidates(model)
         return model
+
+    @torch.inference_mode()
+    def _init_markov_candidates(
+        self, model: torch.nn.Module, chunk_size: int = 512
+    ) -> None:
+        """Build a target-token to draft-candidate table with bounded scratch space."""
+        assert self._draft_topk is not None
+        if self._draft_topk == model.logits_processor.org_vocab_size:
+            self._draft_topk = None
+            return
+        self._markov_candidate_ids = torch.empty(
+            (self.vocab_size, self._draft_topk), dtype=torch.int64, device=self.device
+        )
+        for start in range(0, self.vocab_size, chunk_size):
+            end = min(start + chunk_size, self.vocab_size)
+            token_ids = torch.arange(start, end, device=self.device)
+            bias = model.markov_bias(model.markov_embed(token_ids))
+            self._markov_candidate_ids[start:end] = bias.topk(
+                self._draft_topk, dim=-1
+            ).indices
 
     def _sample_logits(
         self,
@@ -209,24 +232,21 @@ class DSparkSpeculator(DFlashSpeculator):
             )
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        """Apply the sequential Markov head only to top-k base-logit candidates.
+        """Apply the Markov head to base-logit and Markov-bias top-k candidates.
 
-        Candidate selection is done once for all draft positions. At each
-        sequential step, the selected logits are corrected in place and every
-        other entry is set to ``-inf``. The normal dense sampling and rejection
-        paths then consume that truncated distribution unchanged.
+        Base candidates are selected once for all draft positions; Markov
+        candidates depend on the previous token at each step. Their logits are
+        corrected in place and every other entry is set to ``-inf``. The normal
+        sampling and rejection paths consume that truncated distribution.
         """
         assert self._draft_topk is not None
+        assert self._markov_candidate_ids is not None
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
         base_logits = self.model.compute_draft_logits(sample_hidden)
         base_logits = base_logits.view(num_reqs, n_spec, -1)
         base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
-        # Reuse the dense backbone output as the normal sampler's input. Fill
-        # once for all positions, then scatter only the corrected candidates
-        # during the sequential loop.
-        base_logits.fill_(float("-inf"))
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
@@ -236,11 +256,19 @@ class DSparkSpeculator(DFlashSpeculator):
             markov_embed = self.model.markov_embed(prev)
             if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
+            bias_indices = self._markov_candidate_ids[prev]
+            logits_i = base_logits[:, i]
+            bias_values = logits_i.gather(1, bias_indices)
+            logits_i.fill_(float("-inf"))
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
-                base_logits[:, i],
+                logits_i,
                 base_values[:, i],
                 draft_indices[:, i],
+            )
+            # Separate scatters avoid concurrent writes for overlapping IDs.
+            logits_i = self.model.apply_markov_bias_gathered(
+                markov_embed, logits_i, bias_values, bias_indices
             )
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
