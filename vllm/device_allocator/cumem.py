@@ -230,14 +230,25 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        keep_tags: tuple[str, ...] | str | None = None,
+    ) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
-        offloaded to CPU memory, and others will be discarded.
+        offloaded to CPU memory, allocations tagged in `keep_tags` stay
+        mapped on the device, and others will be discarded.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+            keep_tags: The tags of the memory allocation that will stay mapped
+                with their contents. They are not put to sleep, so `wake_up`
+                leaves them alone.
+
+        Raises:
+            ValueError: If a tag is in both `offload_tags` and `keep_tags`.
 
         """
         if offload_tags is None:
@@ -246,19 +257,32 @@ class CuMemAllocator:
             offload_tags = (CuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
+        if keep_tags is None:
+            keep_tags = ()
+        elif isinstance(keep_tags, str):
+            keep_tags = (keep_tags,)
 
         assert isinstance(offload_tags, tuple)
+        assert isinstance(keep_tags, tuple)
+        if overlap := set(offload_tags) & set(keep_tags):
+            raise ValueError(
+                f"Tags {sorted(overlap)} cannot be both offloaded and kept."
+            )
 
         total_bytes = 0
         backup_bytes = 0
+        kept_bytes = 0
         has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
                 requests_offload = data.tag in offload_tags
                 was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if data.tag in keep_tags or requests_offload != was_offloaded:
                     has_policy_conflict = True
+                continue
+            if data.tag in keep_tags:
+                kept_bytes += data.handle[1]
                 continue
             handle = data.handle
             total_bytes += handle[1]
@@ -287,6 +311,12 @@ class CuMemAllocator:
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
         )
+        if kept_bytes:
+            logger.info(
+                "CuMemAllocator: sleep kept %.2f GiB mapped for tags %s.",
+                kept_bytes / 1024**3,
+                keep_tags,
+            )
 
         if has_policy_conflict:
             logger.warning(

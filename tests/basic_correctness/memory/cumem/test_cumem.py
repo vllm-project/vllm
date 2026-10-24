@@ -265,6 +265,48 @@ def test_discard_tags():
     assert torch.allclose(weights, torch.ones_like(weights))
 
 
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_sleep_keep_tags():
+    """Allocations tagged in keep_tags stay mapped with their contents through
+    sleep and a selective wake, so a pause can keep its KV cache while the
+    weights leave the device."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.full((1024, 1024), 2.0, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        kv = torch.arange(512 * 512, dtype=torch.float32, device=DEVICE_TYPE)
+    expected_kv = kv.cpu()
+    kv_bytes = sum(
+        data.handle[1]
+        for data in allocator.pointer_to_data.values()
+        if data.tag == "kv_cache"
+    )
+
+    allocator.sleep(offload_tags="weights", keep_tags="kv_cache")
+    assert mapped_usage(allocator) == kv_bytes
+    assert torch.equal(kv.cpu(), expected_kv)
+
+    allocator.wake_up(tags=["weights"])
+    assert torch.equal(weights, torch.full_like(weights, 2.0))
+    assert torch.equal(kv.cpu(), expected_kv)
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_sleep_rejects_tag_both_offloaded_and_kept():
+    """A tag in both offload_tags and keep_tags is rejected before anything is
+    unmapped."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.ones(1024, 1024, device=DEVICE_TYPE)
+    mapped_bytes = mapped_usage(allocator)
+
+    with pytest.raises(ValueError, match="weights"):
+        allocator.sleep(offload_tags=("weights", "runtime"), keep_tags="weights")
+
+    assert mapped_usage(allocator) == mapped_bytes
+    assert torch.equal(weights, torch.ones_like(weights))
+
+
 @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_selective_wake_restores_internal_tags(tag):
