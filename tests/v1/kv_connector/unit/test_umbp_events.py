@@ -16,7 +16,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
-from vllm.distributed.kv_events import BlockRemoved
+from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
     UMBPStoreKVEvents,
@@ -307,6 +307,59 @@ def test_old_residency_result_cannot_invalidate_a_new_store(monkeypatch):
     [event] = scheduler.take_events()
     assert event.block_hashes == [maybe_convert_block_hash(b"a")]
     assert scheduler._event_objects[(0, b"a")].published
+    scheduler.close()
+
+
+@pytest.mark.parametrize("ranks", [1, 2])
+@pytest.mark.parametrize(
+    "failure", ["exception", "short-result", "long-result", "reset"]
+)
+def test_failed_or_reset_residency_check_cannot_publish_block_stored(
+    failure, ranks, monkeypatch
+):
+    """A failed residency check or one outliving reset_store() emits nothing."""
+    scheduler, _ = _event_scheduler(ranks=ranks)
+    futures = []
+
+    def submit(*args):
+        future: Future[list[bool]] = Future()
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(scheduler._lookup_executor, "submit", submit)
+    metadata = _schedule_store(scheduler)
+    _complete_store(scheduler, metadata.store_event, workers=ranks)
+
+    # Transfer pins are released when the store completes, before residency.
+    assert scheduler._gpu_block_pool.blocks[1].ref_cnt == 0
+    [future] = futures
+    if failure == "exception":
+        future.set_exception(RuntimeError("injected residency failure"))
+    elif failure == "short-result":
+        future.set_result([True] * (ranks - 1))
+    elif failure == "long-result":
+        future.set_result([True] * (ranks + 1))
+    else:
+        # The lookup is already running, so reset cannot cancel it.
+        assert future.set_running_or_notify_cancel()
+        assert scheduler.reset_store()
+        future.set_result([True] * ranks)
+
+    assert scheduler.take_events() == []
+    assert scheduler._event_lookup is None
+    assert scheduler._event_objects == {}
+    assert scheduler._pending_event_objects == {}
+    assert not scheduler.has_pending_push_work()
+    assert len(futures) == 1
+    assert scheduler._gpu_block_pool.blocks[1].ref_cnt == 0
+    if failure == "reset":
+        # A store after reset publishes only from its own residency check.
+        metadata = _schedule_store(scheduler)
+        _complete_store(scheduler, metadata.store_event, workers=ranks)
+        futures[1].set_result([True] * ranks)
+        [event] = scheduler.take_events()
+        assert isinstance(event, BlockStored)
+        assert event.block_hashes == [maybe_convert_block_hash(b"a")]
     scheduler.close()
 
 
