@@ -333,6 +333,10 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return cls is DeepseekV4IndexerBackend and current_platform.is_cuda()
+
+    @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # ROCm runs adaptive verification through the per-token flattened
         # indexer path, which derives row ownership from device decode lengths.
@@ -725,6 +729,8 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    # Persistent zeros for the prefill-style top-k selector during graph replay.
+    row_starts: torch.Tensor | None = None
     global_seq_lens: torch.Tensor | None = None
     per_req_decode_lens: torch.Tensor | None = None
     decode_is_uniform: bool = True
@@ -1061,6 +1067,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # (B, max_decode_len) at runtime, keeping context_lens contiguous even
         # when max_decode_len is smaller than next_n.
         self.decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.decode_row_starts_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
@@ -1760,6 +1771,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
+                row_starts=self.decode_row_starts_buffer[:num_decode_tokens],
                 global_seq_lens=global_seq_lens_for_decode,
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
