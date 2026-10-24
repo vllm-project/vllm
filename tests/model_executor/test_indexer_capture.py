@@ -13,6 +13,7 @@ from vllm.model_executor.layers.indexer_capture import (
     IndexerCaptureSink,
     IndexerCaptureSource,
     bind_indexer_capturer,
+    capture_indexer_topk,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -177,3 +178,34 @@ def test_connector_owns_indexer_capture_before_storage(capture_config, dist_init
         connector.close()
     assert source.indexer_capture is None
     connector.close()
+
+
+def test_capture_helper_skips_unbound_sink_without_a_buffer():
+    capture_indexer_topk(None, None, 2)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 3])
+def test_capture_helper_copies_active_rows_and_topk_width(num_tokens):
+    buffer = torch.tensor(
+        [[8, -1, 30, 31], [2, 0, 32, 33], [-1, 4, 34, 35]], dtype=torch.int32
+    )
+    destination = torch.full((3, 2), -99, dtype=torch.int32)
+    sink = IndexerCaptureSink(destination)
+    capture_indexer_topk(sink, buffer, num_tokens)
+    expected = torch.tensor([[8, -1], [2, 0], [-1, 4]], dtype=torch.int32)
+    torch.testing.assert_close(destination[:num_tokens], expected[:num_tokens])
+    torch.testing.assert_close(
+        destination[num_tokens:], torch.full_like(destination[num_tokens:], -99)
+    )
+
+
+def test_capture_helper_preserves_sink_width_validation():
+    sink = IndexerCaptureSink(torch.empty((2, 3), dtype=torch.int32))
+    with pytest.raises(ValueError, match="selection width changed"):
+        capture_indexer_topk(sink, torch.zeros((2, 2), dtype=torch.int32), 2)
+
+
+def test_capture_helper_requires_a_buffer_for_a_bound_sink():
+    sink = IndexerCaptureSink(torch.empty((2, 2), dtype=torch.int32))
+    with pytest.raises(AssertionError):
+        capture_indexer_topk(sink, None, 2)

@@ -9,6 +9,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.model_executor.layers.indexer_capture import capture_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
@@ -283,13 +284,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         if self.indexer is not None and not self.skip_topk:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
-            if self.indexer_capture is not None:
-                assert self.topk_indices_buffer is not None
-                self.indexer_capture.capture(
-                    self.topk_indices_buffer[
-                        : len(q_c), : self.indexer_capture.rows.shape[1]
-                    ]
-                )
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(q_c)
+            )
 
         if attn_metadata is None:
             output.zero_()

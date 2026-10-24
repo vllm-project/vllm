@@ -13,7 +13,10 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -528,13 +531,9 @@ class DeepseekV32Attention(MLAAttention, IndexerCaptureSource):
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
             )
-            if self.indexer_capture is not None:
-                assert self.topk_indices_buffer is not None
-                self.indexer_capture.capture(
-                    self.topk_indices_buffer[
-                        : len(q_c), : self.indexer_capture.rows.shape[1]
-                    ]
-                )
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(q_c)
+            )
 
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 

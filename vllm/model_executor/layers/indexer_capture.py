@@ -30,6 +30,17 @@ class IndexerCaptureSink:
         self.rows[token_start:end].copy_(indices)
 
 
+def capture_indexer_topk(
+    sink: IndexerCaptureSink | None,
+    topk_indices_buffer: torch.Tensor | None,
+    num_tokens: int,
+) -> None:
+    if sink is None:
+        return
+    assert topk_indices_buffer is not None
+    sink.capture(topk_indices_buffer[:num_tokens, : sink.rows.shape[1]])
+
+
 class IndexerCaptureSource:
     """Explicit capability for a logical TopK producer's execution path."""
 
