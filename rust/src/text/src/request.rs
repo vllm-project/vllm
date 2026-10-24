@@ -65,6 +65,7 @@ impl Default for Prompt {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SamplingParams {
@@ -72,7 +73,8 @@ pub struct SamplingParams {
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to this request.
-    pub watermarking: bool,
+    /// `None` applies it, as in Python's `SamplingParams`.
+    pub watermarking: Option<bool>,
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
@@ -146,7 +148,14 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// `None` returns routing for the whole prompt.
+    pub routed_experts_prompt_start: Option<u32>,
     /// Additional request parameters for custom extensions.
+    ///
+    /// Python's `SamplingParams` names this `extra_args`, which clients of the
+    /// token generate API send.
+    #[serde(alias = "extra_args")]
     pub vllm_xargs: Option<HashMap<String, Value>>,
     /// Number of newly generated tokens to batch into each streamed output.
     /// Raises the interval above the frontend-level `--stream-interval`;
@@ -160,7 +169,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
-            watermarking: true,
+            watermarking: None,
             top_p: None,
             top_k: None,
             seed: None,
@@ -185,6 +194,7 @@ impl Default for SamplingParams {
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,
         }
@@ -297,6 +307,9 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
+            return Err(Error::InvalidCacheSalt);
+        }
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
         }
@@ -304,9 +317,44 @@ impl TextRequest {
     }
 }
 
+/// Whether a cache salt is safe to hand to downstream cache backends, which
+/// may use these characters as key separators or terminators. Mirrors Python's
+/// `validate_cache_salt`, which counts length in code points.
+fn is_valid_cache_salt(salt: &str) -> bool {
+    const MAX_LEN: usize = 128;
+    const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
+
+    !salt.is_empty() && salt.chars().count() <= MAX_LEN && !salt.contains(FORBIDDEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_unsafe_cache_salt() {
+        let max_len = "é".repeat(128);
+        for (salt, valid) in [
+            ("tenant-a", true),
+            (max_len.as_str(), true),
+            ("", false),
+            (&"a".repeat(129), false),
+            ("tenant@a", false),
+            ("tenant/a", false),
+            ("tenant\\a", false),
+            ("tenant\0a", false),
+        ] {
+            let request = TextRequest {
+                cache_salt: Some(salt.to_string()),
+                ..TextRequest::for_test()
+            };
+            let result = request.validate();
+            assert_eq!(result.is_ok(), valid, "{salt:?}");
+            if let Err(err) = result {
+                assert!(err.is_request_validation_error());
+            }
+        }
+    }
 
     #[test]
     fn validate_rejects_empty_stop_string_at_shared_chokepoint() {
@@ -319,5 +367,24 @@ mod tests {
         assert!(err.is_request_validation_error());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn sampling_params_serialization_omits_unset_fields() {
+        let params = SamplingParams {
+            max_tokens: Some(64),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&params).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(
+            obj.values().all(|v| !v.is_null()),
+            "unexpected null in {value}"
+        );
+        assert_eq!(obj["max_tokens"], 64);
+
+        let back: SamplingParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back, params);
     }
 }

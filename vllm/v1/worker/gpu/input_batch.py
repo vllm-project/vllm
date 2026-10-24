@@ -14,6 +14,7 @@ from vllm.utils.math_utils import cdiv
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
 
 
 class InputBuffers:
@@ -115,8 +116,8 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
-    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
 
     # [num_reqs] prefilling rows that schedule one new prompt token (excluding
     # drafts) over existing context and so compute exactly like decodes.
@@ -228,7 +229,8 @@ def set_dummy_context(
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
+    """Give each dummy request context_len of context, for profiling step cost
+    and for DCP FULL cudagraph capture."""
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:

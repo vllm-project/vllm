@@ -16,6 +16,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     KVCacheBlock,
     resolve_block_hashes,
+    trim_null_head,
 )
 from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.kv_cache_interface import (
@@ -509,6 +510,13 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
+            if self.use_eagle:
+                # A sibling that diverges right after the junction cannot use
+                # the block past it as the EAGLE peek, so its hit lands one
+                # block lower.
+                reachable_boundaries.append(
+                    request.shared_prefix_boundary - self.block_size
+                )
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -569,14 +577,15 @@ class SingleTypeKVCacheManager(ABC):
             request_id: The request ID.
 
         Returns:
-            The request's blocks in allocation order.
+            The request's blocks in allocation order, without the leading
+            null blocks (e.g. a sliding-window table's skipped prefix).
 
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
-        return req_blocks
+        return trim_null_head(req_blocks)
 
     def free(self, request_id: str) -> None:
         """Free the blocks for the request.
@@ -587,21 +596,6 @@ class SingleTypeKVCacheManager(ABC):
         """
         # Free blocks in reverse order so that the tail blocks are freed first.
         self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
-
-    @abstractmethod
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """Get the number of common prefix blocks for all requests with allocated
-        KV cache.
-
-        Args:
-            running_request_id: The request ID.
-
-        Returns:
-            The number of common prefix blocks for all requests with allocated
-            KV cache.
-
-        """
-        raise NotImplementedError
 
     @classmethod
     @abstractmethod
@@ -898,16 +892,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
         )
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        blocks = self.req_to_blocks[running_request_id]
-        num_common_blocks = 0
-        for block in blocks:
-            if block.ref_cnt == len(self.req_to_blocks):
-                num_common_blocks += 1
-            else:
-                break
-        return num_common_blocks
-
 
 class RSWAManager(FullAttentionManager):
     """KV cache manager for Reference Sliding Window Attention (R-SWA).
@@ -1194,14 +1178,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
-        So it's not correct to count ref_cnt like FullAttentionManager. Return
-        0 here for correctness. Need to support cascade attention + sliding
-        window in the future.
-        """
-        return 0
-
 
 class CircularBufferManager(FullAttentionManager):
     """Claims the ring's single block per request; prefix caching disabled."""
@@ -1288,9 +1264,6 @@ class CircularBufferManager(FullAttentionManager):
         num_prompt_tokens: int | None = None,
     ) -> None:
         return
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         return 0
@@ -1447,10 +1420,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         ) * self.attention_chunk_size
         return num_skipped_tokens
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """Cascade attention is not supported by chunked local attention."""
-        return 0
-
 
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
@@ -1466,6 +1435,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
+        assert self.mamba_cache_mode == "align" or not self.enable_caching, (
+            "Mamba prefix caching requires mamba_cache_mode='align'"
+        )
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"
@@ -1679,10 +1651,6 @@ class MambaManager(SingleTypeKVCacheManager):
                 if blocks[last_state_block_idx] != self._null_block:
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """Cascade attention is not supported by mamba"""
-        return 0
 
     def _needs_internal_checkpoint(
         self,
@@ -2134,6 +2102,10 @@ class MambaManager(SingleTypeKVCacheManager):
         source_block = blocks[block_idx]
         if source_block.is_null:
             return None
+        # Already keyed here by a hit or an earlier step; re-caching would
+        # mark it cached this step and defer every sibling that hits it.
+        if source_block.block_hash_num_tokens == num_tokens:
+            return None
 
         partial_hash = self.block_pool.cache_partial_block(
             request=request,
@@ -2191,11 +2163,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        # Cross-attention blocks contain request-specific encoder states
-        # and are not shared between different requests
-        return 0
 
     @classmethod
     def find_longest_cache_hit(
@@ -2394,9 +2361,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     ) -> None:
         return None
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
-
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -2587,7 +2551,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         blocks = self.get_residency_row(request_id)
         self.residency_changes.pop(request_id, None)
         super().pop_blocks_for_free(request_id)
-        return blocks
+        return trim_null_head(blocks)
 
     def adopt_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock
