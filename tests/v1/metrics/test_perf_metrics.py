@@ -752,6 +752,43 @@ def test_ffn_per_gpu_with_pipeline_parallelism():
     assert global_flops == 6 * per_gpu_flops
 
 
+@pytest.mark.parametrize(
+    "metric_name",
+    [
+        "get_num_flops_breakdown",
+        "get_read_bytes_breakdown",
+        "get_write_bytes_breakdown",
+    ],
+)
+def test_ffn_pipeline_parallelism_preserves_mixed_layer_contributions(
+    metric_name,
+):
+    """Average stages retain dense and MoE contributions, including minority layers."""
+    hf_config = DeepseekV3Config(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=6,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=4,
+        n_shared_experts=1,
+        first_k_dense_replace=1,
+        moe_layer_freq=1,
+    )
+    vllm_config = create_mock_vllm_config(hf_config, pipeline_parallel_size=2)
+    metrics = FfnMetrics.from_vllm_config(vllm_config)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=4, context_len=8, is_prefill=True
+    )
+
+    breakdown = getattr(metrics, metric_name)
+    global_values = breakdown(ctx, per_gpu=False)
+    per_gpu_values = breakdown(ctx, per_gpu=True)
+
+    assert all(isinstance(value, int) for value in per_gpu_values.values())
+    assert {key: value * 2 for key, value in per_gpu_values.items()} == global_values
+
+
 def test_moe_per_gpu_with_expert_parallelism():
     """Test MoE metrics with expert parallelism, covering num_activated_experts."""
     hf_config = Qwen3MoeConfig(
