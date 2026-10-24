@@ -2061,6 +2061,18 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
+    def speculator_config_class(self) -> str | None:
+        """For a speculative decoding draft model, the config class of the
+        speculator it's for, if it declares one (see `SpeculativeDraftModel`)."""
+        return self._model_info.speculator_config_class
+
+    @property
+    def may_use_target_embed(self) -> bool:
+        """For a speculative decoding draft model, whether it may reuse the
+        target's input embedding under pipeline parallelism."""
+        return self._model_info.may_use_target_embed
+
+    @property
     def supports_replayssm(self) -> bool:
         return self._model_info.supports_replayssm
 

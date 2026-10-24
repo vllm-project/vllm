@@ -16,7 +16,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
-- [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
+- [Custom Speculators (Experimental)](#custom-speculators-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
 - [FLy Verification (Lossy)](fly.md)
@@ -43,10 +43,77 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
-## Custom Proposer Backend (Experimental)
+## Custom Speculators (Experimental)
 
-You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
-Your custom class must accept a `VllmConfig` upon instantiation and implement a `propose` method.
+You can plug in your own speculator with the V2 model runner by registering it
+as a speculative method from a [vLLM plugin](../../design/plugin_system.md), and then using it
+with `"method": "<name>"`. Custom speculative methods require the V2 model
+runner.
+
+A custom speculator consists of:
+
+- The speculator itself: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator.BaseSpeculator`, typically of
+  `DraftModelSpeculator` (for a speculator that runs its own draft model, which
+  the model runner then loads and allocates draft KV cache for) or
+  `TargetDependentARSpeculator` (for EAGLE/MTP-style drafting from the target
+  model's hidden states). It's constructed with `(vllm_config, device)`.
+- Its config: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`, which
+  names the speculator class and describes how it behaves (KV lookahead slots,
+  whether it needs the target's hidden states, which features it supports,
+  ...). It's used in every vLLM process, including those that never build the
+  speculator, so its module shouldn't import the speculator. A speculator that
+  behaves like a built-in one should subclass that speculator's config (e.g.
+  `Eagle3SpeculatorConfig`), which also determines how its draft model is
+  configured from `model`.
+
+```python
+# my_package/config.py
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
+
+
+class MySpeculatorConfig(Eagle3SpeculatorConfig):
+    speculator_class = "my_package.speculator.MySpeculator"
+    # Accept options in `speculator_options` (validated in `apply_options`).
+    supported_options = frozenset({"speculator_options"})
+
+    @classmethod
+    def apply_options(cls, spec):
+        options = spec.speculator_options or {}
+        if unknown := options.keys() - {"my_option"}:
+            raise ValueError(f"Unknown speculator_options: {sorted(unknown)}")
+
+
+# my_package/__init__.py, registered as a `vllm.general_plugins` entry point
+def register():
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        register_speculative_method,
+    )
+
+    register_speculative_method("my_spec", "my_package.config.MySpeculatorConfig")
+```
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{
+    "method": "my_spec",
+    "model": "<draft-model>",
+    "num_speculative_tokens": 3,
+    "speculator_options": {"my_option": 1}
+  }'
+```
+
+The speculator reads its options from
+`vllm_config.speculative_config.speculator_options`.
+
+### V1 Custom Proposer Backend
+
+With the V1 model runner, you can plug in your own custom proposer class by
+setting the method to `custom_class` and providing the full module path to your
+class. Your custom class must accept a `VllmConfig` upon instantiation and
+implement a `propose` method. This is not supported by the V2 model runner, and
+will be removed together with the V1 model runner.
 
 **Example configuration:**
 

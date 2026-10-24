@@ -103,7 +103,7 @@ def unsupported(vllm_config) -> str | None:
             "deployments without FULL decode CUDA graphs (e.g. enforce-eager)",
         ),
         (
-            spec is not None and spec.method != "dspark",
+            spec is not None and spec.base_method != "dspark",
             "speculative methods but DSpark",
         ),
         (

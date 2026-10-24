@@ -271,6 +271,11 @@ class Qwen3XPressModel(DFlashQwen3Model):
 
 
 class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = (
+        "vllm.v1.worker.gpu.spec_decode.xpress.config.XPressSpeculatorConfig"
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None

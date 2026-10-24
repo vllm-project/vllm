@@ -59,9 +59,24 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
+    """Base class for V2 model runner speculators.
+
+    This is also the interface for custom speculators, named by the
+    `speculator_class` of their registered `SpeculatorConfig` (see
+    `register_speculative_method`). Speculators that run a draft model
+    should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
+    drafting consumes target model state), which the model runner loads and
+    allocates draft KV cache for.
+    """
+
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    supports_mm_inputs: bool = False
+    # [max_num_reqs, num_speculative_steps, vocab_size] draft logits for
+    # probabilistic rejection sampling, or None for greedy-draft verification
+    # and for speculators without a draft model.
+    draft_logits: torch.Tensor | None = None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -102,6 +117,12 @@ class BaseSpeculator(ABC):
     ) -> torch.Tensor:
         pass
 
+    def prepare_watermarking(
+        self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
+    ) -> None:
+        """Prepare draft-side watermarking before `propose`. No-op by default."""
+        return
+
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -110,7 +131,8 @@ class DraftModelSpeculator(BaseSpeculator):
 
         assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
-        self.method = self.speculative_config.method
+        # The built-in method, also for a custom speculator based on one.
+        self.method = self.speculative_config.base_method
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         self.draft_model_config = self.speculative_config.draft_model_config
 
