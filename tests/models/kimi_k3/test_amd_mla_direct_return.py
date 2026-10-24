@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -90,9 +91,7 @@ def test_mla_forward_preserves_output_shape_with_fp8_input(
         dcp_q_replicate=False,
         _fused_qk_prep=fused_decode,
         _qkv_gate_fused=False,
-        _fused_decode=lambda q, kv, pe, pos, shape, *args: attention_output(
-            "fused", shape
-        ),
+        _fused_decode=lambda q, kv, pe, shape, *args: attention_output("fused", shape),
         g_proj=None,
         o_proj=lambda value: (value, None),
     )
@@ -118,3 +117,67 @@ def test_mla_forward_preserves_output_shape_with_fp8_input(
 
     assert output is projected
     assert paths == ["fused" if fused_decode else "regular"]
+
+
+def test_fused_decode_feeds_zero_positions_to_kernel(monkeypatch) -> None:
+    """The fused kernel's identity RoPE must see position 0 for every slot.
+
+    Not every AITER variant clamps positions into the one-row cos/sin cache, and
+    the kernel takes its token count from slot_mapping, padding included.
+    """
+    from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
+
+    calls = []
+    cache_ops = ModuleType("aiter.ops.cache")
+    monkeypatch.setattr(
+        cache_ops,
+        "fused_qk_rope_concat_and_cache_mla",
+        lambda *args, **kwargs: calls.append(args),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "aiter", ModuleType("aiter"))
+    monkeypatch.setitem(sys.modules, "aiter.ops", ModuleType("aiter.ops"))
+    monkeypatch.setitem(sys.modules, "aiter.ops.cache", cache_ops)
+
+    num_tokens, num_heads, nope, rope, lora, v_dim = 4, 2, 4, 2, 4, 4
+    head_size = lora + rope
+    zero_positions = torch.zeros(16, dtype=torch.int64)
+    output = torch.randn(num_tokens, num_heads * v_dim, dtype=torch.bfloat16)
+    attn = SimpleNamespace(
+        is_aiter_triton_fp4_bmm_enabled=False,
+        W_UK_T=torch.randn(num_heads, nope, lora, dtype=torch.bfloat16),
+        kv_lora_rank=lora,
+        impl=SimpleNamespace(forward_mqa=lambda q, *args: (q, None)),
+        _v_up_proj=lambda attn_out, out: out.copy_(output),
+    )
+    wrapper = SimpleNamespace(
+        mla_attn=attn,
+        qk_nope_head_dim=nope,
+        qk_rope_head_dim=rope,
+        _identity_rope=None,
+        _fused_q_heads=4,
+        _zero_positions=zero_positions,
+    )
+    # A CUDA-graph padded batch: the last slot is a pad.
+    slot_mapping = torch.tensor([[5], [9], [2], [-1]])
+
+    result = KimiK3MultiHeadLatentAttentionWrapper._fused_decode(
+        wrapper,
+        torch.randn(num_tokens, num_heads, nope + rope, dtype=torch.bfloat16),
+        torch.randn(num_tokens, lora, dtype=torch.bfloat16),
+        torch.randn(num_tokens, 1, rope, dtype=torch.bfloat16),
+        tuple(output.shape),
+        None,
+        SimpleNamespace(_k_scale=torch.ones(1), _q_scale=torch.ones(1)),
+        torch.zeros(2, 4, head_size, dtype=torch.uint8),
+        slot_mapping,
+    )
+
+    assert len(calls) == 1
+    kernel_slots, positions = calls[0][6], calls[0][9]
+    assert torch.equal(kernel_slots, slot_mapping.flatten())
+    assert positions.shape == kernel_slots.shape
+    assert not positions.any()
+    # A view of the persistent buffer, so captured graphs allocate nothing.
+    assert positions.data_ptr() == zero_positions.data_ptr()
+    assert torch.equal(result, output)
