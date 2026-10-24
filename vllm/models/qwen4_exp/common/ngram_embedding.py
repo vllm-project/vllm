@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared Qwen4Exp n-gram embedding storage with device and pinned-host backends.
+"""Shared Qwen4Exp n-gram embedding storage with device and host backends.
 
 Both the NVIDIA and AMD Qwen4Exp implementations use these classes so the (large)
 n-gram embedding table can be kept in pinned host memory and looked up through
-Unified Virtual Addressing on any CUDA-alike platform.
+Unified Virtual Addressing on any CUDA-alike platform. Where UVA is unavailable
+(e.g. NVIDIA Confidential Computing), the NVIDIA path gathers the rows from the
+host table on the CPU and copies them to the device instead.
 """
 
 import threading
@@ -50,7 +52,8 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 from .ple import PLEVocabParallelEmbedding
@@ -62,6 +65,9 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
     """ETP-sharded PLE table shared by device and pinned-host backends."""
 
     supports_prefetch: ClassVar[bool] = False
+    # The model state stages the rows into a device buffer before the forward
+    # (outside any CUDA graph) via ``stage_lookup``, not ``start_prefetch``.
+    stages_before_forward: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -158,6 +164,17 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         if self.etp_data_parallel_size == 1:
             return embeddings
         return embeddings.narrow(0, slot_offset, local_num_tokens)
+
+    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Combine host-table lookup results owned by different ETP ranks."""
+        if self.tp_size == 1:
+            return embeddings
+        assert self.parallel_group is not None
+        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
+            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
+            return reduced.view(embeddings.dtype)
+        return self.parallel_group.all_reduce(embeddings)
 
     @abstractmethod
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
@@ -724,17 +741,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             slot_offset,
         )
 
-    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Combine pinned lookup results owned by different ETP ranks."""
-        if self.tp_size == 1:
-            return embeddings
-        assert self.parallel_group is not None
-        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
-            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
-            return reduced.view(embeddings.dtype)
-        return self.parallel_group.all_reduce(embeddings)
-
     @eager_break_during_capture
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
@@ -819,4 +825,165 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError(
             "Pinned-host PLE embedding requires "
             "start_prefetch() and finalize_prefetch()."
+        )
+
+
+class Qwen4ExpPLEStagedHostEmbedding(Qwen4ExpPLEEmbedding):
+    """PLE table in host memory, gathered on the CPU and copied to the device.
+
+    Fallback for ``cpu_offload`` where the GPU cannot read host memory through
+    UVA, such as NVIDIA Confidential Computing, where the device view of
+    pinned host memory is not coherent. Before each forward the model state
+    calls ``stage_lookup``: the n-gram IDs are read back to the host, the rows
+    of every storage plane are gathered from the host table, and one explicit
+    H2D copy per plane lands them in persistent device buffers. The forward
+    only reads those buffers, so FULL and PIECEWISE CUDA graphs replay it.
+
+    The read-back waits for the IDs, which hash the tokens the previous step
+    sampled on the GPU, so the host stalls until that step has finished.
+    """
+
+    supports_prefetch: ClassVar[bool] = True
+    stages_before_forward: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        params_dtype: torch.dtype,
+        padding_size: int,
+        prefix: str,
+        embedding_method: Qwen4ExpPLEEmbeddingMethod,
+        num_ngram_heads: int = 1,
+        max_total_tokens: int = 0,
+        data_parallel_rank: int = 0,
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            params_dtype=params_dtype,
+            padding_size=padding_size,
+            prefix=prefix,
+            embedding_method=embedding_method,
+            num_ngram_heads=num_ngram_heads,
+            max_total_tokens=max_total_tokens,
+            data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
+        )
+        if self.etp_data_parallel_size != 1:
+            raise NotImplementedError(
+                "Host-staged PLE embedding does not support ETP spanning DP ranks"
+            )
+        self._nvfp4 = isinstance(embedding_method, Qwen4ExpPLENvFp4EmbeddingMethod)
+        rows = (max_total_tokens, num_ngram_heads)
+        pin_memory = is_pin_memory_available()
+        self._host_ids = torch.empty(
+            rows, dtype=torch.long, device="cpu", pin_memory=pin_memory
+        )
+        # Per storage plane: parameter name, device staging and host rows.
+        # Host rows are rewritten only after the stream sync in
+        # ``stage_lookup``, so after the previous step's H2D out of them.
+        self._planes: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+        for name in ("weight", "weight_scale") if self._nvfp4 else ("weight",):
+            table = getattr(self, name)
+            shape = (*rows, table.shape[1])
+            self._planes.append(
+                (
+                    name,
+                    torch.zeros(shape, dtype=table.dtype),
+                    torch.empty(
+                        shape, dtype=table.dtype, device="cpu", pin_memory=pin_memory
+                    ),
+                )
+            )
+        if self._nvfp4:
+            # Staged NVFP4 rows stay packed; the forward decodes them here.
+            self._decoded = torch.zeros((*rows, self.embedding_dim), dtype=params_dtype)
+            self._row_ids = torch.arange(rows[0] * rows[1])
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Allocate the complete PLE weight in ordinary CPU memory."""
+        return torch.empty(num_embeddings, embedding_dim, dtype=dtype, device="cpu")
+
+    def stage_lookup(self, ngram_ids: torch.Tensor) -> None:
+        """Gather this step's rows on the host and copy them to the device.
+
+        Runs outside CUDA graph capture, before the forward that reads the
+        rows, on the stream that runs that forward.
+        """
+        num_tokens = ngram_ids.shape[0]
+        if num_tokens > self._host_ids.shape[0]:
+            raise ValueError(
+                f"host-staged PLE buffers hold {self._host_ids.shape[0]} tokens, "
+                f"but the batch needs {num_tokens}"
+            )
+        host_ids = self._host_ids[:num_tokens]
+        # The host gather needs this step's IDs: an intended sync.
+        with gpu_sync_allowed():
+            host_ids.copy_(ngram_ids, non_blocking=True)
+            if ngram_ids.device.type != "cpu":
+                # Also orders the host rows after the previous step's H2D.
+                torch.accelerator.current_stream().synchronize()
+        ids = host_ids.flatten()
+        owned: torch.Tensor | None = None
+        if self.tp_size > 1:
+            # Rows owned by other ETP ranks contribute zeros to the reduce.
+            vocab_start = self.shard_indices.org_vocab_start_index
+            vocab_end = self.shard_indices.org_vocab_end_index
+            owned = (ids >= vocab_start) & (ids < vocab_end)
+            ids = torch.where(owned, ids - vocab_start, 0)
+        for name, staging, host in self._planes:
+            # Copy raw bytes so every storage dtype (FP8, packed NVFP4) works.
+            table = getattr(self, name).view(torch.uint8)
+            host_rows = host[:num_tokens].flatten(0, 1).view(torch.uint8)
+            torch.index_select(table, 0, ids, out=host_rows)
+            if owned is not None:
+                host_rows[~owned] = 0
+            # Host-synchronous where pinned memory is unavailable or, as under
+            # Confidential Computing, staged through bounce buffers.
+            with gpu_sync_allowed():
+                staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
+
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
+        """Rows are staged before the forward; nothing to start here."""
+        return None
+
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Return the staged rows, decoded if NVFP4, with optional ETP reduction."""
+        weight = self._planes[0][1][:total_tokens]
+        embeddings = weight
+        if self._nvfp4:
+            num_rows = weight.shape[0] * weight.shape[1]
+            embeddings = self._decoded[:total_tokens]
+            if num_rows:
+                # Staged rows are compact, so the i-th staged row has ID i.
+                # Zeroed rows of other ETP owners decode to zeros.
+                _lookup_nvfp4_ple_embedding_kernel[(num_rows,)](
+                    weight,
+                    self._planes[1][1][:total_tokens].view(torch.uint8),
+                    self.weight_scale_2,
+                    self._row_ids[:num_rows],
+                    embeddings,
+                    self.embedding_dim,
+                    0,
+                    num_rows,
+                    BLOCK_D=triton.next_power_of_2(self.embedding_dim),
+                )
+        if self.reduce_results:
+            embeddings = self._reduce_etp_embeddings(embeddings)
+        else:
+            # The outer TP reduce-scatter requires ETP=TP.
+            assert self.etp_data_parallel_size == 1
+        return embeddings.flatten(-2)
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError(
+            "Host-staged PLE embedding requires stage_lookup() and finalize_prefetch()."
         )

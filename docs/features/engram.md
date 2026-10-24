@@ -93,8 +93,13 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
   --engram-config.cpu_offload false
 ```
 
-CPU offload requires a GPU with UVA support;
-vLLM fails fast when it is unavailable.
+CPU offload requires a GPU with UVA support; vLLM fails fast when it is
+unavailable, except for Qwen4Exp PLE tables on NVIDIA GPUs. Those fall back
+to gathering each step's rows on the host and copying them to the device
+before the forward (for example under NVIDIA Confidential Computing, where
+the device view of pinned host memory is not coherent). The fallback keeps
+CUDA graphs, but the host waits for the previous step to finish before every
+step, so it trades some scheduling overlap for the GPU memory it frees.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 
