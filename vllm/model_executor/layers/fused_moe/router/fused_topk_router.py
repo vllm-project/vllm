@@ -134,8 +134,26 @@ def dispatch_topk_softmax_func(
 
 def dispatch_topk_sigmoid_func(
     use_rocm_aiter: bool = False,
+    *,
+    topk_weights: torch.Tensor | None = None,
+    topk_indices: torch.Tensor | None = None,
+    gating_output: torch.Tensor | None = None,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     if use_rocm_aiter:
+        if (
+            rocm_aiter_ops.is_topk_gating_enabled()
+            and topk_weights is not None
+            and topk_indices is not None
+            and gating_output is not None
+            and _aiter_topk_gating_supported(
+                topk_weights,
+                topk_indices,
+                gating_output,
+                num_shared_experts=0,
+                shared_expert_scoring_func="",
+            )
+        ):
+            return rocm_aiter_ops.topk_sigmoid_gating
         return rocm_aiter_ops.topk_sigmoid
     return vllm_topk_sigmoid
 
@@ -179,7 +197,10 @@ def fused_topk(
         return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
         topk_func = dispatch_topk_sigmoid_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+            topk_weights=topk_weights,
+            topk_indices=topk_ids,
+            gating_output=gating_output,
         )
         topk_weights, topk_ids = topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
