@@ -516,10 +516,14 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
-        # Materialized on-device in load_weights: compute_logits runs under CUDA
-        # graph capture in the V2 speculator, where indexing with a Python list
-        # would issue an unpinned H2D copy (illegal during capture).
-        self._suppress_idx: torch.Tensor | None = None
+        # Materialized on-device: compute_logits runs under CUDA graph capture in
+        # the V2 speculator, where indexing with a Python list would issue an
+        # unpinned H2D copy (illegal during capture).
+        if self._suppress_token_ids:
+            idx = torch.tensor(self._suppress_token_ids, dtype=torch.long)
+            self.register_buffer("_suppress_idx", idx, persistent=False)
+        else:
+            self._suppress_idx = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -590,11 +594,4 @@ class Gemma4MTP(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        if self._suppress_token_ids:
-            self._suppress_idx = torch.tensor(
-                self._suppress_token_ids,
-                dtype=torch.long,
-                device=next(self.parameters()).device,
-            )
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

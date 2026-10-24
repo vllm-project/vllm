@@ -753,7 +753,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             vllm_config
         )
         if self.fuse_mhc_all_reduce:
-            init_mhc_all_reduce(vllm_config)
+            # A buffer, so sleep mode restores the fused kernel's generation state.
+            stage_state = init_mhc_all_reduce(vllm_config)
+            self.register_buffer("_mhc_ar_stage_state", stage_state, persistent=False)
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(

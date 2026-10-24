@@ -29,6 +29,8 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         # Move the E2M1 lookup table to the device now, because
         # `.to(device)` is not allowed during CUDA graph capture.
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
+        # A layer buffer, so sleep mode restores the shared device table.
+        layer.register_buffer("e2m1_lut", kE2M1ToFloat_handle.val, persistent=False)
 
     def apply_weights(
         self,

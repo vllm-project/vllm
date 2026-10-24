@@ -271,9 +271,8 @@ class OpenPanguVisionBlock(nn.Module):
 class OpenPanguVisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        self.inv_freq = 1.0 / (
-            theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim)
-        )
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._freqs_cached = None
 

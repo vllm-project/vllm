@@ -611,6 +611,7 @@ class HummingLinearMethod(LinearMethodBase):
 
         self.compute_config = get_humming_linear_compute_config()
         self.locks = _hm.create_humming_locks(layer.weight.device)
+        layer.register_buffer("humming_locks", self.locks, persistent=False)
 
     def apply(
         self,

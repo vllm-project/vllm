@@ -72,11 +72,11 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     return comm is not None and bool(comm.mnnvl_lamport_ag_multicast_ptr)
 
 
-def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
+def init_mhc_all_reduce(vllm_config: VllmConfig) -> torch.Tensor:
     """Build the fused all-reduce + mHC kernel the overlap path reduces with.
 
     Collective over the TP group, so every rank must call it, and only when
-    ``supports_mhc_all_reduce`` holds.
+    ``supports_mhc_all_reduce`` holds. Returns the kernel's persistent state.
     """
     global _all_reduce_mhc
     from .cute_dsl import AllReduceMHC
@@ -93,6 +93,7 @@ def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
         "DSV4.1 mHC: CuTe DSL Lamport all-reduce fused with mHC for up to %d tokens.",
         MHC_OVERLAP_MAX_TOKENS,
     )
+    return _all_reduce_mhc._stage_state
 
 
 def mhc_pre_delayed_overlap(
