@@ -179,6 +179,20 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.structured_outputs.json is None
         assert request.structured_outputs is None
 
+    def test_structured_outputs_with_plain_text_format(self):
+        """text.format type "text" is unconstrained, as in Chat Completions."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            structured_outputs=StructuredOutputsParams(choice=["yes", "no"]),
+            text=ResponseTextConfig.model_validate({"format": {"type": "text"}}),
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.choice == ["yes", "no"]
+
     def test_structured_outputs_and_json_schema_conflict(self):
         """Test that specifying both structured_outputs and json_schema raises."""
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
