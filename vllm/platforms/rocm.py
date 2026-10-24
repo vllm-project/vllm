@@ -1159,6 +1159,17 @@ class RocmPlatform(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        if parallel_config.all2all_backend == "mori":
+            from vllm.config.parallel import resolve_mori_all2all
+
+            resolve_mori_all2all(
+                parallel_config,
+                model_config,
+                vllm_config.kernel_config.moe_backend,
+                lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
+            )
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:

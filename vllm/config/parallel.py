@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.config.fault_tolerance import FaultToleranceConfig
+    from vllm.config.model import ModelConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -51,6 +52,7 @@ All2AllBackend = Literal[
     "mori_high_throughput",
     "mori_low_latency",
     "moonep",
+    "mori",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -223,15 +225,24 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
-    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node (kept for
+      compatibility; prefer "mori")
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node (kept for
+      compatibility; prefer "mori")
     - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
+    - "mori": MoRI EP; uses EPv2 where supported (see `VLLM_MORI_EP_V2`) and
+      EPv1 otherwise, picking the EPv1 inter-node kernel from the token budget
+      (see `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "passthrough": No all2all at all: the MoE backend dispatches and combines
       itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
       such MoE backends; not selectable from the CLI."""
+    mori_ep_v2: bool | None = None
+    """Whether the "mori" all2all backend runs MoRI EPv2. Resolved from
+    `VLLM_MORI_EP_V2` and the deployment by `resolve_mori_all2all`; not meant
+    to be set by users."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -777,6 +788,7 @@ class ParallelConfig:
                 "passthrough",
                 "mori_high_throughput",
                 "mori_low_latency",
+                "mori",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -1198,3 +1210,82 @@ class ParallelConfig:
         self.data_parallel_rank = 0
         self.nnodes = nnodes
         self.node_rank = node_rank
+
+
+def resolve_mori_all2all(
+    parallel_config: ParallelConfig,
+    model_config: "ModelConfig | None",
+    moe_backend: str,
+    lsa_spans_hosts: bool = False,
+    sdma_picks_epv1: bool = True,
+) -> None:
+    """Resolve whether the "mori" all2all backend runs MoRI EPv2 or EPv1.
+
+    An unset `VLLM_MORI_EP_V2` prefers EPv2 and falls back to EPv1 where EPv2
+    is unsupported, an explicit true keeps EPv2 regardless, and false selects
+    EPv1. `lsa_spans_hosts` says whether a CCO-LSA team can span hosts (e.g.
+    gfx1250's UALink vPOD). `sdma_picks_epv1` says whether `MORI_ENABLE_SDMA=1`
+    selects EPv1; gfx1250 keeps EPv2 under SDMA.
+    """
+    if parallel_config.all2all_backend != "mori":
+        return
+    if parallel_config.mori_ep_v2 is None:
+        parallel_config.mori_ep_v2 = _resolve_mori_ep_v2(
+            parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
+        )
+    logger.info_once("MoRI all2all: EP%s", "v2" if parallel_config.mori_ep_v2 else "v1")
+
+
+def _resolve_mori_ep_v2(
+    parallel_config: ParallelConfig,
+    model_config: "ModelConfig | None",
+    moe_backend: str,
+    lsa_spans_hosts: bool,
+    sdma_picks_epv1: bool,
+) -> bool:
+    if envs.VLLM_MORI_EP_V2 is False:
+        return False
+    reason = _mori_epv2_unsupported_reason(
+        parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
+    )
+    if reason is None:
+        return True
+    if envs.VLLM_MORI_EP_V2:
+        logger.warning(
+            "VLLM_MORI_EP_V2=1 is set explicitly, so MORI EPv2 is used even "
+            "though it does not support %s.",
+            reason,
+        )
+        return True
+    logger.warning(
+        "MORI EPv2 does not support %s; falling back to MORI EPv1. "
+        "Set VLLM_MORI_EP_V2=1 to force EPv2, or 0 to select EPv1.",
+        reason,
+    )
+    return False
+
+
+def _mori_epv2_unsupported_reason(
+    parallel_config: ParallelConfig,
+    model_config: "ModelConfig | None",
+    moe_backend: str,
+    lsa_spans_hosts: bool,
+    sdma_picks_epv1: bool,
+) -> str | None:
+    ep_size = (
+        parallel_config.tensor_parallel_size
+        * parallel_config.data_parallel_size
+        * parallel_config.prefill_context_parallel_size
+    )
+    # A rough guess before startup; MoriEPv2All2AllManager checks the actual
+    # CCO-LSA team.
+    if ep_size > 8 and not lsa_spans_hosts:
+        return f"ep_size={ep_size} across hosts (EPv2 is validated within one host)"
+    sdma = os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true")
+    if sdma and sdma_picks_epv1:
+        return "MORI_ENABLE_SDMA=1 (SDMA is EPv1-only)"
+    if moe_backend == "aiter_mega_moe":
+        return "moe_backend=aiter_mega_moe (MegaMoE runs on MoRI EPv1 shmem)"
+    if model_config is not None and model_config.dtype != torch.bfloat16:
+        return f"dtype={model_config.dtype} (EPv2 requires bfloat16)"
+    return None
