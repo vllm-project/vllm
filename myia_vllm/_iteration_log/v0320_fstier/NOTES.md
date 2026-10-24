@@ -1191,3 +1191,92 @@ faut **recréer le conteneur**. Docstring de `lru_fs_tier.py` corrigée.
 
 **Cron** : `64a58306` a survécu au reboot ; le doublon `9505c4a1` créé après le reboot
 a été supprimé, il reste un seul cron de surveillance.
+
+## Cycle 24/10 12:41Z — redémarrage par le plafond BUSY après 20 min de saturation, renvois client à ~400 s
+
+**Ce qui s'est passé (watchdog, VÉRIFIÉ).** Trois épisodes depuis la génération moteur
+de 11:45:10Z :
+- **11:54:22→11:58:23Z** : premier `fail 1/2`, puis `WEDGE-BUSY 1/10` (p 46 226 → 254 381),
+  puis `RECOVERED`. C'est le **premier BUSY→RECOVERED en vrai** de la v6 : rattrapage
+  post-redémarrage sans relance du moteur.
+- **12:06:59→12:09:00Z** : `fail 1/2` → `RECOVERED`.
+- **12:10:55→12:30:59Z** : `fail 1/2` puis **10 cycles BUSY d'affilée**, compteurs en
+  avance à chaque fois (p 8 371 844 → 10 248 447, soit +1,88 M tokens de prompt cache
+  compris ; g 56 590 → 57 744, soit +1 154 tokens générés en 20 min, ~1 t/s). Au 10ᵉ :
+  `RESTARTING (BUSY ceiling 10 reached ~5min — anti-drift fallback)`. Arrêt de l'API
+  12:32:30Z, StartedAt 12:32:33.88Z, route prête 12:34:32Z, soit **~3 min 40 sans moteur**.
+
+**Correction de durée — le plafond fait ~20 min, pas ~5.** En état WEDGE, un cycle dure
+`GEN_TIMEOUT` 90 s + `INTERVAL` 30 s = 120 s ; 10 cycles = **~20 min** (mesuré :
+12:12:55 → 12:30:59). Le « ~5 min » du message et de l'arbitrage Q27 vient d'un calcul sur
+`INTERVAL` seul. Le plafond est donc 4× plus tolérant qu'annoncé ; le texte du message
+reste à corriger au prochain recreate du watchdog.
+
+**État moteur pendant la fenêtre (log par minute, 12:07→12:32Z)** : Running 5-7, Waiting
+1-6, Deferred 2-6, `KV fetch: 1-2 waiting to start` presque en continu, KV en dents de
+scie 67-95 %, génération ~1 t/s. Environ une grosse requête atteint son premier token
+toutes les ~5 min (rafales `pp` 17-21 K t/s = ~200 K tokens comptés d'un coup). Hit
+local 76 → 64 %, externe 43 → 24 %. Les préemptions de l'ancienne génération sont
+perdues avec elle (compteur remis à 0 au boot).
+
+**Lecture : surcharge par longueur de contexte, pas un blocage.** Les corps de 640 à
+817 Ko pèsent ~180-230 K tokens (ratio mesuré le 24/10 : 3,53 o/token). Six requêtes de
+cette taille en cours demandent ~1,2 M tokens de KV, contre **750 747** de capacité GPU.
+Le moteur ne peut donc en tenir que 3 à 4 à la fois et charge/décharge le reste depuis
+les paliers. Le débit de service (~1 grosse requête / 2-5 min) est inférieur au débit
+d'arrivée : 49 corps > 100 Ko terminés entre 11:58 et 12:31Z, tous du hub (UA Bun,
+x_forwarded_for = site).
+
+**Renvois à l'identique à ~400 s (VÉRIFIÉ par empreinte du contenu).** Cinq corps
+reviennent avec la même taille, le même début et la même fin :
+- 816 600 o : 12:15:51, 12:22:42, 12:29:24 ;
+- 747 393 o : 12:18:10, 12:25:03, 12:31:57 ;
+- 641 539 o : 12:20:06, 12:26:50 ;
+- 804 875 o : 12:20:53, 12:25:25 ;
+- 725 781 o : 12:23:22, 12:30:09.
+Le `ts` d'`error_sources.jsonl` est écrit à la **fin** de l'échange HTTP (après
+`await self.app`, `error_source_capture.py:131-146`). Un intervalle entre deux fins
+mesure donc la durée de la tentative suivante : **4 intervalles sur 5 font 402-414 s**.
+Quelqu'un abandonne vers 400 s et renvoie la même requête, qui repart en queue. Ce n'est
+pas l'`API_TIMEOUT_MS` du canon Claude Code (600 000 ms) ; l'émetteur du renvoi n'est pas
+établi (hub ou client) → question posée à claudish.
+
+**Abandon côté moteur.** Le middleware transmet `receive` tel quel (y compris
+`http.disconnect`), il ne masque donc pas la déconnexion. Reste ouvert : uvicorn 0.54 /
+starlette 1.8 détectent-ils la déconnexion **pendant le prefill**, avant le premier
+octet ? L'instrument est `vllm:request_success_total{finished_reason="abort"}` : à 0
+depuis 12:32 (aucune tentative n'a encore atteint 400 s). S'il reste à 0 alors que des
+renvois réapparaissent, les tentatives abandonnées sont menées à terme pour rien.
+
+**Ce qu'a fait le palier fs après le redémarrage de 12:32Z (VÉRIFIÉ, 10 min).**
+- Tokens de prompt servis depuis le disque : 1 229 632 (56 %). Depuis le GPU :
+  729 552 (33 %). Calculés : 230 699 (11 %).
+- Palier fs : 28,2 Go lus contre 12,3 Go écrits.
+- Chunks : 1 075 hits fs sur 2 296 requêtes.
+Le palier tient son rôle : il survit au redémarrage et sert la majorité du rattrapage.
+
+**Après le redémarrage, 12:32→12:48Z** :
+- 28 requêtes terminées. Moyennes : file 47,6 s, prefill 14,8 s, bout en bout 124 s.
+- 3 préemptions. KV entre 72 et 100 %. Running 3-4, Waiting 2-4.
+- Sondes `OK` mais lentes (espacées de 64 à 80 s).
+- Condensation : disjoncteur ouvert à 12:18-12:23Z, repli cloud réussi. C'est la
+  dégradation prévue.
+
+**Coût et bénéfice du plafond dans ce régime.** Il a sauté trois fois aujourd'hui
+(02:09, 07:09, 12:30Z), à chaque fois avec des compteurs en avance. Coût mesuré :
+- ~3 min 40 sans moteur ;
+- caches GPU et RAM vidés : le hit local passe de 64 % à 25-30 % ;
+- requêtes en vol coupées.
+Bénéfice : aucun mesuré, car redémarrer ne réduit pas la charge qui arrive. Le choix
+reste à l'utilisateur : registre Q29.
+
+**Census 2 h (fenêtre de 95 min)** : 267 requêtes, ~2,8/min (contre ~6/min au cycle
+précédent).
+- Statuts : 252 × 200, 15 × 401 (clé VL morte, sondeur connu `108.165.33.236`). Aucun
+  400 ni 5xx.
+- Corps : 135 entre 100 Ko et 1 Mo. C'est la longueur des contextes qui sature, pas le
+  nombre de requêtes.
+- IP externes avec des 200 : site et web1 seulement, aucune nouvelle.
+
+**Hôte** : boot Windows 11:01:38Z, commit 65,6 % (marge 136 Go), C: 603,8 Go libres,
+`/dev/shm` 16 G (26 %), VRAM 21 059 / 20 370 MiB.
