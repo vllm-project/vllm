@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
     convert_flashinfer_moe_output,
@@ -34,7 +37,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
@@ -61,7 +63,7 @@ def prepare_deepseek_fp8_x_sf(x: torch.Tensor, x_sf: torch.Tensor) -> torch.Tens
     return x_sf.t().contiguous()
 
 
-class TrtLlmFp8ExpertsBase:
+class TrtLlmFp8ExpertsBase(TrtLlmExpertsBase):
     """Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
     interfaces.
     """
@@ -116,17 +118,7 @@ class TrtLlmFp8ExpertsBase:
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        self.routing_method_type = moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
-
-        self.moe_config = moe_config
-        self.quant_config = quant_config
+        super().__init__(moe_config, quant_config)
 
         # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
         device = torch.accelerator.current_device_index()
@@ -156,20 +148,6 @@ class TrtLlmFp8ExpertsBase:
             )
         else:
             self.gemm1_clamp_limit = None
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -303,6 +281,18 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
         num_tokens = hidden_states.shape[0]
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=topk_ids.size(1),
+            activation_type=activation_to_flashinfer_int(activation),
+            use_shuffled_weight=use_shuffled_weight,
+            weight_layout=int(weight_layout),
+        )
         flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
@@ -330,6 +320,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             do_finalize=not defer,
             output=None if defer else output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if not defer:
             return None
@@ -486,6 +477,18 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
 
+        workspace = self._get_workspace(
+            hidden_states,
+            quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_type,
+            use_shuffled_weight=use_shuffled_weight,
+            weight_layout=int(weight_layout),
+        )
+
         kwargs = dict(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -512,6 +515,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             fp8_quantization_type=fp8_quant_type,
             routing_replay_out=routing_replay_out,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
@@ -550,6 +554,17 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         else:
             assert not apply_router_weight_on_input
 
+        workspace = self._get_workspace(
+            hidden_states,
+            quant_mode="fp8_per_tensor",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_type,
+            use_routing_scales_on_input=apply_router_weight_on_input,
+        )
+
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -572,6 +587,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             activation_type=activation_type,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         return out
 

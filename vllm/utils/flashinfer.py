@@ -287,6 +287,9 @@ flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
 flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"
 )
+flashinfer_trtllm_fused_moe_workspace_size = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "trtllm_fused_moe_workspace_size"
+)
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
@@ -558,6 +561,17 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_trtllm_fused_moe_workspace() -> bool:
+    """Return whether FlashInfer TRTLLM fused MoE supports caller-owned scratch."""
+    if not has_flashinfer_trtllm_fused_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    return mod is not None and callable(
+        getattr(mod, "trtllm_fused_moe_workspace_size", None)
+    )
 
 
 @functools.cache
@@ -1277,6 +1291,7 @@ __all__ = [
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
+    "flashinfer_trtllm_fused_moe_workspace_size",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_prepare_bf16_fp4_weights",
@@ -1301,6 +1316,8 @@ __all__ = [
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_trtllm_fused_moe",
+    "has_flashinfer_trtllm_fused_moe_workspace",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",

@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
     convert_flashinfer_moe_output,
@@ -33,13 +36,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import is_weights_pre_processed
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
 
-class TrtLlmNvFp4ExpertsBase:
+class TrtLlmNvFp4ExpertsBase(TrtLlmExpertsBase):
     """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
 
     def __init__(
@@ -48,23 +49,13 @@ class TrtLlmNvFp4ExpertsBase:
         quant_config: FusedMoEQuantConfig,
         per_token_activation: bool = False,
     ):
-        self.moe_config = moe_config
-        self.quant_config = quant_config
+        super().__init__(moe_config, quant_config)
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
-
-        self.routing_method_type = self.moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
         self.hidden_dim_unpadded = (
             moe_config.hidden_dim_unpadded or moe_config.hidden_dim
         )
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.is_situ = moe_config.activation == MoEActivation.SITU
 
         self.g1_scale_c = self._compute_g1_scale_c()
@@ -201,16 +192,6 @@ class TrtLlmNvFp4ExpertsBase:
             self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
-
-    @staticmethod
     def _supports_no_act_and_mul() -> bool:
         """Supports non-gated MoE (i.e. Nemotron-Nano)."""
         return True
@@ -247,10 +228,6 @@ class TrtLlmNvFp4ExpertsBase:
         # NOTE: non-256-aligned dims will trigger a warning log and may
         # cause performance degradation due to activation slicing.
         return True
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -349,6 +326,22 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             block_scale, per_token_scale = a1q_scale, None
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=output is not None,
+            quant_mode="nvfp4",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_per_token_scale=per_token_scale is not None,
+            valid_hidden_size=self.hidden_dim_unpadded,
+            valid_intermediate_size=(
+                self.moe_config.intermediate_size_per_partition_unpadded
+            ),
+        )
+
         # Invoke kernel.
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
@@ -385,6 +378,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if output is not None:
             return None
@@ -545,6 +539,22 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="nvfp4",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_per_token_scale=per_token_scale is not None,
+            valid_hidden_size=self.hidden_dim_unpadded,
+            valid_intermediate_size=(
+                self.moe_config.intermediate_size_per_partition_unpadded
+            ),
+        )
+
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
@@ -581,6 +591,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,

@@ -8,8 +8,10 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
     RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
@@ -27,8 +29,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 def view_as_block_major_k(weight: torch.Tensor) -> torch.Tensor:
@@ -40,7 +40,7 @@ def view_as_block_major_k(weight: torch.Tensor) -> torch.Tensor:
     return weight.view(experts, cols // block_k, rows, block_k)
 
 
-class TrtLlmBf16ExpertsBase:
+class TrtLlmBf16ExpertsBase(TrtLlmExpertsBase):
     """BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
     monolithic interfaces.
     """
@@ -69,37 +69,6 @@ class TrtLlmBf16ExpertsBase:
 
     def supports_routing_replay_capture(self) -> bool:
         return True
-
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        self.routing_method_type = moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
-
-        self.moe_config = moe_config
-        self.quant_config = quant_config
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -206,6 +175,18 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
 
         topk_ids = topk_ids.to(dtype=torch.int32)
 
+        workspace = self._get_workspace(
+            hidden_states,
+            quant_mode="bf16",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=topk_ids.size(1),
+            activation_type=activation_to_flashinfer_int(activation),
+            use_shuffled_weight=True,
+            weight_layout=int(WeightLayout.BlockMajorK),
+        )
+
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             hidden_states=hidden_states,
@@ -224,6 +205,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             weight_layout=WeightLayout.BlockMajorK,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
@@ -276,6 +258,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
+        from flashinfer.fused_moe import WeightLayout
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
@@ -283,6 +266,19 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="bf16",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_shuffled_weight=True,
+            weight_layout=int(WeightLayout.BlockMajorK),
+        )
 
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
@@ -303,6 +299,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
             do_finalize=not defer,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,

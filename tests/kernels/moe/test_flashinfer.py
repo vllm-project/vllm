@@ -1159,3 +1159,63 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
         )
 
     check_accuracy(ref_output=reference, actual_output=output)
+
+
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM fused MoE on Blackwell",
+)
+@torch.inference_mode()
+def test_trtllm_fp8_per_tensor_reuses_workspace(activation, trtllm_workspace_check):
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        td = TestData.make_moe_tensors_8bit(
+            32, 1024, 1024, 16, is_trtllm=True, activation=activation
+        )
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=td.w13_weight_scale,
+            w2_scale=td.w2_weight_scale,
+            a1_scale=td.a1_scale,
+            a2_scale=td.a2_scale,
+            per_act_token_quant=False,
+        )
+        layers = [
+            mk.FusedMoEKernel(
+                maybe_make_prepare_finalize(
+                    moe=td.layer.moe,
+                    quant_config=quant_config,
+                    allow_new_interface=True,
+                    use_monolithic=True,
+                ),
+                TrtLlmFp8ExpertsMonolithic(td.layer.moe, quant_config),
+            )
+            for _ in range(2)
+        ]
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            activation_to_flashinfer_int,
+        )
+
+        trtllm_workspace_check(
+            "trtllm_fp8_per_tensor_scale_moe",
+            "fp8_per_tensor",
+            activation_type=activation_to_flashinfer_int(activation),
+            use_routing_scales_on_input=True,
+        )
+        logits = torch.randn(32, 16, device="cuda", dtype=torch.bfloat16)
+        for layer, rows in [(layers[0], 1), (layers[1], 32), (layers[0], 16)]:
+            layer.apply_monolithic(
+                hidden_states=td.hidden_states[:rows],
+                w1=td.layer.w13_weight,
+                w2=td.layer.w2_weight,
+                router_logits=logits[:rows],
+                activation=activation,
+                global_num_experts=16,
+                expert_map=None,
+                apply_router_weight_on_input=True,
+                routed_scaling_factor=1.0,
+                routing_sink=None,
+            )
+            current_workspace_manager().lock()

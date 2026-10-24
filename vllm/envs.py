@@ -222,6 +222,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_MOE_USE_WORKSPACE: bool = False
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
@@ -1814,6 +1815,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # Reuse caller-owned scratch for FlashInfer TRT-LLM MoE. It will keep flashinfer moe
+    # workspace in the gpu_memory_utilization budget, but may slightly increase the
+    # peak memory usage. Set to 0 to disable workspace sizing and use FlashInfer's
+    # per-call allocations.
+    "VLLM_FLASHINFER_MOE_USE_WORKSPACE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_USE_WORKSPACE", "0"))
     ),
     # Transmit MoE all-to-all combine (expert-output) payloads in FP8 instead
     # of BF16, halving NVLink traffic on the combine leg. Only takes effect
