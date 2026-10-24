@@ -469,6 +469,17 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            current_platform.is_cuda()
+            and get_flash_attn_version(
+                head_size=head_size,
+                has_sinks=has_sink,
+                kv_cache_block_size=block_size,
+                supports_fa4_hd256=True,
+            )
+            is None
+        ):
+            return "FlashAttention is not available or supported on this device"
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
