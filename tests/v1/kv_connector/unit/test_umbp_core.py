@@ -1149,6 +1149,35 @@ def test_worker_polls_async_load_without_forward_execution(fail_load):
     assert worker.get_block_ids_with_load_errors() == ({1} if fail_load else set())
 
 
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("fail_load", [False, True])
+def test_sync_load_finishes_before_forward_without_layer_hooks(bulk, fail_load):
+    """FULL graph replay skips layer hooks, so sync loads must settle on entry."""
+
+    class _SyncLoadHandle(_WaitRecordingDelayedLoadHandle):
+        def wait(self, job):
+            if not fail_load:
+                return super().wait(job)
+            self.waited.append(job)
+            job.fail(job.keys, "injected load failure")
+            return job
+
+    handle = _SyncLoadHandle()
+    if bulk:
+        handle.load_blocks = handle.load
+    worker = UMBPStoreConnectorWorker(handle)
+    batch = BlockLoadBatch(["sync-load"], [7], [0], "req")
+
+    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"req": batch}))
+
+    assert handle.waited == [handle.load_job]
+    assert worker.get_finished(set()) == (None, None)
+    assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
+    stats = worker.get_kv_connector_stats().reduce()
+    assert stats["load_completed"] == (0 if fail_load else 1)
+    assert stats["load_failed"] == (1 if fail_load else 0)
+
+
 def test_forward_does_not_wait_for_async_loads():
     """Async loads fill blocks of requests the running batch does not contain."""
     handle = _WaitRecordingDelayedLoadHandle()
