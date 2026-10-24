@@ -110,7 +110,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
@@ -125,7 +125,9 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
             positions=positions, hidden_states=hidden_states, residual=None
         )
         hidden_states = residual + hidden_states
-        return hidden_states
+        # compute_logits normalizes the first element; subsequent draft steps
+        # consume the normalized feedback state.
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class Glm4MoeMultiTokenPredictor(nn.Module):
@@ -166,7 +168,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
@@ -232,11 +234,10 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )
-        return hidden_states
 
     def compute_logits(
         self,
