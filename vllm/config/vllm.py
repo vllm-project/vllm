@@ -2058,6 +2058,11 @@ class VllmConfig:
             self.scheduler_config.scheduler_cls = (
                 f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_name}"
             )
+        # Use the async twin of a model hook's PrefixLMScheduler.
+        prefix_lm = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM"
+        sched = self.scheduler_config
+        if sched.async_scheduling and sched.scheduler_cls == f"{prefix_lm}Scheduler":
+            sched.scheduler_cls = f"{prefix_lm}AsyncScheduler"
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled

@@ -39,7 +39,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import PREFIX_LM_LEN, SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
@@ -7590,16 +7590,12 @@ def test_async_load_reservation_prevents_wedge_e2e():
 
 
 def _create_hybrid_mamba_connector_scheduler(
-    matched_tokens: int | None,
+    matched_tokens: int,
     block_size: int = 16,
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
-    max_num_batched_tokens: int = 8192,
-    prefill_whole_prompt: bool = False,
-    **mamba_kwargs,
 ) -> Scheduler:
-    """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector, or with
-    no connector if `matched_tokens` is None."""
+    """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -7610,12 +7606,11 @@ def _create_hybrid_mamba_connector_scheduler(
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_seqs=4,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_batched_tokens=8192,
             max_model_len=8192,
             enable_chunked_prefill=True,
             is_encoder_decoder=False,
             watermark=0.0,
-            prefill_whole_prompt=prefill_whole_prompt,
         ),
         model_config=model_config,
         cache_config=CacheConfig(
@@ -7623,9 +7618,7 @@ def _create_hybrid_mamba_connector_scheduler(
             enable_prefix_caching=True,
             mamba_cache_mode="align",
         ),
-        kv_transfer_config=None
-        if matched_tokens is None
-        else KVTransferConfig(
+        kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
@@ -7656,7 +7649,6 @@ def _create_hybrid_mamba_connector_scheduler(
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
-                    **mamba_kwargs,
                 ),
             ),
         ],
@@ -7751,88 +7743,6 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     output = scheduler.schedule()
     [new_req] = output.scheduled_new_reqs
     assert new_req.num_computed_tokens == expected_num_computed
-
-
-def _create_prefix_lm_hybrid_scheduler(max_num_batched_tokens: int = 256):
-    return _create_hybrid_mamba_connector_scheduler(
-        None,
-        max_num_batched_tokens=max_num_batched_tokens,
-        prefill_whole_prompt=True,
-        num_prefill_checkpoint_blocks=1,
-        prefill_checkpoint_alignment=16,
-    )
-
-
-def _prefix_lm_step(
-    scheduler: Scheduler, *requests: tuple[str, list[int], int | None]
-) -> dict[str, tuple[int, int]]:
-    """Add (id, prompt, prefix length) requests and run one step. Returns the
-    cached and scheduled tokens of each new request."""
-    init_none_hash(sha256)
-    for req_id, prompt, prefix_len in requests:
-        params = SamplingParams(
-            max_tokens=1,
-            extra_args=None if prefix_len is None else {PREFIX_LM_LEN: prefix_len},
-        )
-        params.update_from_generation_config({}, EOS_TOKEN_ID)
-        scheduler.add_request(
-            Request(
-                request_id=req_id,
-                prompt_token_ids=prompt,
-                sampling_params=params,
-                pooling_params=None,
-                block_hasher=get_request_block_hasher(16, sha256),
-            )
-        )
-    output = scheduler.schedule()
-    req_ids = list(output.num_scheduled_tokens)
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-            sampled_token_ids=[[0]] * len(req_ids),
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-    return {
-        r.req_id: (r.num_computed_tokens, output.num_scheduled_tokens[r.req_id])
-        for r in output.scheduled_new_reqs
-    }
-
-
-def test_prefix_lm_hits_stop_at_the_prefix_and_prompts_prefill_whole():
-    """Hits stop at a prefix of the same tokens and length, and the rest of the
-    prompt is prefilled in one step, also where Mamba alignment would split it."""
-    scheduler = _create_prefix_lm_hybrid_scheduler()
-    prefix = list(range(100, 140))
-    # The questions share their first 24 tokens: blocks [0, 64) match.
-    q1, q2, q3 = (prefix + list(range(200, 224)) + [i] * 6 for i in (1, 2, 3))
-
-    assert _prefix_lm_step(scheduler, ("q1", q1, 40)) == {"q1": (0, 70)}
-    # q1 left Mamba state only at 64, past the prefix. q2's attention hit at 32
-    # is a junction where alignment would stop, and the step would wait forever.
-    assert _prefix_lm_step(scheduler, ("q2", q2, 40)) == {"q2": (0, 70)}
-    # The prefix alone leaves its state at 32.
-    assert _prefix_lm_step(scheduler, ("prefix", prefix, 40)) == {"prefix": (0, 40)}
-    assert _prefix_lm_step(scheduler, ("q3", q3, 40), ("q1 again", q1, 40)) == {
-        "q3": (32, 38),
-        "q1 again": (32, 38),
-    }
-    # Another prefix length, or none, shares no block with these prompts.
-    assert _prefix_lm_step(scheduler, ("p48", q1, 48), ("causal", q1, None)) == {
-        "p48": (0, 70),
-        "causal": (0, 70),
-    }
-
-
-def test_prefix_lm_prompt_waits_rather_than_split():
-    scheduler = _create_prefix_lm_hybrid_scheduler(max_num_batched_tokens=100)
-    a, b = list(range(70)), list(range(100, 170))
-    assert _prefix_lm_step(scheduler, ("a", a, 40), ("b", b, 40)) == {"a": (0, 70)}
-    assert _prefix_lm_step(scheduler) == {"b": (0, 70)}
 
 
 @pytest.mark.parametrize(

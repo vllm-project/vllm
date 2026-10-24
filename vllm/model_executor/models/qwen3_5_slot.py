@@ -4,8 +4,8 @@
 prefix and question as two bidirectional PrefixLM blocks."""
 
 from vllm.config import VllmConfig
-from vllm.sampling_params import PREFIX_LM_LEN
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.prefix_lm_scheduler import prefix_lm_len
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -22,13 +22,16 @@ class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
-        params = new_req_data.sampling_params
-        prefix_len = (params.extra_args or {}).get(PREFIX_LM_LEN) if params else None
-        length = len(new_req_data.prompt_token_ids or ())
-        if type(prefix_len) is int and 0 < prefix_len <= length:
+        if new_req_data.mm_features:
+            # The encoder budget can end a step inside the prompt.
+            return
+        ids = new_req_data.prompt_token_ids
+        prefix_len = prefix_lm_len(new_req_data.sampling_params, ids)
+        if prefix_len is not None:
+            assert ids is not None
             blocks = [(0, prefix_len - 1)]
-            if prefix_len < length:
-                blocks.append((prefix_len, length - 1))
+            if prefix_len < len(ids):
+                blocks.append((prefix_len, len(ids) - 1))
             self.blocks[new_req_data.req_id] = blocks
 
     def remove_request(self, req_id: str) -> None:
@@ -38,11 +41,23 @@ class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
     def get_mm_prefix_ranges(
         self, input_batch: InputBatch
     ) -> dict[int, list[tuple[int, int]]] | None:
-        ranges = {
-            i: self.blocks[req_id]
-            for i, req_id in enumerate(input_batch.req_ids)
-            if req_id in self.blocks
-        }
+        ranges: dict[int, list[tuple[int, int]]] = {}
+        for i, req_id in enumerate(input_batch.req_ids):
+            if (blocks := self.blocks.get(req_id)) is None:
+                continue
+            ranges[i] = blocks
+            if input_batch.is_prefilling_np[i]:
+                # A step that ends inside a block computes the KV of its earlier
+                # tokens without the later ones.
+                end = int(
+                    input_batch.num_computed_prefill_tokens_np[i]
+                    + input_batch.num_scheduled_tokens[i]
+                )
+                if end <= blocks[-1][1] and end != blocks[0][1] + 1:
+                    raise RuntimeError(
+                        f"PrefixLM request {req_id} is scheduled up to token "
+                        f"{end}, inside one of its blocks {blocks}"
+                    )
         return ranges or None
 
 

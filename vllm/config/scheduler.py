@@ -52,6 +52,9 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    user_specified_max_num_batched_tokens: bool = False
+    """Whether the user set max_num_batched_tokens."""
+
     max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
@@ -171,10 +174,6 @@ class SchedulerConfig:
     (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
-
-    prefill_whole_prompt: bool = False
-    """If True, the rest of a prompt after its prefix-cache hit is prefilled in
-    one step, or the request waits. Set by PrefixLM models."""
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".

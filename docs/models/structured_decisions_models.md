@@ -399,16 +399,23 @@ Qwen3.5 checkpoints with a slot readout. vLLM detects their
 `SlotLMStrategy`.
 
 ```bash
-vllm serve baselabs/mammoth-1 --max-model-len 16384 --max-num-batched-tokens 16384
+vllm serve baselabs/mammoth-1 --max-model-len 16384
 ```
 
 - Each question is one read of the checkpoint's fixed prompt. The full
   attention layers read the shared prefix and the question as two
-  bidirectional blocks, so each prompt is prefilled in one step:
-  `--max-num-batched-tokens` must be at least `--max-model-len`.
-- Keep prefix caching on (the default) so the shared prefix is prefilled once
-  for all questions of a request.
-- The `TRITON_ATTN` attention backend is selected automatically; other
-  backends are refused.
+  bidirectional blocks, so each prompt is prefilled in one step.
+  `--max-num-batched-tokens` must be at least `--max-model-len` and, unless
+  set, defaults to at least that plus `--max-num-seqs`, so a long prompt does
+  not wait for running requests.
+- Prefix caching (on by default) prefills the shared prefix once per decision
+  request instead of once per question. It needs FlashInfer's GatedDeltaNet
+  prefill (Hopper, or Blackwell with CUDA 13) and is turned off with other
+  backends.
+- Only the `TRITON_ATTN` attention backend is supported, and it is selected
+  automatically. KV transfer connectors, `--kv-offloading-size`, speculative
+  decoding, context parallelism, micro-batching and `--prefix-match-unit` are
+  refused, as is `--scheduler-cls` with prefix caching on.
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
-  `{"enable_thinking": false}`, since the prompt is fixed.
+  `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
+  choice and returns 400 for score levels with the same label.

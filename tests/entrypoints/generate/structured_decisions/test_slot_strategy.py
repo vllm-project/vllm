@@ -15,6 +15,8 @@ from vllm.entrypoints.generate.structured_decisions.protocol import (
 )
 from vllm.entrypoints.generate.structured_decisions.serving import parse_questions
 from vllm.entrypoints.openai.decisions import slot_prompt
+from vllm.entrypoints.openai.decisions.adapters import make_read_question
+from vllm.entrypoints.openai.decisions.protocol import ScoreQuestion
 from vllm.entrypoints.openai.decisions.question_types import StructuredDecisionError
 from vllm.entrypoints.openai.decisions.strategies import (
     ReadContext,
@@ -24,6 +26,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
+from vllm.v1.core.sched.prefix_lm_scheduler import prefix_lm_salt
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -169,7 +172,8 @@ async def test_reads_match_qev_byte_for_byte(tokenizer):
         prompt, params = call.args[0], call.args[1]
         ids = tokenizer.encode(QEV_PROMPTS[q.id], add_special_tokens=False)
         assert prompt["prompt_token_ids"] == ids
-        assert prompt["cache_salt"] == "salt"
+        # The prefix's digest, then the caller's salt.
+        assert prompt["cache_salt"] == prefix_lm_salt(ids[:QEV_PREFIX_LEN], "salt")
         assert params.max_tokens == 1 and params.temperature == 0.0
         assert params.extra_args == {"prefix_lm_len": QEV_PREFIX_LEN}
         assert params.logprob_token_ids == strategy.slot_ids[: len(q.options)]
@@ -202,11 +206,14 @@ async def test_prefix_ends_at_the_state_block(tokenizer):
     prefix_len = calls[0].args[1].extra_args["prefix_lm_len"]
     first = calls[0].args[0]["prompt_token_ids"]
     assert tokenizer.decode(first[:prefix_len]).endswith("</state>\n\n")
+    salt = prefix_lm_salt(first[:prefix_len], None)
     for call in calls:
         assert call.args[1].extra_args == {"prefix_lm_len": prefix_len}
         assert call.args[0]["prompt_token_ids"][:prefix_len] == first[:prefix_len]
+        assert call.args[0]["cache_salt"] == salt
     assert warm_up.args[0]["prompt_token_ids"] == first[:prefix_len]
     assert warm_up.args[1].extra_args == {"prefix_lm_len": prefix_len}
+    assert warm_up.args[0]["cache_salt"] == salt
 
 
 @pytest.mark.asyncio
@@ -253,3 +260,11 @@ async def test_refuses_untrained_prompt_options(tokenizer, extra):
     with pytest.raises(StructuredDecisionError):
         await read(strategy, request)
     engine.generate.assert_not_called()
+
+
+def test_decisions_api_refuses_duplicate_labels(tokenizer):
+    strategy, _ = make_strategy(tokenizer)
+    levels = [{"label": "low"}, {"label": "high"}, {"label": "low"}]
+    question = ScoreQuestion(type="score", instructions="How urgent?", levels=levels)
+    with pytest.raises(StructuredDecisionError, match="distinct"):
+        strategy._suffix(make_read_question(0, question))

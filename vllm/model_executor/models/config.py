@@ -1172,11 +1172,36 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
+        scheduler_config = vllm_config.scheduler_config
+        prefix_lm = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM"
+        prefix_lm_schedulers = (f"{prefix_lm}Scheduler", f"{prefix_lm}AsyncScheduler")
+        if cache_config.enable_prefix_caching:
+            from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
+
+            _, gdn = qwen_gdn_linear_attn._resolve_gdn_prefill_backend(vllm_config)
+            if gdn != "flashinfer":
+                logger.info(
+                    "Disabling prefix caching for %s: the %s GDN prefill backend "
+                    "saves no Mamba prefix-cache states",
+                    model_config.architecture,
+                    gdn,
+                )
+                cache_config.enable_prefix_caching = False
         unsupported = {
             "KV transfer connectors": vllm_config.kv_transfer_config,
+            "--kv-offloading-size": cache_config.kv_offloading_size is not None,
             "speculative decoding": vllm_config.speculative_config,
+            "context parallelism": (
+                vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.parallel_config.decode_context_parallel_size > 1
+            ),
+            "micro-batching": vllm_config.parallel_config.use_ubatching,
             "--prefix-match-unit": (
                 cache_config.enable_prefix_caching and cache_config.prefix_match_unit
+            ),
+            "--scheduler-cls": (
+                cache_config.enable_prefix_caching
+                and scheduler_config.scheduler_cls not in (None, *prefix_lm_schedulers)
             ),
         }
         if features := [name for name, enabled in unsupported.items() if enabled]:
@@ -1193,21 +1218,47 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"{model_config.architecture} needs the TRITON_ATTN attention "
                 f"backend, not {attention_config.backend.name}"
             )
-
-        # The rest of each prompt after its prefix-cache hit is prefilled in one
-        # step, so a step never ends inside a PrefixLM block.
-        scheduler_config = vllm_config.scheduler_config
-        if cache_config.enable_prefix_caching:
-            # The Mamba prefix cache needs chunked prefill.
-            scheduler_config.enable_chunked_prefill = True
-        scheduler_config.prefill_whole_prompt = True
-        scheduler_config.long_prefill_token_threshold = 0
-        if scheduler_config.max_num_batched_tokens < model_config.max_model_len:
+        per_kind = attention_config.backend_per_kind.get("full_attention")
+        if per_kind is not None and per_kind != AttentionBackendEnum.TRITON_ATTN:
             raise ValueError(
-                f"{model_config.architecture} prefills each prompt in one step, so "
-                "--max-num-batched-tokens "
-                f"({scheduler_config.max_num_batched_tokens}) must be at least "
-                f"--max-model-len ({model_config.max_model_len})"
+                f"{model_config.architecture} needs the TRITON_ATTN attention "
+                f"backend for full attention, not {per_kind.name}"
+            )
+
+        # Each prompt is prefilled from its cache hit in one step: by the stock
+        # scheduler with chunked prefill off, or by PrefixLMScheduler, as the
+        # Mamba prefix cache needs chunked prefill.
+        scheduler_config.enable_chunked_prefill = cache_config.enable_prefix_caching
+        if cache_config.enable_prefix_caching:
+            scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
+        scheduler_config.long_prefill_token_threshold = 0
+        # Unless set by the user, fit a full prompt beside one decode token per
+        # running request, so a long prompt does not wait for them to finish.
+        headroom = model_config.max_model_len + scheduler_config.max_num_seqs
+        if not scheduler_config.user_specified_max_num_batched_tokens:
+            scheduler_config.max_num_batched_tokens = max(
+                scheduler_config.max_num_batched_tokens, headroom
+            )
+        budgets = {
+            "--max-num-batched-tokens": scheduler_config.max_num_batched_tokens,
+            "--max-num-scheduled-tokens": scheduler_config.max_num_scheduled_tokens,
+        }
+        for flag, budget in budgets.items():
+            if budget is not None and budget < model_config.max_model_len:
+                raise ValueError(
+                    f"{model_config.architecture} prefills each prompt in one "
+                    f"step, so {flag} ({budget}) must be at least --max-model-len "
+                    f"({model_config.max_model_len})"
+                )
+        step_budget = min(b for b in budgets.values() if b is not None)
+        if step_budget < headroom:
+            logger.warning(
+                "%s prefills each prompt in one step. With a step budget of %d "
+                "tokens, below --max-model-len plus --max-num-seqs (%d), a long "
+                "prompt can wait for running requests to finish.",
+                model_config.architecture,
+                step_budget,
+                headroom,
             )
 
 

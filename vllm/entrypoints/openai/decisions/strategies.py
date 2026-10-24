@@ -42,10 +42,11 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, PREFIX_LM_LEN, SamplingParams
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
 from . import slot_prompt
 from .question_types import (
@@ -1506,7 +1507,12 @@ class SlotLMStrategy(NextTokenStrategy):
                 f"question {q.id!r}: a score has at most "
                 f"{self.MAX_SCORE_LEVELS} levels for this model"
             )
-        # Decisions API questions are choices with no request criteria.
+        # Decisions API questions have no raw criteria; options key them by name.
+        names = [o.name for o in q.options]
+        if q.raw is None and len(set(names)) != len(names):
+            raise StructuredDecisionError(
+                f"question {q.id!r}: option labels must be distinct for this model"
+            )
         instructions, criteria = q.raw or (
             q.instructions,
             {o.name: o.description for o in q.options},
@@ -1548,6 +1554,7 @@ class SlotLMStrategy(NextTokenStrategy):
         marked = self._prompt(state, slot_prompt.PREFIX_MARK)
         prefix = self._tokens(marked[: marked.rindex(slot_prompt.PREFIX_MARK)])
         prefix_len = common_prefix_len([prefix, *prompts])
+        cache_salt = prefix_lm_salt(prompts[0][:prefix_len], cache_salt)
 
         # Cache hits stop at the prefix, so prefill it alone for the questions.
         await self._warm_shared_prefix(

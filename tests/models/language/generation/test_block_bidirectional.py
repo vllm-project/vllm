@@ -160,7 +160,11 @@ def test_block_attention_matches_transformers(vllm_runner, tmp_path):
         vllm_config = llm.llm_engine.vllm_config
         assert vllm_config.model_config.architecture == "Qwen3_5ForSlotDecision"
         assert vllm_config.model_config.head_dtype == torch.float32
-        assert vllm_config.scheduler_config.prefill_whole_prompt
+        # Prefix caching stays on with FlashInfer's GDN prefill only.
+        prefix_caching = vllm_config.cache_config.enable_prefix_caching
+        if prefix_caching:
+            scheduler_cls = vllm_config.scheduler_config.scheduler_cls
+            assert scheduler_cls.startswith("vllm.v1.core.sched.prefix_lm_scheduler.")
 
         # The three questions with their blocks, then q0 without a prefix length,
         # which is read causally.
@@ -183,6 +187,8 @@ def test_block_attention_matches_transformers(vllm_runner, tmp_path):
         for args in zip([*names, "q0 causal"], outputs, references, others):
             check(*args)
 
+        if not prefix_caching:
+            return
         # The prefix alone, as the strategy's warm-up sends it. The questions
         # then reuse its cache, and never past it: q1 and q2 share 40 more
         # tokens, and q2 comes twice.
