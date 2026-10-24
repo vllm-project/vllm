@@ -76,7 +76,7 @@ class CPUWorker(Worker):
         torch.ops._C.init_cpu_memory_env([memory_node])
 
         memory_status = get_memory_node_info(memory_node)
-        memory_fraction = vllm_config.cache_config.gpu_memory_utilization
+        memory_fraction = vllm_config.cache_config.resolved_gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
