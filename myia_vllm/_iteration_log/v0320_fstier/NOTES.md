@@ -975,3 +975,63 @@ Issues : **roo-extensions#4334** (remédiation harnais) + **claudish#640**
 (jumelle, mesure au hub) + DM po-2025:claudish. Enjeu en $ : cache de prompt
 Anthropic à 0,1× sur le socle partagé, prefix caching OpenAI ≥1024 tokens,
 et re-prefill évité sur vllm-myia.
+
+### Cycle 24/10 08:41Z — GATES LRU PASSÉES (2/2) + MYSTÈRE DES 400 RÉSOLU
+
+**LRU en production — les deux gates différées du déploiement PASSÉES :**
+
+1. **Reservice des anciens blocs** : `chunk_hits_total{tier="1:TouchOnHitFsTier"} = 406`
+   en 25 min post-boot (boot 08:17:27Z), `prompt_tokens_cached_by_source{disk} =
+   259 168 tokens` servis depuis le disque, `kv_offload_tiering_read_bytes_total =
+   10,66 GB`. Le label du tier porte le nom de la classe — preuve que le module
+   out-of-tree est bien le tier actif. Écritures 63,4 GB sur la même fenêtre
+   (write-heavy conforme à la rétraction du 06:41Z).
+2. **Preuve mtime par birth-time ext4** (le fichier baseline `/tmp/oldest_blocks_before.txt`
+   était vide — capture ratée à 08:16Z, remplacée par la méthode plus directe) :
+   sur 500 blocs à mtime récente, **111 sont nés AVANT le boot** (ex. né
+   06:55:56Z, mtime 08:25:21Z) — impossible sans `utime()` : le hook touche au
+   hit, le pruner oldest-mtime-first protège donc désormais les blocs en usage.
+   Nouvelle baseline 8-plus-vieux posée (`/tmp/oldest_blocks_v2.txt`, CR-stripped).
+
+**Santé post-deploy** : health 200 en 3,2 ms, 25 min up, 833 sondes OK, OOM 0,
+préemptions **0** depuis boot, VRAM 21 095/20 240 (plage en charge), shm 8,1G/63G
+(purgé au deploy), prefix-hit 95,7 % (17,13 M queries / 16,40 M hits), commit
+hôte 79,1 % (marge 83,4 GB), G: OK, nbaudit ok — **vague 2 armée :
+`subpath` basculé sur `19451:Image/`** (Audio/ n'a plus de livrables en attente).
+
+**Le RESTARTING 08:16:53Z** du watchdog = streak BUSY 7/10 dont les compteurs
+sont passés plats (p=0 g=0) PENDANT le recreate compose du deploy — la sonde
+metrics voyait le moteur partir. Coïncidence des deux autorités, issue saine
+(une seule indispo).
+
+**⚠ Croissance du tier 38 GiB/h mesurée** : pruner 08:20:02Z a vu 110,3 GiB,
+supprimé 276 fichiers/7,24 GiB (retour cap) ; à 08:45Z `du` = 119G. Rétention
+~2,5 h au cap 96G. La croissance outpace la nuit (~21 GiB/h) — à suivre au
+prochain cycle ; si soutenu, le tier churne mais la fenêtre de réutilisation
+conversationnelle (~min) reste couverte d'un ordre de grandeur.
+
+**★ MYSTÈRE DES 400 RÉSOLU — la capture `error_body` a attrapé la cause au
+premier essai** (07:20:58Z, Bun, bb=926 908) :
+
+```json
+{"error":{"message":"This model's maximum context length is 262144 tokens.
+However, your prompt contains at least 262145 input tokens, which exceeds
+this limit even without any output tokens. (parameter=input_tokens,
+value=262145)","type":"BadRequestError","param":"input_tokens","code":400}}
+```
+
+C'est la signature exacte chassée depuis la spec §2 : **window+1 = 262 145**.
+Une session routée sur Swift dépasse la fenêtre **avant** son auto-compact —
+l'auto-compact flotte est réglé à 263 000 > 262 144, le bandeau 262,1-263K ne
+peut mécaniquement finir qu'en 400 (même famille que l'incident CoursIA-2 du
+22/10 à 269 844 tok). 3× 400 sur la fenêtre 2h (07:07 bb=868K, 07:09 bb=466K —
+corps de réponse vides, à qualifier — et 07:20 documentée), toutes UA Bun =
+front hub, toutes `model=swift-1.5-27b`. Le remède n'est PAS côté moteur :
+(i) auto-compact < plus petite fenêtre déclarée (~250K), (ii) règle #431
+(router cette requête vers le cloud, jamais retry local). Rendu au user +
+DM po-2025:claudish (this cycle). Les 401 restants (12) = clé VL morte
+(Go-http-client, nuisance connue).
+
+**Census 2h** : 405 req (~3,4/min = 205/h, en baisse vs 259/h) ; 273 req >100K
+toutes du front hub (hairpin 90.65.170.144) — pas de re-prefill pathologique
+par IP externe ; aucune nouvelle IP avec 200 (seul le hairpin + `?` direct).
