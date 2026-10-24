@@ -121,6 +121,76 @@ def rocm_paged_mxfp4_cache_layout(
     return RocmPagedMxfp4CacheLayout(n_per_tile, d_per_tile, scale_lanes)
 
 
+@functools.cache
+def _aiter_indexer_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
+    """The aiter indexer key writer and query quantizer."""
+    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
+        k_norm_rope_mxfp4_cache,
+    )
+    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
+
+    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
+
+
+def rocm_mxfp4_indexer_k_store(
+    k_pre: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    use_fp4_cache: bool,
+    *,
+    num_heads: int,
+) -> None:
+    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
+    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    query heads."""
+    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
+    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
+    k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()
+    k_norm_rope_mxfp4_cache(
+        k_pre,
+        positions,
+        cos_sin_cache,
+        rms_norm_weight,
+        rms_norm_eps,
+        k_cache,
+        kv_slot_mapping,
+        compress_ratio,
+        shuffle=layout,
+    )
+
+
+def rocm_mxfp4_indexer_q_quant(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    use_fp4: bool = True,
+    weights_out_dtype: torch.dtype = torch.float32,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
+    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
+    weights)."""
+    assert use_fp4 and weights_out_dtype == torch.float32, (
+        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
+    )
+    _, q_rope_mxfp4_quant = _aiter_indexer_cache_ops()
+    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale * index_weights_head_scale,
+    )
+    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
+
+
 def rocm_mxfp4_decode_schedule_words(
     num_heads: int, head_dim: int, page_entries: int, next_n: int = 1
 ) -> int:
