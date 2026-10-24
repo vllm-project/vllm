@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -280,3 +281,41 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def _admit(params: SamplingParams) -> None:
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(),
+        vllm_config=SimpleNamespace(watermark_config=None),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    InputProcessor._validate_params(processor, params, ("generate",))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"n": True},
+        {"max_tokens": 2.5},
+        {"max_tokens": True},
+        {"seed": 1.5},
+        {"stop_token_ids": [True]},
+        {"routed_experts_prompt_start": 1.5},
+    ],
+)
+def test_params_the_engine_cannot_decode_are_rejected(kwargs: dict):
+    """The engine decodes params with msgspec, so a value that passed
+    construction but fails that decode made LLM.generate() hang (#60998)."""
+    with pytest.raises(VLLMValidationError, match="Expected `int"):
+        _admit(SamplingParams(**kwargs))
+
+
+def test_int_enum_values_are_accepted():
+    class Limit(enum.IntEnum):
+        TOKENS = 8
+
+    _admit(SamplingParams(max_tokens=Limit.TOKENS, top_k=Limit.TOKENS))
