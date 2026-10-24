@@ -3217,6 +3217,43 @@ def test_pause_new_ignores_streaming_session_waiting_for_input():
     assert scheduler.get_num_unfinished_requests() == 0
 
 
+def test_pause_new_counts_running_request_beside_preempted_session():
+    """A session that stops while preempted waits for input with no KV blocks,
+    so it sits in `waiting`. It must not cancel out a running request in the
+    PAUSED_NEW count, or a pause(mode="wait") drain completes too early."""
+    # Two blocks besides the null block: one per 16-token prompt.
+    scheduler = create_scheduler(async_scheduling=True, num_blocks=3, block_size=16)
+    running, session = create_requests(
+        num_requests=2, num_tokens=16, max_tokens=1, req_ids=["running", "session"]
+    )
+    running.max_tokens = running.sampling_params.max_tokens = 100
+    session.resumable = True
+    scheduler.add_request(running)
+    scheduler.add_request(session)
+
+    output = scheduler.schedule()
+    # The running request's decode needs a new block, which preempts the
+    # session while its prefill output is still in flight.
+    scheduler.schedule()
+    assert session.status == RequestStatus.PREEMPTED
+
+    # The in-flight output hits max_tokens, so the session stops while preempted.
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["running", "session"],
+            req_id_to_index={"running": 0, "session": 1},
+            sampled_token_ids=[[7], [8]],
+        ),
+    )
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert session in scheduler.waiting
+    assert running.status == RequestStatus.RUNNING
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.get_num_unfinished_requests() == 1
+
+
 @pytest.mark.parametrize(
     ("load_modes", "expected_has_sync_loads"),
     [

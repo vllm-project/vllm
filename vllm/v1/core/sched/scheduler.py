@@ -2991,9 +2991,14 @@ class Scheduler(SchedulerInterface):
             return 0
         num_running, num_waiting = self.get_request_counts()
         if self._pause_state == PauseState.PAUSED_NEW:
-            # Requests holding KV blocks still drain; queued ones stay queued.
-            num_waiting = len(self.kv_holding_waiting)
-        num_waiting -= self.num_waiting_for_streaming_input
+            # Requests holding KV blocks still drain; queued ones and paused
+            # sessions (which can sit in either queue) stay put.
+            num_waiting = sum(
+                req.status != RequestStatus.WAITING_FOR_STREAMING_REQ
+                for req in self.kv_holding_waiting
+            )
+        else:
+            num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:
