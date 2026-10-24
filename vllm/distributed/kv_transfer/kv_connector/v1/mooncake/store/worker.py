@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import functools
 import math
 import os
 import queue
@@ -64,6 +65,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_OK,
     decode_lookup_response,
     encode_lookup_response,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.selective_lease import (  # noqa: E501
+    SelectiveLookupLease,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
@@ -1498,6 +1502,7 @@ class MooncakeStoreWorker:
 
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
+        self._selective_lease: SelectiveLookupLease | None = None
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
@@ -1533,6 +1538,15 @@ class MooncakeStoreWorker:
         )
         self.token_dbs = self._build_token_databases(metadata, store_layout_cls)
         self._init_lookup_key_prefixes()
+        if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
+            self._selective_lease = SelectiveLookupLease(
+                self.store,
+                self.coord,
+                self.token_dbs,
+                self._kv_cache_groups,
+                self._lookup_key_prefixes,
+                self._record_kv_connector_operation,
+            )
 
     def _supports_tp_sharded_store_layout(
         self,
@@ -2151,9 +2165,14 @@ class MooncakeStoreWorker:
         if not candidate_keys:
             return MooncakeLookupResult(0)
 
+        exists_fn = (
+            self.store.batch_is_exist
+            if self._selective_lease is None
+            else self._selective_lease.probe
+        )
         lookup_start = time.perf_counter()
         try:
-            res = self.store.batch_is_exist(candidate_keys)
+            res = exists_fn(candidate_keys)
             self._record_kv_connector_operation(
                 "lookup_exists",
                 time.perf_counter() - lookup_start,
@@ -2181,6 +2200,24 @@ class MooncakeStoreWorker:
                 exists_set.add((g_idx, hash_bytes))
             pos += count
 
+        hit = self._longest_hit(num_tokens, token_len, block_hashes, exists_set)
+        if self._selective_lease is None:
+            return hit
+        return self._selective_lease.lease_hit(
+            block_hashes,
+            hit,
+            exists_set,
+            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+        )
+
+    def _longest_hit(
+        self,
+        num_tokens: int,
+        token_len: int,
+        block_hashes: Sequence[BlockHash],
+        exists_set: set[tuple[int, bytes]],
+    ) -> MooncakeLookupResult:
+        """Longest prefix hit over the ``(group, hash)`` pairs in the store."""
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
