@@ -49,6 +49,7 @@ from vllm.utils.flashinfer import (
     force_use_trtllm_attention,
     pin_host_range_buf,
     supports_trtllm_attention,
+    unpin_plan_staging_buffer,
     use_trtllm_attention,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -420,6 +421,8 @@ class BatchDCPPrefillWrapper:
         # The context-pass wrapper planned for this step.
         self._context: BatchPrefillWithPagedKVCacheWrapper | TrtllmDCPContextWrapper
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
+        unpin_plan_staging_buffer(self._context)
+        unpin_plan_staging_buffer(self._new_tokens)
 
     def plan(
         self,
@@ -1394,6 +1397,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             backend="auto",
                         )
                     )
+                unpin_plan_staging_buffer(self._noncausal_prefill_wrapper)
             return self._noncausal_prefill_wrapper
 
         if self._prefill_wrapper is None:
@@ -1429,6 +1433,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         get_flashinfer_layout_string(self.kv_cache_layout),
                         backend=backend,
                     )
+                unpin_plan_staging_buffer(self._prefill_wrapper)
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
@@ -1473,6 +1478,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_tensor_cores=True,
                 backend=backend,
             )
+            unpin_plan_staging_buffer(decode_wrapper)
 
             # save the decode wrapper
             if use_cudagraph:
