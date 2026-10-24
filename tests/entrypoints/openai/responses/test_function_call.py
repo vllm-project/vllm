@@ -525,3 +525,67 @@ async def test_function_calling_with_streaming_forced_tool_choice(
     assert args["location"] is not None
     # Forced tool choice should not leak tool-call JSON via output_text delta.
     assert "".join(text_deltas).strip() == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["required", "auto"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_allowed_tools_tool_choice(
+    client: openai.AsyncOpenAI, mode: str, stream: bool
+):
+    tools = [
+        {
+            "type": "function",
+            "name": name,
+            "description": f"Get the current {what} for a location.",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+        for name, what in [("get_weather", "weather"), ("get_time", "local time")]
+    ]
+    # The prompt asks for both tools, but only get_time may be called.
+    kwargs = {
+        "model": MODEL_NAME,
+        "input": "What is the weather in Berlin, and what time is it there?",
+        "tools": tools,
+        "tool_choice": {
+            "type": "allowed_tools",
+            "mode": mode,
+            "tools": [{"type": "function", "name": "get_time"}],
+        },
+        # A single call keeps the output bounded, since the model cannot make
+        # the get_weather call it wants.
+        "parallel_tool_calls": False,
+        "temperature": 0.0,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    if stream:
+        events = await client.responses.create(stream=True, **kwargs)
+        output = [
+            event.item
+            async for event in events
+            if event.type == "response.output_item.done"
+        ]
+    else:
+        output = (await client.responses.create(**kwargs)).output
+
+    calls = [item for item in output if item.type == "function_call"]
+    text = "".join(
+        part.text
+        for item in output
+        if item.type == "message"
+        for part in item.content
+        if part.type == "output_text"
+    )
+    assert [call.name for call in calls if call.name != "get_time"] == []
+    # Calls must be returned as function_call items, not as message text.
+    assert "<tool_call>" not in text
+    if mode == "required":
+        assert len(calls) == 1
+        assert "location" in json.loads(calls[0].arguments)
+        assert text.strip() == ""
