@@ -355,6 +355,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     prompt_token_ids_to_return: list[int] | None = None
 
                     assert request.max_tokens is not None
+                    # echo with max_tokens=0 samples one token it does not return.
+                    generated_token_ids = (
+                        []
+                        if request.echo and request.max_tokens == 0
+                        else output.token_ids
+                    )
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
                         if request.return_token_ids:
@@ -419,7 +425,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     else:
                         logprobs = None
 
-                    previous_num_tokens[i] += len(output.token_ids)
+                    previous_num_tokens[i] += len(generated_token_ids)
                     stop_reason = output.stop_reason
 
                     if self.enable_log_outputs and self.request_logger:
@@ -449,7 +455,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 stop_reason=stop_reason,
                                 prompt_token_ids=prompt_token_ids_to_return,
                                 token_ids=(
-                                    as_list(output.token_ids)
+                                    as_list(generated_token_ids)
                                     if request.return_token_ids
                                     else None
                                 ),
@@ -587,6 +593,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 self._raise_if_error(output.finish_reason, request_id)
 
                 assert request.max_tokens is not None
+                # echo with max_tokens=0 samples one token it does not return.
+                generated_token_ids = (
+                    [] if request.echo and request.max_tokens == 0 else output.token_ids
+                )
                 if request.echo:
                     if request.return_token_ids:
                         prompt_text = ""
@@ -644,7 +654,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         prompt_token_ids if request.return_token_ids else None
                     ),
                     token_ids=(
-                        as_list(output.token_ids) if request.return_token_ids else None
+                        as_list(generated_token_ids)
+                        if request.return_token_ids
+                        else None
                     ),
                     routed_experts=routed_experts_b64,
                     weight_versions=(
@@ -655,7 +667,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 )
                 choices.append(choice_data)
 
-                num_generated_tokens += len(output.token_ids)
+                num_generated_tokens += len(generated_token_ids)
 
             num_prompt_tokens += len(prompt_token_ids)
 
