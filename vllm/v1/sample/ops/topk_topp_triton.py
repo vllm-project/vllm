@@ -140,81 +140,43 @@ def _topk_topp_kernel(
         if TOPK_ENABLED:
             k = tl.load(K + row_id)
             if k < VOCAB_SIZE:
-                # Zeroth pass: pick the gather pivot as an order statistic of
-                # a strided sample taken across the whole row. The previous
-                # Gaussian estimate (avg + std * sigma from the first tile
-                # only) is not robust: on real logits the head of the row
-                # carries systematically higher values, and skewed rows break
-                # the Gaussian fit entirely, so the gather can return fewer
-                # than k candidates and the row falls back to a full-vocab
-                # ternary search (3-6x slower per row; the whole batch waits
-                # for the slowest row). An order statistic with a 4x margin
-                # over k keeps the gathered set small while reliably
-                # covering k (#61998).
-                # Strided sample across the whole row: 1 lane every
-                # NUM_TILES * SAMPLE_STRIDE vocab entries, so the sampled
-                # positions cover the row uniformly instead of its head.
-                SAMPLE_STRIDE: tl.constexpr = 4
-                SAMPLE_LANES: tl.constexpr = BLOCK_SIZE // SAMPLE_STRIDE
-                offs_s = tl.arange(0, SAMPLE_LANES) * (NUM_TILES * SAMPLE_STRIDE)
-                mask_s = offs_s < VOCAB_SIZE
-                logits_sample = tl.load(
-                    LOGITS_ROW + offs_s, mask=mask_s, other=-float("inf")
+                # Zeroth pass: Gaussian quantile from four quarters of the
+                # row. Sampling tile 0 alone is layout-biased: real logits
+                # carry systematically higher values at low token ids, which
+                # inflates the mean/std estimate and sets the gather pivot
+                # too high (#61998). Four coalesced 2048-wide segments at
+                # 0, V/4, V/2 and 3V/4 keep the read coalesced while making
+                # the statistics representative of the whole row.
+                SUB_TILE: tl.constexpr = BLOCK_SIZE // 4
+                i_q = tl.arange(0, BLOCK_SIZE)
+                offs = (i_q // SUB_TILE) * (VOCAB_SIZE // 4) + i_q % SUB_TILE
+                mask_n = offs < VOCAB_SIZE
+                logits_blk0 = tl.load(
+                    LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
                 )
-                # m-th largest sample value, m = ceil(4 * k * S / V) with a
-                # floor of 8, found by an in-register binary search over the
-                # sample's value range (no extra global memory traffic).
-                num_finite_s = tl.sum((logits_sample > -float("inf")) & mask_s)
-                # Sample count actually used (clamped to the loaded lanes).
-                SAMPLE_COUNT: tl.constexpr = SAMPLE_LANES
-                m_target = tl.cast(
-                    (4 * k * SAMPLE_COUNT + VOCAB_SIZE - 1) // VOCAB_SIZE,
-                    tl.int32,
+                # Exclude -inf values (e.g. from grammar bitmasks) from
+                # statistics to avoid NaN in pivot computation.
+                finite_mask = (logits_blk0 > -float("inf")) & mask_n
+                num_finite = tl.sum(finite_mask)
+                finite_logits = tl.where(finite_mask, logits_blk0, 0.0)
+                avg_logit = tl.where(
+                    num_finite > 0, tl.sum(finite_logits) / num_finite, 0.0
                 )
-                m_target = tl.maximum(m_target, 8)
-                m_target = tl.minimum(
-                    m_target, tl.cast(SAMPLE_COUNT, tl.int32)
+                sq_avg_logit = tl.where(
+                    num_finite > 0,
+                    tl.sum(finite_logits * finite_logits) / num_finite,
+                    0.0,
                 )
-                num_finite_s_i32 = tl.cast(num_finite_s, tl.int32)
-                m_target = tl.minimum(m_target, num_finite_s_i32)
-                lo_s = tl.min(tl.where(mask_s, logits_sample, float("inf")))
-                hi_s = tl.max(logits_sample)
-                # Pivot default when the sample holds no finite logits (all
-                # of a row's mass can sit between the sample points, e.g. a
-                # grammar mask keeping a handful of tokens): gather nothing
-                # and let the full-row fallback search run. Its bounds come
-                # from the row's own min/max, so the ternary search stays on
-                # a finite, well-scaled range; a sentinel like -1e30 would
-                # instead poison the buffer-search range and never converge.
-                outlier_pivot = float("inf")
-                if num_finite_s > 0:
-                    # Seed lo at the smallest finite sample value so the
-                    # search converges even when most sampled lanes are
-                    # masked (e.g. grammar bitmasks); the gather then
-                    # collects every finite entry the sample saw at minimum.
-                    lo_s = tl.min(
-                        tl.where(
-                            logits_sample > -float("inf"),
-                            logits_sample,
-                            float("inf"),
-                        )
-                    )
-                    # 16 halvings are enough for a gather threshold: the
-                    # remaining error (~1e-3 of the sample range) only shifts
-                    # a few edge tokens in or out of the gather, which the
-                    # ternary search absorbs.
-                    for _ in tl.static_range(12):
-                        if hi_s - lo_s > 1e-3:
-                            mid_s = (lo_s + hi_s) / 2.0
-                            cnt_s = tl.sum((logits_sample > mid_s).to(tl.int32))
-                            # Keep the m_target-th largest strictly above the
-                            # pivot: shrink hi when enough values remain,
-                            # otherwise raise lo.
-                            if cnt_s >= m_target:
-                                lo_s = mid_s
-                            else:
-                                hi_s = mid_s
-                    outlier_pivot = lo_s
+                std_logit = tl.sqrt(
+                    tl.maximum(sq_avg_logit - avg_logit * avg_logit, 0.0)
+                )
+
+                # Calculate outlier pivot t for Gaussian sigma-truncation
+                percentile = tl.cast(k / VOCAB_SIZE * 200, tl.uint32)
+                percentile = tl.minimum(percentile, 199)
+                sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
+                sigma = sigma + tl.abs(sigma) * -0.15
+                outlier_pivot = avg_logit + std_logit * sigma
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
                 # First pass: compute max and min logits and gather outliers
@@ -346,9 +308,131 @@ def _topk_topp_kernel(
                             num_min_larger = num_min_larger_0
                             found_pivot = 1
                 else:
-                    # If top-k outlier gathering failed, search whole logit space
+                    # The Gaussian gather under-covered k. Re-gather once at
+                    # a distribution-free pivot, then run the ternary search
+                    # entirely inside the re-gathered buffer (L2-resident,
+                    # replacing the up-to-18 full-vocab DRAM sweeps).
+                    #
+                    # Tier 2 (dense rows): order-statistic pivot (#61998).
+                    # Sample S lanes uniformly across the row and take the
+                    # m-th largest sampled value as the pivot. Unlike the
+                    # Gaussian quantile this makes no distribution
+                    # assumption, so it also covers the skewed rows that
+                    # broke the zeroth pass.
+                    # Tier 3 (sparse rows, e.g. grammar masks): the row
+                    # minimum as pivot, collecting every finite candidate.
+                    # The upstream num_finite_total <= k short-circuit
+                    # guarantees rows reaching here hold >= k finite logits,
+                    # so tier 3 always covers k.
+                    regather_pivot = min_logit
+                    if num_finite_total > 2 * BLOCK_SIZE:
+                        # Uniform whole-row sample: one lane every
+                        # NUM_TILES * SAMPLE_STRIDE vocab entries. This is
+                        # the "SAMPLE_STRIDE positions per tile, tiles
+                        # covering the whole row" lattice collapsed to a
+                        # single stride: lane i lands at i-th lattice point,
+                        # so the sample spreads uniformly over [0, V) with
+                        # no head bias. The last lanes may exceed
+                        # VOCAB_SIZE (~2% of S); they are masked out, which
+                        # only thins the sample and never biases it.
+                        SAMPLE_STRIDE: tl.constexpr = 4
+                        SAMPLE_LANES: tl.constexpr = BLOCK_SIZE // SAMPLE_STRIDE
+                        offs_s = tl.arange(0, SAMPLE_LANES) * (
+                            NUM_TILES * SAMPLE_STRIDE
+                        )
+                        mask_s = offs_s < VOCAB_SIZE
+                        logits_s = tl.load(
+                            LOGITS_ROW + offs_s, mask=mask_s, other=-float("inf")
+                        )
+                        num_finite_s = tl.sum((logits_s > -float("inf")) & mask_s)
+                        # Order-statistic target: each lane represents V/S
+                        # vocab entries, so the m-th largest sampled value
+                        # estimates the (m * V/S)-th largest of the row.
+                        # Targeting 4k entries (m = ceil(4kS/V)) keeps a 4x
+                        # margin over k so sampling noise cannot under-cover
+                        # (#61998 emulation: a 2x margin still fails 3.4% of
+                        # rows at k=64; 4x had zero failures for k=20..1000)
+                        # while the gathered set stays ~4k entries, so the
+                        # buffer search is still a single small tile.
+                        # The floor of 8 keeps the statistic robust at small
+                        # k (a 1-2 element sample order statistic is pure
+                        # noise); the caps at S and at the finite sample
+                        # count degenerate gracefully for huge k and for
+                        # mostly-masked rows.
+                        m_target = tl.cast(
+                            (4 * k * SAMPLE_LANES + VOCAB_SIZE - 1) // VOCAB_SIZE,
+                            tl.int32,
+                        )
+                        m_target = tl.maximum(m_target, 8)
+                        m_target = tl.minimum(m_target, tl.cast(SAMPLE_LANES, tl.int32))
+                        m_target = tl.minimum(m_target, tl.cast(num_finite_s, tl.int32))
+                        if num_finite_s > 0:
+                            # In-register binary search for the m-th largest
+                            # sample value: 12 halvings shrink the bracket to
+                            # ~range/4096; the residual only moves a few
+                            # boundary tokens in or out of the re-gather,
+                            # which the exact ternary search below absorbs.
+                            lo_s = tl.min(
+                                tl.where(
+                                    logits_s > -float("inf"), logits_s, float("inf")
+                                )
+                            )
+                            hi_s = tl.max(logits_s)
+                            for _ in tl.static_range(12):
+                                if hi_s - lo_s > 1e-3:
+                                    mid_s = (lo_s + hi_s) / 2.0
+                                    cnt_s = tl.sum((logits_s > mid_s).to(tl.int32))
+                                    if cnt_s >= m_target:
+                                        lo_s = mid_s
+                                    else:
+                                        hi_s = mid_s
+                            regather_pivot = lo_s
+                    num_outliers = tl.zeros((), dtype=tl.uint32)
+                    for i in range(0, NUM_TILES):
+                        offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                        mask_n = offs_n < VOCAB_SIZE
+                        logits_blk = tl.load(
+                            LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                        )
+                        fb_mask = (logits_blk > regather_pivot) & mask_n
+                        cumulative_pos = tl.cast(
+                            tl.cumsum(fb_mask) - 1 + num_outliers, tl.int32
+                        )
+                        num_outliers += tl.sum(fb_mask)
+                        write_pos = tl.where(fb_mask, cumulative_pos, -1)
+                        tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
+                    # Safety net: the re-gather above is only statistically
+                    # guaranteed to cover k (an adversarial arrangement of
+                    # values against the sampling lattice can under-cover),
+                    # and the min_logit pivot uses strict `>`, so a row with
+                    # exactly k+1 finite logits and a unique minimum also
+                    # collects only k. In either case, re-gather every
+                    # finite logit: the upstream num_finite_total <= k
+                    # short-circuit guarantees that covers k, so the buffer
+                    # search below is always well-defined. This never fires
+                    # on any distribution measured; it bounds the worst case.
+                    if num_outliers <= k:
+                        num_outliers = tl.zeros((), dtype=tl.uint32)
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            logits_blk = tl.load(
+                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            )
+                            fb_mask = (logits_blk > -float("inf")) & mask_n
+                            cumulative_pos = tl.cast(
+                                tl.cumsum(fb_mask) - 1 + num_outliers, tl.int32
+                            )
+                            num_outliers += tl.sum(fb_mask)
+                            write_pos = tl.where(fb_mask, cumulative_pos, -1)
+                            tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
                     max_range = max_logit
                     min_range = min_logit
+                    search_range = tl.cast(num_outliers, tl.int32)
+                    search_iters = tl.cast(
+                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                        tl.int32,
+                    )
                     found_pivot = 0
                     while found_pivot == 0:
                         k_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
@@ -361,13 +445,14 @@ def _topk_topp_kernel(
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        # Single fused pass over full vocab (same approach
-                        # as the buffer path above).
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
+                        # Ternary search over the re-gathered buffer (L2).
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
+                                0, BLOCK_SIZE_TRUNC
+                            )
+                            mask_n_2 = offs_n < search_range
                             logits_blk2 = tl.load(
-                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
                             )
 
                             above_0 = logits_blk2 > k_pivot_0
