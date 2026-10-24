@@ -50,10 +50,6 @@ class SpeculatorConfig:
     # For performance, prefers requests' full token history on the GPU instead of
     # UVA memory (e.g. ngram).
     prefer_dense_token_history: ClassVar[bool] = False
-    # Reuses the target's input embedding (as hidden-state drafters do) only for
-    # target models that opt in (see `spec_decode_needs_target_embed`), since
-    # e.g. MTP layers usually have their own.
-    target_embed_needs_opt_in: ClassVar[bool] = False
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
