@@ -533,6 +533,9 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
 
         previous_texts = [""] * num_choices
+        # previous_texts is only read when output logging is enabled; skip
+        # the per-chunk accumulation otherwise.
+        log_full_text = self.enable_log_outputs and self.request_logger is not None
 
         try:
             if self.parser_cls is not None:
@@ -707,15 +710,14 @@ class OpenAIServingChat(GenerateBaseServing):
                         res.prompt_token_ids,
                     )
 
-                    previous_texts[i] += delta_text
+                    if log_full_text:
+                        previous_texts[i] += delta_text
 
                     if parser is not None and self._include_reasoning_tokens_details:
                         generated_token_ids[i].extend(output.token_ids)
                         if include_continuous_usage:
                             previous_reasoning_tokens[i] = (
-                                parser.count_reasoning_tokens(
-                                    tuple(generated_token_ids[i])
-                                )
+                                parser.count_reasoning_tokens(generated_token_ids[i])
                             )
 
                     # if the message delta is None (e.g. because it was a
@@ -847,7 +849,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     parser = processor.parser
                     if parser is not None and generated_token_ids[i]:
                         previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                            tuple(generated_token_ids[i])
+                            generated_token_ids[i]
                         )
 
             # once the final token is handled, if stream_options.include_usage

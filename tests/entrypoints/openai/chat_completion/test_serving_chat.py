@@ -1130,7 +1130,7 @@ async def test_streaming_reasoning_usage_counts_across_deltas(
         assert parser.count_reasoning_tokens.call_count == expected_calls
         if include_details:
             assert parser.count_reasoning_tokens.call_args.args == (
-                (10,) + (20,) * (i + 1) + (11, 20, 30),
+                [10] + [20] * (i + 1) + [11, 20, 30],
             )
         choices = [
             chunk
@@ -1388,6 +1388,53 @@ async def test_streaming_reasoning_usage_lifecycle_edges(
         assert call_count == 0
     else:
         assert call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_output_logging_receives_full_text():
+    """Text accumulation for logging must keep working when output logging
+    is enabled, since it is skipped on the hot path otherwise."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_log_outputs = True
+    serving.request_logger = MagicMock()
+    serving.model_config = None
+
+    texts = ["Hello", " ", "world"]
+    request_outputs = []
+    for step, text in enumerate(texts):
+        result = _make_metrics_request_output(metrics=None, token_ids=(100 + step,))
+        result.outputs[0].text = text
+        finished = step == len(texts) - 1
+        result.outputs[0].finish_reason = "stop" if finished else None
+        result.finished = finished
+        request_outputs.append(result)
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-log-full-text")
+    async for _ in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(*request_outputs),
+        "chatcmpl-log-full-text",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    ):
+        pass
+
+    serving.request_logger.log_outputs.assert_called_once_with(
+        request_id="chatcmpl-log-full-text",
+        outputs="Hello world",
+        output_token_ids=None,
+        finish_reason="streaming_complete",
+        is_streaming=True,
+        delta=False,
+    )
 
 
 @pytest.mark.asyncio
