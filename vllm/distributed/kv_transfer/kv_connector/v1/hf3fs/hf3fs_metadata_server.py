@@ -115,36 +115,31 @@ class GlobalMetadataState:
             if rank not in self.rank_metadata:
                 raise ValueError(f"Rank {rank} not initialized")
 
-            # Batch allocate pages for all keys
-            num_pages_needed = len(keys)
+            cached_pages = {
+                key: self.key_metadata[key].rank_to_page[rank]
+                for key, _ in keys
+                if key in self.key_metadata
+                and self.key_metadata[key].is_complete()
+                and rank in self.key_metadata[key].rank_to_page
+            }
+            new_keys = list(
+                dict.fromkeys(key for key, _ in keys if key not in cached_pages)
+            )
+            num_pages_needed = len(new_keys)
             allocated_pages = self.rank_metadata[rank].allocate_pages(num_pages_needed)
 
             if len(allocated_pages) < num_pages_needed:
                 logger.warning(
-                    "Rank %s only allocated %s pages for %s keys",
+                    "Rank %s only allocated %s pages for %s new keys",
                     rank,
                     len(allocated_pages),
                     num_pages_needed,
                 )
 
-            allocation_results = {}
-            for i, (key, prefix_key) in enumerate(keys):
-                if key in self.key_metadata:
-                    key_meta = self.key_metadata[key]
-                    if key_meta.is_complete() and rank in key_meta.rank_to_page:
-                        # key is already fully written, reuse the existing page
-                        # and release the allocated pages back to the free pool.
-                        if i < len(allocated_pages):
-                            self.rank_metadata[rank].release_pages([allocated_pages[i]])
-                        allocation_results[key] = key_meta.rank_to_page[rank]
-                        continue
-
-                if i < len(allocated_pages):
-                    allocation_results[key] = allocated_pages[i]
-                else:
-                    allocation_results[key] = -1  # No pages available
-
-            return allocation_results
+            new_pages = dict(zip(new_keys, allocated_pages))
+            return {
+                key: cached_pages.get(key, new_pages.get(key, -1)) for key, _ in keys
+            }
 
     def confirm_write_for_keys(
         self,
