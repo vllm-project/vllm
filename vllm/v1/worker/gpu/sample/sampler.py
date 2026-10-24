@@ -85,10 +85,12 @@ class Sampler:
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
+        # The FlashInfer and XPU kernels draw fp32 noise, so they can't honor fp64.
         self.use_flashinfer = (
-            not return_sampling_mask and flashinfer_sampler_supported()
+            not return_sampling_mask
+            and not use_fp64_gumbel
+            and flashinfer_sampler_supported()
         )
-        # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
         self.use_xpu_sampler = (
             not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
         )
