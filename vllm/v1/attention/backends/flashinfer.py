@@ -656,11 +656,9 @@ class FlashInferBackend(AttentionBackend):
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
             and device_capability.major in (8, 9, 12)
+            and has_sink
         ):
-            if head_size == 64:
-                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
-            if has_sink:
-                return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+            return "the sink prefill wrapper cannot read an NVFP4 KV cache"
         return None
 
     @classmethod
@@ -932,8 +930,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 raise NotImplementedError(
                     "The DCP prefill wrapper cannot read NVFP4 block scales."
                 )
-            if self.nvfp4_fa2 and self.head_dim == 64:
-                raise NotImplementedError("fa2 prefill misreads NVFP4 at head_size 64.")
             if self.nvfp4_trtllm:
                 if (
                     force_use_trtllm_attention() is False

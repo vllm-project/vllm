@@ -1721,8 +1721,9 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 )
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("q_len", [1, 4])
+@pytest.mark.parametrize("d", [64, 256])
 def test_flashinfer_nvfp4_decode_correctness(
-    default_vllm_config, q_len, use_cuda_graph
+    default_vllm_config, d, q_len, use_cuda_graph
 ):
     """Single-token and spec-decode queries over an NVFP4 cache decode with
     XQA on SM12x and fa2 on SM8x, eager and replayed, and match the fa2
@@ -1731,13 +1732,13 @@ def test_flashinfer_nvfp4_decode_correctness(
 
     from vllm.v1.attention.backends import flashinfer as fi
 
-    seq_lens, bs, d = [40, 300, 1027], 16, 256
+    seq_lens, bs = [40, 300, 1027], 16
     config = create_vllm_config(
         model_name="Qwen/Qwen3-0.6B",
         max_model_len=max(seq_lens),
         block_size=bs,
     )
-    # GQA 6 at head_dim 256, as Qwen3.8-27B at TP=2.
+    # GQA 6, as Qwen3.8-27B at TP=2.
     config.model_config.model_arch_config = replace(
         config.model_config.model_arch_config,
         total_num_attention_heads=24,
