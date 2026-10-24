@@ -53,7 +53,7 @@ async def test_flash_late_interaction_rejects_mm_processor_kwargs_by_default():
         match="Per-request mm_processor_kwargs are disabled",
     ):
         await ServingScores.flash_late_interaction(serving, request)
-    serving._preprocessing.assert_not_called()
+    serving._preprocessing_async.assert_not_called()
 
 
 @pytest.fixture(scope="module", params=[True, False])
