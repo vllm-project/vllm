@@ -905,3 +905,73 @@ clé MEDIUM_VL morte — mur tenu), `400 × 1` (ci-dessus), **0 × 500**.
 Aucune IP inconnue avec 200. Condensation : aucun événement depuis 00:56Z,
 bannière vivante ; deux WARN `STALE-FILE #3230` (05:46Z) = périmètre RSM,
 la vue PG sert de secours comme prévu.
+
+## 2026-10-24 08:17Z — ★ DÉPLOIEMENT `TouchOnHitFsTier` (GO user ~08:05Z) : l'éviction fs est un LRU sur l'usage
+
+**Contexte immédiat** : le moteur était dans un épisode BUSY 7/10 (1 t/s,
+plafond attendu 08:20:53) après un **2ᵉ déclenchement du plafond BUSY à
+07:09:33** (restart propre 07:11:06). Déployer pendant l'épisode fait
+converger les deux événements : le recreate compose est tombé dans la
+branche patiente `BOOTING` du watchdog → **une seule fenêtre d'indispo** au
+lieu de deux (restart watchdog + recreate).
+
+**Pré-vol (dans le CONTENEUR réel, pas sur l'hôte)** — tout PASSÉ :
+- `docker cp` du module + import : OK, `issubclass(FileSystemTierManager)` OK ;
+- `file_mapper` / `get_file_name` présents dans le code installé (vérifiés
+  par `inspect.getsource`) ;
+- `SecondaryTierFactory.get_tier_class({'type':'TouchOnHitFsTier',
+  'module_path':'lru_fs_tier'})` résout vers notre classe (le warning
+  « experimental » est celui du chemin out-of-tree documenté) ;
+- tests unitaires exécutés dans le conteneur : **ALL PASS** (mtime bumpé sur
+  hit d'un bloc réel, miss propre sur fichier absent sans exception, `touch()`
+  sur collection). Hôte sans vllm → les tests DOIVENT tourner in-container.
+
+**Déploiement** : 3 deltas dans `medium-swift15-27b-fstier.yml`
+(`type/module_path` du tier, bind `./../../../kv_tier:/opt/kv_tier:ro`,
+`PYTHONPATH=/middleware:/opt/kv_tier`), `docker compose config` validé avant,
+`up -d` → recreate. **Boot 08:17:27Z, compile 1,23 s** (cache v0320 chaud),
+init moteur 109 s, healthy. **`Loading out-of-tree secondary tier
+'TouchOnHitFsTier' from 'lru_fs_tier'` dans les DEUX process** (EngineCore +
+APIServer), zéro ImportError. **KV 750 747 tokens identique**, nvfp4, noms
+duaux inchangés. Génération réelle : « Quatre » (22 prompt / 3 gen).
+`/dev/shm` purgé post-boot : 21 orphelins, 8,0 G/63 G (13 %).
+
+**Gates restants au prochain cycle** (nécessitent du trafic) :
+1. `chunk_hits{tier=1:fs} > 0` depuis 08:17:27 — preuve que les blocs
+   d'avant le restart resservent ;
+2. **preuve du touch** : les 8 plus vieux blocs échantillonnés à 08:16:13Z
+   (`/tmp/oldest_blocks_before.txt` côté WSL) doivent voir des mtime
+   avancer après des hits — c'est la démonstration LRU en production.
+
+**Rollback** : `MYIA_FS_TOUCH=0` dans l'env conteneur (kill switch SANS
+restart — chaque touch devient no-op) ; retour complet = 3 lignes de profil.
+
+### Découverte adjacente — la « version industrielle » est DÉJÀ dans l'image
+
+`pip list` dans le conteneur : **`lmcache 0.5.6`** et
+**`mooncake-transfer-engine-cuda13 0.3.13.post1`** sont installés dans le
+stock `vllm/vllm-openai:v0.32.0`, et `import lmcache` fonctionne (backend
+cuda auto-sélectionné). Le connecteur `LMCacheConnectorV1` (LRU interne,
+plus de pruneur externe) est donc le **candidat industriel de la prochaine
+itération** — mais basculer de connecteur = revalider nvfp4, la survie au
+restart, le comportement WSL2 : une **fenêtre d'éval dédiée** (méthode du
+20/10), pas un flip en flux tendu. Mooncake (Kimi/Moonshot, FAST'25) reste
+la référence architecture si on passe multi-moteurs. Le module déployé
+aujourd'hui ne remplace PAS ce code industriel : il rebranche le signal de
+fraîcheur (`touch()` sans appelant en v0.32.0) du tiering upstream qu'on
+fait déjà tourner.
+
+### Mesure — où les préfixes des sessions fourchent (→ issues flotte)
+
+Census 3 h (419 requêtes Claude-Code-like, `body_head`) : **préfixe commun
+à TOUTES = 143 octets (~35 tokens)**, toutes paires divergent avant 300 o.
+Fourches nommées : **143 = paragraphe de mode Roo** (`Tu es Roo en mode
+ask-simple/code-simple/orchestrator-simple`), **180 = variante de harnais**
+(Agent SDK vs CLI), **287 = output style**. Toute différence dans le
+premier paragraphe détruit tout le partage aval (outils, CLAUDE.md,
+historique) — d'où l'option structurelle « base commune EN PREMIER,
+mode/style à la FIN » plutôt qu'« harmoniser ».
+Issues : **roo-extensions#4334** (remédiation harnais) + **claudish#640**
+(jumelle, mesure au hub) + DM po-2025:claudish. Enjeu en $ : cache de prompt
+Anthropic à 0,1× sur le socle partagé, prefix caching OpenAI ≥1024 tokens,
+et re-prefill évité sur vllm-myia.
