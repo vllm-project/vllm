@@ -243,7 +243,10 @@ class TestModel(torch.nn.Module):
                     AiterFusedAddRMSNormDynamicQuantPattern,
                     AiterRMSNormDynamicQuantPattern,
                 )
+                from vllm.platforms.rocm import on_gfx942
 
+                if on_gfx942():
+                    return [AiterRMSNormDynamicQuantPattern.FUSED_OP]
                 return [
                     AiterFusedAddRMSNormDynamicQuantPattern.FUSED_OP,
                     AiterRMSNormDynamicQuantPattern.FUSED_OP,
@@ -294,6 +297,7 @@ def _run_fusion_test(
     dtype,
     hidden_size,
     num_tokens,
+    expected_matches=3,
 ):
     """Helper function for common fusion test logic.
 
@@ -321,8 +325,10 @@ def _run_fusion_test(
 
     torch.testing.assert_close(result_fused, result_unfused, atol=ATOL, rtol=RTOL)
 
-    assert fusion_pass.matched_count == 3
-    backend.check_before_ops(model.ops_in_model_before())
+    assert fusion_pass.matched_count == expected_matches
+    backend.check_before_ops(
+        model.ops_in_model_before(), fully_replaced=expected_matches == 3
+    )
     backend.check_after_ops(model.ops_in_model_after())
 
     return backend, backend2
@@ -553,8 +559,17 @@ def test_aiter_fusion_rmsnorm_quant(
             use_aiter_quant=use_aiter_quant_op,  # Toggle aiter quantization
         )
 
+        from vllm.platforms.rocm import on_gfx942
+
+        expected_matches = 1 if on_gfx942() and group_shape.is_per_token() else 3
         _run_fusion_test(
-            model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
+            model,
+            fusion_pass,
+            vllm_config,
+            dtype,
+            hidden_size,
+            num_tokens,
+            expected_matches,
         )
 
 

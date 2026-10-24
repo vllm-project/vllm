@@ -187,9 +187,14 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import on_gfx942
 
+        # TODO(akaratza): drop the gfx942 gate once AITER custom allreduce stores
+        # bf16 with RNE on gfx942 (ROCm/aiter#6300 does not cover it).
         return (
-            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
+            rocm_aiter_ops.is_enabled()
+            and cfg.parallel_config.tensor_parallel_size > 1
+            and not on_gfx942()
         )
 
     return (
@@ -247,7 +252,7 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if not rocm_aiter_ops.is_enabled():
+    if not rocm_aiter_ops.is_enabled() or cfg.model_config is None:
         return False
     return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
 

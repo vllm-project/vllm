@@ -1534,6 +1534,7 @@ if is_native_runtime; then
   echo "--- Test log"
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
+  export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-0}"
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
@@ -1804,6 +1805,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    -e "VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0}" \
     "${cpu_platform_env[@]}" \
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \

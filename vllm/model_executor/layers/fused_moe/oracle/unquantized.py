@@ -319,7 +319,7 @@ def select_unquantized_moe_backend(
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         skip_aiter_moe = (
-            not envs.VLLM_ROCM_USE_AITER
+            not rocm_aiter_ops.is_enabled()
             or not envs.VLLM_ROCM_USE_AITER_MOE
             or rocm_aiter_ops.is_rdna_aiter_enabled()
         )
