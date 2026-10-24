@@ -28,6 +28,9 @@ from .interface import (
     get_assigned_physical_gpu_ids,
 )
 
+# The CPU attention backend's block size granularity (CPUAttentionBackend).
+_CPU_ATTN_BLOCK_MULTIPLE = 32
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -233,6 +236,8 @@ class CpuPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
+        # A simulation keeps the settings of the GPU deployment it models.
+        simulated = vllm_config.simulation_config.simulate_forward
 
         # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
         # which is still being resolved while this platform class is loading.
@@ -308,8 +313,15 @@ class CpuPlatform(Platform):
                 )
             cache_config.block_size = 256
         elif (
-            cache_config.user_specified_block_size and cache_config.block_size % 32 != 0
+            cache_config.user_specified_block_size
+            and cache_config.block_size % _CPU_ATTN_BLOCK_MULTIPLE != 0
         ):
+            if simulated:
+                raise ValueError(
+                    "Simulated execution on the CPU platform needs a KV block "
+                    f"size that is a multiple of {_CPU_ATTN_BLOCK_MULTIPLE}, "
+                    f"got {cache_config.block_size}."
+                )
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -317,7 +329,8 @@ class CpuPlatform(Platform):
 
         # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
-            torch.cpu._is_avx512_bf16_supported()
+            not simulated
+            and torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
             mamba_backend = _cpu_mamba_backend(vllm_config)
@@ -339,18 +352,20 @@ class CpuPlatform(Platform):
 
         # Legacy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
-        if env_key in os.environ and os.environ[env_key] != "":
+        if not simulated and os.environ.get(env_key, "") != "":
             kv_cache_space = int(os.environ[env_key])
             cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
 
         scheduler_config = vllm_config.scheduler_config
-        # async scheduling is not required on CPU
-        scheduler_config.async_scheduling = False
+        if not simulated:
+            # async scheduling is not required on CPU
+            scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
         if (
             os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
             and parallel_config.distributed_executor_backend == "uni"
+            and not simulated
         ):
             # OMP requires the MP executor to function correctly, UniProc
             # is not supported as it is not possible to set the OMP
@@ -559,8 +574,12 @@ class CpuPlatform(Platform):
         # VllmConfig.__post_init__ and would undo the hybrid alignment below.
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
+            # A simulation takes the minimum, the closest to the GPU default.
+            simulated = vllm_config.simulation_config.simulate_forward
             cache_config.block_size = cls._preferred_block_size_for_backends(
-                backend_classes, 128, vllm_config
+                backend_classes,
+                _CPU_ATTN_BLOCK_MULTIPLE if simulated else 128,
+                vllm_config,
             )
         if not model_config.is_hybrid:
             return

@@ -1904,6 +1904,27 @@ def scaled_fp8_quant(
     return output, scale
 
 
+def _fp8_quant_fake(*args: object) -> None:
+    # The FP8 quantization ops write into preallocated tensors.
+    return None
+
+
+for _op in (
+    "static_scaled_fp8_quant",
+    "dynamic_scaled_fp8_quant",
+    "dynamic_per_token_scaled_fp8_quant",
+):
+    # The CPU build defines them as composite placeholders, which take no fake.
+    if (
+        hasattr(torch.ops, "_C")
+        and hasattr(torch.ops._C, _op)
+        and not torch._C._dispatch_has_kernel_for_dispatch_key(
+            f"_C::{_op}", "CompositeImplicitAutograd"
+        )
+    ):
+        register_fake(f"_C::{_op}")(_fp8_quant_fake)
+
+
 # int8
 def scaled_int8_quant(
     input: torch.Tensor,

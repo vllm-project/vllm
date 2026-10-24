@@ -42,6 +42,7 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
+from vllm.config.simulation import SimulationConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
@@ -128,6 +129,8 @@ __all__ = [
     "ReasoningConfig",
     # From vllm.config.scheduler
     "SchedulerConfig",
+    # From vllm.config.simulation
+    "SimulationConfig",
     # From vllm.config.speculative
     "SpeculativeConfig",
     # From vllm.config.speech_to_text

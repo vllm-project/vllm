@@ -51,6 +51,7 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
+from .simulation import SimulationConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
@@ -373,6 +374,8 @@ class VllmConfig:
     """Attention configuration."""
     aux_output_config: AuxOutputConfig = Field(default_factory=AuxOutputConfig)
     """Execution auxiliary output configuration."""
+    simulation_config: SimulationConfig = Field(default_factory=SimulationConfig)
+    """Simulated execution configuration."""
     engram_config: EngramConfig | None = None
     """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
@@ -557,6 +560,8 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.aux_output_config.compute_hash())
+        if self.simulation_config.simulate_forward:
+            vllm_factors.append(self.simulation_config.compute_hash())
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = safe_hash(
@@ -712,6 +717,17 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.simulation_config.simulate_forward:
+            unsupported = self._get_v2_model_runner_unsupported_features()
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False or not HAS_TRITON:
+                unsupported.append("VLLM_USE_V2_MODEL_RUNNER=0 or no Triton")
+            if unsupported:
+                raise ValueError(
+                    "Simulated forward runs on Model Runner V2, which does not "
+                    f"support {', '.join(unsupported)}."
+                )
+            return True
+
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
@@ -1520,6 +1536,8 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        if self.model_config is not None:
+            self.simulation_config.verify_and_update_config(self)
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 

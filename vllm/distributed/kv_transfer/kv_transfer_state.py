@@ -27,6 +27,12 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
+def set_kv_transfer_group(connector: KVConnectorBaseType | None) -> None:
+    """Make `connector` this process's KV connector, or clear it."""
+    global _KV_CONNECTOR_AGENT
+    _KV_CONNECTOR_AGENT = connector
+
+
 def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
