@@ -1273,3 +1273,71 @@ def test_combo_kernel_defaults_without_inductor_deterministic_setting():
 
     assert config.inductor_compile_config["combo_kernels"] is True
     assert config.inductor_compile_config["benchmark_combo_kernel"] is True
+
+
+def test_xpu_moe_shared_fusion_disabled_off_xpu():
+    with patch.object(current_platform, "is_xpu", return_value=False):
+        pass_config = PassConfig(fuse_xpu_moe_shared=True)
+    assert not pass_config.fuse_xpu_moe_shared
+
+
+@pytest.mark.parametrize(
+    "dtype,expected_enabled",
+    [(torch.float16, True), (torch.bfloat16, True), (torch.float32, False)],
+)
+def test_xpu_moe_shared_fusion_compile_ranges(dtype, expected_enabled):
+    with patch.object(current_platform, "is_xpu", return_value=True):
+        vllm_config = VllmConfig(
+            scheduler_config=SchedulerConfig(
+                max_num_seqs=128,
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                is_encoder_decoder=False,
+            ),
+        )
+        vllm_config.model_config = MagicMock(dtype=dtype)
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_xpu_moe_shared=True),
+        )
+        vllm_config._set_compile_ranges()
+
+    pass_config = vllm_config.compilation_config.pass_config
+    assert pass_config.fuse_xpu_moe_shared == expected_enabled
+    endpoints = vllm_config.compilation_config.compile_ranges_endpoints
+    assert (pass_config.xpu_moe_shared_fusion_max_token_num in endpoints) == (
+        expected_enabled
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_xpu_moe_shared_fusion_cache_tracks_kernel_availability(monkeypatch, enabled):
+    import vllm.compilation.passes.fusion.xpu_fusion as fusion
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    config = CompilationConfig(pass_config=PassConfig(fuse_xpu_moe_shared=enabled))
+    op = SimpleNamespace(
+        default=SimpleNamespace(_schema="test_moe(Tensor x) -> Tensor")
+    )
+    monkeypatch.setattr(
+        torch.ops._xpu_C, "moe_shared_fused_decode_interface", op, raising=False
+    )
+    monkeypatch.setattr(fusion, "_xpu_moe_shared_fused_available", lambda: False)
+    unavailable = config.compute_hash()
+    monkeypatch.setattr(fusion, "_xpu_moe_shared_fused_available", lambda: True)
+    assert (config.compute_hash() != unavailable) == enabled
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_xpu_moe_shared_fusion_cache_tracks_pass_source(monkeypatch, enabled):
+    from pathlib import Path
+
+    import vllm.compilation.passes.fusion.xpu_fusion as fusion
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(fusion, "_xpu_moe_shared_fused_available", lambda: False)
+    config = CompilationConfig(pass_config=PassConfig(fuse_xpu_moe_shared=enabled))
+    monkeypatch.setattr(Path, "read_text", lambda self: "original pass implementation")
+    original = config.compute_hash()
+    monkeypatch.setattr(Path, "read_text", lambda self: "updated pass implementation")
+    assert (config.compute_hash() != original) == enabled
