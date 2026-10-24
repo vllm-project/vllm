@@ -621,6 +621,75 @@ mêmes charges, **sans tier fs** (RAM seule) — un redémarrage. À faire en
 fenêtre, et c'est le seul geste qui répond à « ce tier aide-t-il ou coûte-t-il
 plus qu'il ne rapporte ». **Ne pas relancer d'hypothèse avant cette mesure.**
 
+## 24/10 00:41Z — ★ PREMIER ARBITRAGE BUSY MULTI-CYCLES : 6/10, zéro restart, et la latence du tier mesurée DANS la fenêtre
+
+**La porte v6 a fait son travail dans un cas qu'elle n'avait jamais couvert.**
+Six cycles BUSY consécutifs, 12 minutes, `RUNNING` jamais interrompu :
+
+```
+23:46:26 BUSY (2/10) p 61 295 997 -> 61 791 049   g 344 293 -> 344 405
+23:48:26 BUSY (3/10) p 61 791 049 -> 62 002 009
+23:50:26 BUSY (4/10) p 62 002 009 -> 62 423 897
+23:52:26 BUSY (5/10) p 62 423 897 -> 62 761 047
+23:54:26 BUSY (6/10) p 62 761 047 -> 63 023 073   g 344 782 -> 345 029
+23:56:26 RECOVERED (decode ok after 1 wedge fails, BUSY streak was 6)
+```
+
+736 tokens générés en 12 min = **~1 tok/s agrégé**. Sous v5 c'était un
+**redémarrage** qui aurait effacé 63 M de tokens de préfixe pour retomber dans
+le même état. Le plafond `BUSY_MAX=10` n'a pas été atteint (streak max 6).
+
+**La mesure qui manquait, prise dans la fenêtre elle-même** — latence moyenne
+par appel de lookup du tier fs, par intervalle de 10 s :
+
+| heure | latence | nb d'appels |
+|---|---|---|
+| 23:40:30 (avant) | 862 ms | 238 |
+| **23:47:22** | **3 510 ms** | 305 |
+| **23:49:52** | **11 366 ms** | 286 |
+| **23:53:13** | **4 528 ms** | 120 |
+| **23:54:23** | **4 867 ms** | 141 |
+| 23:58:13 (après reprise) | **371 ms** | 251 |
+| 23:58:43 | 603 ms | 159 |
+
+Les latences de plusieurs secondes sont **concentrées dans la fenêtre BUSY** et
+retombent sous la seconde dès la reprise. Corrélation forte, mécanisme
+plausible (le scheduler attend la réponse du tier avant d'avancer).
+
+**Réserve honnête sur la causalité.** La latence mesurée est un **délai
+d'attente en file**, pas un temps CPU : 305 appels à 3,5 s en 10 s donne ~105
+appels en vol (loi de Little), cohérent avec des files de 16 threads. Une
+corrélation inverse reste possible — un moteur bloqué pour une autre raison
+ralentit aussi son pool de lookup. Le sens de la flèche n'est pas établi, seule
+la contemporanéité l'est. **C'est pourquoi l'A/B sans tier reste la prochaine
+étape, et pas une conclusion.**
+
+**Reste du cycle** : health 200 (4 ms), `RC=0`, **3 h 02 sans restart**,
+260 sondes OK, OOM 0, VRAM 21 429 / 20 650 MiB, `/dev/shm` 8,1 G, disque
+invité 71 % (281 GB), commit hôte **78,9 %** (marge 84,2 GB, sous le seuil 85 %),
+G: 85 % et écriture OK.
+
+**Le plafond 96 GiB se comporte exactement comme prévu** : passage de
+00:20:03Z, `cap=96`, `bytes_total 66,5 GiB`, **`over=0`, `supprimé 0/0 GiB`,
+0 erreur**. Première purge depuis le changement : aucune suppression. Le tier
+n'a pas encore regrossi jusqu'au nouveau plafond.
+
+**Census 2 h** : 518 requêtes, **268 au-dessus de 100 K tokens (52 %)** ;
+statuts **200 × 495**, **400 × 3**, **401 × 20**.
+- Les 3 × 400 sont tous du hub (Bun, `90.65.170.144`), corps **875 K à 1 007 K**
+  → signature **#431 connue** (sur-fenêtre 262 144). Cadence plus élevée que
+  d'habitude (1/2 h), à surveiller sans alerter.
+- Les 401 sont la clé **MEDIUM_VL morte** `fp=1f7f6080cb65` (18) depuis
+  `108.165.33.236` (70 requêtes, **0 × 200**) : nuisance connue.
+- **IP nouvelle, sans 200** : `116.202.50.2` (3 requêtes, 0 × 200) — pas dans
+  la carte. Pas d'alerte (la règle exige des 200), mais à revoir si elle
+  revient chargée.
+
+**Vigie split-brain** : `IdentityManager` émet deux fois à 00:26:47Z
+« Recent heartbeat found for myia-ai-01 (0s ago) — concurrent instance
+possible but not blocking ». Périmètre RSM, non bloquant, à relayer si ça se
+répète — ce n'est pas un cron vLLM.
+
 **Leçons d'instrument** (deux erreurs corrigées avant publication) :
 - moyenner un ratio de cache sur des fenêtres à 16 tokens de prompt donne
   53 % de « cache » là où la vraie valeur est 92 % — un dénominateur
