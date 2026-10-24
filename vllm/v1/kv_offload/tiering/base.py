@@ -95,6 +95,23 @@ class JobResult:
     transfer_bytes: int | None = None
 
 
+@dataclass(frozen=True)
+class LookupProbe:
+    """One key's outcome from :meth:`ParentManager.probe_batch`.
+
+    ``result is None`` means the key is present in ``promotion_tier`` but has
+    not been promoted yet. Promotion allocates primary-tier capacity and can
+    evict other probed keys, so it is deferred until every primary HIT in the
+    batch has been pinned. ``result is RETRY`` means at least one tier is
+    still resolving the key asynchronously; callers must probe again instead
+    of treating it as MISS.
+    """
+
+    key: OffloadKey
+    result: LookupResult | None
+    promotion_tier: int | None = None
+
+
 class ParentManager(ABC):
     """Interface for secondary tiers to call back into the tiering manager.
 
@@ -104,15 +121,23 @@ class ParentManager(ABC):
 
     Required call sequence for each remote request:
         1. on_new_request(req_context)  — set up per-request state
-        2. lookup(key, req_context)     — check chunk availability
-           (repeat per chunk)
-        3. create_store_job(keys, req_context) — pin chunks and get a
-           job handle
-        4. on_request_finished(req_context) — clean up per-request state
+        2. probe_batch(keys, req_context) — check chunk availability
+           without starting promotions
+        3. create_store_job(hit_keys, req_context) — pin every primary
+           HIT from step 2 in one batch
+        4. promote_batch(probes, req_context) — start promotions for the
+           keys that were found in a secondary tier
+        5. on_request_finished(req_context) — clean up per-request state
 
-    Steps 2-3 may be interleaved. Step 4 must be called even if no
-    chunks were found, to avoid leaking async lookup state (e.g. in
-    the fs tier's AsyncLookupManager).
+    ``lookup()`` remains the single-key entry point and keeps its old
+    behavior (a secondary HIT starts a promotion immediately). Batch callers
+    that probe several keys must use ``probe_batch`` instead: ``lookup()``
+    promotes inline, and that promotion may evict an earlier HIT of the same
+    batch before it is pinned.
+
+    Step 3 must complete for the whole batch before step 4 runs. Step 5 must
+    be called even if no chunks were found, to avoid leaking async lookup
+    state (e.g. in the fs tier's AsyncLookupManager).
     """
 
     @abstractmethod
@@ -120,6 +145,34 @@ class ParentManager(ABC):
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult: ...
+
+    @abstractmethod
+    def probe_batch(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> list[LookupProbe]:
+        """Check ``keys`` without pinning anything or starting promotions.
+
+        Returns one :class:`LookupProbe` per key, in input order. HIT and
+        MISS are final; RETRY means a tier is still resolving the key and the
+        caller must probe again; ``result is None`` means a secondary-tier HIT
+        whose promotion must be requested via :meth:`promote_batch` after all
+        HITs are pinned.
+        """
+
+    @abstractmethod
+    def promote_batch(
+        self,
+        probes: Collection[LookupProbe],
+        req_context: ReqContext,
+    ) -> dict[OffloadKey, LookupResult]:
+        """Start promotions for probes with ``result is None``.
+
+        Callers must pin every primary HIT of the same probe batch first.
+        Returns the terminal lookup result per promoted key: HIT_PENDING when
+        a promotion started, MISS when the primary tier could not make room.
+        """
 
     @abstractmethod
     def create_store_job(

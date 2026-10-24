@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    LookupProbe,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -335,6 +336,12 @@ class _RecordingParent:
 
     def lookup(self, key, ctx):
         return LookupResult.MISS
+
+    def probe_batch(self, keys, ctx):
+        return [LookupProbe(key, LookupResult.MISS) for key in keys]
+
+    def promote_batch(self, probes, ctx):
+        return {}
 
     def create_store_job(self, keys, ctx):
         raise AssertionError("unreachable")
