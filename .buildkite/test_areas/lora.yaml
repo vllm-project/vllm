@@ -42,6 +42,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/models/transformers/moe.py
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
@@ -75,6 +76,7 @@ steps:
       source_file_dependencies:
       - vllm/lora
       - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/models/transformers/moe.py
       - vllm/platforms/rocm.py
       - tests/lora
       commands:

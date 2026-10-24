@@ -722,7 +722,6 @@ Some HF processors directly insert feature tokens without replacing anything in 
 Examples:
 
 - BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
-- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Handling prompt updates unrelated to multi-modal data
 
@@ -731,7 +730,6 @@ Examples:
 Examples:
 
 - Molmo2 (prepends `bos_token`): [vllm/model_executor/models/molmo2.py](../../../vllm/model_executor/models/molmo2.py)
-- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 

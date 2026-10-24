@@ -1334,30 +1334,6 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Molmo
-def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "allenai/Molmo-7B-D-0924"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    prompts = [
-        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Molmo2
 def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "allenai/Molmo2-8B"
@@ -2249,7 +2225,6 @@ model_example_map = {
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,
-    "molmo": run_molmo,
     "molmo2": run_molmo2,
     "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
