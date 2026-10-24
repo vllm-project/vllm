@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gzip
 import json
 import subprocess
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,9 +11,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from vllm.benchmarks.forward import profile as forward_profile
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.main import run_case
-from vllm.benchmarks.forward.profile import summarize
+from vllm.benchmarks.forward.profile import profile_graph, summarize
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 
@@ -126,6 +129,59 @@ def test_profile_summary():
     ]
     with pytest.raises(ValueError, match="replays"):
         summarize(events[:-1], replays=2, skip=1)
+
+
+def test_torch_profile_does_not_toggle_cuda_profiler(tmp_path, monkeypatch):
+    """torch.profiler and cudaProfilerStart must not own CUPTI together."""
+
+    class FakeGraph:
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+
+    class FakeProfiler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def export_chrome_trace(self, path):
+            events = [
+                {"cat": "kernel", "name": "kernel", "ts": i * 10, "dur": 1}
+                for i in range(3)
+            ]
+            with gzip.open(path, "wt") as f:
+                json.dump({"traceEvents": events}, f)
+
+    def unexpected_cuda_profiler_call():
+        pytest.fail("cudaProfilerStart/Stop must not run under torch.profiler")
+
+    monkeypatch.setattr(
+        forward_profile.torch.profiler, "profile", lambda activities: FakeProfiler()
+    )
+    monkeypatch.setattr(
+        forward_profile.torch.cuda.nvtx, "range", lambda _: nullcontext()
+    )
+    monkeypatch.setattr(forward_profile.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(
+        forward_profile.torch.cuda.profiler,
+        "start",
+        unexpected_cuda_profiler_call,
+    )
+    monkeypatch.setattr(
+        forward_profile.torch.cuda.profiler,
+        "stop",
+        unexpected_cuda_profiler_call,
+    )
+
+    graph = FakeGraph()
+    summary = profile_graph(graph, "test", str(tmp_path / "profile"), skip=0)
+
+    assert graph.replays == 3
+    assert summary is not None and summary["activities"] == 1
 
 
 @pytest.mark.benchmark
