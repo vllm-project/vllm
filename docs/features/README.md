@@ -3,6 +3,7 @@
 ## KV Cache Offloading
 
 - [MORI-UMBP embedded DRAM](umbp_embedded_dram.md)
+- [MORI-UMBP standalone DRAM](umbp_standalone.md)
 
 ## Compatibility Matrix
 
