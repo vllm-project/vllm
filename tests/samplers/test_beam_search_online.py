@@ -471,11 +471,13 @@ async def test_beam_search_respects_skip_special_tokens(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
+@pytest.mark.parametrize("api_surface", ["unknown", "messages"])
 async def test_beam_search_abort_returns_partial_outputs(
     monkeypatch,
     abort_after: int,
     prompt_token: int,
     terminal_logprobs: SampleLogprobs | None,
+    api_surface: str,
 ) -> None:
     """Abort returns each beam's tokens and scores from the last completed step."""
     calls = 0
@@ -483,6 +485,7 @@ async def test_beam_search_abort_returns_partial_outputs(
     async def generate(prompt, *args, **kwargs):
         nonlocal calls
         calls += 1
+        assert kwargs["api_surface"] == api_surface
         depth = len(prompt["prompt_token_ids"]) - 1
         assert depth <= abort_after, "Beam search continued after abort"
         result = await anext(_EngineClient().generate(prompt, *args, **kwargs))
@@ -509,6 +512,7 @@ async def test_beam_search_abort_returns_partial_outputs(
             prompt,
             "request",
             BeamSearchParams(beam_width=2, max_tokens=4, watermarking=False),
+            api_surface=api_surface,
         )
     ]
 

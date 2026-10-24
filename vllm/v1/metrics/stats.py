@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
+API_SURFACES = ("messages", "chat_completions", "completions", "unknown")
+
+
+def normalize_api_surface(api_surface: str) -> str:
+    """Bound API attribution to the supported metric label values."""
+    return api_surface if api_surface in API_SURFACES else "unknown"
+
+
 @dataclass
 class BaseCacheStats:
     """Stores cache hit statistics."""
@@ -283,6 +291,8 @@ class RequestStateStats:
     # Track if this request asked for the watermark but could not use it
     is_watermark_skipped: bool = False
 
+    api_surface: str = "unknown"
+
 
 @dataclass
 class FinishedRequestStats:
@@ -302,6 +312,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    api_surface: str = "unknown"
 
 
 @dataclass
@@ -474,7 +485,7 @@ class PromptTokenStats:
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
-    def __init__(self):
+    def __init__(self, enable_api_surface_metrics: bool = False):
         self.iteration_timestamp = time.time()
         # Read once per iteration: update_from_output runs per request per
         # step, and each envs attribute access re-reads the environment
@@ -482,12 +493,18 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
+        self.num_generation_tokens_by_api_surface: defaultdict[str, int] | None = (
+            defaultdict(int) if enable_api_surface_metrics else None
+        )
+        self.prompt_token_stats_by_api_surface: (
+            defaultdict[str, PromptTokenStats] | None
+        ) = defaultdict(PromptTokenStats) if enable_api_surface_metrics else None
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
-        self.time_to_first_tokens_iter: list[float] = []
-        self.inter_token_latencies_iter: list[float] = []
+        self.time_to_first_tokens_iter: list[tuple[str, float]] = []
+        self.inter_token_latencies_iter: list[tuple[str, float]] = []
         self.num_corrupted_reqs: int = 0
         self.num_watermarked_reqs: int = 0
         self.num_watermark_skipped_reqs: int = 0
@@ -518,12 +535,24 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
+        if self.num_generation_tokens_by_api_surface is not None:
+            api_surface = normalize_api_surface(req_stats.api_surface)
+            self.num_generation_tokens_by_api_surface[api_surface] += (
+                num_new_generation_tokens
+            )
+            if is_prefilling and output.prefill_stats is not None:
+                assert self.prompt_token_stats_by_api_surface is not None
+                self.prompt_token_stats_by_api_surface[api_surface].update_from_output(
+                    output.prefill_stats
+                )
         if is_prefilling:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
-            self.time_to_first_tokens_iter.append(first_token_latency)
+            self.time_to_first_tokens_iter.append(
+                (req_stats.api_surface, first_token_latency)
+            )
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
@@ -553,7 +582,7 @@ class IterationStats:
             req_stats.first_token_ts = engine_core_timestamp
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+            self.inter_token_latencies_iter.append((req_stats.api_surface, itl))
 
         req_stats.last_token_ts = engine_core_timestamp
 
@@ -630,6 +659,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            api_surface=req_stats.api_surface,
         )
         self.finished_requests.append(finished_req)
 

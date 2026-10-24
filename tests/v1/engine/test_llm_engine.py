@@ -211,7 +211,8 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             )
 
 
-def test_engine_metrics(vllm_runner, example_prompts):
+@pytest.mark.parametrize("enable_api_surface_metrics", [False, True])
+def test_engine_metrics(vllm_runner, example_prompts, enable_api_surface_metrics):
     max_tokens = 100
     # Use spec decoding to test num_accepted_tokens_per_pos
     speculative_config = {
@@ -225,6 +226,7 @@ def test_engine_metrics(vllm_runner, example_prompts):
         MODEL,
         speculative_config=speculative_config,
         disable_log_stats=False,
+        enable_api_surface_metrics=enable_api_surface_metrics,
     ) as vllm_model:
         llm: LLM = vllm_model.llm
         sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
@@ -241,10 +243,13 @@ def test_engine_metrics(vllm_runner, example_prompts):
 
         metrics = llm.get_metrics()
 
-        def find_metric(name) -> list[Metric]:
+        def find_metric(name, api_surface: str | None = None) -> list[Metric]:
             found = []
             for metric in metrics:
-                if metric.name == name:
+                if metric.name == name and (
+                    api_surface is None
+                    or metric.labels.get("api_surface") == api_surface
+                ):
                     found.append(metric)
             return found
 
@@ -253,18 +258,23 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert isinstance(num_requests_running[0], Gauge)
         assert num_requests_running[0].value == 0.0
 
-        generation_tokens = find_metric("vllm:generation_tokens")
+        api_surface = "unknown" if enable_api_surface_metrics else None
+        generation_tokens = find_metric("vllm:generation_tokens", api_surface)
         assert len(generation_tokens) == 1
         assert isinstance(generation_tokens[0], Counter)
         assert generation_tokens[0].value == total_tokens
+        assert generation_tokens[0].labels.get("api_surface") == api_surface
 
-        request_generation_tokens = find_metric("vllm:request_generation_tokens")
+        request_generation_tokens = find_metric(
+            "vllm:request_generation_tokens", api_surface
+        )
         assert len(request_generation_tokens) == 1
         assert isinstance(request_generation_tokens[0], Histogram)
         assert "+Inf" in request_generation_tokens[0].buckets
         assert request_generation_tokens[0].buckets["+Inf"] == n_prompts
         assert request_generation_tokens[0].count == n_prompts
         assert request_generation_tokens[0].sum == total_tokens
+        assert request_generation_tokens[0].labels.get("api_surface") == api_surface
 
         num_accepted_tokens_per_pos = find_metric(
             "vllm:spec_decode_num_accepted_tokens_per_pos"

@@ -37,6 +37,85 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+### API attribution
+
+By default, request metrics retain their existing labels and aggregate traffic
+across APIs. To distinguish Messages, Chat Completions, and Completions traffic,
+start the server with `--enable-api-surface-metrics`:
+
+```console
+vllm serve <model> --enable-api-surface-metrics
+```
+
+This opt-in setting adds an `api_surface` label to the following request metrics:
+
+- `vllm:request_success_total` (with the existing `finished_reason` label)
+- `vllm:time_to_first_token_seconds`
+- `vllm:inter_token_latency_seconds`
+- `vllm:request_time_per_output_token_seconds`
+- `vllm:e2e_request_latency_seconds`
+- `vllm:request_queue_time_seconds`
+- `vllm:request_inference_time_seconds`
+- `vllm:request_prefill_time_seconds`
+- `vllm:request_decode_time_seconds`
+- `vllm:prompt_tokens_total`
+- `vllm:generation_tokens_total`
+- `vllm:prompt_tokens_by_source_total` (with the existing `source` label)
+- `vllm:prompt_tokens_cached_total`
+- `vllm:request_prompt_tokens`
+- `vllm:request_generation_tokens`
+- `vllm:request_prefill_kv_computed_tokens`
+
+Its values are `messages` for `/v1/messages`, `chat_completions` for
+`/v1/chat/completions`, `completions` for `/v1/completions`, and `unknown`
+for callers without one of these API identities, including offline generation
+and Cohere requests.
+When enabled, the label applies to streaming and non-streaming generation,
+including requests without tools, and does not require tracing. See the
+[OpenTelemetry guide](../../examples/observability/opentelemetry/README.md#api-attribution)
+for trace attribution.
+
+Histogram buckets and counting semantics are unchanged. These metrics describe
+engine requests: multiple generated choices contribute separately, and errors
+rejected before engine admission are excluded. Enabling the setting replaces
+the aggregate series with four sets of series per model and engine, one per API
+value; it does not export both aggregate and per-API copies. Disabling it restores
+the original labels. Changing the setting requires a server restart.
+
+Token counters update as engine outputs arrive, including before a request
+finishes. Prompt tokens are counted at prefill completion, with their existing
+local-compute, local-cache, and external-transfer breakdown. Generation tokens
+count all emitted token IDs, including multiple tokens in one engine output.
+The scheduler's `vllm:prompt_tokens_cached_by_source_total` counter tracks
+cache-tier hits at admission and remains engine-wide, as do scheduler gauges
+and the per-iteration token histogram.
+
+For example, request throughput by API can be queried with:
+
+```promql
+sum by (api_surface) (rate(vllm:request_success_total[5m]))
+```
+
+For output token throughput by API:
+
+```promql
+sum by (api_surface) (rate(vllm:generation_tokens_total[5m]))
+```
+
+To query p95 end-to-end latency by API:
+
+```promql
+histogram_quantile(0.95,
+  sum by (api_surface, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+```
+
+Before enabling the setting, update dashboard aggregations and vector joins
+that assume a single series per model, engine, and finish reason. For totals
+across APIs, aggregate with `sum without (api_surface)`. Each label combination
+adds series, including histogram buckets, so account for the increased scrape
+and storage volume. Existing queries retain their original behavior while the
+setting remains disabled.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"

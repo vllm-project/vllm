@@ -614,6 +614,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
+    _api_surface: Literal["chat_completions", "messages", "unknown"] = PrivateAttr(
+        default="chat_completions"
+    )
+
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
