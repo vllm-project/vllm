@@ -30,7 +30,7 @@ class GateLinear(ReplicatedLinear):
        any shape)
     4. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
     5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
-       M>=2048)
+       M>32; split-K Triton below M=2048, hipBLASLt from there)
     6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype); gfx950
        routes low M through the tier 2 kernel
     7. F.linear via ReplicatedLinear (ultimate fallback)
@@ -411,7 +411,7 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     weight_split: torch.Tensor,
 ) -> torch.Tensor:
-    """Run the ROCm bf16x3 router GEMM, or fall back for small batches.
+    """Run the ROCm bf16x3 router GEMM, or the fp32 kernel for tiny batches.
 
     This must be a custom op because our torch.compile integration does not
     support runtime dispatching on num_tokens: models carrying fp32 router
@@ -423,10 +423,8 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
         bf16x3_router_gemm_rocm,
     )
 
-    if bf16x3_router_gemm_rocm.is_supported(x, weight):
-        return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
-    # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
-    # checked ahead of.
+    # The low-M gfx950 kernel this tier is checked ahead of is faster for the
+    # smallest batches.
     if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
             can_use_rocm_fp32_router_gemm,
@@ -436,6 +434,8 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
         x = x.contiguous()
         if can_use_rocm_fp32_router_gemm(x, weight):
             return rocm_fp32_router_gemm(x, weight)
+    if bf16x3_router_gemm_rocm.is_supported(x, weight):
+        return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
     return torch.nn.functional.linear(x.float(), weight)
 
 
