@@ -371,6 +371,16 @@ class SimpleCPUOffloadScheduler:
         if request.skip_reading_prefix_cache:
             return 0, False
 
+        if num_computed_tokens and not self._lazy_mode:
+            # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
+            # but eager stores skip it, so move it to the MRU end here.
+            prefix_hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
+                request.block_hashes, num_computed_tokens
+            )
+            prefix_blocks = [b for grp in prefix_hit for b in grp if not b.is_null]
+            self.cpu_block_pool.touch(prefix_blocks)
+            self.cpu_block_pool.free_blocks(reversed(prefix_blocks))
+
         if num_computed_tokens % self.block_size != 0:
             # Transfers are whole-block copies, so an external suffix cannot
             # start in the middle of a destination block. When the GPU-side
