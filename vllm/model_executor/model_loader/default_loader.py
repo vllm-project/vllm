@@ -240,9 +240,15 @@ class DefaultModelLoader(BaseModelLoader):
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-            if not hf_weights_files and pattern.endswith(".safetensors"):
+            if (
+                not hf_weights_files
+                and allow_patterns_overrides is None
+                and pattern.endswith(".safetensors")
+            ):
                 # Shards may live in a subdirectory named by the index.
-                if not is_local:
+                if not is_local and glob.glob(
+                    os.path.join(hf_folder, "**", pattern), recursive=True
+                ):
                     download_safetensors_index_file_from_hf(
                         model_name_or_path,
                         index_file,

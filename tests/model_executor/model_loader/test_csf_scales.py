@@ -83,20 +83,27 @@ def test_unpaired_stream_is_rejected():
         list(decode_csf_scale_streams([("e.weight_scale.nvfp4_csf_fixed", fixed)]))
 
 
-def test_hub_download_finds_shards_listed_by_the_index(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "shard_name", ["tensors/model-00001-of-00001.safetensors", "pytorch_model.bin"]
+)
+def test_hub_download_finds_shards_listed_by_the_index(
+    tmp_path, monkeypatch, shard_name
+):
     """A Hub snapshot whose shards sit under tensors/ is found once the index
-    is fetched; only the shards are downloaded by the allow patterns."""
+    is fetched; a .bin-only snapshot never asks for the index."""
     import json
 
     from vllm.config.load import LoadConfig
     from vllm.model_executor.model_loader import default_loader
 
-    shard = tmp_path / "tensors" / "model-00001-of-00001.safetensors"
-    shard.parent.mkdir()
+    shard = tmp_path / shard_name
+    shard.parent.mkdir(exist_ok=True)
     shard.write_bytes(b"")
-    index = {"weight_map": {"w": "tensors/model-00001-of-00001.safetensors"}}
+    index = {"weight_map": {"w": shard_name}}
+    fetched = []
 
     def fake_download_index(model, index_file, cache_dir, subfolder, revision):
+        fetched.append(index_file)
         (tmp_path / index_file).write_text(json.dumps(index))
 
     monkeypatch.setattr(
@@ -107,11 +114,11 @@ def test_hub_download_finds_shards_listed_by_the_index(tmp_path, monkeypatch):
         "download_safetensors_index_file_from_hf",
         fake_download_index,
     )
-    loader = default_loader.DefaultModelLoader(LoadConfig(load_format="safetensors"))
+    loader = default_loader.DefaultModelLoader(LoadConfig(load_format="hf"))
 
     _, files, use_safetensors, _ = loader._prepare_weights(
         "org/model", None, None, fall_back_to_pt=False, allow_patterns_overrides=None
     )
 
-    assert use_safetensors
+    assert use_safetensors == bool(fetched) == shard_name.endswith(".safetensors")
     assert files == [str(shard)]
