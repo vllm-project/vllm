@@ -43,6 +43,15 @@ def test_serialize_messages() -> None:
     assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
 
 
+def test_skip_early_mm_lookup_is_preserved_in_chat_params() -> None:
+    request = ResponsesRequest(input="hello", skip_early_mm_lookup=True)
+
+    chat_params = request.build_chat_params(None, "auto")
+
+    assert request.skip_early_mm_lookup is True
+    assert chat_params.skip_early_mm_lookup is True
+
+
 def test_custom_tool_grammar_format_rejected() -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
     with pytest.raises(VLLMValidationError) as exc_info:

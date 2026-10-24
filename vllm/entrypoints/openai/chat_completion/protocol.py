@@ -390,6 +390,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    skip_early_mm_lookup: bool = Field(
+        default=False,
+        description="Skip the UUID-only rendering attempt for this request.",
+    )
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
@@ -664,6 +668,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            skip_early_mm_lookup=self.skip_early_mm_lookup,
             # No-tools requests default to tool_choice="none" at the API
             # layer. Collapse that default before rendering, so K3 emits a
             # model-visible tool-choice instruction only for requests with a
@@ -1192,6 +1197,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     chat_template_kwargs: dict[str, Any] | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     mm_processor_kwargs: dict[str, Any] | None = None
+    skip_early_mm_lookup: bool = False
     priority: int = Field(default=0, ge=_INT64_MIN, le=_INT64_MAX)
     cache_salt: str | None = None
     include_stop_str_in_output: bool = False

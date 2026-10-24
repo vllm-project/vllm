@@ -95,6 +95,9 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
+    skip_early_mm_lookup: bool = False
+    """Fetch media with UUIDs upfront instead of first trying the processor cache."""
+
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
@@ -129,6 +132,7 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
+            skip_early_mm_lookup=self.skip_early_mm_lookup,
             tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
