@@ -21,6 +21,7 @@ from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAnd
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
+    get_input_quant_scales,
 )
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
@@ -46,9 +47,8 @@ def _silu_and_mul_fp8_static(
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
     result = torch.empty(out_shape, dtype=FP8_DTYPE, device=x.device)
-    # TODO(mgoin): read the consumer scale via the contract instead of reaching
-    # into the kernel-specific input_scale attribute.
-    scale = linear.input_scale
+    scale = get_input_quant_scales(linear).static_scale
+    assert scale is not None, "Static FP8 quantization requires an input scale"
     torch.ops._C.silu_and_mul_quant(result, x, scale)
     return QuantizedActivation(
         data=result,
@@ -126,14 +126,12 @@ def _silu_and_mul_nvfp4_dynamic(
     # consumer GEMM's alpha (= input_global_scale * weight_global_scale)
     # divides it back out, so quantize with the reciprocal like the unfused
     # scaled_fp4_quant path does.
-    input_global_scale_inv = getattr(linear, "input_global_scale_inv", None)
-    assert input_global_scale_inv is not None, (
-        "input_global_scale_inv is required for NVFP4 quantization"
+    global_scale_inv = get_input_quant_scales(linear).global_scale_inv
+    assert global_scale_inv is not None, (
+        "NVFP4 quantization requires an inverse global scale"
     )
 
-    torch.ops._C.silu_and_mul_nvfp4_quant(
-        result, block_scale, x, input_global_scale_inv
-    )
+    torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, global_scale_inv)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
@@ -157,7 +155,7 @@ def _relu_squared_static_fp8_quant_supported(
     linear: LinearBase,
 ) -> bool:
     """Return whether the ReLU2 static-FP8 producer can consume this input."""
-    scale = getattr(linear, "input_scale", None)
+    scale = get_input_quant_scales(linear).static_scale
     return (
         isinstance(act_fn, ReLUSquaredActivation)
         and x.is_cuda

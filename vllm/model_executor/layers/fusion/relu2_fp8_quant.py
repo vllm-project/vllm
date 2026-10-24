@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_scales,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -46,7 +49,8 @@ def relu_squared_static_fp8_quant(
     """BF16 ReLU2 followed by static per-tensor FP8 quantization."""
     assert x.dtype == torch.bfloat16
     assert x.is_contiguous()
-    scale = linear.input_scale
+    scale = get_input_quant_scales(linear).static_scale
+    assert scale is not None, "Static FP8 quantization requires an input scale"
     assert scale.dtype == torch.float32
     assert x.device == scale.device
     assert scale.numel() == 1
