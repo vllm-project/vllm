@@ -79,6 +79,41 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+## Triton MoE Kernel Tuning
+
+When GLM-5.3-Flash uses the Triton fused MoE backend on NVIDIA H20 at TP4,
+vLLM automatically loads the bundled configuration for 288 experts, a per-rank
+intermediate size of 512, and FP8 weights with 128×128 quantization blocks.
+No additional flag is needed for this configuration. It tunes the existing
+Triton backend; it does not change which MoE backend vLLM selects.
+Batch-invariant execution (`VLLM_BATCH_INVARIANT=1`) uses its fixed configuration
+instead of tuned configurations.
+
+To search the benchmark's parameter space for this model from a source checkout:
+
+```bash
+python benchmarks/kernels/benchmark_moe.py \
+  --model /path/to/GLM-5.3-Flash --tp-size 4 --dtype fp8_w8a8 \
+  --tune --save-dir ./moe-tuned
+```
+
+The benchmark reads the model configuration and uses synthetic inputs; it does
+not load the model weights. Its batch size is the number of tokens passed to
+MoE, rather than the number of serving requests. Use `--batch-size` to select
+the token counts to tune. Set `VLLM_TUNED_CONFIG_FOLDER` to the generated
+configuration directory to evaluate the results in vLLM. Validate numerical
+correctness and model behavior before adopting new settings, and measure
+performance with the intended hardware, software versions, and serving workload.
+
+For example, start a new server process with the generated configuration and
+explicitly select Triton:
+
+```bash
+VLLM_TUNED_CONFIG_FOLDER=/absolute/path/to/moe-tuned \
+  vllm serve /path/to/GLM-5.3-Flash \
+  --tensor-parallel-size 4 --moe-backend triton
+```
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
