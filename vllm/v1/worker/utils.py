@@ -906,6 +906,10 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._v_scale_cache = None
 
 
+_MAX_COW_TRANSIENT_BYTES = 256 * 1024 * 1024
+"""Upper bound on bytes materialized per chunk by copy_kv_cache_blocks_inplace."""
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
@@ -952,7 +956,16 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
-        blocks[dst] = blocks[src]
+        # The RHS gather materializes len(src) rows in one allocation. Rows
+        # can be tens of MiB (mamba state), so a large CoW wave would
+        # transiently allocate multi-GiB and OOM near the memory limit.
+        # Copy in byte-bounded chunks; src and dst sets are disjoint in
+        # copy-on-write (dst blocks are freshly allocated), so chunking is
+        # order-equivalent.
+        row_bytes = blocks.stride(0) * blocks.element_size()
+        chunk = max(1, _MAX_COW_TRANSIENT_BYTES // row_bytes)
+        for start in range(0, src.numel(), chunk):
+            blocks[dst[start : start + chunk]] = blocks[src[start : start + chunk]]
 
 
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
