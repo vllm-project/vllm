@@ -75,6 +75,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+#ifdef VLLM_ROCM_RDNA_ATTN
+  // RDNA3.5 decode attention (gfx1151).
+  rocm_ops.def("rdna_decode_configs() -> int[]", &rdna_decode_configs);
+  rocm_ops.def("rdna_decode_batch_configs() -> int[]",
+               &rdna_decode_batch_configs);
+  rocm_ops.def(
+      "rdna_decode_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! acc, Tensor! m, Tensor! l, "
+      "Tensor! cnt, Tensor seq_lens, float scale, Tensor? mm_ranges=None, "
+      "bool batched=False) -> ()");
+  rocm_ops.impl("rdna_decode_attn", torch::kCUDA, &rdna_decode_attn);
+  // RDNA3.5 prefill attention (gfx1151).
+  rocm_ops.def("rdna_prefill_configs() -> int[]", &rdna_prefill_configs);
+  rocm_ops.def("rdna_prefill_batch_configs() -> int[]",
+               &rdna_prefill_batch_configs);
+  rocm_ops.def(
+      "rdna_prefill_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! partial_o, "
+      "Tensor! partial_ml, Tensor! counters, Tensor seq_lens, "
+      "int max_seq_len, float scale, Tensor? mm_ranges=None, "
+      "Tensor? plan=None, Tensor? query_start_loc=None, int head_group=0) -> "
+      "()");
+  rocm_ops.impl("rdna_prefill_attn", torch::kCUDA, &rdna_prefill_attn);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
