@@ -1280,3 +1280,47 @@ précédent).
 
 **Hôte** : boot Windows 11:01:38Z, commit 65,6 % (marge 136 Go), C: 603,8 Go libres,
 `/dev/shm` 16 G (26 %), VRAM 21 059 / 20 370 MiB.
+
+## 24/10 14:08Z — watchdog v6.1 : plus de redémarrage quand les compteurs avancent (Q29 = b)
+
+**Arbitrage utilisateur, 24/10 ~14:05Z** : « OK pour b ». Un moteur dont les compteurs de
+tokens avancent n'est plus redémarré, quelle que soit la durée de la surcharge. On
+redémarre seulement quand les compteurs sont plats (vrai blocage) ou quand le moteur ne
+répond plus.
+
+**Ce qui a changé dans `medium-swift15-27b-fstier.yml`** (service watchdog uniquement) :
+- Le bloc du plafond `BUSY_MAX` ne redémarre plus. À chaque multiple de `BUSY_MAX`
+  cycles BUSY, il écrit une ligne `BUSY-LONG ALERT` (durée estimée = cycles × 2 min).
+- Bandeau `v6.1`. Il indique la vraie durée d'un cycle en état WEDGE : ~2 min
+  (GEN_TIMEOUT 90 s + INTERVAL 30 s). Le plafond de 10 cycles valait donc ~20 min, et non
+  ~5 min comme on l'avait écrit dans l'arbitrage Q27.
+- Inchangés : le redémarrage sur compteurs plats et les chemins ENGINE-HUNG / ENGINE-DOWN.
+
+**Validation avant déploiement** :
+- Script extrait du yml avec `$$`→`$`, puis `sh -n` : OK.
+- Banc simulé (`.tmp/wd_sim.sh`, faux `curl`/`docker`/`sleep`) :
+  - compteurs qui avancent : aucun appel docker, `BUSY-LONG` aux cycles 10 et 20 ;
+  - compteurs plats : `docker restart` appelé.
+- `docker compose config -q` : OK. Le dry-run ne recréait que le service watchdog.
+
+**Déploiement** : `up -d --no-deps watchdog-swift15-27b` à 14:08:23Z. Le `StartedAt` du
+moteur n'a pas bougé (12:32:33Z avant et après) et RC vaut 0. Première sonde à 14:08:27 :
+`WARMUP decode=000`. La grâce de 120 s a été consommée sans être comptée comme un
+blocage. C'est le comportement attendu sur un moteur saturé.
+
+**État à 14:10Z** : 1 h 38 sans redémarrage, mais toujours en surcharge.
+- Running 4, Waiting 7, KV 99,5 %.
+- 58 préemptions depuis 12:32Z.
+- Entre 12:32 et 14:08Z, 3 `fail 1/2`, tous suivis de `RECOVERED`.
+- Le palier disque sert ~80 % des tokens de prompt depuis le redémarrage.
+
+Le remède à la surcharge reste l'admission côté hub : il entre plus de contextes longs
+que les 750 747 tokens de KV n'en tiennent.
+
+**Deux mesures ouvertes, relayées à claudish** :
+1. Un 400 à 13:29:42Z : 914 723 octets, `input_tokens=262145`, soit la fenêtre + 1. Il
+   arrive après le recreate du hub (Gate 5b, 12:37Z), ce qui en fait un critère possible
+   de #651 (plafond de contexte appris perdu au recreate).
+2. Compteur d'abandons toujours à 0, alors que 4 corps ont été renvoyés à l'identique
+   après 12:32Z. Deux hypothèses restent ouvertes : les originaux ont abouti, ou la
+   déconnexion n'est pas détectée pendant le prefill.
