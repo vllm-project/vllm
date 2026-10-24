@@ -50,6 +50,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
 )
@@ -476,6 +477,13 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import (
+            get_cpu_distributed_timeout_or_none,
+            get_distributed_timeout_or_none,
+        )
+
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
@@ -489,12 +497,6 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import (
-                get_cpu_distributed_timeout_or_none,
-                get_distributed_timeout_or_none,
-            )
-
-            timeout = get_cpu_distributed_timeout_or_none()
             device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
@@ -507,7 +509,7 @@ class GroupCoordinator:
                 # processes through the CPU.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=timeout
+                        ranks, backend="gloo", timeout=self.cpu_timeout
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -1376,6 +1378,10 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
+        return cpu_all_reduce_(tensor, self.cpu_group, self.cpu_timeout)
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -1680,6 +1686,11 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
+    comm = getattr(group.device_communicator, "aiter_ar_comm", None)
+    return comm is not None and comm.registers_graph_buffers
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """`graph_capture` is a context manager which should surround the code that
@@ -1694,11 +1705,23 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
+    from vllm.device_allocator.alloc_conf import non_expandable_allocations
+    from vllm.platforms import current_platform
+
+    tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    # Let AITER all-reduce register captured buffers instead of copying them.
+    # Not with DP AITER collectives: they reduce workspaces allocated earlier.
+    non_expandable = (
+        current_platform.is_rocm()
+        and _aiter_registers_graph_buffers(tp)
+        and not _aiter_registers_graph_buffers(dp)
+    )
     with (
-        get_tp_group().graph_capture(context),
-        get_pp_group().graph_capture(context),
-        get_dp_group().graph_capture(context),
+        non_expandable_allocations() if non_expandable else nullcontext(),
+        tp.graph_capture(context),
+        pp.graph_capture(context),
+        dp.graph_capture(context),
     ):
         yield context
 
@@ -2442,6 +2465,11 @@ def get_tensor_model_parallel_world_size() -> int:
 def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
+
+
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
 
 
 def get_node_count() -> int:

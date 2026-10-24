@@ -7,7 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 from xgrammar import Grammar, StructuralTag
 from xgrammar.structural_tag import (
@@ -21,10 +21,6 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.chat_utils import (
-    get_tool_call_id_type,
-    make_tool_call_id,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -42,6 +38,10 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.renderers.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
 from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
@@ -118,8 +118,9 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    # Server-side floor for tool-call structural tags (--tool-strict-level).
-    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    # Server-side floor for tool-call structural tags (--tool-strict-level), or
+    # None for the tool parser's default level.
+    tool_strict_level: ToolStrictLevel | None = None
     always_adjust_request: bool = False
 
     def __init__(
@@ -193,6 +194,12 @@ class Parser:
             state.history_tool_call_cnt_initialized = True
             return
         state.history_tool_call_cnt = count_history_tool_calls(request)
+        state.history_tool_call_cnt_initialized = True
+
+    def set_history_tool_call_count(self, count: int) -> None:
+        """Seed the history count when `request.messages` is not available."""
+        state = self._stream_state
+        state.history_tool_call_cnt = count
         state.history_tool_call_cnt_initialized = True
 
     def adjust_request(
@@ -359,7 +366,9 @@ class DelegatingParser(Parser):
     def _get_function_name(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> str:
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if request.tool_choice and isinstance(
+            request.tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
+        ):
             return request.tool_choice.name
         if request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
@@ -398,7 +407,7 @@ class DelegatingParser(Parser):
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
         is_auto_tool_choice = enable_auto_tools and (
@@ -503,7 +512,11 @@ class DelegatingParser(Parser):
             or request.tool_choice == "required"
             or isinstance(
                 request.tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
             )
         )
         if not need_tool_calling:
@@ -513,10 +526,7 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
-        if (
-            strict_level == ToolStrictLevel.AUTO
-            and tool_parser.default_tool_strict_level is not None
-        ):
+        if strict_level is None:
             strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
@@ -723,7 +733,11 @@ class DelegatingParser(Parser):
             and request.tool_choice
             and isinstance(
                 request.tool_choice,
-                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+                (
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                    ChatCompletionNamedToolChoiceParam,
+                ),
             )
         ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
@@ -760,6 +774,10 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        if self._reasoning_parser is not None:
+            self._reasoning_parser.set_prompt_token_ids(prompt_token_ids)
 
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
@@ -850,6 +868,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
+            self.set_prompt_token_ids(prompt_token_ids)
             if self._reasoning_parser is None or self.is_reasoning_end(
                 prompt_token_ids
             ):

@@ -4,6 +4,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -29,6 +32,7 @@ from vllm.config import (
     HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -46,7 +50,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -284,10 +288,70 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize("supported", [True, False])
+def test_lora_rejected_at_config_time_for_unsupported_model(supported):
+    """Models without SupportsLoRA must fail during config validation with a
+    clear message, not with a bare assert inside the model constructor."""
+    model_config = SimpleNamespace(
+        runner_type="generate",
+        is_lora_supported=supported,
+        architecture="Zamba2ForCausalLM",
+        architectures=["Zamba2ForCausalLM"],
+        model="Zyphra/Zamba2-1.2B-instruct",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    if supported:
+        lora_config.verify_with_model_config(model_config)
+    else:
+        with pytest.raises(
+            ValueError, match="LoRA is not supported for Zamba2ForCausalLM"
+        ):
+            lora_config.verify_with_model_config(model_config)
+
+
+def test_lora_allowed_for_drafter_without_lora_support():
+    """Speculative decoding re-validates the config with the draft model's
+    config, and drafters don't run LoRA adapters."""
+    draft_config = SimpleNamespace(
+        runner_type="draft",
+        is_lora_supported=False,
+        architecture="DeepSeekMTPModel",
+        architectures=["DeepSeekMTPModel"],
+        model="deepseek-ai/DeepSeek-V3",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    lora_config.verify_with_model_config(draft_config)
+    assert lora_config.lora_dtype == torch.bfloat16
+
+
 def test_mamba_cache_mode_all_is_rejected():
     """The removed 'all' mode must fail validation instead of being ignored."""
     with pytest.raises(ValidationError, match="mamba_cache_mode"):
         CacheConfig(mamba_cache_mode="all")
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "model_dtype", "should_raise"),
+    [
+        ("float16", torch.bfloat16, True),
+        ("bfloat16", torch.float16, True),
+        ("float16", torch.float32, True),
+        ("float16", torch.float16, False),
+        ("auto", torch.bfloat16, False),
+        ("fp8", torch.bfloat16, False),
+    ],
+)
+def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_raise):
+    config = VllmConfig(cache_config=CacheConfig(cache_dtype=cache_dtype))
+    config.model_config = SimpleNamespace(dtype=model_dtype)
+
+    if should_raise:
+        with pytest.raises(ValueError, match="kv_cache_dtype"):
+            config._reject_mismatched_float_kv_cache()
+    else:
+        config._reject_mismatched_float_kv_cache()
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -465,6 +529,48 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize("platform_enum", list(PlatformEnum))
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_model_runner_default_preserves_backend_fallback(
+    monkeypatch, platform_enum, has_triton
+):
+    platform = Platform()
+    platform._enum = platform_enum
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
+
+    config = VllmConfig()
+    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+
+
+def test_v2_frontend_config_can_be_created_without_triton():
+    # Start fresh so config imports observe the frontend's Triton availability.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import vllm.platforms as platforms
+                from vllm.platforms.interface import UnspecifiedPlatform
+
+                platforms._current_platform = UnspecifiedPlatform()
+                platforms._current_platform.device_type = "cpu"
+                import vllm.triton_utils
+
+                os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+                vllm.triton_utils.HAS_TRITON = False
+                from vllm.config import VllmConfig
+
+                config = VllmConfig()
+                assert config.use_v2_model_runner
+            """),
+        ],
+        check=True,
+    )
 
 
 def test_hisparse_requires_v2_model_runner():
@@ -651,21 +757,14 @@ def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    paths and off breakable cudagraphs by default."""
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
@@ -674,64 +773,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         # supports uniform-batch CUDA graphs, so it must opt in or the
         # default FULL_AND_PIECEWISE serve path cannot start.
         assert "DeepseekV41ForCausalLM" in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
-            attention_config=AttentionConfig(),
-        )
-        config._get_v1_model_runner_unsupported_features = lambda: []
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
-    """The ROCm V1 default is a speed preference, not a capability claim.
-
-    DSpark runs only on V2, so pinning DeepSeek V4 to V1 would fail config
-    validation instead of serving it. With nothing V1 refuses, it still holds.
-    """
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architectures=["DeepseekV4ForCausalLM"], is_diffusion=False
-        ),
-        attention_config=AttentionConfig(),
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            pipeline_parallel_size=1,
-            enable_batch_sharded_sampling=False,
-        ),
-        scheduler_config=SimpleNamespace(async_scheduling=False),
-        speculative_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-    config._get_v2_model_runner_unsupported_features = lambda: []
-    # The real predicate, so the test also pins where dspark lands in it.
-    config._get_v1_model_runner_unsupported_features = lambda: (
-        VllmConfig._get_v1_model_runner_unsupported_features(config)
-    )
-
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
-
-    config.speculative_config = SimpleNamespace(
-        method="dspark", enable_adaptive_verification=False
-    )
-    assert VllmConfig.use_v2_model_runner.fget(config) is True
-
-    # Yielding is not the same as selecting V2: the later checks still run, so
-    # a config neither runner can serve lands on V1 and fails validation there.
-    config._get_v2_model_runner_unsupported_features = lambda: ["sequence parallelism"]
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
@@ -965,7 +1008,10 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
+)
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
@@ -2046,9 +2092,7 @@ def test_draft_inherits_ep_only_for_moe(
     draft_is_moe: bool,
 ):
     """Validate final draft configs without loading weights or mocking validation."""
-    from transformers import LlamaConfig, MixtralConfig
-
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config, LlamaConfig, MixtralConfig
 
     common = dict(
         hidden_size=128,
@@ -2065,7 +2109,7 @@ def test_draft_inherits_ep_only_for_moe(
             n_routed_experts=4,
             num_experts_per_tok=2,
             num_nextn_predict_layers=1,
-            compress_ratios=[1, 1],
+            layer_types=["sliding_attention"] * 2,
             head_dim=32,
             **common,
         )
@@ -2138,8 +2182,8 @@ def test_draft_parallel_config_preserves_ep_without_model(
     [
         pytest.param("eagle3", False, 0, id="eagle3"),
         pytest.param("eagle3", True, 7, id="p-eagle"),
-        pytest.param("dflash", True, 8, id="dflash"),
-        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("dflash", True, 0, id="dflash"),
+        pytest.param("dspark", True, 0, id="dspark"),
         pytest.param("mtp", False, 0, id="mtp"),
         pytest.param("ngram", False, 0, id="ngram"),
         pytest.param("draft_model", False, 1, id="draft-model"),
@@ -3486,6 +3530,12 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
+    """A zero token budget never schedules anything, so generation would hang."""
+    with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
+        SchedulerConfig.default_factory(max_num_scheduled_tokens=0)
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
@@ -3599,8 +3649,14 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize(
+    ("method", "drops_block"),
+    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+)
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+    method: str,
+    drops_block: bool,
     disable_eagle_block_drop: bool,
 ):
     # Start from an ngram config to avoid loading model metadata: these predicates
@@ -3610,10 +3666,12 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
         num_speculative_tokens=3,
         disable_eagle_block_drop=disable_eagle_block_drop,
     )
-    speculative_config.method = "eagle3"
+    speculative_config.method = method
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
+    assert speculative_config.use_eagle_block_drop() is (
+        drops_block and not disable_eagle_block_drop
+    )
 
 
 def test_draft_sample_method_gumbel_is_rejected():
@@ -3769,34 +3827,48 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
-def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting"),
+    [
+        ("eagle", False),
+        ("eagle3", False),
+        ("mtp", False),
+        ("dspark", True),
+        ("dflash", True),
+    ],
+)
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
+    method, parallel_drafting
+):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
+        parallel_drafting=parallel_drafting,
     )
 
     config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_supports_dspark():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
-        method="dspark",
+        method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
         parallel_drafting=True,
+        draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
-    config._check_supports_watermarking()
+    with pytest.raises(ValueError, match="candidate-head drafters"):
+        config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
+def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
@@ -3806,7 +3878,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="autoregressive model-based"):
+    with pytest.raises(ValueError, match="Watermarking supports only"):
         config._check_supports_watermarking()
 
 
@@ -3919,6 +3991,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.model = local_cache
     mock_draft.hf_config.model_type = "deepseek_mtp"
     mock_draft.hf_config.n_predict = None
+    mock_draft.hf_config.max_position_embeddings = 4096
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 
@@ -4164,6 +4237,50 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    "enabled,supported,cuda_alike,tp_size,pp_size,error",
+    [
+        (True, True, True, 2, 1, None),
+        (True, False, True, 2, 1, "not supported for this model"),
+        (True, True, False, 2, 1, "requires CUDA"),
+        (True, True, True, 1, 1, None),
+        (True, False, False, 1, 2, None),
+        (True, True, True, 2, 2, "requires PP=1"),
+        (False, False, False, 2, 1, None),
+    ],
+)
+def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, error):
+    """Validate active HC SP configurations and ignore the flag with TP=1."""
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    model = SimpleNamespace(
+        architectures=["HCModel"],
+        registry=ModelRegistry,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=8),
+        multimodal_config=None,
+    )
+    parallel = ParallelConfig(
+        enable_hc_sp=enabled,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        # Avoid backend auto-detection in this config-only test.
+        distributed_executor_backend="mp",
+    )
+    with (
+        patch(
+            "vllm.config.model.current_platform.is_cuda_alike",
+            return_value=cuda_alike,
+        ),
+        patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
+        patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
+    ):
+        if error:
+            with pytest.raises(ValueError, match=error):
+                ModelConfig.verify_with_parallel_config(model, parallel)
+        else:
+            ModelConfig.verify_with_parallel_config(model, parallel)
 
 
 @pytest.mark.parametrize(

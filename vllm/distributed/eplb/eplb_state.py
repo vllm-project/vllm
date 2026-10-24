@@ -321,39 +321,47 @@ class EplbState:
         """
         if len(self.model_states) > 0:
             model = next(iter(self.model_states.values())).model
-            if (
-                model.num_routed_experts != new_model.num_routed_experts
-                or model.num_redundant_experts != new_model.num_redundant_experts
-                or model.num_physical_experts != new_model.num_physical_experts
-                or model.num_logical_experts != new_model.num_logical_experts
-                or model.num_expert_groups != new_model.num_expert_groups
-            ):
-                raise RuntimeError(
-                    "Model: {} "
-                    "with config {} "
-                    "{} {} {} {} "
-                    "mismatch with new model {} "
-                    "with config {} "
-                    "{} {} {} {}".format(
-                        type(model),
-                        model.num_routed_experts,
-                        model.num_redundant_experts,
-                        model.num_physical_experts,
-                        model.num_logical_experts,
-                        model.num_expert_groups,
-                        type(new_model),
-                        new_model.num_routed_experts,
-                        new_model.num_redundant_experts,
-                        new_model.num_physical_experts,
-                        new_model.num_logical_experts,
-                        new_model.num_expert_groups,
-                    )
+            self.assert_confs_equal(model, new_model)
+
+    @staticmethod
+    def assert_confs_equal(
+        model: MixtureOfExperts, new_model: MixtureOfExperts
+    ) -> None:
+        """Raise if the models have different expert parallel configurations."""
+        if (
+            model.num_routed_experts != new_model.num_routed_experts
+            or model.num_redundant_experts != new_model.num_redundant_experts
+            or model.num_physical_experts != new_model.num_physical_experts
+            or model.num_logical_experts != new_model.num_logical_experts
+            or model.num_expert_groups != new_model.num_expert_groups
+        ):
+            raise RuntimeError(
+                "Model: {} "
+                "with config {} "
+                "{} {} {} {} "
+                "mismatch with new model {} "
+                "with config {} "
+                "{} {} {} {}".format(
+                    type(model),
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                    model.num_physical_experts,
+                    model.num_logical_experts,
+                    model.num_expert_groups,
+                    type(new_model),
+                    new_model.num_routed_experts,
+                    new_model.num_redundant_experts,
+                    new_model.num_physical_experts,
+                    new_model.num_logical_experts,
+                    new_model.num_expert_groups,
                 )
+            )
 
     def add_model(
         self,
         model: MixtureOfExperts,
         model_config: ModelConfig,
+        model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
         self.validate_ep_configuration(model)
@@ -497,7 +505,7 @@ class EplbState:
             logical_replica_count=logical_replica_count,
             expert_load_pass=expert_load_pass,
             expert_load_window=expert_load_window,
-            model_name=model_config.model,
+            model_name=model_name or model_config.model,
             model=model,
             expert_buffer=expert_buffer,
             rebalanced=False,
@@ -567,14 +575,14 @@ class EplbState:
 
         """
         ep_group = get_ep_group().device_group
-        if is_profile:
-            self.rearrange(is_profile=True)
-            return
-
         if is_dummy:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+
+        if is_profile:
+            self.rearrange(is_profile=True)
+            return
 
         if (
             log_stats

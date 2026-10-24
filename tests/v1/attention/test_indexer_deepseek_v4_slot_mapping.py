@@ -14,6 +14,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -113,16 +114,22 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         num_reqs, 4
     )
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    # SM100's paged MQA logits only take varlen rows.
+    indices = (
+        torch.arange(num_reqs, dtype=torch.int32, device=device)
+        if mqa_logits_use_mx_scales()
+        else None
+    )
     schedule_metadata = indexer_module.get_paged_mqa_logits_metadata(
         torch.div(seq_lens, 16, rounding_mode="floor").unsqueeze(1),
         64,
         num_sms,
+        indices=indices,
     ).clone()
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
     builder.dcp_world_size = 1
     builder.compress_ratio = 16
-    builder.kernel_block_size = None
     builder.num_sms = num_sms
     builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
     builder.kv_cache_spec = SimpleNamespace(num_states=64)
@@ -140,6 +147,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             decode_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
             requires_padding=False,
             schedule_metadata=schedule_metadata,
+            indices=indices,
         ),
         block_table=block_table,
     )
@@ -158,7 +166,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(
         schedule_metadata,
         indexer_module.get_paged_mqa_logits_metadata(
-            expected_decode_seq_lens.unsqueeze(1), 64, num_sms
+            expected_decode_seq_lens.unsqueeze(1), 64, num_sms, indices=indices
         ),
     )
     assert metadata.decode is not None
@@ -170,30 +178,24 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize(
-    "block_size,kernel_block_size,compress_ratio", [(64, 64, 1), (256, 64, 4)]
-)
-def test_indexer_draft_decode_refresh_follows_new_batch(
-    monkeypatch, block_size, kernel_block_size, compress_ratio
-):
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ratio):
     """Without a prior build(), the refresh must not keep the last batch's state."""
     monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: False)
     device = torch.device("cuda")
     num_reqs, width = 3, 8
-    factor = block_size // kernel_block_size
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
     builder.dcp_world_size = 1
     builder.compress_ratio = compress_ratio
-    builder.kernel_block_size = kernel_block_size
     builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
-    builder.kv_cache_spec = SimpleNamespace(block_size=block_size, num_states=64)
+    builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
 
     def stale(*shape: int) -> torch.Tensor:
         return torch.full(shape, -7, dtype=torch.int32, device=device)
 
     decode = DeepSeekV32IndexerDecodeMetadata(
-        block_table=stale(num_reqs, width // factor),
+        block_table=stale(num_reqs, width),
         seq_lens=stale(num_reqs, 1),
         decode_lens=stale(num_reqs),
         requires_padding=False,
@@ -219,8 +221,7 @@ def test_indexer_draft_decode_refresh_follows_new_batch(
 
     builder.update_draft_decode_metadata(metadata)
 
-    expected_block_table = request_block_table[:, ::factor] // factor
-    torch.testing.assert_close(decode.block_table, expected_block_table)
+    torch.testing.assert_close(decode.block_table, request_block_table)
     torch.testing.assert_close(decode.indices, builder.arange_buffer[:num_reqs])
     assert torch.all(decode.per_req_decode_lens == 1)
     assert torch.all(decode.decode_lens == 1)
@@ -287,7 +288,9 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
 def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
     """Packed MLA/indexer groups must retain 64 compressed rows per page."""
     kernel_block_size = select_common_block_size(
-        256, [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend]
+        256,
+        # indexer backend has no impl class
+        [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend],  # type: ignore[type-abstract]
     )
     spec = MLAAttentionSpec(
         block_size=256,
@@ -310,7 +313,9 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
     assert isinstance(block_size, int)
     assert (
         select_common_block_size(
-            block_size, [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend]
+            block_size,
+            # indexer backend has no impl class
+            [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend],  # type: ignore[type-abstract]
         )
         == block_size
     )
@@ -471,7 +476,6 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.pcp_rank = 0
     builder.dcp_world_size = 1
     builder.cp_kv_cache_interleave_size = 1
-    builder.kernel_block_size = None
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
 

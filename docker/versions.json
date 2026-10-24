@@ -73,9 +73,6 @@
     "RUN_WHEEL_CHECK": {
       "default": "true"
     },
-    "FLASHINFER_VERSION": {
-      "default": "0.7.0.post1"
-    },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
     },
@@ -87,6 +84,9 @@
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
       "default": ">=0.15.7"
+    },
+    "GGUF_VERSION": {
+      "default": ">=0.19.0"
     }
   }
 }
