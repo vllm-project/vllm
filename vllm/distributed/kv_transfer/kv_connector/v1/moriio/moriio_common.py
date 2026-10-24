@@ -389,7 +389,11 @@ class MoRIIOConfig:
 
         return cls(
             local_ip=resolve_host_ip(extra_config),
-            local_kv_port=get_open_port(),
+            # MoRI binds its engine port itself. Port 0 lets the OS choose, and
+            # the engine descriptor sent at handshake carries the real port.
+            # A port picked here is only checked free, not reserved, so two
+            # workers starting from the same VLLM_PORT could both pick it.
+            local_kv_port=0,
             proxy_ip=extra_config.get("proxy_ip", ""),
             local_ping_port=get_open_port(),
             proxy_ping_port=int(extra_config.get("proxy_ping_port", 0)),
