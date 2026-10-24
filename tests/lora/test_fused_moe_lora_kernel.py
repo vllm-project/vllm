@@ -263,6 +263,187 @@ DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [42]
 
 
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU only")
+@pytest.mark.parametrize("ep_size", [1, 2])
+@pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("lora_mode", ["base", "disabled", "mixed"])
+@pytest.mark.parametrize("execution", ["eager", "graph"])
+@torch.inference_mode()
+def test_xpu_mxfp4_moe_lora_matches_reference(
+    ep_size, num_slices, lora_mode, execution
+):
+    """LoRA must affect both GEMMs, with one routing weight and EP masking."""
+    from dataclasses import replace
+
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import (
+        MoELoRAContext,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsMxFp4,
+    )
+
+    set_random_seed(42)
+    M, K, N, E, topk, rank = 5, 256, 128, 4, 2, 8
+    local_e = E // ep_size
+    device, dtype = "xpu", torch.bfloat16
+    x = torch.randn(M, K, device=device, dtype=dtype) / 4
+    w1 = torch.randint(256, (local_e, 2 * N, K // 2), device=device, dtype=torch.uint8)
+    w2 = torch.randint(256, (local_e, K, N // 2), device=device, dtype=torch.uint8)
+    s1 = torch.full((local_e, 2 * N, K // 32), 124, device=device, dtype=torch.uint8)
+    s2 = torch.full((local_e, K, N // 32), 124, device=device, dtype=torch.uint8)
+    b1 = torch.randn(local_e, 2 * N, device=device, dtype=dtype) / 4
+    b2 = torch.randn(local_e, K, device=device, dtype=dtype) / 4
+    ids = torch.tensor(
+        [[3, 0], [1, 2], [2, 0], [3, 2], [0, 1]], device=device, dtype=torch.int32
+    )
+    weights = torch.rand(M, topk, device=device).softmax(-1)
+    expert_map = None
+    if ep_size > 1:
+        expert_map = torch.tensor([0, -1, 1, -1], device=device, dtype=torch.int32)
+    config = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=topk,
+        hidden_dim=K,
+        intermediate_size=N,
+        num_local_experts=local_e,
+        num_logical_experts=E,
+        activation=MoEActivation.SWIGLUOAI,
+        device=device,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=replace(
+            FusedMoEParallelConfig.make_no_parallel(),
+            ep_size=ep_size,
+            use_ep=ep_size > 1,
+        ),
+        in_dtype=dtype,
+        is_lora_enabled=True,
+    )
+    experts = XPUExpertsMxFp4(config, mxfp4_w4a16_moe_quant_config(s1, s2, b1, b2))
+    punica = PunicaWrapperXPU(
+        M, M, device, lora_config=LoRAConfig(max_loras=2, max_lora_rank=rank)
+    )
+    adapters = [-1, 1, 2, 1, -1] if lora_mode == "mixed" else [-1] * M
+    punica.update_metadata(
+        LoRAMapping(adapters, adapters, is_prefill=True), [1, 2], 2, 0
+    )
+
+    def lora_weights(slices, output_size, input_size):
+        a = tuple(
+            torch.randn(2, local_e, rank, input_size, device=device, dtype=dtype) / 8
+            for _ in range(slices)
+        )
+        b = tuple(
+            torch.randn(2, local_e, output_size, rank, device=device, dtype=dtype) / 8
+            for _ in range(slices)
+        )
+        return a, b
+
+    a13, b13 = lora_weights(num_slices, 2 * N // num_slices, K)
+    a2, b2_lora = lora_weights(1, K, N)
+    ctx = MoELoRAContext(
+        a13,
+        b13,
+        a2,
+        b2_lora,
+        adapter_enabled=torch.ones(3, device=device, dtype=torch.int32),
+        max_loras=2,
+        top_k=topk,
+        w13_num_slices=num_slices,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=local_e,
+        punica_wrapper=punica,
+        use_tuned_config=False,
+    )
+    if lora_mode != "base":
+        experts.set_lora_context(ctx)
+    output = torch.empty_like(x)
+    empty = torch.empty(0, device=device, dtype=dtype)
+
+    def run():
+        experts.apply(
+            output,
+            x,
+            w1,
+            w2,
+            weights,
+            ids,
+            config.activation,
+            E,
+            expert_map,
+            None,
+            None,
+            empty,
+            empty,
+            None,
+            False,
+        )
+
+    run()
+    if execution == "graph":
+        torch.xpu.synchronize()
+        graph = torch.xpu.XPUGraph()
+        with torch.xpu.graph(graph):
+            run()
+        x.mul_(0.5)
+        ids.copy_(ids.roll(1, dims=0))
+        weights.copy_(weights.flip(1))
+        graph.replay()
+
+    def unpack(w):
+        table = torch.tensor(
+            [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+            device=device,
+        )
+        return table[torch.stack((w & 15, w >> 4), dim=-1).long()].flatten(-2) / 8
+
+    ref_w1, ref_w2 = unpack(w1), unpack(w2)
+    expected = torch.zeros_like(x, dtype=torch.float32)
+    for token in range(M):
+        for slot in range(topk):
+            expert = int(ids[token, slot])
+            expert = int(expert_map[expert]) if expert_map is not None else expert
+            if expert < 0:
+                continue
+            h = (ref_w1[expert] @ x[token].float() + b1[expert].float()).to(dtype)
+            adapter = adapters[token] - 1
+            if adapter >= 0:
+                delta = torch.cat(
+                    [
+                        b[adapter, expert].float()
+                        @ (a[adapter, expert].float() @ x[token].float())
+                        .to(dtype)
+                        .float()
+                        for a, b in zip(a13, b13)
+                    ]
+                )
+                if num_slices == 2:
+                    delta = delta.reshape(2, N).T.flatten()
+                h = (h + delta.to(dtype)).to(dtype)
+            gate, up = h[::2].float().clamp(max=7), h[1::2].float().clamp(-7, 7)
+            act = (gate * torch.sigmoid(1.702 * gate) * (up + 1)).to(dtype)
+            y = (ref_w2[expert] @ act.float() + b2[expert].float()).to(dtype)
+            if adapter >= 0:
+                delta = (
+                    b2_lora[0][adapter, expert].float()
+                    @ (a2[0][adapter, expert].float() @ act.float()).to(dtype).float()
+                )
+                y = (y + delta.to(dtype)).to(dtype)
+            expected[token] += weights[token, slot] * y.float()
+    torch.testing.assert_close(output, expected.to(dtype), atol=0.06, rtol=0.03)
+
+
 @pytest.mark.parametrize("num_tokens", [100])
 @pytest.mark.parametrize("top_k_num", [6, 12])
 @pytest.mark.parametrize("num_experts", [64])

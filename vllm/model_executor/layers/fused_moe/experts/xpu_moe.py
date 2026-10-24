@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -8,6 +9,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -31,6 +35,17 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
+def _route_rows(
+    delta: torch.Tensor, row_map: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flatten a per-(token, topk) delta to grouped rows; drop invalid rows."""
+    indices = row_map.flatten().long()
+    delta = delta.reshape(indices.numel(), -1).masked_fill(
+        (indices < 0).unsqueeze(1), 0
+    )
+    return indices.clamp_min(0), delta
+
+
 def prepare_fp8_moe_layer_for_xpu(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -49,7 +64,7 @@ def prepare_fp8_moe_layer_for_xpu(
     )
 
 
-class XPUExperts(mk.FusedMoEExpertsModular):
+class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -65,6 +80,14 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
+        # Per-call state shared by the LoRA hooks, set in _apply_experts.
+        self._lora_hidden_states: torch.Tensor
+        self._lora_topk_ids: torch.Tensor
+        self._lora_expert_map: torch.Tensor | None
+        self._lora_w1: torch.Tensor
+        self._lora_w2: torch.Tensor
+        self._lora_unweighted: torch.Tensor
+        self._lora_w13_meta: tuple | None = None
         is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
         if not is_xe2_or_xe3:
             raise NotImplementedError(
@@ -151,6 +174,10 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.moe_config.is_lora_enabled and apply_router_weight_on_input:
+            raise NotImplementedError(
+                "XPU MoE LoRA requires routing weights on the output."
+            )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             if (
@@ -180,16 +207,125 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             # expert not owned by this rank so they are skipped.
             sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
             topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
+        self._apply_experts(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            expert_map,
+            a1q_scale,
+        )
+
+    def _apply_experts(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+    ) -> None:
+        assert self.fused_moe_impl is not None
+        hooks = {}
+        if self._lora_context is not None:
+            if self.fused_moe_impl._use_ref:
+                raise NotImplementedError(
+                    "XPU MoE LoRA is not supported by the reference MoE path"
+                )
+            # Per-call inputs shared by the LoRA hooks.
+            self._lora_hidden_states = hidden_states
+            self._lora_topk_ids = topk_ids
+            self._lora_expert_map = expert_map
+            self._lora_w1 = w1
+            self._lora_w2 = w2
+            # moe_gather weights both base and LoRA outputs after the hooks.
+            self._lora_unweighted = torch.ones_like(topk_weights)
+            self._lora_w13_meta = None
+            hooks = dict(
+                activation_hook=self._lora_activation_hook,
+                output_hook=self._lora_output_hook,
+            )
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             a1q_scale=a1q_scale,
+            **hooks,
         )
+
+    def _lora_activation_hook(
+        self, gemm1_output: torch.Tensor, row_map: torch.Tensor
+    ) -> None:
+        ctx = self._lora_context
+        assert ctx is not None
+        num_tokens, top_k = self._lora_topk_ids.shape
+        delta = torch.zeros(
+            (num_tokens, top_k, gemm1_output.shape[-1]),
+            device=gemm1_output.device,
+            dtype=gemm1_output.dtype,
+        )
+        self._lora_w13_meta = self.apply_w13_lora(
+            ctx,
+            y=delta,
+            x=self._lora_hidden_states,
+            topk_ids=self._lora_topk_ids,
+            topk_weights=self._lora_unweighted,
+            expert_map=self._lora_expert_map,
+            w1=self._lora_w1,
+            w2=self._lora_w2,
+            num_tokens=num_tokens,
+            top_k_num=top_k,
+        )
+        dest, delta = _route_rows(delta, row_map)
+        gemm1_output.index_add_(0, dest, delta)
+
+    def _lora_output_hook(
+        self,
+        gemm2_output: torch.Tensor,
+        act_output: torch.Tensor,
+        row_map: torch.Tensor,
+    ) -> None:
+        ctx = self._lora_context
+        meta = self._lora_w13_meta
+        assert ctx is not None and meta is not None
+        num_tokens, top_k = self._lora_topk_ids.shape
+        indices = row_map.flatten().long()
+        act = act_output.index_select(0, indices.clamp_min(0)).masked_fill(
+            (indices < 0).unsqueeze(1), 0
+        )
+        delta = torch.zeros(
+            (num_tokens, top_k, gemm2_output.shape[-1]),
+            device=gemm2_output.device,
+            dtype=gemm2_output.dtype,
+        )
+        self.apply_w2_lora(
+            ctx,
+            y=delta,
+            x=act,
+            topk_weights=self._lora_unweighted,
+            sorted_token_ids_lora=meta[0],
+            expert_ids_lora=meta[1],
+            num_tokens_post_padded_lora=meta[2],
+            token_lora_mapping=meta[3],
+            num_tokens=num_tokens,
+            w1=self._lora_w1,
+            w2=self._lora_w2,
+            top_k_num=top_k,
+        )
+        dest, delta = _route_rows(delta, row_map)
+        gemm2_output.index_add_(0, dest, delta)
 
 
 class XPUExpertsFp8(XPUExperts):
+    @staticmethod
+    def supports_lora() -> bool:
+        return False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -245,6 +381,10 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
 
 
 class XPUExpertsBlockFp8(XPUExperts):
+    @staticmethod
+    def supports_lora() -> bool:
+        return False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -282,6 +422,10 @@ class XPUExpertsWNA16(XPUExperts):
     Pairs with `INCXPULinearMethod` for the linear layers; together they
     cover full-attn + MoE on Intel XPU end-to-end without IPEX.
     """
+
+    @staticmethod
+    def supports_lora() -> bool:
+        return False
 
     def __init__(
         self,

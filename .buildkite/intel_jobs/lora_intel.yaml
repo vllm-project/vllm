@@ -137,7 +137,8 @@ steps:
       pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
-      pytest -v -s lora/test_llama_tp.py::test_llama_lora'
+      pytest -v -s lora/test_llama_tp.py::test_llama_lora &&
+      pytest -v -s lora/test_olmoe_tp.py'
 
 - label: ":intel: (BMG) LoRA Multimodal"
   key: lora-multimodal
@@ -188,3 +189,28 @@ steps:
       pytest -v -s lora/test_add_lora.py &&
       pytest -v -s lora/test_default_mm_loras.py &&
       pytest -s -v lora/test_minicpmv_tp.py'
+
+- label: ":intel: (BMG) LoRA GPT-OSS"
+  key: lora-gptoss
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - vllm/model_executor/layers/fused_moe
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      pytest -v -s lora/test_gptoss_tp.py'
