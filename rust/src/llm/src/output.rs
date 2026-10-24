@@ -97,7 +97,7 @@ pub enum FinishReason {
     Length,
     /// The request was aborted by the client.
     Abort,
-    /// A request-level internal error occurred, with the engine's details
+    /// A request-level error occurred, with the engine's details
     /// when it sent any (e.g. a retryable rejection by a paused engine).
     Error(Option<Box<RequestError>>),
     /// A repetitive token pattern was detected.

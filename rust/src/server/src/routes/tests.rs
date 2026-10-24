@@ -4291,6 +4291,19 @@ async fn engine_request_errors_map_to_http_status() {
             ),
             ("/inference/v1/generate", raw(false), status),
             ("/inference/v1/generate", raw(true), StatusCode::OK),
+            // Completion streams that request logprobs, with and without
+            // generation, report the engine's error.
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "logprobs": 1, "stream": true}),
+                StatusCode::OK,
+            ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "max_tokens": 0,
+                       "logprobs": 1, "stream": true}),
+                StatusCode::OK,
+            ),
         ];
         for (uri, request, expected_status) in cases {
             let engine_error = error.clone();
