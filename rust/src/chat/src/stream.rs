@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use trait_set::trait_set;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::RequestTimestamps;
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
@@ -30,6 +31,8 @@ pub struct CollectedAssistantMessage {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Routed-expert rows for the whole request, when the engine returned any.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 /// Per-request stream of chat events.
@@ -87,6 +90,7 @@ impl ChatEventStream {
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    routed_experts,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -101,6 +105,7 @@ impl ChatEventStream {
                         finish_reason,
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
+                        routed_experts: routed_experts.map(|rows| *rows),
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -208,6 +213,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             ]),
         );
@@ -250,6 +256,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
             }
         );
     }

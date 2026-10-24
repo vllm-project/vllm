@@ -102,6 +102,9 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::SamplingParams(SamplingParamsError::RoutedExpertsPromptStartOutOfRange {
+                ..
+            }) => Some("routed_experts_prompt_start"),
             _ => None,
         }
     }

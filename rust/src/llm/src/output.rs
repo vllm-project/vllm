@@ -190,6 +190,15 @@ pub struct GenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request, set on terminal outputs only.
     pub routed_experts: Option<Box<WireNdArray>>,
+    /// Routed-expert rows forwarded by this output's engine updates.
+    ///
+    /// Unlike [`Self::routed_experts`], this is populated on every output that
+    /// forwarded tokens, so a frontend that stops before the engine terminates
+    /// (for example on a stop string) can still return the rows it processed.
+    /// Each chunk keeps one engine update's rows, already offset by
+    /// `routed_experts_prompt_start`; a list holds several chunks when
+    /// `stream_interval` coalesced several updates into this output.
+    pub routed_experts_delta: Vec<WireNdArray>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -244,6 +253,7 @@ impl GenerateOutput {
                 None => self.sampling_mask = Some(next_mask),
             }
         }
+        self.routed_experts_delta.extend(next.routed_experts_delta);
         self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
         self.finish_reason = next.finish_reason;
         self.kv_transfer_params = next.kv_transfer_params;
@@ -282,6 +292,7 @@ impl GenerateOutput {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            routed_experts_delta: Vec::new(),
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -369,9 +380,15 @@ impl GenerateOutputStream {
         self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
-        if let Some(rows) = raw.routed_experts {
-            self.routed_experts_chunks.push(*rows);
-        }
+        let routed_experts_delta = match raw.routed_experts {
+            Some(rows) => {
+                // Share the raw bytes with the terminal merge; only the
+                // refcount is copied.
+                self.routed_experts_chunks.push((*rows).clone());
+                vec![*rows]
+            }
+            None => Vec::new(),
+        };
 
         // Populate the one-time prompt info on the first output.
         if let Some(info) = &mut self.pending_prompt_info
@@ -436,6 +453,7 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
             routed_experts,
+            routed_experts_delta,
             timestamps: self.request_metrics.timestamps(),
         };
 
@@ -445,29 +463,7 @@ impl GenerateOutputStream {
     /// Concatenate the routed-expert rows received so far along the token
     /// axis, like Python's `np.concatenate`.
     fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
-        let chunks = std::mem::take(&mut self.routed_experts_chunks);
-        let Some(first) = chunks.first() else {
-            return Ok(None);
-        };
-        let row_shape = first.shape.get(1..);
-        let mut num_rows = 0;
-        let mut data = Vec::new();
-        for chunk in &chunks {
-            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
-                return Err(crate::Error::RoutedExpertsShapeMismatch {
-                    request_id: request_id.to_string(),
-                });
-            }
-            num_rows += chunk.shape[0];
-            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
-        }
-        let mut shape = first.shape.clone();
-        shape[0] = num_rows;
-        Ok(Some(Box::new(WireNdArray::from_raw(
-            first.dtype,
-            shape,
-            data,
-        ))))
+        concat_routed_experts_rows(std::mem::take(&mut self.routed_experts_chunks), request_id)
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
@@ -489,6 +485,41 @@ impl GenerateOutputStream {
                 .collect(),
         )
     }
+}
+
+/// Concatenate routed-expert rows along the token axis, like Python's
+/// `np.concatenate`.
+///
+/// The first dimension is the token axis; every chunk must agree on the dtype
+/// and the remaining dimensions. An empty input means "no payload" (`None`),
+/// while a single zero-row chunk is a valid empty array.
+pub fn concat_routed_experts_rows(
+    chunks: Vec<WireNdArray>,
+    request_id: &str,
+) -> Result<Option<Box<WireNdArray>>> {
+    let Some(first) = chunks.first() else {
+        return Ok(None);
+    };
+    let row_shape = first.shape.get(1..);
+    let mut num_rows = 0;
+    let mut data = Vec::new();
+    for chunk in &chunks {
+        if chunk.shape.is_empty() || chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape
+        {
+            return Err(crate::Error::RoutedExpertsShapeMismatch {
+                request_id: request_id.to_string(),
+            });
+        }
+        num_rows += chunk.shape[0];
+        data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
+    }
+    let mut shape = first.shape.clone();
+    shape[0] = num_rows;
+    Ok(Some(Box::new(WireNdArray::from_raw(
+        first.dtype,
+        shape,
+        data,
+    ))))
 }
 
 impl Stream for GenerateOutputStream {
@@ -625,5 +656,23 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             unreachable!("generate stream should yield an error instead of closing early")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routed_experts_reject_changed_source_layout() {
+        let chunks = vec![
+            WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
+            WireNdArray::from_i32(vec![1, 2, 1], vec![2, 0]).unwrap(),
+        ];
+        let error = concat_routed_experts_rows(chunks, "req-routed").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::RoutedExpertsShapeMismatch { .. }
+        ));
     }
 }
