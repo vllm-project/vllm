@@ -2059,15 +2059,24 @@ class KNvfp4Static(QuantKeyScheme):
         # loader. A value still equal to the NaN sentinel it was created with
         # means the FP4 weights were never actually loaded (e.g. the
         # checkpoint stores this layer as BF16 and the weight loader silently
-        # skipped it).
+        # skipped it, or the checkpoint is incomplete and this layer's shard
+        # was never read).
         if torch.isnan(layer.weight_scale.float()).any():
+            # Prefer the module prefix: layer.name is the registered layer
+            # type (e.g. 'column_parallel_linear'), identical for every layer
+            # in the model, so it cannot identify which layer failed.
+            layer_id = (
+                getattr(layer, "prefix", None)
+                or getattr(layer, "name", None)
+                or repr(layer)
+            )
             raise RuntimeError(
-                f"NVFP4 weight_scale for layer "
-                f"{getattr(layer, 'name', repr(layer))!r} was never loaded "
+                f"NVFP4 weight_scale for layer {layer_id!r} was never loaded "
                 "(still NaN). The checkpoint likely stores this layer as "
-                "BF16 (not FP4). Fix: pass quant_config=None when "
-                "constructing this layer, or add it to the quantization "
-                "ignore list."
+                "BF16 (not FP4), or the checkpoint is incomplete (e.g. a "
+                "missing safetensors shard). Fix: pass quant_config=None "
+                "when constructing this layer, add it to the quantization "
+                "ignore list, or verify the checkpoint download."
             )
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(

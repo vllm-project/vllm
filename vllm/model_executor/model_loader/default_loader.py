@@ -37,6 +37,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     multi_thread_safetensors_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
+    raise_on_missing_safetensors_shards,
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
@@ -252,6 +253,10 @@ class DefaultModelLoader(BaseModelLoader):
                 hf_weights_files = filter_duplicate_safetensors_files(
                     hf_weights_files, hf_folder, index_file
                 )
+                # Without an index on disk (e.g. a manually downloaded
+                # checkpoint), a partially downloaded shard set would
+                # otherwise load silently with holes in the state dict.
+                raise_on_missing_safetensors_shards(hf_weights_files)
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
