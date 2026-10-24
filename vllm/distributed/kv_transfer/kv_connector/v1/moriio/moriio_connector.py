@@ -1392,18 +1392,15 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
-        if (
-            self.mode == MoRIIOMode.READ
-            and self._has_mamba
-            and scheduler_output.new_block_ids_to_zero
-        ):
-            # Hybrid models zero recycled attention pages that held Mamba state.
-            # Host-submitted READs overwrite these pages and can race zeroing.
+        if self.mode == MoRIIOMode.READ and scheduler_output.new_block_ids_to_zero:
+            # Mamba and mixed-precision caches zero new pages on the compute
+            # stream. Host-submitted READs overwrite these pages and can race it.
             # Hybrid READ metadata puts the aligned attention pages first.
             read_dst_block_ids = {
                 b
                 for _, block_ids in self._reqs_need_recv.values()
-                for b in block_ids[0]
+                for group in (block_ids[:1] if self._has_mamba else block_ids)
+                for b in group
             }
             scheduler_output.new_block_ids_to_zero = [
                 b
