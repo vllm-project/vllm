@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
+    iter_layer_specs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -1975,6 +1976,21 @@ def _hybrid_specs(draft=True):
         specs["mtp.0"] = _as_draft(new_kv_cache_spec())
     return specs
 
+def _glm_dflash_specs():
+    """GLM-5.3-Flash shape (#61443): MLA + Mamba (align) target layers plus
+    a DFlash2 drafter of plain GQA sliding-window layers, tagged as draft
+    layers the way the runner tags them."""
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+        "target.mamba.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+        "target.mamba.1": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+    }
+    for i in range(3):
+        specs[f"draft.attn.{i}"] = _as_draft(
+            new_sliding_window_spec(block_size=16, sliding_window=2048)
+        )
+    return specs
 
 _DRAFT_SPEC_SHAPES = {
     "uniform": lambda: {
@@ -1988,6 +2004,7 @@ _DRAFT_SPEC_SHAPES = {
         "mtp.0": _as_draft(new_mla_spec()),
         "mtp.1": _as_draft(new_swa_mla_spec(head_size=1024)),
     },
+    "glm_dflash": _glm_dflash_specs,
 }
 
 
@@ -2041,6 +2058,23 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
     warned = "could be identified as the draft model's" in caplog_vllm.text
     assert warned == warns
 
+def test_dflash_draft_group_flagged_on_glm_hybrid_shape(caplog_vllm):
+    # Regression test for #61443: under the generic packed layout, the group
+    # holding the DFlash drafter's tagged layers — and only that group — is
+    # flagged, so the EAGLE last-block drop applies to the drafter while the
+    # align-mode Mamba groups stay unflagged.
+    groups = _spec_decode_kv_cache_groups([_glm_dflash_specs()])
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "draft.attn.0" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 _GQA_SPEC = FullAttentionSpec(
     block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
