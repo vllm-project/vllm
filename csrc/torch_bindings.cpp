@@ -30,6 +30,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
+  ops.def(
+      "init_tpsp_p2p(int device_index, int comm_address, int tp_size, "
+      "int rank, int max_chunk_rows, int hidden_size, int max_tokens) -> int");
+  ops.def("destroy_tpsp_p2p(int handle) -> ()");
+  ops.def(
+      "tpsp_fused_matmul_reduce_scatter_norm_all_gather("
+      "Tensor a, Tensor b, Tensor weight, Tensor residual, "
+      "Tensor? projection_bias, Tensor? norm_bias, float eps, int norm_kind, "
+      "int microchunk_rows, int comm_address, int tp_size, int p2p_handle, "
+      "int sm_count_target=0) "
+      "-> (Tensor, Tensor, Tensor)");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -791,6 +802,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl("tpsp_fused_matmul_reduce_scatter_norm_all_gather",
+           TORCH_BOX(&tpsp_fused_matmul_reduce_scatter_norm_all_gather));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
@@ -973,6 +986,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
 // ops.impl("op_name", &func) without a dispatch key in the non-stable API.
 STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
 #ifndef USE_ROCM
+  ops.impl("init_tpsp_p2p", TORCH_BOX(&init_tpsp_p2p));
+  ops.impl("destroy_tpsp_p2p", TORCH_BOX(&destroy_tpsp_p2p));
   ops.impl("cutlass_scaled_mm_supports_fp8",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp8));
   ops.impl("cutlass_group_gemm_supported",
