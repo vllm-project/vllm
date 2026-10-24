@@ -75,6 +75,12 @@ pub struct ReasoningParserKwargs {
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
+    /// Sent as msgpack bin of little-endian u32, which the engine copies instead
+    /// of decoding one Python int per token.
+    #[serde(
+        serialize_with = "token_ids::serialize",
+        deserialize_with = "token_ids::deserialize"
+    )]
     pub prompt_token_ids: Option<Vec<u32>>,
     /// Multimodal features attached to the request.
     pub mm_features: Option<MmFeatures>,
@@ -162,6 +168,61 @@ impl EngineCoreRequest {
     }
 }
 
+/// `prompt_token_ids` as a msgpack array of u32, or as bin of little-endian u32.
+mod token_ids {
+    use std::fmt;
+
+    use serde::de::value::SeqAccessDeserializer;
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(ids: &Option<Vec<u32>>, s: S) -> Result<S::Ok, S::Error> {
+        match ids {
+            Some(ids) => {
+                let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+                s.serialize_bytes(&bytes)
+            }
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u32>>, D::Error> {
+        Ok(Option::<TokenIds>::deserialize(d)?.map(|ids| ids.0))
+    }
+
+    struct TokenIds(Vec<u32>);
+
+    impl<'de> Deserialize<'de> for TokenIds {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(TokenIdsVisitor).map(TokenIds)
+        }
+    }
+
+    struct TokenIdsVisitor;
+
+    impl<'de> Visitor<'de> for TokenIdsVisitor {
+        type Value = Vec<u32>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an array of u32 or bytes of little-endian u32")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            Vec::deserialize(SeqAccessDeserializer::new(seq))
+        }
+
+        fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            if !bytes.len().is_multiple_of(4) {
+                return Err(E::invalid_length(bytes.len(), &self));
+            }
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rmpv::Value;
@@ -219,6 +280,30 @@ mod tests {
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
         assert!(matches!(&array[21], Value::Map(_)));
+    }
+
+    #[test]
+    fn engine_core_request_encodes_prompt_token_ids_as_le_bytes() {
+        let ids = vec![1u32, 70_000, 129_279];
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: Some(ids.clone()),
+            ..EngineCoreRequest::default()
+        };
+        let encoded = encode_msgpack(&request).unwrap();
+        let Value::Array(mut array) = decode_value(&encoded).unwrap() else {
+            panic!("expected array");
+        };
+        let le_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+        assert_eq!(array[1], Value::Binary(le_bytes));
+        let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, request);
+
+        // An array of ints still decodes.
+        array[1] = Value::from(ids.iter().map(|&id| Value::from(id)).collect::<Vec<_>>());
+        let encoded = rmp_serde::to_vec(&Value::Array(array)).unwrap();
+        let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.prompt_token_ids, Some(ids));
     }
 
     #[test]
