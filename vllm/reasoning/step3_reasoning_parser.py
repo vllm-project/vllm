@@ -43,6 +43,7 @@ class Step3ReasoningParser(ReasoningParser):
                 "token in the tokenizer!"
             )
         self.think_end_token_id: int = think_end_token_id
+        self.think_start_token_id: int | None = self.vocab.get(self.think_start_token)
 
     @property
     def reasoning_start_str(self) -> str:
@@ -106,7 +107,14 @@ class Step3ReasoningParser(ReasoningParser):
             return reasoning, content
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self.think_end_token_id in input_ids
+        # Stop at the current turn's <think> so a </think> earlier in the
+        # prompt does not count as the end of this turn's reasoning.
+        for token_id in reversed(input_ids):
+            if token_id == self.think_start_token_id:
+                return False
+            if token_id == self.think_end_token_id:
+                return True
+        return False
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
