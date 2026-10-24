@@ -180,6 +180,7 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
+torch::stable::Tensor alloc_host_pinned_tensor(int64_t nbytes);
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(

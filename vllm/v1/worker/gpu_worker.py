@@ -394,6 +394,11 @@ class Worker(WorkerBase):
         zero_weights(self.model_runner.get_model())
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        if tag == "kv_cache" and self.vllm_config.cache_config.kv_cache_host_pinned:
+            self._check_host_pinned_kv_cache()
+            # allocate_kv_cache does its own cudaHostAlloc, outside any pool.
+            return nullcontext()
+
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -415,6 +420,26 @@ class Worker(WorkerBase):
                 "CuMem allocator can only be used for one instance per process."
             )
         return allocator.use_memory_pool(tag=tag)
+
+    def _check_host_pinned_kv_cache(self) -> None:
+        """See CacheConfig.kv_cache_host_pinned. Integrated (unified-memory)
+        GPUs only: on every other part the GPU has its own memory, and the KV
+        cache belongs there."""
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_integrated_gpu(self.local_rank)
+        ):
+            raise ValueError(
+                "kv_cache_host_pinned is only supported on integrated "
+                "(unified-memory) GPUs such as GB10 / DGX Spark or Thor, whose "
+                "device memory the NIC cannot register for RDMA."
+            )
+        if self.vllm_config.model_config.enable_sleep_mode:
+            # cudaFreeHost cannot keep the virtual address that the KV views
+            # and captured CUDA graphs point to, so wake_up could not restore it.
+            raise ValueError(
+                "kv_cache_host_pinned is not supported with enable_sleep_mode."
+            )
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):

@@ -377,6 +377,16 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    kv_cache_host_pinned: bool = False
+    """Back the KV cache with host-pinned memory (cudaHostAlloc, mapped and
+    write-combined) instead of device memory. Integrated (unified-memory) GPUs
+    only, such as GB10 / DGX Spark or Thor, and refused elsewhere: on those
+    parts device allocations cannot be registered for RDMA (no GPUDirect RDMA,
+    no dma-buf) while host-pinned memory can, and on GB10 the GPU reads both at
+    the same bandwidth. With the NIXL connector the KV cache is then registered
+    as DRAM and transferred zero-copy, without the staging copy through a host
+    bounce buffer. Not supported with sleep mode."""
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
