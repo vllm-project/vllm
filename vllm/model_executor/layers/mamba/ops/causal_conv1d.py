@@ -40,6 +40,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_cache_indices: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.int64,
+    stride_o_group: tl.int64,
     # others
     pad_slot_id: tl.constexpr,
     null_block_id: tl.constexpr,
@@ -49,6 +50,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     SILU_ACTIVATION: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
+    QKV_OUTPUT_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     launch_pdl: tl.constexpr,
@@ -376,6 +378,13 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             + (sequence_start_index + token_offset + idx_token) * stride_o_token
             + (idx_feats * stride_o_dim)
         )
+        if QKV_OUTPUT_DIM:
+            o_ptrs = (
+                o_ptr
+                + (idx_feats // QKV_OUTPUT_DIM) * stride_o_group
+                + (sequence_start_index + token_offset + idx_token) * stride_o_token
+                + idx_feats % QKV_OUTPUT_DIM
+            )
 
         tl.store(o_ptrs, acc, mask=mask_1d)
 
@@ -393,6 +402,7 @@ def causal_conv1d_fn(
     null_block_id: int = NULL_BLOCK_ID,
     metadata=None,
     validate_data=False,
+    output_qkv: bool = False,
 ):
     """Support varlen + continuous batching when x is 2D tensor.
 
@@ -433,7 +443,10 @@ def causal_conv1d_fn(
         for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at
         indices 0 and 3
-    out: same shape as `x`
+    output_qkv: bool
+        Return contiguous [3, tokens, dim // 3] output for three equal channel
+        groups. Only supported by this Triton implementation.
+    out: same shape as `x`, or [3, tokens, dim // 3] when output_qkv is True
     """
     if isinstance(activation, bool) and activation:
         activation = "silu"
@@ -442,7 +455,14 @@ def causal_conv1d_fn(
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
     x = x.to(conv_states.dtype)
-    out = torch.empty_like(x)
+    if output_qkv:
+        if x.ndim != 2 or x.shape[0] == 0 or x.shape[0] % 3:
+            raise ValueError("Dense QKV output requires three equal channel groups")
+        out = torch.empty(
+            (3, x.shape[1], x.shape[0] // 3), dtype=x.dtype, device=x.device
+        )
+    else:
+        out = torch.empty_like(x)
     if metadata is not None:
         nums_dict = metadata.nums_dict
         args = nums_dict
@@ -491,7 +511,9 @@ def causal_conv1d_fn(
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)
-    if out.dim() == 2:
+    if output_qkv:
+        stride_o_dim, stride_o_token = 1, out.stride(1)
+    elif out.dim() == 2:
         stride_o_dim = out.stride(0)
         stride_o_token = out.stride(1)
     else:
@@ -616,6 +638,7 @@ def causal_conv1d_fn(
         stride_cache_indices,
         stride_o_dim,
         stride_o_token,
+        out.stride(0) if output_qkv else 0,
         # others
         pad_slot_id,
         null_block_id,
@@ -625,6 +648,7 @@ def causal_conv1d_fn(
         SILU_ACTIVATION=activation in ["silu", "swish"],
         HAS_NULL_BLOCK=null_block_id is not None,
         NP2_STATELEN=np2_statelen,
+        QKV_OUTPUT_DIM=dim // 3 if output_qkv else 0,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
         BLOCK_N=256,

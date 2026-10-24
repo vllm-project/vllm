@@ -268,8 +268,11 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
 @pytest.mark.parametrize("offset", [16, 144, 256])
 @pytest.mark.parametrize("dim_first", [False, True])
 @pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("dense_qkv", [False, True])
 @torch.inference_mode()
-def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, offset):
+def test_prefill_checkpoint_resumes_suffix(
+    monkeypatch, dim_first, num_spec, offset, dense_qkv
+):
     """Restoring both cached states must reproduce an uninterrupted prefill."""
     from types import SimpleNamespace
 
@@ -302,6 +305,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.kda_safe_gate = True
     layer.kda_lower_bound = -5.0
     layer.kda_prefill_backend = "flashkda"
+    layer._dense_qkv_prefill = dense_qkv
     layer._conv_state_dim_first = dim_first
     layer._merged_conv_weight = torch.randn(width, 4, device=device) * 0.1
     layer.q_conv1d = SimpleNamespace(bias=None)
@@ -337,6 +341,14 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     raw_qkv, beta = projected[:, :width], projected[:, width:].unsqueeze(0)
     raw_before = raw_qkv.clone()
     gate = torch.randn(1, 2 * length, heads, D, device=device, dtype=torch.bfloat16)
+
+    conv_fn = kda.causal_conv1d_fn
+
+    def checked_conv(*args, **kwargs):
+        assert kwargs["output_qkv"] == (dense_qkv and not num_spec)
+        return conv_fn(*args, **kwargs)
+
+    monkeypatch.setattr(kda, "causal_conv1d_fn", checked_conv)
 
     def run(qkv, g, b, slots, has_initial, checkpoint=None):
         n = qkv.shape[0] // 2
