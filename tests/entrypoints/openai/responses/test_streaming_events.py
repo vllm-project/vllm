@@ -16,6 +16,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
     StreamingState,
@@ -213,6 +214,63 @@ class TestSimpleToolCallShapes:
 
 
 class TestCustomToolStreaming:
+    @pytest.mark.parametrize("kind", ["custom", "function"])
+    def test_namespace_custom_streaming_and_name_collision(self, kind):
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {"type": "custom", "name": "emit"},
+                {
+                    "type": "namespace",
+                    "name": "editing",
+                    "description": "",
+                    "tools": [{"type": kind, "name": "emit", "parameters": {}}],
+                },
+            ],
+        )
+        processor = SimpleStreamingEventProcessor(tools=request.tools)
+        events = []
+        for i, chunk in enumerate(['{"input":"hi\\u', "4f60\\ud83d", '\\ude00"}']):
+            events.extend(
+                _run_through_processor(
+                    processor,
+                    DeltaMessage(
+                        tool_calls=[
+                            _make_tool_call(
+                                0,
+                                name="editing__emit" if i == 0 else None,
+                                arguments=chunk,
+                            )
+                        ]
+                    ),
+                )
+            )
+        events.extend(processor.close_current())
+        added, done = events[0].item, events[-1].item
+        expected_type = "custom_tool_call" if kind == "custom" else "function_call"
+        assert added.type == done.type == expected_type
+        assert added.namespace == done.namespace == "editing"
+        assert added.name == done.name == "emit"
+        assert added.id == done.id
+        if kind == "custom":
+            assert done.input == "hi你😀"
+            assert (
+                "".join(
+                    e.delta
+                    for e in events
+                    if e.type == "response.custom_tool_call_input.delta"
+                )
+                == done.input
+            )
+            assert (
+                next(
+                    e.input
+                    for e in events
+                    if e.type == "response.custom_tool_call_input.done"
+                )
+                == done.input
+            )
+
     def test_custom_tool_input_events(self):
         processor = SimpleStreamingEventProcessor(
             tools=[CustomTool(type="custom", name="emit_command")]

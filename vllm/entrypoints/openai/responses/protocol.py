@@ -799,6 +799,7 @@ class ResponsesRequest(OpenAIBaseModel):
         tools = data.get("tools")
         if not isinstance(tools, list):
             return data
+        tools = list(tools)
         for tool in tools:
             if isinstance(tool, dict):
                 tool_dict = tool
@@ -806,6 +807,10 @@ class ResponsesRequest(OpenAIBaseModel):
                 tool_dict = tool.model_dump()
             else:
                 continue
+            if tool_dict.get("type") == "namespace":
+                children = tool_dict.get("tools")
+                if isinstance(children, list):
+                    tools.extend(children)
             tool_format = tool_dict.get("format")
             if (
                 tool_dict.get("type") == "custom"
