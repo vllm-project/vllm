@@ -109,11 +109,10 @@ class BertPooler(SequencePooler):
         )
 
         head_dtype = model_config.head_dtype
-        self.dense = ReplicatedLinear(
+        self.dense = nn.Linear(
             config.hidden_size,
             config.hidden_size,
-            params_dtype=head_dtype,
-            return_bias=False,
+            dtype=head_dtype,
         )
         self.act_fn = nn.Tanh()
 
@@ -805,7 +804,6 @@ class BertForSequenceClassification(
     is_pooling_model = True
     embedding_class: type[nn.Module] = BertEmbedding
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
-    lora_classifier_modules = ("bert.pooler.dense", "classifier")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

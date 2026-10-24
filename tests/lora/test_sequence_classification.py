@@ -11,7 +11,6 @@ from vllm.lora.request import LoRARequest
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NATIVE_MODEL_NAME = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
-BERT_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L6-v2"
 PROMPTS = {
     "star_trek": "Does warp drive appear in Star Trek?",
     "new_zealand": "Wellington is the capital of New Zealand.",
@@ -28,7 +27,7 @@ EXPECTED_OUT = {
 def _classify_logits(
     llm: LLM,
     prompts: list[str],
-    requests: LoRARequest | list[LoRARequest | None],
+    requests: LoRARequest | list[LoRARequest],
 ) -> torch.Tensor:
     params = [PoolingParams(task="classify", use_activation=False) for _ in prompts]
     outputs = llm.classify(
@@ -131,47 +130,6 @@ def test_multi_layer_head_with_modules_to_save(
         atol=2e-2,
         rtol=2e-2,
     )
-
-    del llm
-    cleanup_dist_env_and_memory()
-
-
-def test_bert_pooler_lora(tmp_path) -> None:
-    # PEFT's all-linear also targets bert.pooler.dense, which BERT declares as
-    # part of its classification head.
-    from peft import LoraConfig, TaskType, get_peft_model
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-    prompt = PROMPTS["new_zealand"]
-    torch.manual_seed(1)
-    model = get_peft_model(
-        AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_NAME),
-        LoraConfig(
-            task_type=TaskType.SEQ_CLS,
-            r=8,
-            lora_alpha=16,
-            target_modules="all-linear",
-            init_lora_weights=False,
-        ),
-    ).eval()
-    model.save_pretrained(tmp_path)
-    tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
-    with torch.no_grad():
-        expected = model(**tokenizer(prompt, return_tensors="pt")).logits
-
-    llm = LLM(
-        model=BERT_MODEL_NAME,
-        runner="pooling",
-        dtype="float16",
-        enable_lora=True,
-        max_lora_rank=8,
-        enforce_eager=True,
-        max_model_len=128,
-        gpu_memory_utilization=0.3,
-    )
-    actual = _classify_logits(llm, [prompt], LoRARequest("bert", 1, str(tmp_path)))
-
-    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=0)
 
     del llm
     cleanup_dist_env_and_memory()
