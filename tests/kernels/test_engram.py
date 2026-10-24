@@ -801,13 +801,10 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_engram_shared_prefetch_stream_waits_per_layer():
     """Consuming a layer must not wait for later layers on the shared stream."""
-    # HIP may map same-priority streams to one hardware queue, serializing them.
-    stream = torch.cuda.Stream(priority=-1)
+    stream = torch.cuda.Stream()
     modules = []
     for _ in range(2):
         module = Engram.__new__(Engram)
@@ -925,9 +922,7 @@ def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
     _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "missing_dependency", ["record_stream", "producer_wait", "consumer_wait"]
 )
@@ -992,8 +987,7 @@ def _run_engram_prepared_rows(
     engram = Engram.__new__(Engram)
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
-    # HIP may map same-priority streams to one hardware queue, serializing them.
-    engram._prefetch_stream = torch.cuda.Stream(priority=-1) if cpu_offload else None
+    engram._prefetch_stream = torch.cuda.Stream() if cpu_offload else None
     engram._prefetch_done = torch.cuda.Event() if cpu_offload else None
     # Exercise the production eager boundaries even when the test process
     # imported Engram before breakable graphs were enabled.
