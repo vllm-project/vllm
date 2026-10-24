@@ -314,7 +314,7 @@ class RankLocalStoreLayout(StoreLayout):
         assert len(chunks) == len(shard_ids) and all(
             shard_id == 0 for shard_id in shard_ids
         )
-        base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+        base = np.asarray(self.kv_caches_base_addr, dtype=np.uint64)
         length = len(self.block_len)
         blen = np.asarray(
             [self.block_len[i % length] for i in range(base.shape[0])],
@@ -329,7 +329,7 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        addrs = base[None, :] + (bids[:, None] * blen[None, :]).astype(np.uint64)
         block_counts = (spans + self.block_size - 1) // self.block_size
         sizes = blen[None, :] * block_counts[:, None]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
@@ -760,7 +760,7 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    current_event: torch.cuda.Event | None = None
+    current_event: torch.Event | None = None
 
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].
