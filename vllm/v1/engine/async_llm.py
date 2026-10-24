@@ -216,6 +216,10 @@ class AsyncLLM(EngineClient):
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
+        # Set once shutdown() is under way, so the output handler can tell an
+        # engine core that was asked to stop from one that died. A list for the
+        # same reason as _logger_ref below: the handler must not capture self.
+        self._shutting_down_ref = [False]
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -304,6 +308,11 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
+        # Set before the engine core is stopped, since the handler reads it on
+        # the event loop while shutdown() runs in an executor thread. getattr
+        # because __del__ calls shutdown() on engines whose __init__ failed.
+        if (shutting_down := getattr(self, "_shutting_down_ref", None)) is not None:
+            shutting_down[0] = True
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
@@ -863,6 +872,7 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
+        shutting_down = self._shutting_down_ref
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
@@ -938,6 +948,13 @@ class AsyncLLM(EngineClient):
                     logger.info(
                         "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
                     )
+                    output_processor.propagate_error(e)
+                    return
+                if shutting_down[0] and isinstance(e, EngineDeadError):
+                    # shutdown() stops the engine core before it cancels this
+                    # task, and runs in an executor thread, so a read already in
+                    # flight finds the core gone. That is the shutdown working.
+                    logger.info("Engine core stopped before the output handler")
                     output_processor.propagate_error(e)
                     return
                 logger.exception("AsyncLLM output_handler failed.")
