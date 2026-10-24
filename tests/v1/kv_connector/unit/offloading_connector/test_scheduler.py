@@ -4978,7 +4978,7 @@ class TestMambaHybridOffloadServing:
     MAMBA_BLOCK = 16
     PROMPT_TOKENS = 28  # 7 hash blocks; 1 full mamba chunk
 
-    def _make_scheduler(self, speculative_config, mamba_eagle=False):
+    def _make_scheduler(self, speculative_config, mamba_eagle=False, mamba_groups=1):
         vllm_config = _make_vllm_config(
             extra_config={"self_describing_kv_events": True}
         )
@@ -5013,8 +5013,61 @@ class TestMambaHybridOffloadServing:
                 ),
             ],
         )
+        for index in range(1, mamba_groups):
+            kv_cache_config.kv_cache_groups.append(
+                KVCacheGroupSpec(
+                    [f"mamba_layer{index}"],
+                    kv_cache_config.kv_cache_groups[1].kv_cache_spec,
+                )
+            )
         spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
         return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+    @pytest.mark.parametrize("group", [1, 2, 3])
+    @pytest.mark.parametrize("state", ["complete", "missing", "pending", "earlier"])
+    @pytest.mark.parametrize("length", [32, 33])
+    def test_three_recurrent_groups_need_one_common_checkpoint(
+        self, group, state, length
+    ):
+        scheduler = self._make_scheduler(None, mamba_groups=3)
+        request = MagicMock()
+        request.request_id = "hybrid"
+        request.kv_transfer_params = None
+        request.num_prompt_tokens = request.num_tokens = length
+        request.num_computed_tokens = 0
+        request.block_hashes = [
+            BlockHash(f"h{i}".encode()) for i in range(length // self.BLOCK)
+        ]
+        request.all_token_ids = list(range(length))
+        request.lora_request = None
+        request.skip_reading_prefix_cache = False
+        request.is_finished.return_value = False
+        request.status = None
+        scheduler.on_new_request(request)
+
+        def lookup(key, context):
+            if get_offload_group_idx(key) != group or state == "complete":
+                return LookupResult.HIT
+            if state == "missing":
+                return LookupResult.MISS
+            if state == "earlier":
+                return (
+                    LookupResult.HIT
+                    if get_offload_block_hash(key) == b"h3"
+                    else LookupResult.MISS
+                )
+            return LookupResult.HIT_PENDING
+
+        scheduler.manager.lookup.side_effect = lookup
+        hit, asynchronous = scheduler.get_num_new_matched_tokens(request, 0)
+        expected = {
+            "complete": 16 if length == 32 else 32,
+            "missing": 0,
+            "pending": None,
+            "earlier": 16,
+        }[state]
+        assert hit == expected
+        assert asynchronous is bool(expected)
 
     def _roundtrip_served_tokens(self, scheduler) -> int:
         """Request A: prompt-only store, finish; request A2: served tokens."""

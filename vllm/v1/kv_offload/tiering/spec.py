@@ -308,6 +308,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return metrics
 
     def __init__(self, config: OffloadingConfig):
+        if config.recurrent_schema is not None:
+            from vllm.v1.kv_offload.tiering.p2p.manager import P2PSecondaryTierManager
+
+            tiers = config.extra_config.get("secondary_tiers", [])
+            if not isinstance(tiers, list):
+                raise ValueError(
+                    "secondary_tiers must be a list of tier configurations"
+                )
+            for tier in tiers:
+                if issubclass(
+                    SecondaryTierFactory.get_tier_class(tier), P2PSecondaryTierManager
+                ):
+                    raise ValueError(
+                        "GDN canonical format does not support P2P tiers; "
+                        "remove the P2P tier"
+                    )
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
@@ -529,12 +545,18 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         try:
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
+            storage_kwargs: dict[str, Any] = {}
+            if self.config.canonical_storage_layout is not None:
+                storage_kwargs["canonical_storage_layout"] = (
+                    self.config.canonical_storage_layout
+                )
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                **storage_kwargs,
             )
         except Exception:
             worker_mmap.cleanup()

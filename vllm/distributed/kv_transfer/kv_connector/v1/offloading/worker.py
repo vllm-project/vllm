@@ -17,6 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+    validate_storage_layout,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -75,7 +78,10 @@ class OffloadingConnectorWorker:
             kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
         )
         mappings = derive_canonical_mappings(
-            self.vllm_config, kv_cache_config, kv_caches
+            self.vllm_config,
+            kv_cache_config,
+            kv_caches,
+            recurrent_schema=self.spec.config.recurrent_schema,
         )
 
         # layer_name -> (num_blocks, page_size_bytes) tensor
@@ -145,6 +151,10 @@ class OffloadingConnectorWorker:
             packed_layer_name is not None
             and kv_cache_config.hisparse_host_num_blocks is None
         ):
+            if self.spec.config.recurrent_schema is not None:
+                raise ValueError(
+                    f"GDN canonical mode rejects packed layer {packed_layer_name}"
+                )
             (tensor,) = tensors_per_block[packed_layer_name]
             num_blocks = tensor.shape[0]
             block_stride = tensor.stride(0)
@@ -213,6 +223,12 @@ class OffloadingConnectorWorker:
             tensors=block_tensors,
             group_data_refs=group_data_refs,
         )
+
+        if self.spec.config.recurrent_schema is not None:
+            layout = self.spec.config.canonical_storage_layout
+            if layout is None:
+                raise ValueError("Missing GDN canonical storage layout")
+            validate_storage_layout(canonical_kv_caches, layout)
 
         self._init_worker(canonical_kv_caches)
 

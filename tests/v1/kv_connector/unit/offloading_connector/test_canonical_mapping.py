@@ -25,6 +25,131 @@ from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 NUM_BLOCKS = 3
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"tp_replicated": True},
+        {"shapes": ((3, 64), (8, 4, 2))},
+        {"shapes": ((64, 3),)},
+        {"dtypes": (torch.bfloat16,)},
+        {"shapes": ((0, 3), (8, 4, 2))},
+        {"shapes": ((65, 3), (8, 4, 2))},
+        {"dtypes": (torch.float32, torch.float32)},
+        {"dtypes": (torch.bfloat16, torch.float16)},
+        {"num_prefill_checkpoint_blocks": 1},
+        {"num_speculative_blocks": 1},
+        {"page_size_padded": 4},
+        {"mamba_cache_mode": "none"},
+    ],
+)
+def test_gdn_rejects_unsupported_state_contract(change, monkeypatch):
+    from dataclasses import replace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+        derive_gdn_geometry,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((64, 3), (8, 4, 2)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+    )
+    assert derive_gdn_geometry(replace(spec, **change), 1) is None
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize("producer_tp", [1, 2, 4])
+@pytest.mark.parametrize("consumer_tp", [1, 2, 4])
+@pytest.mark.parametrize("conv_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("padding", [0, 32])
+def test_gdn_cross_tp_bytes(producer_tp, consumer_tp, conv_dtype, padding, monkeypatch):
+    """An independent projection/head oracle catches rank-major GDN corruption."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+        derive_gdn_geometry,
+        gdn_mapping,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+    get_conv_state_layout.cache_clear()
+    # Global Q/K widths 16, V width 32; temporal has eight (V=4,K=2) heads.
+    sizes = (96, 96, 192, 256)
+    components = [
+        (
+            torch.arange(size).repeat(NUM_BLOCKS, 1)
+            + torch.arange(NUM_BLOCKS)[:, None] * 17
+            + component * 41
+        )
+        .remainder(251)
+        .to(torch.int8)
+        for component, size in enumerate(sizes)
+    ]
+    expected = torch.cat(components, dim=1)
+
+    def shard(tp, rank):
+        return torch.cat(
+            [
+                value[:, rank * (size // tp) : (rank + 1) * (size // tp)]
+                for size, value in zip(sizes, components)
+            ],
+            dim=1,
+        )
+
+    def page_and_mapping(tp, rank):
+        local_bytes = sum(sizes) // tp
+        physical_page = local_bytes + padding
+        spec = MambaSpec(
+            block_size=16,
+            shapes=((64 // tp, 3), (8 // tp, 4, 2)),
+            dtypes=(conv_dtype, torch.float32),
+            page_size_padded=physical_page,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            mamba_cache_mode="align",
+        )
+        backing = torch.full(
+            (32 + NUM_BLOCKS * physical_page + 32,), -91, dtype=torch.int8
+        )
+        raw = backing.as_strided(
+            (NUM_BLOCKS, 1, 1, local_bytes), (physical_page, 7, 5, 1), storage_offset=32
+        )
+        geometry = derive_gdn_geometry(spec, tp)
+        assert geometry is not None
+        mapping = gdn_mapping(spec, raw, NUM_BLOCKS, tp, rank)
+        assert mapping.parallelism_agnostic
+        return backing, raw.squeeze((1, 2)), mapping, physical_page
+
+    canonical = torch.full_like(expected, -91)
+    mappings = []
+    for rank in reversed(range(producer_tp)):
+        _, page, mapping, _ = page_and_mapping(producer_tp, rank)
+        page.copy_(shard(producer_tp, rank))
+        mappings.append(mapping)
+        for lo, co, size in _triples(mapping.runs):
+            canonical[:, co : co + size] = page[:, lo : lo + size]
+    _verify_tiling("gdn", mappings)
+    assert torch.equal(canonical, expected)
+    for rank in range(consumer_tp):
+        backing, page, mapping, physical_page = page_and_mapping(consumer_tp, rank)
+        for lo, co, size in _triples(mapping.runs):
+            page[:, lo : lo + size] = canonical[:, co : co + size]
+        assert torch.equal(page, shard(consumer_tp, rank))
+        assert torch.all(backing[:32] == -91)
+        assert torch.all(backing[-32:] == -91)
+        physical = backing[32:-32].reshape(NUM_BLOCKS, physical_page)
+        assert torch.all(physical[:, mapping.local_page_size_bytes :] == -91)
+    get_conv_state_layout.cache_clear()
+
+
 def _ctx(rank, tp=1, dcp=1, pcp=1, interleave=1, total=None, heads=2):
     return _RankContext(
         tp_size=tp,

@@ -21,11 +21,13 @@ from vllm.v1.kv_cache_interface import (
     iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
+    CanonicalStorageLayout,
     OffloadingCacheConfig,
     OffloadingConfig,
     OffloadingGroupConfig,
     OffloadingModelConfig,
     OffloadingParallelConfig,
+    RecurrentSchema,
 )
 
 if TYPE_CHECKING:
@@ -228,6 +230,23 @@ def build_offloading_config(
             and parallel_config.world_size == tp_size
         )
 
+    recurrent_schema: RecurrentSchema | None = None
+    canonical_storage_layout: CanonicalStorageLayout | None = None
+    if (
+        canonical_layout
+        and extra_config.get("spec_name", "CPUOffloadingSpec")
+        == "TieringOffloadingSpec"
+        and len(selected_groups) == len(kv_cache_config.kv_cache_groups)
+    ):
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+            resolve_gdn_format,
+        )
+
+        recurrent_format = resolve_gdn_format(vllm_config, kv_cache_config)
+        if recurrent_format is not None:
+            recurrent_schema, canonical_storage_layout = recurrent_format
+            is_parallelism_agnostic = True
+
     if canonical_layout:
         replicated_layout = (
             is_parallelism_agnostic
@@ -281,4 +300,6 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        recurrent_schema=recurrent_schema,
+        canonical_storage_layout=canonical_storage_layout,
     )
