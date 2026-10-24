@@ -4,18 +4,19 @@
 
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    BYTES_BUCKETS,
+    DESCRIPTOR_BUCKETS,
+    XFER_TIME_BUCKETS,
+    CounterSpec,
+    HistogramSpec,
     KVConnectorPromMetrics,
     KVConnectorStats,
-    PromMetric,
-    PromMetricT,
 )
-from vllm.v1.metrics.utils import create_metric_per_engine
 
 if TYPE_CHECKING:
     from vllm.distributed.nixl_utils import nixlXferTelemetry
@@ -160,169 +161,70 @@ class NixlKVConnectorStats(KVConnectorStats):
 
 
 class NixlPromMetrics(KVConnectorPromMetrics):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
-        labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
-    ):
-        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+    """Prometheus metrics for NIXL KV Cache transfers."""
 
-        buckets = [
-            0.001,
-            0.005,
-            0.01,
-            0.025,
-            0.05,
-            0.075,
-            0.1,
-            0.2,
-            0.3,
-            0.5,
-            0.75,
-            1.0,
-            5.0,
-        ]
-        nixl_histogram_xfer_time = self._histogram_cls(
+    HISTOGRAM_SPECS = (
+        HistogramSpec(
+            stats_key="transfer_duration",
             name="vllm:nixl_xfer_time_seconds",
             documentation="Histogram of transfer duration for NIXL KV Cache transfers.",
-            buckets=buckets[1:],
-            labelnames=labelnames,
-        )
-        self.nixl_histogram_xfer_time = create_metric_per_engine(
-            nixl_histogram_xfer_time, self.per_engine_labelvalues
-        )
-        nixl_histogram_post_time = self._histogram_cls(
+            buckets=XFER_TIME_BUCKETS,
+        ),
+        HistogramSpec(
+            stats_key="post_duration",
             name="vllm:nixl_post_time_seconds",
-            documentation="Histogram of transfer post time for NIXL KV"
-            " Cache transfers.",
-            buckets=buckets,
-            labelnames=labelnames,
-        )
-        self.nixl_histogram_post_time = create_metric_per_engine(
-            nixl_histogram_post_time, self.per_engine_labelvalues
-        )
-        # uniform 2kb to 16gb range
-        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
-        nixl_histogram_bytes_transferred = self._histogram_cls(
+            documentation="Histogram of transfer post time for NIXL KV Cache"
+            " transfers.",
+            buckets=(0.001, *XFER_TIME_BUCKETS),
+        ),
+        HistogramSpec(
+            stats_key="bytes_transferred",
             name="vllm:nixl_bytes_transferred",
-            documentation="Histogram of bytes transferred per NIXL KV Cache transfers.",
-            buckets=buckets,
-            labelnames=labelnames,
-        )
-        self.nixl_histogram_bytes_transferred = create_metric_per_engine(
-            nixl_histogram_bytes_transferred, self.per_engine_labelvalues
-        )
-        buckets = [
-            10,
-            20,
-            30,
-            50,
-            75,
-            100,
-            200,
-            400,
-            1000,
-            2000,
-            4000,
-            10000,
-            20000,
-            50000,
-        ]
-        nixl_histogram_num_descriptors = self._histogram_cls(
+            documentation="Histogram of bytes transferred per NIXL KV Cache transfer.",
+            buckets=BYTES_BUCKETS,
+        ),
+        HistogramSpec(
+            stats_key="num_descriptors",
             name="vllm:nixl_num_descriptors",
-            documentation="Histogram of number of descriptors per NIXL"
-            "  KV Cache transfers.",
-            buckets=buckets,
-            labelnames=labelnames,
-        )
-        self.nixl_histogram_num_descriptors = create_metric_per_engine(
-            nixl_histogram_num_descriptors, self.per_engine_labelvalues
-        )
-        counter_nixl_num_failed_transfers = self._counter_cls(
+            documentation="Histogram of number of descriptors per NIXL KV Cache"
+            " transfer.",
+            buckets=DESCRIPTOR_BUCKETS,
+        ),
+    )
+    COUNTER_SPECS = (
+        # Transfer, handshake and notification failures are grouped: all are
+        # sporadic lower-transport-layer events. KV expiry is reported separately
+        # as it signals autoscaler behavior, not transport health.
+        CounterSpec(
+            stats_keys=(
+                "num_failed_transfers",
+                "num_failed_handshakes",
+                "num_failed_notifications",
+            ),
             name="vllm:nixl_num_failed_transfers",
             documentation="Number of failed NIXL KV Cache transfers, including"
             " handshake and notification failures. NOTE: KV expiry is tracked"
             " separately in vllm:nixl_num_kv_expired_reqs.",
-            labelnames=labelnames,
-        )
-        self.counter_nixl_num_failed_transfers = create_metric_per_engine(
-            counter_nixl_num_failed_transfers, self.per_engine_labelvalues
-        )
-
-        counter_nixl_num_failed_notifications = self._counter_cls(
+        ),
+        CounterSpec(
+            stats_keys=("num_failed_notifications",),
             name="vllm:nixl_num_failed_notifications",
             documentation="Number of failed NIXL KV Cache notifications. "
             "Retained for compatibility; these failures are also included in "
             "vllm:nixl_num_failed_transfers.",
-            labelnames=labelnames,
-        )
-        self.counter_nixl_num_failed_notifications = create_metric_per_engine(
-            counter_nixl_num_failed_notifications, self.per_engine_labelvalues
-        )
-
-        counter_nixl_num_kv_expired_reqs = self._counter_cls(
+        ),
+        CounterSpec(
+            stats_keys=("num_kv_expired_reqs",),
             name="vllm:nixl_num_kv_expired_reqs",
             documentation="Number of requests that had their KV expire. "
             "NOTE: This metric is tracked on the P instance.",
-            labelnames=labelnames,
-        )
-        self.counter_nixl_num_kv_expired_reqs = create_metric_per_engine(
-            counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
-        )
-
-        counter_nixl_num_notifications_after_expiry = self._counter_cls(
+        ),
+        CounterSpec(
+            stats_keys=("num_notifications_after_expiry",),
             name="vllm:nixl_num_notifications_after_expiry",
             documentation="Number of completion notifications for requests that "
             "were no longer tracked, usually because their KV lease expired. The "
             "KV blocks may have been reused before the transfer finished. Counted "
             "per notification (one per remote rank), not per request.",
-            labelnames=labelnames,
-        )
-        self.counter_nixl_num_notifications_after_expiry = create_metric_per_engine(
-            counter_nixl_num_notifications_after_expiry, self.per_engine_labelvalues
-        )
-
-    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
-        for prom_obj, list_item_key in zip(
-            [
-                self.nixl_histogram_xfer_time,
-                self.nixl_histogram_post_time,
-                self.nixl_histogram_bytes_transferred,
-                self.nixl_histogram_num_descriptors,
-            ],
-            [
-                "transfer_duration",
-                "post_duration",
-                "bytes_transferred",
-                "num_descriptors",
-            ],
-        ):
-            for list_item in transfer_stats_data[list_item_key]:
-                prom_obj[engine_idx].observe(list_item)
-        for counter_obj, counter_item_keys in zip(
-            [
-                self.counter_nixl_num_failed_transfers,
-                self.counter_nixl_num_failed_notifications,
-                self.counter_nixl_num_kv_expired_reqs,
-                self.counter_nixl_num_notifications_after_expiry,
-            ],
-            [
-                # Transfer, handshake and notification failures are grouped:
-                # all are sporadic lower-transport-layer events. KV expiry is
-                # reported separately as it signals autoscaler behavior, not
-                # transport health.
-                (
-                    "num_failed_transfers",
-                    "num_failed_handshakes",
-                    "num_failed_notifications",
-                ),
-                ("num_failed_notifications",),
-                ("num_kv_expired_reqs",),
-                ("num_notifications_after_expiry",),
-            ],
-        ):
-            for counter_item_key in counter_item_keys:
-                for list_item in transfer_stats_data[counter_item_key]:
-                    counter_obj[engine_idx].inc(list_item)
+        ),
+    )
