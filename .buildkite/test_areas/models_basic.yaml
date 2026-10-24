@@ -77,8 +77,11 @@ steps:
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_muse_spark_rocm_loading.py
+  - tests/models/test_muse_spark_logits_local.py
+  - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -101,17 +104,23 @@ steps:
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
+      - tests/models/test_muse_spark_rocm_loading.py
+      - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
       - tests/models/hy_v4/test_triton_ihc.py
+      - vllm/models/muse_spark/
+      - tests/models/test_muse_spark_logits_local.py
+      - tests/models/test_muse_spark_rocm_shared_rope.py
       commands:
-      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_deepseek_v4_vl_stream_weights.py
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_muse_spark_rocm_loading.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
+      - pytest -v -s models/test_dsv4_mono_decode.py
 
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355
   dind: false
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   device: mi355_4
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
@@ -120,8 +129,11 @@ steps:
   source_file_dependencies:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
+  - tests/models/minimax_m3/test_index_cache_overrides.py
+  - vllm/model_executor/models/config.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -152,6 +164,17 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s models/inkling/rocm
+
+- label: ":nvidia: (B200) Flint"
+  key: flint-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+    - uv pip install --system 'gguf>=0.19.0'
+    - pytest -v -s models/flint
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
@@ -325,6 +348,24 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
+  key: dsv4-mono-decode-numerics-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/deepseek_v4/amd/
+  - tests/models/test_dsv4_mono_numerics.py
+  - tests/models/test_dsv4_mono_layers.py
+  commands:
+  - pytest -v -s tests/models/test_dsv4_mono_numerics.py
+  - pytest -v -s tests/models/test_dsv4_mono_layers.py
 
 - label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
   key: dsv41-mono-decode-layers-gfx942-amd

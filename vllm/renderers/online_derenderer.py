@@ -6,18 +6,19 @@ from typing import Any
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ToolCall,
 )
 from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     completion_top_logprobs_limit,
     decode_token_ids,
 )
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    assemble_chat_message_fields,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -43,17 +44,13 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
-    maybe_filter_parallel_tool_calls,
     resolve_finish_reason,
 )
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
-from vllm.renderers.chat_utils import (
-    ChatTemplateContentFormatOption,
-    make_tool_call_id,
-)
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
@@ -470,30 +467,19 @@ class OnlineDerenderer:
             model_output_token_ids=token_ids,
         )
 
-        if not getattr(chat_request, "include_reasoning", True):
-            reasoning = None
-
-        tc_items = (
-            [
-                ToolCall(id=tc.id or make_tool_call_id(), function=tc)
-                for tc in maybe_filter_parallel_tool_calls(tool_calls, chat_request)
-            ]
-            if tool_calls
-            else []
+        fields = assemble_chat_message_fields(
+            chat_request,
+            reasoning,
+            content,
+            tool_calls,
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=self.parser,
         )
-
-        is_named_tool_choice = (
-            type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
-        )
-        is_required_tool_choice = chat_request.tool_choice == "required"
-        if is_named_tool_choice or is_required_tool_choice:
-            content = content or ""
-
         return ChatMessage(
             role="assistant",
-            reasoning=reasoning,
-            content=content,
-            tool_calls=tc_items,
+            reasoning=fields.reasoning,
+            content=fields.content,
+            tool_calls=fields.tool_calls,
         )
 
     def _detokenize_delta(
@@ -759,6 +745,8 @@ class OnlineDerenderer:
                 chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
                 model_config=self.model_config,
             ),
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=parser_cls,
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded
@@ -1098,12 +1086,17 @@ class OnlineDerenderer:
                     initial_text_offset=state.logprob_text_offset,
                 )
 
+            next_text_offset = state.logprob_text_offset + len(new_text)
+            if completion_logprobs is not None and completion_logprobs.tokens:
+                next_text_offset = completion_logprobs.text_offset[-1] + len(
+                    completion_logprobs.tokens[-1]
+                )
             updated_state = updated_state.model_copy(
                 update={
                     "logprob_context_token_ids": _logprob_context_tail(
                         state.logprob_context_token_ids, delta_tids
                     ),
-                    "logprob_text_offset": state.logprob_text_offset + len(new_text),
+                    "logprob_text_offset": next_text_offset,
                 }
             )
 
@@ -1182,7 +1175,7 @@ def _decode_params(
     skip_special = (
         False
         if preserve_special
-        else (request.skip_special_tokens if request is not None else True)
+        else (request is None or request.skip_special_tokens is not False)
     )
     spaces_between = (
         request.spaces_between_special_tokens if request is not None else True
