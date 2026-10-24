@@ -1,9 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import platform
+import sys
+
+import pytest
+
 from vllm.utils.network_utils import get_file_store_init_method
 from vllm.v1.executor import UniProcExecutor
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+
+RUNAI_PLATFORM_SUPPORTED = sys.platform == "linux" and platform.machine() in {
+    "aarch64",
+    "x86_64",
+}
+RUNAI_PLATFORM_SKIP_REASON = (
+    "runai-model-streamer only provides Linux x86_64 and aarch64 wheels"
+)
+requires_runai = pytest.mark.skipif(
+    not RUNAI_PLATFORM_SUPPORTED,
+    reason=RUNAI_PLATFORM_SKIP_REASON,
+)
 
 
 # This is a dummy executor for patching in test_runai_model_streamer_s3.py.
