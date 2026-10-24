@@ -229,13 +229,18 @@ services:
         BUSY_COUNT=0
         SNAP_PTOKS=-1
         SNAP_GTOKS=-1
+        METRICS_KO=0
+        METRICS_KO_MAX=3
 
+        # Prints "-1 -1" when /metrics cannot be read. A timeout used to print
+        # "0 0", which read as flat counters and restarted a working engine
+        # (2026-10-24 15:18Z: /metrics took >5 s under overload).
         read_counters() {
-          curl -s --max-time 5 "http://host.docker.internal:$$PORT/metrics" 2>/dev/null \
-            | awk '/^vllm:prompt_tokens_total\{/{p=$$2} /^vllm:generation_tokens_total\{/{g=$$2} END{printf "%d %d", p, g}'
+          curl -s --max-time 15 "http://host.docker.internal:$$PORT/metrics" 2>/dev/null \
+            | awk '/^vllm:prompt_tokens_total\{/{p=$$2} /^vllm:generation_tokens_total\{/{g=$$2} END{if (p=="" || g=="") printf "-1 -1"; else printf "%d %d", p, g}'
         }
 
-        echo "Watchdog v6.1 for Swift-1.5-27B (v5 + prefill-in-flight gate, no restart while counters advance)"
+        echo "Watchdog v6.2 for Swift-1.5-27B (v5 + prefill-in-flight gate, no restart while counters advance or are unreadable)"
         echo "  Interval: $${INTERVAL}s (a WEDGE cycle lasts ~2 min). Probes host.docker.internal. BUSY alert every $${BUSY_MAX} cycles."
 
         while true; do
@@ -265,6 +270,7 @@ services:
               WEDGE_FAIL=0
               BUSY_COUNT=0
               SNAP_PTOKS=-1
+              METRICS_KO=0
               WARMUP_LEFT=0
             elif [ $$WARMUP_LEFT -gt 0 ]; then
               WARMUP_LEFT=$$((WARMUP_LEFT - 1))
@@ -274,7 +280,20 @@ services:
               if [ $$NEWFAIL -ge $$WEDGE_MAX ]; then
                 CT="$$(read_counters)"
                 PT="$${CT%% *}"; GT="$${CT##* }"
-                if [ "$$SNAP_PTOKS" -ge 0 ] && { [ "$$PT" -gt "$$SNAP_PTOKS" ] || [ "$$GT" -gt "$$SNAP_GTOKS" ]; }; then
+                UNREAD=0
+                if [ "$$PT" -lt 0 ] || [ "$$SNAP_PTOKS" -lt 0 ]; then
+                  UNREAD=1
+                  METRICS_KO=$$((METRICS_KO + 1))
+                fi
+                if [ $$UNREAD -eq 1 ] && [ $$METRICS_KO -lt $$METRICS_KO_MAX ]; then
+                  echo "$$TS WEDGE-UNKNOWN health=200 decode=$$G — counters unreadable (now p=$$PT, snapshot p=$$SNAP_PTOKS), NOT restarting on a missing reading ($$METRICS_KO/$$METRICS_KO_MAX)"
+                  if [ "$$PT" -ge 0 ]; then
+                    SNAP_PTOKS=$$PT
+                    SNAP_GTOKS=$$GT
+                  fi
+                  WEDGE_FAIL=$$((WEDGE_MAX - 1))
+                elif [ $$UNREAD -eq 0 ] && { [ "$$PT" -gt "$$SNAP_PTOKS" ] || [ "$$GT" -gt "$$SNAP_GTOKS" ]; }; then
+                  METRICS_KO=0
                   BUSY_COUNT=$$((BUSY_COUNT + 1))
                   echo "$$TS WEDGE-BUSY health=200 decode=$$G — counters ADVANCED (p $$SNAP_PTOKS->$$PT g $$SNAP_GTOKS->$$GT), engine is working, NOT restarting (streak $$BUSY_COUNT, alert every $$BUSY_MAX)"
                   SNAP_PTOKS=$$PT
@@ -284,10 +303,15 @@ services:
                     echo "$$TS BUSY-LONG ALERT $$CONTAINER busy $$BUSY_COUNT cycles (~$$((BUSY_COUNT * 2)) min) with counters advancing — overload, NOT restarting (a restart empties GPU/RAM caches and does not reduce the incoming load; user arbitration Q29=b, 2026-10-24)"
                   fi
                 else
-                  echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters flat p=$$PT g=$$GT)"
+                  if [ $$UNREAD -eq 1 ]; then
+                    echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters unreadable $$METRICS_KO cycles in a row)"
+                  else
+                    echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters flat p=$$PT g=$$GT)"
+                  fi
                   docker restart $$CONTAINER
                   WEDGE_FAIL=0
                   BUSY_COUNT=0
+                  METRICS_KO=0
                   SNAP_PTOKS=-1
                   WARMUP_LEFT=$$WARMUP_PROBES
                   echo "$$TS Restart issued. Waiting 600s for boot..."
