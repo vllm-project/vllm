@@ -288,6 +288,9 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        self.num_decode_step_tokens = (
+            1 + self.num_spec_tokens if self.num_spec_tokens else 0
+        )
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
         # for all such groups, so the rewind matches every group's allocation.
@@ -1364,9 +1367,7 @@ class Scheduler(SchedulerInterface):
                 reserved_blocks = 0
                 # The full-sequence gate also covers the spec decode step that
                 # follows the prefill.
-                num_decode_step_tokens = (
-                    1 + self.num_spec_tokens if self.num_spec_tokens else 0
-                )
+                num_decode_step_tokens = self.num_decode_step_tokens
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
