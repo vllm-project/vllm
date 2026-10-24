@@ -50,6 +50,8 @@ results behind the choices here.
 """
 
 import time
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
@@ -57,6 +59,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -64,9 +67,12 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
+    StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    deregister_nixl_memory,
     register_nixl_memory,
+    validate_sharded_rdt_settings,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -80,6 +86,66 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+class HostStagingAllocationError(RuntimeError):
+    """A host receive slot could not be allocated, page-locked or registered."""
+
+
+def _alloc_page_locked_slot(nbytes: int) -> torch.Tensor:
+    """One exact-size host receive slot: a pageable ``torch.empty`` page-locked
+    whole from its storage base with ``cudaHostRegister``, then NIXL-registered.
+
+    Torch's pinned allocator is bypassed on purpose: it rounds every request up
+    to a power of two and keeps freed blocks cached, so the pool would occupy
+    more than the documented ``lanes x K x slot bytes`` and never give it back.
+    Any failure leaves nothing registered: a nonzero ``cudaHostRegister`` code
+    (the wrapper returns codes and never raises) is raised with its error text,
+    and a NIXL failure unregisters the page-locked range before re-raising.
+    """
+    cudart = CudaRTLibrary()
+    buffer = torch.empty(nbytes, dtype=torch.uint8, device="cpu")
+    storage = buffer.untyped_storage()
+    base, size = storage.data_ptr(), storage.nbytes()
+    code = cudart.cudaHostRegister(base, size, 0)
+    if code != 0:
+        cudart.cudaGetLastError()
+        raise RuntimeError(
+            f"cudaHostRegister({size} bytes) returned CUDA error {code}: "
+            f"{cudart.cudaGetErrorString(code)}"
+        )
+    try:
+        register_nixl_memory(buffer)
+    except Exception:
+        _host_unregister(cudart, base)
+        raise
+    return buffer
+
+
+def _host_unregister(cudart: CudaRTLibrary, base: int) -> bool:
+    """Undo ``cudaHostRegister`` on ``base``; True when it succeeded. A failure
+    is logged, not raised: this runs on shutdown and inside the init rollback,
+    and the caller decides the range's fate."""
+    code = cudart.cudaHostUnregister(base)
+    if code != 0:
+        cudart.cudaGetLastError()
+        logger.warning(
+            "cudaHostUnregister(%#x) returned CUDA error %d: %s",
+            base,
+            code,
+            cudart.cudaGetErrorString(code),
+        )
+    return code == 0
+
+
+@dataclass(frozen=True)
+class _ReceivePoolConfig:
+    """Validated receive-pool settings recorded before the plan is known."""
+
+    staging_device: StagingDevice
+    stages_in_flight: int
+    ring_depth: int
+    buffer_presize: int
 
 
 @dataclass
@@ -111,6 +177,8 @@ class _Chunk:
     # predecessor is still being read, because Ray may start a consumer's
     # concurrent produce calls in any order. Static, since the plan is.
     seq: int = 0
+    # Stage stream containing ``owner``. Chunks in one stream retain plan order.
+    stream: int = 0
 
 
 @dataclass
@@ -126,6 +194,8 @@ class _CallPlan:
 
     chunks: "list[_Chunk]"
     pre_free: "list[int]"
+    # Stage streams among ``chunks``, numbered by first chunk appearance.
+    num_streams: int = 0
 
 
 @dataclass
@@ -141,6 +211,23 @@ class _PendingPull:
     targets: "list[torch.Tensor]"
     blob: "torch.Tensor"
     slot: int
+
+
+@dataclass
+class _PullHooks:
+    """Operations injected into the pure ``_run_lanes`` scheduler."""
+
+    # Start a pull into the slot. The real hook waits if the slot's previous
+    # scatter is still reading it; tests inject transport-free pulls.
+    issue: "Callable[[_Chunk, int], Any]"
+    # Whether issue into the slot would start without waiting.
+    slot_free: "Callable[[int], bool]"
+    # Wait for one pull to land, optionally for at most ``timeout`` seconds.
+    wait_any: "Callable[[list[Any], float | None], int | None]"
+    # Complete a landed pull, dispatch its scatter, and signal its groups.
+    drain: "Callable[[Any, _Chunk], None]"
+    # Signal a group belonging to a chunk with no keys.
+    signal: "Callable[[int], None]"
 
 
 @dataclass
@@ -216,12 +303,11 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     worker's distinct index comes from ``_global_worker_index``."""
 
     num_rdt_buffers: int = 2
-    """Depth of the consumer receive-buffer ring. Must match the
-    producer's — ``_run_chunk_pipeline``'s slot-safety argument rests on it. 2 =
-    double buffer: chunk i+1's serve overlaps chunk i's RDMA, and scatter(i-1)
-    overlaps RDMA(i) in the other slot. Keep depth x chunk_bytes under the
-    fabric's address-translation reach (~2-3 GB/flow on the reference 8xB200 RoCE
-    cluster, where K=3 measurably hurt)."""
+    """K, the receive slots and in-flight pulls per active stream lane. Must
+    match the producer's ring depth. The consumer pool is L x K slots, where L
+    is the effective ``stages_in_flight`` clamped to the plan's stream count.
+    Keep K x chunk_bytes per flow under the fabric's address-translation reach
+    (~2-3 GB/flow on the reference 8xB200 RoCE cluster)."""
 
     buffer_presize_gb: float = 0.0
     """Pre-size each packed receive-buffer slot to this many GiB
@@ -229,6 +315,12 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     model's largest atomic chunk (e.g. an untied lm_head). Sizing buffers ONCE
     matters beyond perf -- see the doc's "Sizing buffers once matters beyond
     throughput"."""
+
+    staging_device: StagingDevice = "gpu"
+    """Where receive buffers live: GPU HBM or pinned host memory."""
+
+    stages_in_flight: int = 1
+    """Maximum trainer stages pulled from concurrently."""
 
     replica_rank: int = 0
     """This inference engine's ordinal in the fleet (0..``num_replicas``-1).
@@ -254,14 +346,19 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for the sharded RDT backend: intentionally EMPTY.
+    """Update info for the sharded RDT backend: the sync's index, nothing else.
 
     The chunk/free plan is a pure function of the baked plan and the driver's
     gather-group partition, both fixed for the engine's lifetime, so it is built
     once at ``init_transfer_engine`` from ``ShardedRDTWeightTransferInitInfo``'s
     ``names`` + ``group_lens``. ONE ``update_weights`` per sync then just re-runs
-    that plan; there is nothing per-sync to carry.
+    that plan.
     """
+
+    sync_idx: int = -1
+    """The trainer's count of this sync, sent with every ``free_group`` so a
+    producer that has not begun the sync yet keeps the signal instead of losing
+    it to its ``begin_sync``. -1 (an older trainer) sends untagged signals."""
 
 
 class ShardedRDTWeightTransferEngine(
@@ -343,23 +440,35 @@ class ShardedRDTWeightTransferEngine(
         # recv path does zero registration in steady state. See the doc's "Sizing
         # buffers once matters beyond throughput" for why they rarely grow.
         #
-        # Ring depth is both the slot count and the in-flight pull count, one
-        # quantity from ``num_rdt_buffers``. Decoupling them with a spare slot
-        # measurably slows the sync.
+        # The pool has one K-slot block per active stage-stream lane. K is both
+        # a lane's slot count and its in-flight pull limit.
         self._ring_depth = 1
+        self._staging_device: StagingDevice = "gpu"
+        self._stages_in_flight = 1
+        self._lanes = 1
+        self._pool_geometry: tuple[StagingDevice, int, int] | None = None
         self._dest_buffers: list[dict[torch.dtype, torch.Tensor]] = [{}]
+        # (slot, old tensor) pairs a re-init grow replaced, released once that
+        # init commits: a rollback puts them back, so they must stay registered.
+        self._retired_slots: list[tuple[int, torch.Tensor]] = []
+        # Host slots whose release failed or could not be proven safe (a NIXL
+        # deregistration or cudaHostUnregister error, or a post-processing thread
+        # that never stopped): possibly still registered or still being read, so
+        # they stay page-locked and referenced for the process lifetime.
+        self._parked_host_slots: list[torch.Tensor] = []
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
         # Generation counters guarding the events (see _ensure_proc_worker).
         self._slot_queued: list[int] = []
         self._slot_done: list[int] = []
         self._slot_cv: Any = None
-        self._pull_slot = 0
+        self._lane_cursors = [0]
         # (id(chunk), slot) -> (buffer data_ptr, per-key views).
         # Lives on the engine, not on the _Chunk: the plan is static and shared
         # across syncs, so a per-slot runtime cache has no business inside it.
         self._targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
         self._buffer_presize = 0  # bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_group signal refs, drained per sync
+        self._sync_idx: int | None = None  # this sync's index, tagged on every free
         # The STATIC plan: built once — at init from init_info.group_lens, else
         # lazily on the first update_weights — and reused. Non-None means
         # update_weights ignores its per-sync names.
@@ -384,14 +493,21 @@ class ShardedRDTWeightTransferEngine(
         self._proc_error: BaseException | None = None
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
-        """Configure the ring, bind the producers, bake the replay plan, and
-        pre-register every NIXL buffer -- in that order, because each step depends
-        on the previous one.
+        """Record pool settings, bind producers, bake and build the replay plan,
+        size its LxK receive pool, then pre-register every NIXL buffer.
 
         The bake drives ``model.load_weights`` and the pre-registration blocks on
         RPCs to the producers, so this is a heavyweight one-off; every later
         ``update_weights`` is pure replay.
         """
+        validate_sharded_rdt_settings(
+            staging_device=init_info.staging_device,
+            stages_in_flight=init_info.stages_in_flight,
+            num_rdt_buffers=init_info.num_rdt_buffers,
+            buffer_presize_gb=init_info.buffer_presize_gb,
+            num_consumers=init_info.num_consumers,
+            allow_zero_consumers=True,
+        )
         # Read the attribute directly: if a vLLM bump renames it, this guard
         # must fail loudly at init rather than silently disappear.
         if self.parallel_config.enable_eplb:
@@ -405,41 +521,197 @@ class ShardedRDTWeightTransferEngine(
             )
         # The worker is often a different install from whatever spawned it, so
         # check here too and not only where the actor options are set.
-        check_ray_rdt_version()
-        self._configure_ring(init_info)
-        self._resolve_producers(init_info)
+        check_ray_rdt_version(init_info.staging_device)
+        pool_config = self._configure_ring(init_info)
 
-        # A pure dry run: the trainer's gather cache is empty at init, so nothing
-        # can (or does) get pulled -- we only record how each slice is fetched and
-        # where it lands, then restore the model.
-        self._bake(init_info)
-        self._build_static_plan(init_info)
-        # Register ALL NIXL memory now, while the fabric is idle: dma-buf GPUDirect
-        # registration concurrent with in-flight RDMA intermittently fails
-        # (ibv_reg_mr 'Bad address'), which bites under M:N fan-in. Sizes come from
-        # the static plan, so this is exact.
-        self._preregister_at_init()
-        # Start the background post-processing worker (pull/process pipelining).
-        self._ensure_proc_worker()
-
-    def _configure_ring(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
-        """Ring depth K.
-
-        Must run before ``_ensure_proc_worker`` creates the per-slot events and
-        counters, and before any buffer is grown (both happen on the first pull).
-        """
-        self._num_consumers_override = int(init_info.num_consumers or 0)
-        k = max(1, int(init_info.num_rdt_buffers))
-        self._ring_depth = k
-        self._dest_buffers = [{} for _ in range(k)]
-        self._targets_cache = {}
-        self._buffer_presize = int(float(init_info.buffer_presize_gb) * (1 << 30))
-        logger.info(
-            "[RDT-RING] active_pulls=%d slots=%d presize=%.2fGiB",
-            k,
-            k,
-            self._buffer_presize / (1 << 30),
+        # Re-init prepares routing, baked state, and receive buffers in place.
+        # Keep the active state transactional through pre-registration and
+        # worker setup: a failed candidate must not leave its plan, tensors, or
+        # routing active.
+        old_num_consumers_override = self._num_consumers_override
+        old_router = self._router
+        old_name_to_plan = self._name_to_plan
+        old_name_to_plan_contents = dict(old_name_to_plan)
+        old_name_meta = self._name_meta
+        old_name_meta_contents = dict(old_name_meta)
+        old_live_names = self._live_names
+        old_live_names_contents = set(old_live_names)
+        old_cached_plan = self._cached_plan
+        old_pool_settings = (
+            self._pool_geometry,
+            self._staging_device,
+            self._stages_in_flight,
+            self._ring_depth,
+            self._lanes,
+            self._buffer_presize,
         )
+        old_dest_buffers = self._dest_buffers
+        old_dest_slots = list(old_dest_buffers)
+        old_dest_slot_contents = [dict(slot) for slot in old_dest_slots]
+        old_lane_cursors = self._lane_cursors
+        old_lane_cursor_contents = list(old_lane_cursors)
+        old_targets_cache = self._targets_cache
+        old_targets_cache_contents = dict(old_targets_cache)
+        old_worker_refs = (
+            self._slot_read_done,
+            self._slot_queued,
+            self._slot_done,
+            self._slot_cv,
+        )
+        old_worker_contents = tuple(list(values) for values in old_worker_refs[:3])
+        try:
+            self._num_consumers_override = init_info.num_consumers
+            self._resolve_producers(init_info)
+
+            # A pure dry run: the trainer's gather cache is empty at init, so
+            # nothing can (or does) get pulled -- we only record how each slice
+            # is fetched and where it lands, then restore the model.
+            self._bake(init_info)
+            plan = self._build_static_plan(init_info)
+            self._size_pool(pool_config, plan)
+            self._cached_plan = plan
+            # Register ALL NIXL memory now, while the fabric is idle: dma-buf
+            # GPUDirect registration concurrent with in-flight RDMA intermittently
+            # fails (ibv_reg_mr 'Bad address'), which bites under M:N fan-in. Sizes
+            # come from the static plan, so this is exact.
+            self._preregister_at_init()
+            # Start the background post-processing worker (pull/process pipelining).
+            self._ensure_proc_worker()
+        except Exception:
+            # The restore below drops every slot this attempt built; give their
+            # host memory back first. Slots a re-init grow replaced are restored,
+            # not released, so they stay page-locked and NIXL-registered.
+            self._release_attempt_slots(old_dest_slot_contents)
+            self._retired_slots = []
+            old_name_to_plan.clear()
+            old_name_to_plan.update(old_name_to_plan_contents)
+            old_name_meta.clear()
+            old_name_meta.update(old_name_meta_contents)
+            old_live_names.clear()
+            old_live_names.update(old_live_names_contents)
+            old_dest_buffers[:] = old_dest_slots
+            for slot, contents in zip(old_dest_slots, old_dest_slot_contents):
+                slot.clear()
+                slot.update(contents)
+            old_lane_cursors[:] = old_lane_cursor_contents
+            old_targets_cache.clear()
+            old_targets_cache.update(old_targets_cache_contents)
+            for values, contents in zip(old_worker_refs[:3], old_worker_contents):
+                values[:] = contents
+            self._num_consumers_override = old_num_consumers_override
+            self._router = old_router
+            self._name_to_plan = old_name_to_plan
+            self._name_meta = old_name_meta
+            self._live_names = old_live_names
+            self._cached_plan = old_cached_plan
+            (
+                self._pool_geometry,
+                self._staging_device,
+                self._stages_in_flight,
+                self._ring_depth,
+                self._lanes,
+                self._buffer_presize,
+            ) = old_pool_settings
+            self._dest_buffers = old_dest_buffers
+            self._lane_cursors = old_lane_cursors
+            self._targets_cache = old_targets_cache
+            (
+                self._slot_read_done,
+                self._slot_queued,
+                self._slot_done,
+                self._slot_cv,
+            ) = old_worker_refs
+            raise
+        # Committed: the slots a re-init grow replaced left the pool for good.
+        self._release_retired_slots()
+
+    def _configure_ring(
+        self, init_info: ShardedRDTWeightTransferInitInfo
+    ) -> "_ReceivePoolConfig":
+        """Record candidate staging/S/K settings without allocating or mutating
+        the active receive pool.
+
+        The plan determines effective lanes L, so ``_size_pool`` applies these
+        settings atomically after the plan has been built.
+        """
+        k = init_info.num_rdt_buffers
+        config = _ReceivePoolConfig(
+            staging_device=init_info.staging_device,
+            stages_in_flight=init_info.stages_in_flight,
+            ring_depth=k,
+            buffer_presize=int(init_info.buffer_presize_gb * (1 << 30)),
+        )
+        logger.info(
+            "[RDT-RING] active_pulls=%d per lane, presize=%.2fGiB",
+            k,
+            config.buffer_presize / (1 << 30),
+        )
+        return config
+
+    def _size_pool(self, config: "_ReceivePoolConfig", plan: "_CallPlan") -> None:
+        """Apply an LxK receive-pool geometry after the static plan is known.
+
+        Once the post-processing worker exists, re-init may reuse the pool only
+        for the exact ``(staging_device, L, K)`` tuple. The compatibility check
+        precedes every pool-field mutation, so rejection leaves buffers, events,
+        counters, cursors, and active geometry unchanged.
+        """
+        lanes = max(1, min(config.stages_in_flight, plan.num_streams))
+        geometry = (config.staging_device, lanes, config.ring_depth)
+        worker_exists = self._proc_thread is not None or bool(self._slot_read_done)
+        if (
+            worker_exists
+            and self._pool_geometry is not None
+            and geometry != self._pool_geometry
+        ):
+            old_staging, old_lanes, old_k = self._pool_geometry
+            new_staging, new_lanes, new_k = geometry
+            raise RuntimeError(
+                "Sharded RDT re-init cannot change receive-pool geometry after "
+                "the post-processing worker starts: "
+                f"old=(staging_device={old_staging!r}, L={old_lanes}, K={old_k}), "
+                f"new=(staging_device={new_staging!r}, L={new_lanes}, K={new_k})."
+            )
+
+        num_slots = lanes * config.ring_depth
+        reuse_pool = (
+            self._pool_geometry == geometry and len(self._dest_buffers) == num_slots
+        )
+        self._staging_device = config.staging_device
+        self._stages_in_flight = config.stages_in_flight
+        self._ring_depth = config.ring_depth
+        self._lanes = lanes
+        self._buffer_presize = config.buffer_presize
+        if reuse_pool:
+            self._targets_cache.clear()
+        else:
+            self._targets_cache = {}
+            self._lane_cursors = [0] * lanes
+            self._dest_buffers = [{} for _ in range(num_slots)]
+        self._pool_geometry = geometry
+
+        lowered = (
+            f", lowered to {lanes} (the plan's {plan.num_streams} stage stream(s))"
+            if lanes < config.stages_in_flight
+            else ""
+        )
+        logger.info(
+            "[RDT-PLAN] stages in flight: %d requested%s; pool of %d slots "
+            "(%d lane(s) x %d)",
+            config.stages_in_flight,
+            lowered,
+            num_slots,
+            lanes,
+            config.ring_depth,
+        )
+
+    @property
+    def _num_slots(self) -> int:
+        return self._lanes * self._ring_depth
+
+    def _lane_slots(self, lane: int) -> range:
+        """The contiguous K-slot block owned by one lane."""
+        return range(lane * self._ring_depth, (lane + 1) * self._ring_depth)
 
     def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Work out this worker's consumer identity, build the router, and bind
@@ -558,7 +830,9 @@ class ShardedRDTWeightTransferEngine(
             + self._global_worker_index()
         )
 
-    def _build_static_plan(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _build_static_plan(
+        self, init_info: ShardedRDTWeightTransferInitInfo
+    ) -> "_CallPlan":
         """Build the chunk/free plan once. It never changes across syncs, so
         ``update_weights`` needs no per-sync names."""
         if not init_info.group_lens:
@@ -571,32 +845,37 @@ class ShardedRDTWeightTransferEngine(
                 f"init_info.group_lens sums to {sum(init_info.group_lens)} "
                 f"but {len(init_info.names)} names were given."
             )
-        self._cached_plan = self._build_call_plan(init_info.names, init_info.group_lens)
+        plan = self._build_call_plan(init_info.names, init_info.group_lens)
         logger.info(
-            "[RDT-PLAN] pre-built static call plan at init: %d chunks",
-            len(self._cached_plan.chunks),
+            "[RDT-PLAN] pre-built static call plan at init: %d chunks in %d "
+            "stage stream(s)",
+            len(plan.chunks),
+            plan.num_streams,
         )
+        return plan
 
     def _preregister_at_init(self) -> None:
         """Register every NIXL buffer this worker will use at init, before any
         transfer runs, so nothing registers during the sync-0 RDMA churn.
 
-        Both sides are sized from the static plan: receive buffers are
-        ``ring_depth`` slots at the largest chunk's ``pack_bytes``, and each bound
-        producer is asked to pre-register a serve ring at the max bytes this
-        consumer will pull from it. A no-op when this worker has no chunks."""
+        Both sides are sized from the static plan: receive buffers are all LxK
+        pool slots at the largest chunk's ``pack_bytes``, and each bound producer
+        is asked to pre-register a serve ring at the max bytes this consumer will
+        pull from it. A no-op when this worker has no chunks."""
         plan = self._cached_plan
         if plan is None or not plan.chunks:
             return
-        # (a) consumer receive buffers — one per ring slot, at the largest chunk.
+        # (a) consumer receive buffers — every slot in every active lane.
         max_pack = max(c.pack_bytes for c in plan.chunks)
         alloc = buffer_alloc_bytes(max_pack, self._buffer_presize)
-        for slot in range(self._ring_depth):
+        for slot in range(self._num_slots):
             buffer = self._dest_buffers[slot].get(torch.uint8)
             if buffer is None or buffer.numel() < alloc:
-                buffer = torch.empty(alloc, dtype=torch.uint8, device=self.device)
-                register_nixl_memory(buffer)
-                self._dest_buffers[slot][torch.uint8] = buffer
+                self._dest_buffers[slot][torch.uint8] = self._alloc_receive_buffer(
+                    alloc, pool_total=self._num_slots * alloc
+                )
+                if buffer is not None and self._staging_device == "host":
+                    self._retired_slots.append((slot, buffer))
 
         # (b) producer serve rings — max bytes this consumer pulls from each
         # bound producer, plus the per-producer plan digest a producer sharing
@@ -616,11 +895,149 @@ class ShardedRDTWeightTransferEngine(
         logger.info(
             "[RDT-PLAN] pre-registered %d receive slots (%.0f MiB each) + serve "
             "rings on %d producer(s) %s",
-            self._ring_depth,
+            self._num_slots,
             alloc / (1 << 20),
             len(refs),
             [nb // (1 << 20) for nb in serve_bytes],
         )
+
+    def _alloc_receive_buffer(
+        self, nbytes: int, *, pool_total: int | None = None
+    ) -> torch.Tensor:
+        """Allocate and register one receive buffer in the selected staging mode.
+
+        This is the sole allocation seam for init preregistration, which sizes
+        every slot to ``nbytes`` and passes the exact ``pool_total`` the failure
+        message names, and for the defensive grow path in ``_issue_pull``, which
+        omits it because only one slot is regrown while the others keep their
+        size, so the message names that slot's bytes alone.
+        """
+        if self._staging_device == "gpu":
+            buffer = torch.empty(nbytes, dtype=torch.uint8, device=self.device)
+            register_nixl_memory(buffer)
+            return buffer
+
+        try:
+            return _alloc_page_locked_slot(nbytes)
+        except Exception as error:
+            raise HostStagingAllocationError(
+                "staging_device='host' could not "
+                f"{self._host_alloc_request(nbytes, pool_total)}; each slot "
+                "is pageable host memory page-locked whole with "
+                "cudaHostRegister and registered with NIXL, with no "
+                f"pinned-allocator rounding or caching: {error}"
+            ) from error
+
+    def _host_alloc_request(self, nbytes: int, pool_total: int | None) -> str:
+        """What the failed host allocation was for, with the pool geometry."""
+        geometry = (
+            f"{self._num_slots} slots ({self._lanes} lane(s) x K={self._ring_depth})"
+        )
+        if pool_total is None:
+            return (
+                f"regrow one receive slot of its {geometry} pool to {nbytes} "
+                "bytes, exactly (the other slots keep their size)"
+            )
+        return (
+            f"build its receive pool: {geometry} x {nbytes} bytes = "
+            f"{pool_total} bytes per worker, exactly"
+        )
+
+    def _release_host_slot(self, buffer: torch.Tensor) -> None:
+        """Give one host slot back: NIXL deregistration, then
+        ``cudaHostUnregister`` on the storage base, then forget the cached dtype
+        views so dropping the tensor frees the pageable storage.
+
+        A slot whose release fails at either step is never handed back to the
+        allocator: after a failed NIXL deregistration it may still be
+        registered, and after a failed ``cudaHostUnregister`` its page-lock
+        state is unknown, so it is parked (``_park_host_slot``) instead. One
+        slot's bytes leaked loudly beats a freed range a registration still
+        covers.
+
+        Never raises: it runs on shutdown and inside the init rollback, where a
+        failure must not mask the caller's state.
+        """
+        base = buffer.untyped_storage().data_ptr()
+        try:
+            deregister_nixl_memory(buffer)
+        except Exception:
+            self._park_host_slot(
+                buffer, "its NIXL deregistration failed", exc_info=True
+            )
+            return
+        try:
+            unregistered = _host_unregister(CudaRTLibrary(), base)
+        except Exception:
+            logger.exception("cudaHostUnregister of a host receive slot failed")
+            unregistered = False
+        if not unregistered:
+            self._park_host_slot(buffer, "its cudaHostUnregister failed")
+            return
+        self._forget_cached_targets(buffer)
+
+    def _park_host_slot(
+        self, buffer: torch.Tensor, why: str, *, exc_info: bool = False
+    ) -> None:
+        """Keep ``buffer`` referenced (page-locked, possibly NIXL-registered) for
+        the process lifetime instead of freeing it, and say so at error level:
+        one leaked slot is the safe failure, a freed range that NIXL or a
+        scatter still uses is not."""
+        storage = buffer.untyped_storage()
+        logger.error(
+            "Host receive slot %#x (%d bytes) %s; it stays page-locked and "
+            "parked, never freed",
+            storage.data_ptr(),
+            storage.nbytes(),
+            why,
+            exc_info=exc_info,
+        )
+        self._parked_host_slots.append(buffer)
+        self._forget_cached_targets(buffer)
+
+    def _forget_cached_targets(self, buffer: torch.Tensor) -> None:
+        """Drop the cached dtype views carved out of ``buffer``."""
+        stale = [
+            key
+            for key, (ptr, _views) in self._targets_cache.items()
+            if ptr == buffer.data_ptr()
+        ]
+        for key in stale:
+            del self._targets_cache[key]
+
+    def _release_attempt_slots(
+        self, kept: list[dict[torch.dtype, torch.Tensor]]
+    ) -> None:
+        """Release the host slots a failed init attempt built: every tensor in
+        the pool that is not among ``kept``, the contents the rollback restores.
+        """
+        if self._staging_device != "host":
+            return
+        kept_ids = {id(buffer) for contents in kept for buffer in contents.values()}
+        for buffers in self._dest_buffers:
+            for buffer in buffers.values():
+                if id(buffer) not in kept_ids:
+                    self._release_host_slot(buffer)
+
+    def _release_retired_slots(self) -> None:
+        """Release the host slots a committed re-init grow replaced, once the
+        last scatter out of each has run."""
+        retired, self._retired_slots = self._retired_slots, []
+        for slot, buffer in retired:
+            self._wait_slot_consumed(slot)
+            self._release_host_slot(buffer)
+
+    def _wait_slot_consumed(self, slot: int) -> None:
+        """Block until every scatter out of ``slot`` has run: the generation
+        handshake ``_issue_pull`` performs (while the worker is alive to publish
+        done counts), then the slot's read-done event."""
+        if slot >= len(self._slot_read_done):
+            return  # no worker yet: nothing has read the slot
+        if self._proc_thread is not None:
+            with self._slot_cv:
+                while self._slot_done[slot] < self._slot_queued[slot]:
+                    self._slot_cv.wait(timeout=1.0)
+        self._slot_read_done[slot].synchronize()
 
     def _global_worker_index(self) -> int:
         """This worker's stable, distinct global index across the inference fleet:
@@ -677,8 +1094,8 @@ class ShardedRDTWeightTransferEngine(
 
         The chunk/free plan is STATIC across syncs — a pure function of the baked
         plan and the driver's group partition — so it was built once at init and
-        every sync just re-runs the pipeline over its self-describing chunks, with
-        no per-sync bookkeeping and an empty ``update_info``.
+        every sync just re-runs the pipeline over its self-describing chunks. The
+        update carries only the sync index used to tag free signals.
 
         Assumes each baked module's source names fall within one gather group,
         which the per-layer / pre / post partition guarantees (a leaf module's
@@ -687,7 +1104,7 @@ class ShardedRDTWeightTransferEngine(
         pipeline already freed, which parks the pull until the producer's stall
         watchdog fires.
         """
-        del update_info  # the plan is static; nothing arrives per sync
+        self._sync_idx = update_info.sync_idx if update_info.sync_idx >= 0 else None
         if self._router is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
@@ -757,10 +1174,15 @@ class ShardedRDTWeightTransferEngine(
             # Size ONCE with headroom: Ray's desc cache is keyed by data_ptr and
             # outlives its tensor, so a regrowth can false-hit a recycled pointer
             # and skip registering the new extent -> NIXL_ERR_NOT_FOUND.
-            alloc = buffer_alloc_bytes(cur, self._buffer_presize)
-            buffer = torch.empty(alloc, dtype=torch.uint8, device=self.device)
-            register_nixl_memory(buffer)
+            replaced = buffer
+            buffer = self._alloc_receive_buffer(
+                buffer_alloc_bytes(cur, self._buffer_presize)
+            )
             buffers[torch.uint8] = buffer
+            if replaced is not None and self._staging_device == "host":
+                # The read-done wait above drained every scatter out of the old
+                # slot, so its host memory goes back now.
+                self._release_host_slot(replaced)
         targets = self._pull_targets(chunk, slot, buffer)
         # One produce RPC serves the whole packed chunk, since the group's owner
         # holds every slice. The buffer view must stay strongly referenced through
@@ -804,6 +1226,31 @@ class ShardedRDTWeightTransferEngine(
 
         ray.get(pending.ref)
         return dict(zip(pending.keys, pending.targets))
+
+    def _slot_free(self, slot: int) -> bool:
+        """Whether a pull into ``slot`` can start without waiting."""
+        if not self._slot_read_done:
+            return True
+        with self._slot_cv:
+            if self._slot_done[slot] < self._slot_queued[slot]:
+                return False
+        return self._slot_read_done[slot].query()
+
+    def _wait_any_head(
+        self,
+        pulls: "list[_PendingPull]",
+        timeout: "float | None" = None,
+    ) -> "int | None":
+        """Return the index of a landed pull, or None after ``timeout``."""
+        if len(pulls) == 1 and timeout is None:
+            # The following complete/get blocks on this pull, as the old
+            # single-window loop did; avoid an extra Ray round trip.
+            return 0
+        import ray
+
+        refs = [pull.ref for pull in pulls]
+        ready, _ = ray.wait(refs, num_returns=1, timeout=timeout)
+        return refs.index(ready[0]) if ready else None
 
     # ---------------- Bake (dry run, at init) / replay ----------------
 
@@ -982,15 +1429,15 @@ class ShardedRDTWeightTransferEngine(
         import queue
         import threading
 
-        self._slot_read_done = [torch.cuda.Event() for _ in range(self._ring_depth)]
+        self._slot_read_done = [torch.cuda.Event() for _ in range(self._num_slots)]
         # Generation handshake for the events above: the RPC thread counts items
         # queued per slot, this thread counts records, and a pull may synchronize()
         # only once done[slot] has caught up with queued[slot]. Without it the
         # synchronize can bind to a stale record and pass, letting the next RDMA
         # overwrite a slot under a pending scatter. See the doc's "The slot
         # generation handshake".
-        self._slot_queued = [0] * self._ring_depth
-        self._slot_done = [0] * self._ring_depth
+        self._slot_queued = [0] * self._num_slots
+        self._slot_done = [0] * self._num_slots
         self._slot_cv = threading.Condition()
         self._proc_stream = torch.cuda.Stream(device=self.device)
         self._proc_queue = queue.Queue()
@@ -1132,6 +1579,7 @@ class ShardedRDTWeightTransferEngine(
 
         # --- pass 1: gather groups -> per-owner-class scatter chunks -----------
         raw_chunks: list[list[_Scatter]] = []
+        raw_groups: list[int] = []
         free_at: dict[int, list[int]] = {}  # chunk idx -> groups to signal after it
         pre_free: list[int] = []  # groups with no chunk here (signal at start)
         unbaked: list[str] = []
@@ -1157,6 +1605,7 @@ class ShardedRDTWeightTransferEngine(
                 continue
             for _ci, scatters in self._chunk_module_scatters(modules):
                 raw_chunks.append(scatters)
+                raw_groups.append(gi)
             free_at.setdefault(len(raw_chunks) - 1, []).append(gi)
         if unbaked:
             # A live name with no baked plan cannot be loaded: there is no
@@ -1223,7 +1672,17 @@ class ShardedRDTWeightTransferEngine(
                 )
             )
             per_owner_seq[owner] += 1
-        return _CallPlan(chunks=chunks, pre_free=pre_free)
+
+        component = _stage_components(router, names, group_lens)
+        stream_of: dict[int, int] = {}
+        for chunk in chunks:
+            chunk.stream = stream_of.setdefault(component[chunk.owner], len(stream_of))
+        _check_streams(chunks, raw_groups)
+        return _CallPlan(
+            chunks=chunks,
+            pre_free=pre_free,
+            num_streams=len(stream_of),
+        )
 
     def _signal_group_done(self, group_idx: int) -> None:
         """Fire-and-forget ``free_group`` signal at EVERY owner of the group.
@@ -1236,33 +1695,23 @@ class ShardedRDTWeightTransferEngine(
         the counters, and a straggler landing in the next sync would credit a
         group it does not belong to."""
         assert self._router is not None
-        self._pending_frees.extend(self._router.free_group(group_idx))
+        self._pending_frees.extend(self._router.free_group(group_idx, self._sync_idx))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
-        """Pipelined chunk pulls over the ring of receive slots.
-
-        Issues up to ``ring_depth`` produce RPCs ahead of the blocking gets, so
-        while chunk i's RDMA streams the producer serves i+1 into its own ring
-        slot and the background thread scatters i-1 out of another. Reads stay
-        serialized on the shared NIC — the bandwidth floor, not a loss.
+        """Pull stage streams through independent K-deep FIFO lanes.
 
         Slot safety rests on two arguments spelled out in the doc: the producer's
-        ring is no shallower than this one and drain-before-issue orders its
-        reuse; the consumer's slots are held by ``_issue_pull``'s generation
-        handshake.
+        ring is no shallower than a lane's window and FIFO drain-before-issue
+        orders its reuse; the consumer's slots are held by ``_issue_pull``'s
+        generation handshake.
         """
-        from collections import deque
-
-        inflight: deque[tuple[_PendingPull, _Chunk]] = deque()
-
         # Gather groups with no chunk on this worker (plan.pre_free): signal
         # them done before the pipeline — their owners still published them, and
         # a signal that arrives before its publish is counted (fire-and-forget).
         for gi in plan.pre_free:
             self._signal_group_done(gi)
 
-        def drain_one() -> None:
-            pending, chunk = inflight.popleft()
+        def drain(pending: "_PendingPull", chunk: "_Chunk") -> None:
             results = self._complete_pull(pending)
             self._dispatch_item(
                 _ProcItem(chunk=chunk, results=results, slot=pending.slot)
@@ -1273,26 +1722,34 @@ class ShardedRDTWeightTransferEngine(
             for gi in chunk.free:
                 self._signal_group_done(gi)
 
-        for chunk in plan.chunks:
-            if not chunk.keys:
-                # _chunk_module_scatters never emits empty chunks; keep the
-                # signals safe anyway if this ever changes.
-                for gi in chunk.free:
-                    self._signal_group_done(gi)
-                continue
-            # Drain BEFORE issue once the ring is full: frees this chunk's slot
-            # (generation-wise) and guarantees the producer-slot invariant above.
-            # Sync 0 runs SERIAL (max 1 in flight): both sides still grow and
-            # register buffers, and a producer registration mid-flight churns its
-            # agent-metadata version under an in-flight pull (see __init__).
-            depth = 1 if self._completed_syncs == 0 else self._ring_depth
-            if len(inflight) >= depth:
-                drain_one()
-            slot = self._pull_slot
-            self._pull_slot = (slot + 1) % self._ring_depth
-            inflight.append((self._issue_pull(chunk, slot), chunk))
-        while inflight:
-            drain_one()
+        # Sync 0 is serial while both endpoints finish registration. A single
+        # lane always sees the whole plan, preserving the old issue/drain/free
+        # order even when the plan contains several stage streams.
+        if self._completed_syncs == 0:
+            lanes, depth = 1, 1
+        else:
+            lanes, depth = self._lanes, self._ring_depth
+        streams = (
+            [plan.chunks]
+            if lanes == 1
+            else [
+                [chunk for chunk in plan.chunks if chunk.stream == stream]
+                for stream in range(plan.num_streams)
+            ]
+        )
+        _run_lanes(
+            streams,
+            depth=depth,
+            blocks=[self._lane_slots(lane) for lane in range(lanes)],
+            cursors=self._lane_cursors,
+            hooks=_PullHooks(
+                issue=self._issue_pull,
+                slot_free=self._slot_free,
+                wait_any=self._wait_any_head,
+                drain=drain,
+                signal=self._signal_group_done,
+            ),
+        )
 
     def _process_item(self, item: "_ProcItem") -> None:
         """Scatter-thread half: materialize this chunk's first-seen modules,
@@ -1340,7 +1797,10 @@ class ShardedRDTWeightTransferEngine(
                     # autograd view of the leaf.
                     dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
                     with torch._C.DisableTorchFunctionSubclass():
-                        dst.copy_(results[sc.src])
+                        # Host staging needs this to enqueue rather than wait.
+                        # The read-done event below still prevents overwrite
+                        # until the process stream has consumed the slot.
+                        dst.copy_(results[sc.src], non_blocking=True)
                 # All reads of this slot's buffer are now enqueued on the process
                 # stream; record + publish so the RPC thread can reuse the slot.
                 self._slot_read_done[item.slot].record(self._proc_stream)
@@ -1373,9 +1833,17 @@ class ShardedRDTWeightTransferEngine(
         from vllm.model_executor.layers.quantization.base_config import (
             QuantizeMethodBase,
         )
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
             _copy_and_restore_kernel_tensors,
+        )
+        from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
         )
 
         stream = self._quant_stream or self._proc_stream
@@ -1389,11 +1857,27 @@ class ShardedRDTWeightTransferEngine(
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 assert info is not None  # completed leaf module is set up for reload
+                # The layer tensors were allocated on the process stream, but
+                # this stream reads and then drops them. Keep their storage live
+                # until those reads complete.
+                for tensor in get_layer_tensors(layer).values():
+                    if tensor.is_cuda:
+                        tensor.record_stream(stream)
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
                         delattr(layer, "_already_called_process_weights_after_loading")
-                    quant_method.process_weights_after_loading(layer)
+                    timing_context = (
+                        online_quantization_timing_context(layer, quant_method)
+                        if isinstance(
+                            quant_method, (OnlineLinearBase, OnlineMoEMethodBase)
+                        )
+                        else nullcontext()
+                    )
+                    with timing_context:
+                        quant_method.process_weights_after_loading(layer)
+                    if hasattr(layer, "update_param_tp_status"):
+                        layer.update_param_tp_status()
                 # Copy into persistent kernel storage (preserves cudagraph refs).
                 if info.kernel_tensors is not None:
                     _copy_and_restore_kernel_tensors(layer, info)
@@ -1421,6 +1905,7 @@ class ShardedRDTWeightTransferEngine(
     def shutdown(self) -> None:
         # Stop the background post-processing thread (drain, then sentinel + join)
         # before dropping the state it touches.
+        worker_alive = False
         if self._proc_thread is not None:
             try:
                 self.drain_pending()
@@ -1429,6 +1914,14 @@ class ShardedRDTWeightTransferEngine(
             assert self._proc_queue is not None
             self._proc_queue.put(None)  # sentinel
             self._proc_thread.join(timeout=30)
+            # A worker that did not stop may still scatter out of the receive
+            # slots, so they are parked below rather than freed under it.
+            worker_alive = self._proc_thread.is_alive()
+            if worker_alive:
+                logger.error(
+                    "RDT post-processing thread did not stop within 30 s; host "
+                    "receive slots are parked, not freed"
+                )
             self._proc_thread = None
             self._proc_queue = None
             self._proc_stream = None
@@ -1439,6 +1932,23 @@ class ShardedRDTWeightTransferEngine(
             self._quant_thread = None
             self._quant_queue = None
             self._quant_stream = None
+        # Give every host slot back (NIXL deregistration, then cudaHostUnregister)
+        # before the pool is dropped below; GPU slots keep their process-lifetime
+        # NIXL registration as before.
+        if self._staging_device == "host":
+            for slot, buffers in enumerate(self._dest_buffers):
+                if worker_alive:
+                    for buffer in buffers.values():
+                        self._park_host_slot(
+                            buffer,
+                            "may still be read by the post-processing thread "
+                            "that did not stop",
+                        )
+                    continue
+                self._wait_slot_consumed(slot)
+                for buffer in buffers.values():
+                    self._release_host_slot(buffer)
+        self._retired_slots = []
         self._slot_read_done = []
         self._router = None
         # Drop strong references to baked modules so the model can be freed.
@@ -1447,9 +1957,144 @@ class ShardedRDTWeightTransferEngine(
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
         self._cached_plan = None
-        # Release the receive buffers (their NIXL registration is pinned for the
-        # process lifetime; freeing the tensors just drops our strong refs).
-        self._dest_buffers = [{} for _ in range(self._ring_depth)]
+        # Drop the receive buffers: GPU slots keep their NIXL registration for the
+        # process lifetime (dropping the tensors just drops our strong refs);
+        # host slots were released above.
+        self._dest_buffers = [{} for _ in range(self._num_slots)]
+
+
+def _stage_components(
+    router: RdtRouter,
+    names: list[str],
+    group_lens: list[int],
+) -> list[int]:
+    """Return each producer's connected owner component.
+
+    Producers are connected when they co-own names in one gather group. Pure
+    pipeline stages therefore form separate components, while a cross-stage
+    group conservatively merges its stages into one ordered stream.
+    """
+    parent = list(range(router.num_producers))
+
+    def root(rank: int) -> int:
+        while parent[rank] != rank:
+            parent[rank] = parent[parent[rank]]
+            rank = parent[rank]
+        return rank
+
+    pos = 0
+    for glen in group_lens:
+        owners = sorted(
+            {owner for name in names[pos : pos + glen] for owner in router.owners(name)}
+        )
+        pos += glen
+        for other in owners[1:]:
+            parent[root(other)] = root(owners[0])
+    return [root(rank) for rank in range(router.num_producers)]
+
+
+def _check_streams(chunks: "list[_Chunk]", groups: list[int]) -> None:
+    """Refuse streams that split an owner, gather group, or leaf module."""
+    if len(chunks) != len(groups):
+        raise ValueError("chunks and groups must be parallel")
+
+    seen: dict[str, dict[Any, tuple[int, str]]] = {
+        "trainer rank": {},
+        "gather group": {},
+        "module loading": {},
+    }
+    for chunk, group in zip(chunks, groups):
+        members = [
+            ("trainer rank", chunk.owner, str(chunk.owner)),
+            ("gather group", group, str(group)),
+        ]
+        members.extend(
+            ("module loading", id(sc.layer), repr(sc.src[0])) for sc in chunk.scatters
+        )
+        for kind, key, label in members:
+            stream, _ = seen[kind].setdefault(key, (chunk.stream, label))
+            if stream != chunk.stream:
+                raise RuntimeError(
+                    f"Sharded RDT plan: the {kind} {label} spans stage streams "
+                    f"{stream} and {chunk.stream}, so parallel pulls would "
+                    "break its order."
+                )
+
+
+# How long a lane waiting for a slot lets outstanding heads block before the
+# scheduler rechecks that slot.
+_SLOT_POLL_S = 0.005
+
+
+def _run_lanes(
+    streams: "list[list[_Chunk]]",
+    *,
+    depth: int,
+    blocks: "list[range]",
+    cursors: list[int],
+    hooks: _PullHooks,
+) -> None:
+    """Run one K-deep FIFO pull window per disjoint slot block.
+
+    A lane takes the next unstarted stream after issuing its current stream's
+    last chunk, so its window spans the handoff. If a lane is waiting for slot
+    reuse while other lane heads are outstanding, the head wait is bounded:
+    shared producer packs can otherwise deadlock while each replica waits for a
+    pull that another replica has not yet issued.
+    """
+    from collections import deque
+
+    lanes = range(len(blocks))
+    unstarted = deque(streams)
+    todo: list[deque[_Chunk]] = [deque() for _ in lanes]
+    windows: list[deque[tuple[Any, _Chunk]]] = [deque() for _ in lanes]
+
+    def advance(lane: int) -> None:
+        while True:
+            if not todo[lane]:
+                if not unstarted:
+                    return
+                todo[lane].extend(unstarted.popleft())
+            elif todo[lane][0].keys:
+                return
+            else:
+                for group in todo[lane].popleft().free:
+                    hooks.signal(group)
+
+    def next_slot(lane: int) -> int:
+        return blocks[lane][cursors[lane]]
+
+    def issue(lane: int) -> None:
+        chunk = todo[lane].popleft()
+        slot = next_slot(lane)
+        cursors[lane] = (cursors[lane] + 1) % len(blocks[lane])
+        windows[lane].append((hooks.issue(chunk, slot), chunk))
+        advance(lane)
+
+    for lane in lanes:
+        advance(lane)
+    while True:
+        for lane in lanes:
+            while (
+                todo[lane]
+                and len(windows[lane]) < depth
+                and hooks.slot_free(next_slot(lane))
+            ):
+                issue(lane)
+        waiting = [lane for lane in lanes if todo[lane] and len(windows[lane]) < depth]
+        busy = [lane for lane in lanes if windows[lane]]
+        working = [lane for lane in lanes if todo[lane] or windows[lane]]
+        if waiting and (not busy or len(working) == 1):
+            # No other lane can make progress, so let issue perform the slot's
+            # full generation/event wait.
+            issue(waiting[0])
+        elif busy:
+            heads = [windows[lane][0][0] for lane in busy]
+            index = hooks.wait_any(heads, _SLOT_POLL_S if waiting else None)
+            if index is not None:
+                hooks.drain(*windows[busy[index]].popleft())
+        else:
+            return
 
 
 def _plan_digest(keys_per_chunk: list) -> str:

@@ -11,7 +11,7 @@ The sharded RDT weight transfer engine moves weights point-to-point over [NIXL](
 Requirements:
 
 - `distributed_executor_backend="ray"` — the workers must be Ray actors
-- Ray `>= 2.56.0` on both the trainer and the workers
+- Ray `>= 2.56.0` on both the trainer and the workers for GPU staging; host staging requires Ray `>= 2.58.0`
 - `nixl` installed in the environment shared by trainer and workers
 - Weight loaders that stay inside the supported op set (below)
 - EPLB (`enable_eplb=true`) is rejected: it rearranges experts at runtime, which invalidates the recorded plan
@@ -54,6 +54,20 @@ Because a layer is also the unit the consumers free and the unit the receive buf
 
 A trainer rank need not hold the whole model. Each one declares what it holds through [`WeightSource.held_names()`](base.md#held_names-partial-ownership), the fleet all-gathers those declarations at `trainer_init`, and the consumers route each pull to a rank that actually holds the name. Pipeline stages, expert parallelism, and combinations of the two are all the same declaration. Consumers spread their pulls across the ranks that hold a name, so no single trainer NIC becomes the bottleneck.
 
+### Receive staging and concurrent stage streams
+
+`staging_device` selects where each inference worker's receive slots live. `"gpu"` (the default) receives directly into GPU memory. `"host"` uses host memory that is page-locked with `cudaHostRegister` and registered with NIXL, then enqueues the scatter into the model's GPU parameters asynchronously on a CUDA stream. A slot is not reused until that asynchronous copy has consumed it.
+
+`stages_in_flight` (S) is the maximum number of independent, owner-connected trainer stage streams a worker pulls from concurrently. The effective lane count is `min(S, stream_count)`, with at least one lane, and each lane owns `num_rdt_buffers` (K) slots. The receive-pool memory per worker is therefore exactly:
+
+```text
+min(S, stream_count) * K * rounded_slot_size
+```
+
+where `rounded_slot_size` is the largest packed chunk the worker pulls, rounded up to a multiple of 256 MiB (or the `buffer_presize_gb` floor, if larger). The pool is allocated in GPU memory for GPU staging. For host staging each slot is pageable host memory of exactly `rounded_slot_size` bytes, page-locked whole with `cudaHostRegister` and registered with NIXL; torch's pinned allocator, which rounds every request up to a power of two and caches freed blocks, is not involved, so the formula is the page-locked footprint with no rounding caveat and no hidden host cache. Whenever a host slot is dropped (on shutdown, on a regrow, or when a re-init replaces or rolls it back) it is NIXL-deregistered and unregistered first, so its memory returns to the system; a slot whose release fails at either step, or that a post-processing thread which did not stop at shutdown may still be reading, is kept page-locked and reported, never freed. Increasing S or K is an explicit memory-for-throughput tradeoff and can exhaust the selected allocator or the page-lockable memory; the engine reports the allocation or registration failure, with the exact bytes it asked for, instead of silently reducing concurrency, falling back to pageable memory or changing staging modes.
+
+Sync 0 always runs serially with one lane and one pull in flight while both endpoints finish registration. Pipelining starts with sync 1. The defaults, `staging_device="gpu"` and `stages_in_flight=1`, preserve the existing GPU path and issue, drain, and free order.
+
 ## Inference Side
 
 ```python
@@ -76,7 +90,7 @@ vllm serve my-model \
 Everything else — which producers exist, how the model splits into layer groups, the ownership table — arrives from the trainer at the init handshake.
 
 !!! warning "Size the receive buffers before choosing `gpu_memory_utilization`"
-    Each worker holds `num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom OOMs at the first sync even though the engine came up healthy. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding.
+    With GPU staging, each worker holds `min(stages_in_flight, stream_count) * num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom can OOM during initialization even though model profiling succeeded. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding. Host staging moves this pool to host memory page-locked with `cudaHostRegister` and registered with NIXL, exactly `min(stages_in_flight, stream_count) * num_rdt_buffers * rounded_slot_size` bytes per worker, with the same sizing tradeoff.
 
 ## Trainer Side
 
@@ -95,6 +109,8 @@ engine = WeightTransferTrainerFactory.trainer_init(
         rank=rank,                                # rank 0 is the sender
         num_consumers=8,                          # inference workers, fleet-wide
         trainer_actor_namespace="my_namespace",   # must be visible to the workers
+        staging_device="gpu",                     # "gpu" or "host"
+        stages_in_flight=1,                       # concurrent stage streams
     ),
     client=HTTPVLLMWeightSyncClient("http://localhost:8000"),
     source=ModuleSource(model),
@@ -118,9 +134,15 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 | `buffer_presize_gb` | 0.0 | Pre-size each buffer slot, in GiB. Set it to cover the largest atomic slice |
 | `gather_lookahead` | 1 | Gathered-but-unfreed layers the gather loop runs ahead by |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
+| `staging_device` | `"gpu"` | Receive-slot location: `"gpu"` for GPU memory or `"host"` for pinned host memory |
+| `stages_in_flight` | 1 | Maximum trainer stage streams pulled concurrently; clamped to the plan's stream count |
 
 ## Examples
 
 - [Small MoE on 4 GPUs](../../../examples/rl/rlhf_sharded_rdt_small_ep.py) — 2 FSDP2 trainer ranks → 2 vLLM DP ranks with expert parallelism, one node. It pairs a trainer fleet with a separate inference fleet, the only arrangement this backend supports, and asserts that the sync moved the weights and that a second sync leaves generation unchanged — so it runs unattended in CI
 
 It keeps the trainer deliberately small — just enough FSDP2 to make the weights real — so the file stays about the weight sync rather than about the trainer. For a full RL trainer, SkyRL integrates this backend with Megatron (PP-local gathering and expert-stack fusion for MoE) alongside FSDP: [NovaSky-AI/SkyRL#1753](https://github.com/NovaSky-AI/SkyRL/pull/1753).
+
+Set `RDT_STAGING_DEVICE=host` or `RDT_STAGES_IN_FLIGHT=<S>` to exercise the
+corresponding trainer-init settings in the small example. Its FSDP source has
+uniform ownership, so it validates host transport but clamps stage lanes to one.

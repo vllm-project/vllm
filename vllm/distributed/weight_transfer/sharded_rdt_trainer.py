@@ -44,9 +44,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
+    StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
     register_nixl_memory,
+    validate_sharded_rdt_settings,
 )
 from vllm.logger import init_logger
 
@@ -184,6 +186,21 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
     """Seconds of no publish/serve/free progress before the producer fails the
     sync (see ``DEFAULT_STALL_TIMEOUT_S``)."""
+    staging_device: StagingDevice = "gpu"
+    """Where every worker's receive buffers live. Forwarded unchanged."""
+    stages_in_flight: int = 1
+    """Maximum trainer stages each worker pulls from concurrently. Forwarded
+    unchanged."""
+
+    def __post_init__(self) -> None:
+        validate_sharded_rdt_settings(
+            staging_device=self.staging_device,
+            stages_in_flight=self.stages_in_flight,
+            num_rdt_buffers=self.num_rdt_buffers,
+            buffer_presize_gb=self.buffer_presize_gb,
+            num_consumers=self.num_consumers,
+            allow_zero_consumers=False,
+        )
 
 
 class _RDTProducerServer:
@@ -231,6 +248,11 @@ class _RDTProducerServer:
         # ones. Signals may precede the publish, which completes them.
         self._live_count = 1
         self._free_counts: dict[int, int] = {}
+        # The sync begin_sync last opened, and signals already received for a
+        # sync this producer has not begun: the ranks begin at different times,
+        # so a consumer served by an early rank can signal a late one first.
+        self._sync_idx = -1
+        self._early_free_counts: dict[int, dict[int, int]] = {}
         # gi -> the names this producer published for it (what release drops).
         self._group_names: dict[int, list[str]] = {}
 
@@ -341,10 +363,18 @@ class _RDTProducerServer:
     # ---------------- engine-facing (per sync) ----------------
 
     def begin_sync(
-        self, live_count: int, live_consumer_ids: list | None = None
+        self,
+        live_count: int,
+        live_consumer_ids: list | None = None,
+        sync_idx: int | None = None,
     ) -> None:
         """Reset per-sync free/backpressure state and set this sync's barrier
         target.
+
+        ``sync_idx`` is the trainer's count of this sync. Free signals tagged
+        with it that arrived before this call are kept, not reset: the ranks
+        begin at different times, and a consumer served by an early rank can
+        finish a group and signal this one first. ``None`` opens the next sync.
 
         ``live_count`` is how many consumers take part in THIS sync. Required, no
         default: a forgotten argument silently targeting 1 would free groups after
@@ -379,7 +409,13 @@ class _RDTProducerServer:
             self._gens.clear()
             self._inflight_groups.clear()
             self._freed_pending.clear()
-            self._free_counts.clear()
+            self._sync_idx = self._sync_idx + 1 if sync_idx is None else int(sync_idx)
+            self._free_counts = self._early_free_counts.pop(self._sync_idx, {})
+            self._early_free_counts = {
+                idx: counts
+                for idx, counts in self._early_free_counts.items()
+                if idx > self._sync_idx
+            }
             self._group_names.clear()
             self._base_cache.clear()
             self._note_progress_locked()
@@ -485,7 +521,7 @@ class _RDTProducerServer:
 
     # ---------------- consumer-facing (called by name over Ray) ----------------
 
-    def free_group(self, group_idx: int) -> None:
+    def free_group(self, group_idx: int, sync_idx: int | None = None) -> None:
         """Consumer back-edge: one consumer is done with group ``group_idx``,
         either because its last chunk landed or because it had nothing to pull.
 
@@ -494,9 +530,19 @@ class _RDTProducerServer:
         the same integer everywhere. The last signal drops the cache entries and
         queues the group as gather credit for ``wait_freed``. A signal arriving
         before its publish is only counted — ``publish_group`` completes it.
+
+        ``sync_idx`` names the sync the signal belongs to. One for a sync this
+        producer has not begun is kept for it (see ``begin_sync``); one for a
+        sync it has left is dropped. ``None`` counts toward the current sync.
         """
         gi = int(group_idx)
         with self._cache_cond:
+            if sync_idx is not None and int(sync_idx) != self._sync_idx:
+                if int(sync_idx) > self._sync_idx:
+                    early = self._early_free_counts.setdefault(int(sync_idx), {})
+                    early[gi] = early.get(gi, 0) + 1
+                self._note_progress_locked()
+                return
             count = self._free_counts.get(gi, 0) + 1
             self._free_counts[gi] = count
             if gi in self._group_names and count >= self._live_count:
@@ -1180,11 +1226,11 @@ class ShardedRDTTrainerWeightTransferEngine(
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+        ii = self._init_info
         # The trainer is usually a separate install from the workers, so it gets
         # its own check rather than trusting the consumer side's.
-        check_ray_rdt_version()
+        check_ray_rdt_version(ii.staging_device)
 
-        ii = self._init_info
         self._server_name = f"vllm_rdt_producer_{uuid.uuid4().hex[:12]}_rk{ii.rank}"
         node_id = ray.get_runtime_context().get_node_id()
         # Pin the server to this rank's physical GPU: num_gpus=0 so Ray does not
@@ -1269,6 +1315,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             buffer_presize_gb=self._init_info.buffer_presize_gb,
+            staging_device=self._init_info.staging_device,
+            stages_in_flight=self._init_info.stages_in_flight,
         )
 
     # ---------------- per-round ----------------
@@ -1283,6 +1331,9 @@ class ShardedRDTTrainerWeightTransferEngine(
         the gather collectives, so the caller computes it once for all of them.
         """
         assert self.source is not None
+        # Every rank calls send_weights once per sync, so every rank's count
+        # agrees; the workers tag their free signals with it.
+        self._sync_idx = getattr(self, "_sync_idx", -1) + 1
         if live_consumer_ids is None:
             live_ids = list(range(self._init_info.num_consumers))
             live_count = len(live_ids)
@@ -1310,11 +1361,11 @@ class ShardedRDTTrainerWeightTransferEngine(
             ShardedRDTWeightTransferUpdateInfo,
         )
 
-        empty_update = asdict(ShardedRDTWeightTransferUpdateInfo())
+        update = asdict(ShardedRDTWeightTransferUpdateInfo(sync_idx=self._sync_idx))
         with ThreadPoolExecutor(max_workers=1) as exe:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.
-            future = exe.submit(self.client.update_weights, empty_update)
+            future = exe.submit(self.client.update_weights, update)
             self._run_gather_loop(
                 update_future=future, live_count=live_count, live_ids=live_ids
             )
@@ -1337,7 +1388,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # The live IDS ride along with the count: the free barrier needs only
         # the count, but the slot-sharing rendezvous needs to know WHICH
         # consumers are live.
-        self._rpc("begin_sync", live_count, live_ids)
+        self._rpc("begin_sync", live_count, live_ids, getattr(self, "_sync_idx", None))
         # One generator resume per GROUP: `iter_groups` yields (names, tensors)
         # per owned group in metadata order. Every owner must reach a group in the
         # same order or their shared gather collective mismatches.
