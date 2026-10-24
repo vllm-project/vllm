@@ -39,6 +39,16 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="auto"`: Use the model's default data type
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+- `kv_cache_dtype="fp8_inc"`: FP8 KV-cache dtype used on Intel Gaudi (HPU)
+- `kv_cache_dtype="fp8_ds_mla"`: Packed FP8 layout for DeepSeek's sparse MLA attention backends (FlashMLA / FlashInfer MLA sparse). For DeepSeek-V3.2 this is 512 NoPE + 16 scale + 128 RoPE bytes per token (656 bytes total); DeepSeek-V4 uses a different, 584-byte layout (448 NoPE + 128 RoPE + 8 scale bytes) — the exact byte structure is model-specific, not a fixed format. Some models (e.g. DeepSeek-V3.2) already default `kv_cache_dtype="fp8"` to this layout
+- `kv_cache_dtype="int4_per_token_head"`: Dynamic (no calibration) INT4 quantization with a separate scale per (token, KV head) pair, computed at runtime. Two 4-bit values are packed per storage byte, pre-rotated with a random Hadamard transform to smooth outliers (the head dimension must be a power of 2 for this transform), with an asymmetric zero-point hidden in the scale's low mantissa bits. Requires the Triton attention backend
+- `kv_cache_dtype="int8_per_token_head"`: Dynamic (no calibration) INT8 quantization with a separate scale per (token, KV head) pair, computed at runtime. Requires the Triton attention backend
+- `kv_cache_dtype="fp8_per_token_head"`: Dynamic (no calibration) FP8 quantization with a separate scale per (token, KV head) pair, computed at runtime. Requires the Triton attention backend and CUDA compute capability 8.9+ (like the other `fp8*` dtypes on this backend)
+- `kv_cache_dtype="nvfp4"`: NVIDIA's FP4 format — packed FP4 data with FP8 block scales, stored as separate per-head K/V slots. Requires FlashInfer's TensorRT-LLM-gen kernel path on SM100 (Blackwell datacenter-class GPUs), not just the FlashInfer backend generally
+- `kv_cache_dtype="nvfp4_4over6"`: An NVFP4 variant that, for each block of 16 values, picks between a max/6 and a max/4 scale by minimizing squared reconstruction error. Same SM100 TensorRT-LLM-gen requirement as `nvfp4`
+
+> **Note:**
+> The three `*_per_token_head` modes are a third, finer-grained alternative to the per-tensor and per-attention-head schemes described above: rather than one scale per tensor or per attention head, they compute a separate scale for every individual (token, KV head) pair dynamically at inference time, with no calibration step.
 
 ### Skipping Specific Layers from KV-Cache Quantization
 
