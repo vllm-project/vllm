@@ -287,9 +287,9 @@ def _checkpoint_spec(
         # An explicitly configured method is never overridden.
         ("draft_model", "yuhuili/EAGLE-LLaMA3-Instruct-8B", None, "llama", None),
         ("mtp", "org/draft", _GEMMA4_MTP, "gemma4_mtp", None),
-        # Unrecognized checkpoints aren't checked.
+        # Only checkpoints declaring a speculator are checked.
         ("mtp", "yuhuili/EAGLE-LLaMA3-Instruct-8B", None, "llama", None),
-        # DSpark can use DeepSeek-V4 checkpoints, which look like MTP.
+        ("eagle", "eagle618/eagle-deepseek-v3-random", None, "deepseek_mtp", None),
         ("dspark", "org/draft", None, "deepseek_mtp", None),
     ],
 )
@@ -307,10 +307,9 @@ def test_resolve_checkpoint_config_class(method, model, declared, model_type, ex
 @pytest.mark.parametrize(
     ("method", "model", "declared", "model_type", "match"),
     [
-        ("draft_model", "org/mtp", None, "deepseek_mtp", "looks like a 'mtp'"),
-        ("draft_model", "org/draft", _DSPARK, "qwen3", "looks like a 'dspark'"),
-        ("eagle", "org/draft", _DSPARK, "llama", "looks like a 'dspark'"),
-        ("dflash", "org/mtp", None, "deepseek_mtp", "looks like a 'mtp'"),
+        ("draft_model", "org/draft", _DSPARK, "qwen3", "is a 'dspark'"),
+        ("eagle", "org/draft", _DSPARK, "llama", "is a 'dspark'"),
+        ("dflash", "org/draft", _GEMMA4_MTP, "gemma4_mtp", "is a 'mtp'"),
     ],
 )
 def test_resolve_checkpoint_config_class_rejects_mismatch(

@@ -170,12 +170,6 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         return draft.max_model_len
 
     @classmethod
-    def accepts_checkpoint(cls, recognized_cls: type[SpeculatorConfig]) -> bool:
-        """Whether an explicitly configured speculator can use a draft
-        checkpoint recognized as `recognized_cls`'s."""
-        return recognized_cls.base_method == cls.base_method
-
-    @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
         raise ValueError(
             "num_speculative_tokens was provided but without speculative model."
@@ -410,22 +404,20 @@ def _resolve_checkpoint_config_class(
     configured_cls: type[DraftModelSpeculatorConfig],
 ) -> type[DraftModelSpeculatorConfig]:
     """The built-in config for the draft checkpoint: detected if no method is
-    configured, else the configured one, checked against the checkpoint if it's
-    recognized.
+    configured, else the configured one, checked against the speculator the
+    draft model declares (if any).
     """
+    declared_cls = _get_draft_declared_config_class(spec_config)
     if spec_config.method is not None:
         # Not checked for a custom speculator that isn't based on a built-in one.
-        if configured_cls.base_method is not None:
-            recognized_cls = _recognize_checkpoint_config_class(spec_config)
-            if recognized_cls is not None and not configured_cls.accepts_checkpoint(
-                recognized_cls
-            ):
-                raise ValueError(
-                    _checkpoint_mismatch_message(spec_config, recognized_cls)
-                )
+        if (
+            configured_cls.base_method is not None
+            and declared_cls is not None
+            and declared_cls.base_method != configured_cls.base_method
+        ):
+            raise ValueError(_checkpoint_mismatch_message(spec_config, declared_cls))
         return configured_cls
 
-    declared_cls = _get_draft_declared_config_class(spec_config)
     if declared_cls is not None:
         assert issubclass(declared_cls, DraftModelSpeculatorConfig)
         return declared_cls
@@ -436,29 +428,17 @@ def _resolve_checkpoint_config_class(
     return configured_cls
 
 
-def _recognize_checkpoint_config_class(
-    spec_config: "SpeculativeConfig",
-) -> type[SpeculatorConfig] | None:
-    """The config the checkpoint is structurally recognized as (by declaration
-    or MTP model type, not by name)."""
-    declared_cls = _get_draft_declared_config_class(spec_config)
-    if declared_cls is not None:
-        return declared_cls
-    mtp_cls = resolve_obj_by_qualname(_CONFIG_BY_METHOD["mtp"])
-    return mtp_cls if mtp_cls.matches(spec_config) else None
-
-
 def _checkpoint_mismatch_message(
     spec_config: "SpeculativeConfig",
-    recognized_cls: type[SpeculatorConfig],
+    declared_cls: type[SpeculatorConfig],
 ) -> str:
     draft = spec_config.draft_model_config
-    recognized = recognized_cls.base_method
+    declared = declared_cls.base_method
     return (
         f"speculative_config requested method={spec_config.method!r}, but the "
-        f"draft model {draft.model!r} looks like a {recognized!r} checkpoint "
+        f"draft model {draft.model!r} is a {declared!r} checkpoint "
         f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
         f"architectures={getattr(draft, 'architectures', None)}). Pass a matching "
-        f"method or a matching draft checkpoint. Use method={recognized!r} if that "
+        f"method or a matching draft checkpoint. Use method={declared!r} if that "
         "is what you intended."
     )
