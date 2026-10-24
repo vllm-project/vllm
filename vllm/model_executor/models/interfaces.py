@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -1544,10 +1545,8 @@ class SpeculativeDraftModel(Protocol):
     available without importing the model.
     """
 
-    speculator_config_class: ClassVar[str]
-    """Fully-qualified name of the config class of the speculator that this is
-    a draft model of (a subclass of
-    `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`).
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
     Unless a speculative method is configured that the checkpoint can't
     override, a draft checkpoint with this model's architecture uses this
     speculator."""

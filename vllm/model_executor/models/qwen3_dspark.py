@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
@@ -233,9 +234,7 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     model_cls = Qwen3DSparkModel
     # The speculator this is a draft model of (see SpeculativeDraftModel).
-    speculator_config_class = (
-        "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
-    )
+    speculator_config_class = DSparkSpeculatorConfig
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

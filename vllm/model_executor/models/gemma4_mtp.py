@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -447,9 +448,7 @@ class Gemma4MTP(nn.Module):
     """
 
     # The speculator this is a draft model of (see SpeculativeDraftModel).
-    speculator_config_class = (
-        "vllm.v1.worker.gpu.spec_decode.gemma4.config.Gemma4MTPSpeculatorConfig"
-    )
+    speculator_config_class = Gemma4MTPSpeculatorConfig
 
     has_own_lm_head = True
 
