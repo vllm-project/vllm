@@ -1035,3 +1035,56 @@ DM po-2025:claudish (this cycle). Les 401 restants (12) = clé VL morte
 **Census 2h** : 405 req (~3,4/min = 205/h, en baisse vs 259/h) ; 273 req >100K
 toutes du front hub (hairpin 90.65.170.144) — pas de re-prefill pathologique
 par IP externe ; aucune nouvelle IP avec 200 (seul le hairpin + `?` direct).
+
+### Cycle 24/10 10:41Z — moteur stable 2 h 09, ZÉRO 400, et deux mesures à ne pas surinterpréter
+
+**Prod** : `StartedAt` inchangé 08:17:27Z (2 h 09), RC=0, health 200 en 9,1 ms,
+1003 sondes OK, OOM 0, shm 8,1G/63G, 3 conteneurs Up. Deux `fail 1/2`
+RECOVERED (10:20:17→10:22:17, 10:25:56→10:27:56) = famine prefill documentée,
+moteur sain, zéro restart. VRAM **21 681 / 20 778** — 80 MiB au-dessus de la
+plage de référence en charge (21 400-21 600), **1,3 GiB sous le seuil d'alerte
+23 000** : à surveiller, pas une alerte. GPU 2 = CoursIA (8 449 MiB).
+
+**★ Zéro 400 sur la fenêtre** (3 la précédente). `error_body` capture désormais
+**20/20 des 4xx** : les 401 récurrents toutes les 6 min (Go-http-client, clé
+morte connue) portent enfin leur motif `{"error":"Unauthorized"}` — la capture
+non-2xx est complète, plus de 4xx muet.
+
+**Deux mesures qui demandent un 3ᵉ point avant toute conclusion :**
+
+1. **Hit préfixe incrémentiel 44,4 %** (85,9 M queries / 38,2 M hits sur 2 h)
+   contre 92,3 % au 06:41Z et 95,7 % au 08:41Z. ⚠ Le 95,7 % du 08:41Z est
+   **biaisé** (25 min post-restart, dominé par le re-jeu des mêmes préfixes) —
+   même piège que la rétraction du 06:41Z. La comparaison honnête est
+   92,3 % (4,6 req/min) → 44,4 % (6,0 req/min) : **la charge seule (+30 %) 
+   n'explique pas −48 points**, l'hypothèse première est le **churn du tier**
+   (pruner supprime 1 366 fichiers/cycle, ~35 GiB ; le tier tourne en ~1 h).
+   Discriminant au prochain cycle : même charge sans restart → si 44 % tient,
+   churn ; si ça remonte, artefact.
+2. **Préemptions 52** (0 au 08:41Z, 8/2 h aux cycles précédents à charge
+   moitié) — cohérent avec la charge doublée et des sessions 250K concurrentes
+   (3 sessions pleines = 750K = tout le KV GPU). Pas d'action : les leviers
+   (§5quater) sont déjà tous engagés (nvfp4, tier 8 GiB RAM + 96 GiB fs).
+
+**Tier fs — lecture-dominé sur une fenêtre PLEINE, pas un re-jeu post-restart** :
++467 GB lus vs +205 GB écrits sur 2 h de trafic réel (**2,3:1**), contre 1:4,2
+le 06:41Z. Mécanisme attendu du correctif LRU : les blocs touchés survivent aux
+purges et resservent. **Ce qui manque pour le dire établi : un 3ᵉ point sur une
+fenêtre sans restart** — même exigence que la rétraction du 06:41Z.
+
+**Croissance du tier — la lecture 38 GiB/h du 08:41Z est CORRIGÉE à 17,9 GiB/h**
+(pruner 10:20:03Z : 103 → 138,9 GiB en 2 h ; 1 366 fichiers supprimés, 35,8 GiB
+au-dessus du plafond ; 0 erreur). Les 38 GiB/h étaient un **artefact de fenêtre
+courte** (25 min) — *deux points ne font pas une pente*, appliqué une 2ᵉ fois à
+ma propre mesure en 24 h. Rétention réelle ≈ 5 h au cap 96 GiB.
+
+**Census 2 h** : 715 lignes, **6,0 req/min = 360/h** (+75 % vs 205/h) ;
+695×200 / 20×401 / **0×400 / 0×5xx** ; 482 requêtes >100K **toutes** du front
+hub (hairpin `90.65.170.144`, 506/506 en 200) — taille attendue d'un tour
+Claude Code (le contexte entier est renvoyé), **pas** une signature de
+re-prefill par elle-même ; aucune IP nouvelle avec 200.
+
+**Reste du bilan** : condensation nominale (clients reconstruits 08:29/08:31,
+0 échec, 0 repli cloud) ; nbaudit ok 10:06:02Z (vague 2 `Image/`) ; G: OK
+(577 GB libres, 85 %) ; commit hôte 79,5 % (marge 81,6 GB) ; 1 WARN RSM
+`[retirement #3782] lookup timed out — fail-open` (périmètre RSM, consigné).
