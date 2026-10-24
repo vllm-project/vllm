@@ -1421,6 +1421,90 @@ def test_worker_preserves_scheduler_supplied_ranges():
     assert handle.loaded_plans == [supplied]
 
 
+def test_embedded_runtime_register_store_and_load(monkeypatch):
+    """Scheduler-built batches restore stored bytes into different blocks."""
+    install_memory_runtime(monkeypatch)
+    config = _kv_cache_config()
+    vllm_config = _vllm_config(
+        {
+            "mode": "embedded",
+            "load_async": False,
+            "key_namespace": "builtin-embedded-test",
+        }
+    )
+    source_caches = make_kv_caches(fill=True)
+    destination_caches = make_kv_caches()
+    scheduler_connector = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, config
+    )
+    store_worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    load_worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    try:
+        store_worker.register_kv_caches(source_caches)
+        load_worker.register_kv_caches(destination_caches)
+        handshake(scheduler_connector, store_worker)
+
+        producer = make_request(
+            "builtin-producer",
+            block_hashes=[b"builtin-a", b"builtin-b"],
+            block_ids=([1, 2],),
+        )
+        scheduler_connector.update_state_after_alloc(
+            producer,
+            SimpleNamespace(get_block_ids=lambda group_ids: producer.block_ids),
+            0,
+        )
+        store_metadata = scheduler_connector.build_connector_meta(
+            make_scheduler_output(
+                new_reqs=[producer], scheduled_tokens={producer.req_id: 32}
+            )
+        )
+        store_worker.bind_connector_metadata(store_metadata)
+        store_worker.wait_for_save()
+        store_worker.clear_connector_metadata()
+
+        consumer = make_request(
+            "builtin-consumer",
+            num_tokens=33,
+            block_hashes=producer.block_hashes,
+            block_ids=([5, 6],),
+        )
+        assert scheduler_connector.get_num_new_matched_tokens(consumer, 0) == (
+            32,
+            False,
+        )
+        scheduler_connector.update_state_after_alloc(
+            consumer,
+            SimpleNamespace(get_block_ids=lambda group_ids: consumer.block_ids),
+            32,
+        )
+        load_metadata = scheduler_connector.build_connector_meta(
+            make_scheduler_output(
+                new_reqs=[consumer], scheduled_tokens={consumer.req_id: 1}
+            )
+        )
+        assert set(load_metadata.load_requests) == {consumer.req_id}
+
+        load_worker.bind_connector_metadata(load_metadata)
+        load_worker.start_load_kv(None)
+        load_worker.wait_for_layer_load("layer1")
+        load_worker.wait_for_layer_load("layer2")
+        assert load_worker.get_finished({consumer.req_id}) == (None, None)
+        assert load_worker.get_block_ids_with_load_errors() == set()
+        load_worker.clear_connector_metadata()
+
+        for name, source in source_caches.items():
+            destination = destination_caches[name]
+            assert torch.equal(source[1], destination[5]), f"{name} block 1"
+            assert torch.equal(source[2], destination[6]), f"{name} block 2"
+            untouched = [block for block in range(8) if block not in (5, 6)]
+            assert not destination[untouched].any(), f"{name} stray write"
+    finally:
+        scheduler_connector.shutdown()
+        store_worker.shutdown()
+        load_worker.shutdown()
+
+
 @pytest.mark.parametrize(("tp_size", "dcp_size"), [(2, 1), (2, 2), (4, 2), (8, 8)])
 def test_embedded_tp_dcp_rank_store_completeness(monkeypatch, tp_size, dcp_size):
     """A prefix is reusable only after every actual TP worker publishes."""
