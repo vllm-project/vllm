@@ -62,12 +62,13 @@ class BlockHashToBlockMap:
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """Gets any block with the given block hash key."""
         blocks = self._cache.get(key)
-        if blocks is not None:
-            if isinstance(blocks, KVCacheBlock):
-                return blocks
-            if isinstance(blocks, dict):
-                return next(iter(blocks.values()))
-            self._unexpected_blocks_type(blocks)
+        if blocks is None:
+            return None
+        if isinstance(blocks, KVCacheBlock):
+            return blocks
+        if isinstance(blocks, dict):
+            return next(iter(blocks.values()))
+        self._unexpected_blocks_type(blocks)
         return None
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
