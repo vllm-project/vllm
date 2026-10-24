@@ -367,6 +367,54 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
+def test_max_concurrent_batches_serializes_spec_decode_pp():
+    # Spec decode + PP: the batch queue schedules the next step before the
+    # previous step's bonus token is processed, under-counting one logits
+    # row per spec decode step until prepare_inputs assert-fails. The queue
+    # must serialize so each step settles before the next is scheduled.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        scheduler_config=SchedulerConfig(
+            async_scheduling=False,
+            max_model_len=1024,
+            is_encoder_decoder=False,
+        ),
+        speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=2),
+    )
+    assert config.max_concurrent_batches == 1
+
+
+def test_max_concurrent_batches_unaffected_without_spec_decode():
+    config = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=4),
+        scheduler_config=SchedulerConfig(
+            async_scheduling=False,
+            max_model_len=1024,
+            is_encoder_decoder=False,
+        ),
+    )
+    assert config.max_concurrent_batches == 4
+
+
+def test_max_concurrent_batches_unaffected_with_async_scheduling():
+    # The serialization only applies to the non-async path; with async
+    # scheduling on the V2 runner keeps its pp_size + 1 overlap.
+    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
+        config = VllmConfig(
+            parallel_config=ParallelConfig(pipeline_parallel_size=2),
+            scheduler_config=SchedulerConfig(
+                async_scheduling=True,
+                max_model_len=1024,
+                is_encoder_decoder=False,
+            ),
+            speculative_config=SpeculativeConfig(
+                method="ngram_gpu", num_speculative_tokens=2
+            ),
+        )
+    assert config.use_v2_model_runner
+    assert config.max_concurrent_batches == 3
+
+
 @pytest.mark.parametrize(
     "kv_transfer_config",
     [
