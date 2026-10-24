@@ -17,6 +17,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -47,6 +48,17 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW8A8Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.models.muse_spark.amd.column_sharded_moe import (
+    ColumnShardedDownWeights,
+    ColumnShardedRoutes,
+    all_gather_columns,
+    column_sharded_down_supported,
+    column_sharded_fused_experts,
+)
+from vllm.models.muse_spark.amd.ops.column_sharded_finalize import (
+    column_sharded_finalize,
+    route_sum_squares,
+)
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
 from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNorm
 from vllm.models.muse_spark.common.moe import (
@@ -58,9 +70,14 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
     fused_post_expert_finalize,
 )
 
+logger = init_logger(__name__)
+
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
 _TOKEN_SHARDED_MIN_TOKENS = 256
+# Below this, the column-sharded down projection's gathers and narrower GEMM
+# cost more than the per-route reduce-scatter they replace.
+_COLUMN_SHARDED_MIN_TOKENS = 1024
 
 
 def _validate_tp_post_norm_deployment(
@@ -130,6 +147,17 @@ class MuseSparkQuarkOCPMXMoEQuantConfig(FusedMoEQuantConfig):
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
 
 
+def _fused_post_expert_norm(
+    post_expert_norm_fn: Callable[..., torch.Tensor],
+) -> MuseSpark1xRMSNorm | None:
+    """The norm behind ``post_expert_norm_fn`` when the fused finalize kernels
+    can apply it, else None."""
+    norm = getattr(post_expert_norm_fn, "__self__", None)
+    if isinstance(norm, MuseSpark1xRMSNorm) and norm.variance_size_override is None:
+        return norm
+    return None
+
+
 class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
     """Apply MuseSpark's per-route norm before router weighting and reduction."""
 
@@ -138,7 +166,8 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         post_expert_norm_fn: Callable[..., torch.Tensor],
         *,
         pre_norm_all_reduce: bool,
-        take_route_output: Callable[[], torch.Tensor | None] | None = None,
+        take_route_output: Callable[[], torch.Tensor | ColumnShardedRoutes | None]
+        | None = None,
         take_route_expert_map: Callable[[], torch.Tensor | None] | None = None,
     ) -> None:
         self.post_expert_norm_fn = post_expert_norm_fn
@@ -151,13 +180,7 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             else torch.float32
         )
         self.rs_min_tokens = _TOKEN_SHARDED_MIN_TOKENS
-        norm = getattr(post_expert_norm_fn, "__self__", None)
-        self.fused_norm = (
-            norm
-            if isinstance(norm, MuseSpark1xRMSNorm)
-            and norm.variance_size_override is None
-            else None
-        )
+        self.fused_norm = _fused_post_expert_norm(post_expert_norm_fn)
 
     @staticmethod
     def _chunk_size(top_k: int, hidden_dim: int) -> int:
@@ -179,6 +202,10 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
 
         if self.take_route_output is not None:
             route_output = self.take_route_output()
+            if isinstance(route_output, ColumnShardedRoutes):
+                return self._column_sharded_finalize(
+                    route_output.routes, topk_weights, output
+                )
             if route_output is not None:
                 fused_expert_output = route_output
         expert_map = (
@@ -247,6 +274,45 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
 
         return output
 
+    def _column_sharded_finalize(
+        self,
+        routes: torch.Tensor,
+        topk_weights: torch.Tensor,
+        output: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Finalize routes held as column shards ``[T, top_k, H / tp]`` (see
+        ``column_sharded_moe``): all-reduce each route's sum of squares,
+        normalize and weight-sum the local columns, then all-gather them."""
+        norm = self.fused_norm
+        assert norm is not None
+        num_tokens, _, cols = routes.shape
+        tp_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        weight = (
+            norm.weight[rank * cols : (rank + 1) * cols] if norm.has_weight else None
+        )
+        sum_squares = route_sum_squares(
+            routes, weight, norm.fused_gain_center, norm.applies_weight_before_norm
+        )
+        sum_squares = tensor_model_parallel_all_reduce(sum_squares)
+        if output is None:
+            output = routes.new_empty((num_tokens, cols * tp_size))
+        local = routes.new_empty((num_tokens, cols), dtype=output.dtype)
+        column_sharded_finalize(
+            routes,
+            weight,
+            topk_weights,
+            sum_squares,
+            cols * tp_size,
+            norm.variance_epsilon,
+            norm.fused_gain_center,
+            norm.applies_weight_before_norm,
+            local,
+        )
+        if output.is_contiguous():
+            return all_gather_columns(local, out=output)
+        return output.copy_(all_gather_columns(local))
+
     def _token_sharded_finalize(
         self,
         rows: torch.Tensor,
@@ -286,16 +352,18 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
 class _RouteOutputHandoff:
     """Hand the experts' per-route buffer to the finalize instead of copying it."""
 
-    _route_output: torch.Tensor | None = None
+    _route_output: torch.Tensor | ColumnShardedRoutes | None = None
     _route_expert_map: torch.Tensor | None = None
 
     def _park_route_output(
-        self, route_output: torch.Tensor, expert_map: torch.Tensor | None = None
+        self,
+        route_output: torch.Tensor | ColumnShardedRoutes,
+        expert_map: torch.Tensor | None = None,
     ) -> None:
         self._route_output = route_output
         self._route_expert_map = expert_map
 
-    def _take_route_output(self) -> torch.Tensor | None:
+    def _take_route_output(self) -> torch.Tensor | ColumnShardedRoutes | None:
         route_output, self._route_output = self._route_output, None
         return route_output
 
@@ -419,6 +487,20 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
+        self._column_sharded_down: ColumnShardedDownWeights | None = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        weights = getattr(layer, "w2_column_shard", None)
+        if weights is None:
+            return
+        del layer.w2_column_shard
+        quant_config = self.quant_config
+        assert isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig)
+        assert quant_config.post_expert_norm_fn is not None
+        # The column-sharded finalize has only the fused norm kernels.
+        if _fused_post_expert_norm(quant_config.post_expert_norm_fn) is not None:
+            self._column_sharded_down = weights
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
@@ -513,6 +595,40 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             num_local_tokens = expert_tokens_meta.expert_num_tokens
         else:
             num_local_tokens = None
+
+        weights = self._column_sharded_down
+        if (
+            weights is not None
+            and num_tokens >= _COLUMN_SHARDED_MIN_TOKENS
+            and not torch.cuda.is_current_stream_capturing()
+            and expert_map is None
+            and a1q_scale is None
+            and num_local_tokens is None
+            and output.is_contiguous()
+        ):
+            quant_config = self.quant_config
+            assert quant_config.w1_scale is not None
+            assert quant_config.w2_scale is not None
+            cols = weights.w2.shape[1]
+            route_output = column_sharded_fused_experts(
+                expanded_hidden_states,
+                flat_topk_ids,
+                unit_topk_weights,
+                w1,
+                w2,
+                quant_config.w1_scale,
+                quant_config.w2_scale,
+                weights,
+                out=output.view(-1)[: num_routes * cols].view(num_routes, cols),
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
+            if route_output.shape[-1] == cols:
+                self._park_route_output(
+                    ColumnShardedRoutes(route_output.view(num_tokens, top_k, cols))
+                )
+            else:
+                self._park_route_output(route_output.view_as(output))
+            return
 
         route_output = rocm_aiter_fused_experts(
             hidden_states=expanded_hidden_states,
@@ -636,6 +752,21 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 loaded_slots, layer.moe_config.num_logical_experts
             )
             del layer._quark_expert_loaded_slots
+        if column_sharded_down_supported(layer.moe_config):
+            # From the checkpoint layout, before the AITER shuffle below; the
+            # experts take it over when the kernel is built.
+            weights = ColumnShardedDownWeights.from_checkpoint(
+                layer.w2_weight.data, layer.w2_weight_scale.data
+            )
+            layer.w2_column_shard = weights
+            logger.info_once(
+                "MuseSpark column-sharded MoE down projection: %.2f GiB of "
+                "extra w2 per MXFP4 layer on each rank, used for batches of "
+                ">= %d tokens. Set VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN=0 to "
+                "give it to the KV cache instead.",
+                (weights.w2.nbytes + weights.w2_scale.nbytes) / 2**30,
+                _COLUMN_SHARDED_MIN_TOKENS,
+            )
         super().process_weights_after_loading(layer)
 
 
