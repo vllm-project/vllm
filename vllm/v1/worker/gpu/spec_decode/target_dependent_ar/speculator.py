@@ -131,7 +131,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.target_attn_groups
+            if self.can_reuse_target_attn_metadata
+            else self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -272,6 +274,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         self._prepare_eplb_forward(num_tokens)
+
+        if not self.can_reuse_target_attn_metadata and not skip_attn_for_dummy_run:
+            attn_metadata, slot_mappings = self._build_target_batch_attn_metadata(
+                input_batch,
+                prefill_batch_desc.cg_mode,
+                for_capture=dummy_run
+                and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
+            )
 
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:

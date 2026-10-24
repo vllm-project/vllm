@@ -48,20 +48,6 @@ class UBatchState(NamedTuple):
 
     slices: UBatchSlices
     forward_contexts: list[ForwardContext]
-    # Builds the step's full-batch attention metadata and slot mappings.
-    full_batch_attn_builder: (
-        Callable[[], tuple[dict[str, Any], dict[str, torch.Tensor]]] | None
-    ) = None
-
-    def build_full_batch_attn(
-        self,
-    ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-        """Full-batch attention metadata, for consumers outside the microbatched
-        forward (draft prefill reuses the target's). Call only after the forward:
-        it reuses the first microbatch's metadata builders.
-        """
-        assert self.full_batch_attn_builder is not None
-        return self.full_batch_attn_builder()
 
 
 def create_ubatch_slices(
@@ -429,26 +415,11 @@ class UBatchRunner:
             )
             is_padding.append(ubatch.is_padding)
 
-        def build_full_batch_attn() -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-            full_attn_metadata = self.model_state.prepare_attn(
-                input_batch,
-                cg_mode,
-                block_tables,
-                slot_mappings,
-                self.attn_groups,
-                self.kv_cache_config,
-                for_capture=for_capture,
-            )
-            return full_attn_metadata, build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
-
         return UBatchState(
             slices=ubatch_slices,
             forward_contexts=self._make_forward_contexts(
                 ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
             ),
-            full_batch_attn_builder=build_full_batch_attn,
         )
 
     def _make_forward_contexts(

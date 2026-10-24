@@ -2062,11 +2062,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.kv_connector.finish_forward()
 
-        speculator = self.speculator
-        if ubatch_state and speculator and speculator.needs_target_attn_metadata:
-            # Draft prefill reuses the target's full-batch attention metadata.
-            attn_metadata, slot_mappings_by_layer = ubatch_state.build_full_batch_attn()
-
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)
