@@ -1231,8 +1231,13 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
-                    # Apply Mamba alignment before encoder caps.
-                    if self.need_mamba_block_aligned_split:
+                    # Apply Mamba alignment before encoder caps. A whole-prompt
+                    # prefill from a block boundary needs no split.
+                    if self.need_mamba_block_aligned_split and not (
+                        self.scheduler_config.prefill_whole_prompt
+                        and num_computed_tokens % self.cache_config.block_size == 0
+                        and num_computed_tokens + num_new_tokens == request.num_tokens
+                    ):
                         num_new_tokens = self._mamba_block_aligned_split(
                             request,
                             num_new_tokens,
@@ -1275,6 +1280,14 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = self._reserve_prefill_lookahead(
                         request, num_computed_tokens, num_new_tokens
                     )
+
+                    # PrefixLM: prefill the rest of the prompt now or wait.
+                    if (
+                        self.scheduler_config.prefill_whole_prompt
+                        and num_computed_tokens + num_new_tokens
+                        < request.num_prompt_tokens
+                    ):
+                        num_new_tokens = 0
 
                     if num_new_tokens == 0:
                         # The request cannot be scheduled. Requeue it so it does

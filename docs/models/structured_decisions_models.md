@@ -8,11 +8,12 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
-|---------------------------|---------------------|------------------|-------------------|-------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models                           |
+|---------------------------|---------------------|------------------|-------------------|---------------------------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash`                     |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it`                     |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc.                     |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`, `baselabs/elephant-1` |
 
 ### Multimodal Models
 
@@ -388,3 +389,26 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### Mammoth-1 and Elephant-1
+
+Base Labs [`baselabs/mammoth-1`](https://huggingface.co/baselabs/mammoth-1)
+and [`baselabs/elephant-1`](https://huggingface.co/baselabs/elephant-1) are
+Qwen3.5 checkpoints with a slot readout. vLLM detects their
+`modeling_overrides` and serves them as `Qwen3_5ForSlotDecision`, read by
+`SlotLMStrategy`.
+
+```bash
+vllm serve baselabs/mammoth-1 --max-model-len 16384 --max-num-batched-tokens 16384
+```
+
+- Each question is one read of the checkpoint's fixed prompt. The full
+  attention layers read the shared prefix and the question as two
+  bidirectional blocks, so each prompt is prefilled in one step:
+  `--max-num-batched-tokens` must be at least `--max-model-len`.
+- Keep prefix caching on (the default) so the shared prefix is prefilled once
+  for all questions of a request.
+- The `TRITON_ATTN` attention backend is selected automatically; other
+  backends are refused.
+- `instructions` returns 400, as does any `chat_template_kwargs` other than
+  `{"enable_thinking": false}`, since the prompt is fixed.

@@ -172,6 +172,10 @@ class SchedulerConfig:
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
+    prefill_whole_prompt: bool = False
+    """If True, the rest of a prompt after its prefix-cache hit is prefilled in
+    one step, or the request waits. Set by PrefixLM models."""
+
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
     scheduler_cls: str | type[object] | None = None

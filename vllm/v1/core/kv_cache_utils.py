@@ -656,11 +656,13 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
     lora_extra_keys = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[tuple[str, str]] = (
+    cache_salt_keys: list[tuple[str, Any]] = (
         [("cache_salt", request.cache_salt)]
         if (start_token_idx == 0 and request.cache_salt)
         else []
     )
+    if start_token_idx == 0 and request.prefix_lm_digest is not None:
+        cache_salt_keys.append(("prefix_lm", request.prefix_lm_digest))
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )

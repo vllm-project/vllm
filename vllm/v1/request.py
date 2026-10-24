@@ -12,8 +12,9 @@ import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import PREFIX_LM_LEN, SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.hashing import sha256
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -105,6 +106,10 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
+        # PrefixLM: prefix-cache hits stop at the prefix, whose digest keys the
+        # first block.
+        self.prefix_lm_len: int | None = None
+        self.prefix_lm_digest: bytes | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -126,6 +131,14 @@ class Request:
                 self.kv_cache_report_mode = sampling_params.extra_args.get(
                     "kv_cache_report_mode", "incremental"
                 )
+                prefix_lm_len = sampling_params.extra_args.get(PREFIX_LM_LEN)
+                if (
+                    type(prefix_lm_len) is int
+                    and prompt_token_ids is not None
+                    and 0 < prefix_lm_len <= len(prompt_token_ids)
+                ):
+                    self.prefix_lm_len = prefix_lm_len
+                    self.prefix_lm_digest = sha256(prompt_token_ids[:prefix_lm_len])
             else:
                 self.kv_cache_report_mode = "incremental"
         else:

@@ -32,9 +32,13 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
-MAX_LOGPROB_TOKEN_IDS = 128
+MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+PREFIX_LM_LEN = "prefix_lm_len"
+"""`SamplingParams.extra_args` key of the length of a prompt's PrefixLM prefix,
+whose tokens attend to each other."""
 
 MAX_STRUCTURED_OUTPUT_JSON_NESTING = 64
 """Upper bound on nested objects and arrays in a structured-output JSON schema
