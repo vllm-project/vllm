@@ -76,6 +76,9 @@ class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
     building its own attention metadata from scratch."""
 
+    # Query forwards run num_query_per_req tokens per request regardless of K.
+    dynamic_sd_query_lens = False
+
     def capture(
         self,
         forward_fn: Callable,

@@ -21,8 +21,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.dp_utils import skip_dp_coordination
+from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -457,3 +460,80 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+
+
+def test_standalone_draft_reports_its_own_dp_token_counts(monkeypatch):
+    """DPMetadata asserts each forward's DP token count for MoE models, so the
+    draft must report the tokens it runs, not the target's padded count."""
+    num_reqs, num_steps, dp_rank = 3, 3, 1
+    num_tokens = 2 * num_reqs
+    spec = object.__new__(ar_module.StandaloneARSpeculator)
+    spec.model = object()
+    spec.dp_size, spec.dp_rank = 2, dp_rank
+    spec.num_speculative_steps = num_steps
+    spec.max_model_len = 1024
+    spec.temperature = torch.zeros(8)
+    spec.seeds = torch.zeros(8, dtype=torch.int64)
+    spec.idx_mapping = torch.zeros(8, dtype=torch.int32)
+    spec.last_token_indices = torch.zeros(8, dtype=torch.int64)
+    spec.current_draft_step = torch.tensor(0)
+    spec.draft_tokens = torch.zeros(8, num_steps, dtype=torch.int64)
+    spec.draft_logits = None
+    spec.arange_gpu = torch.arange(9, dtype=torch.int32)
+    spec.input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(8, dtype=torch.int32),
+        positions=torch.zeros(8, dtype=torch.int64),
+        seq_lens=torch.zeros(8, dtype=torch.int32),
+        query_start_loc=torch.zeros(9, dtype=torch.int32),
+    )
+    spec.sample_draft = lambda hidden_states, *_: torch.zeros(
+        hidden_states.shape[0], dtype=torch.int64
+    )
+
+    reported = []
+
+    def run_model(input_ids, positions, attn_md, slot_maps, num_tokens_across_dp):
+        reported.append((input_ids.shape[0], int(num_tokens_across_dp[dp_rank])))
+        return torch.zeros(input_ids.shape[0], 4)
+
+    spec._run_model = run_model
+    monkeypatch.setattr(
+        dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)
+    )
+
+    input_batch = SimpleNamespace(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        query_start_loc=torch.arange(0, num_tokens + 1, 2, dtype=torch.int32),
+        input_ids=torch.zeros(num_tokens, dtype=torch.int32),
+        positions=torch.arange(num_tokens, dtype=torch.int64),
+        seq_lens=torch.full((num_reqs,), 2, dtype=torch.int32),
+        idx_mapping=torch.arange(num_reqs, dtype=torch.int32),
+    )
+    # The target padded its batch to 16 tokens.
+    target_sync = DPSyncState(
+        num_tokens_across_dp=torch.full((2,), 16, dtype=torch.int32),
+        uniform_token_count=None,
+        eager=False,
+        num_reqs=num_reqs,
+    )
+    with skip_dp_coordination():
+        spec.propose(
+            input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=None,
+            aux_hidden_states=None,
+            num_sampled=torch.ones(num_reqs, dtype=torch.int32),
+            num_rejected=torch.zeros(num_reqs, dtype=torch.int32),
+            last_sampled=torch.zeros(8, dtype=torch.int64),
+            next_prefill_tokens=torch.zeros(8, dtype=torch.int32),
+            temperature=torch.zeros(8),
+            seeds=torch.zeros(8, dtype=torch.int64),
+            dp_sync_state=target_sync,
+            dummy_run=True,
+            skip_attn_for_dummy_run=True,
+        )
+
+    expected = [num_tokens] + [num_reqs] * (num_steps - 1)
+    assert reported == [(n, n) for n in expected]
