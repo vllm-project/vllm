@@ -865,15 +865,19 @@ def spec_decode_needs_target_embed(
 ) -> bool:
     """Whether the last PP rank needs the target input embedding.
 
-    MTP targets opt in when their drafter supports sharing this embedding.
+    Hidden-state drafters reuse the target's input embedding. Targets opt in
+    with `include_mtp` where their drafter needs it (see
+    `SpeculatorConfig.target_embed_needs_opt_in`).
     """
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return False
-    sharing = speculative_config.speculator_config.target_embed_sharing
-    if sharing == "never" or (sharing == "target_opt_in" and not include_mtp):
+    speculator_config = speculative_config.speculator_config
+    if not speculator_config.uses_target_hidden_states or (
+        speculator_config.target_embed_needs_opt_in and not include_mtp
+    ):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank

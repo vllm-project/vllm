@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, ClassVar, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from vllm.config.speculative import MTPModelTypes
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     SpeculatorConfig,
-    TargetEmbedSharing,
 )
 
 if TYPE_CHECKING:
@@ -22,7 +21,7 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
     supported_options = EagleSpeculatorConfig.supported_options | {
         "index_share_for_mtp_iteration"
     }
-    target_embed_sharing: ClassVar[TargetEmbedSharing] = "target_opt_in"
+    target_embed_needs_opt_in = True
     supports_pcp = True
 
     @classmethod
