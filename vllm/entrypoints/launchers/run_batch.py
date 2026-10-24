@@ -743,18 +743,11 @@ def make_transcription_wrapper(
                 request_dict = batch_request_body.model_dump(exclude={"file_url"})
                 request_dict["file"] = mock_file
 
+                request: TranslationRequest | TranscriptionRequest
                 if is_translation:
-                    # Create TranslationRequest from BatchTranslationRequest
-                    translation_request = TranslationRequest.model_validate(
-                        request_dict
-                    )
-                    return await handler_fn(audio_data, translation_request)
+                    request = TranslationRequest.model_validate(request_dict)
                 else:
-                    # Create TranscriptionRequest from BatchTranscriptionRequest
-                    transcription_request = TranscriptionRequest.model_validate(
-                        request_dict
-                    )
-                    return await handler_fn(audio_data, transcription_request)
+                    request = TranscriptionRequest.model_validate(request_dict)
             except Exception as e:
                 operation = "translation" if is_translation else "transcription"
                 return ErrorResponse(
@@ -764,6 +757,8 @@ def make_transcription_wrapper(
                         code=HTTPStatus.BAD_REQUEST.value,
                     )
                 )
+
+            return await handler_fn(audio_data, request)
 
         return transcription_wrapper
 
