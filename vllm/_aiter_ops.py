@@ -238,6 +238,14 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     return False
 
 
+def _aiter_w8a8_uses_triton() -> bool:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4()
+    return False
+
+
 def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
@@ -897,13 +905,18 @@ def _rocm_aiter_w8a8_gemm_impl(
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter import gemm_a8w8_CK
+    if _aiter_w8a8_uses_triton():
+        from aiter.ops.triton.gemm_a8w8 import gemm_a8w8
 
-    # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
-    # a to be [M, K]
-    # b to be [N, K]
-    # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-    return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
+        return gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+    else:
+        from aiter import gemm_a8w8_CK
+
+        # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
+        # a to be [M, K]
+        # b to be [N, K]
+        # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+        return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
 def _rocm_aiter_w8a8_gemm_fake(
@@ -2287,7 +2300,7 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA4 (gfx12) analog of is_linear_enabled() (AITER Triton GEMMs)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -4396,6 +4409,11 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
+        if _aiter_w8a8_uses_triton():
+            try:
+                return _triton_gemm_config_is_tuned("GEMM-A8W8", N, K)
+            except (AssertionError, ImportError):
+                return False
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
