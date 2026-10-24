@@ -328,6 +328,50 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
 
 
+_skinny_guard_warned: set[tuple[tuple[int, ...], int]] = set()
+
+
+def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
+    """Should this weight still take the wvSplitK skinny path at n?
+
+    wvSplitK_hf_sml re-reads the weight matrix once per K-shard, so its
+    effective bandwidth collapses on weights far larger than L2 (MI355X
+    measurements in the PR description). Weights above
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) therefore skip the
+    skinny path at 1 < n <= 5 and fall through to the generic GEMM.
+
+    n == 1 always keeps wvSplitK: the n=1 kernel variant shows no
+    pathology on large weights, and its fall-through would be a numerics
+    change with no speed win, so single-row calls stay on the stock path.
+
+    Returns True (keep wvSplitK) when the guard is disabled via
+    VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD, when n <= 1, or when the
+    weight is under the cap; otherwise returns False after emitting a
+    census WARNING (once per (shape, n) per process) naming the redirected
+    site.
+    """
+    if n <= 1:
+        return True
+    if envs.VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD:
+        return True
+    max_bytes = envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
+    if weight.nbytes <= max_bytes:
+        return True
+    key = (tuple(weight.shape), n)
+    if key not in _skinny_guard_warned:
+        _skinny_guard_warned.add(key)
+        logger.warning(
+            "lm_head skinny-GEMM guard engaged: weight %s (%d bytes) exceeds "
+            "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES=%d at n=%d; skipping wvSplitK "
+            "for the generic GEMM fall-through",
+            tuple(weight.shape),
+            weight.nbytes,
+            max_bytes,
+            n,
+        )
+    return False
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -396,6 +440,7 @@ def rocm_unquantized_gemm_impl(
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
         and 0 < n <= 5
+        and lmhead_skinny_guard_permits(weight, n)
     )
 
     use_llmm1 = (

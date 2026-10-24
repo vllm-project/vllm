@@ -304,6 +304,9 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM: bool = False
+    VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD: bool = False
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 256 * 1024 * 1024
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2108,6 +2111,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # AMD MI355X (gfx950) DeepSeek-V4.x decode fastpaths: each lever defaults
+    # to ON; the VLLM_DEBUG_DISABLE_* kill switches restore the stock path.
+    "VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0"))
+    ),
+    "VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD", "0"))
+    ),
+    # wvSplitK skinny-GEMM weight cap: the K-shard re-read makes the
+    # path a loss above L2-sized weights (measured at TP4 on MI355X).
+    "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES": lambda: int(
+        os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", str(256 * 1024 * 1024))
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
