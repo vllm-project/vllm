@@ -8,6 +8,7 @@ import ray
 import torch
 import torch.distributed as dist
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
@@ -568,6 +569,12 @@ def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0x3080
 
 
+def _use_vllm_custom_allreduce(m: pytest.MonkeyPatch) -> None:
+    """On ROCm, AITER's CustomAllreduce would replace the one under test."""
+    m.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(
     monkeypatch: pytest.MonkeyPatch,
@@ -579,6 +586,7 @@ def graph_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -637,6 +645,7 @@ def eager_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -676,6 +685,7 @@ def chunked_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", "1stage")
+        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)

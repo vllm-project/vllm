@@ -3487,6 +3487,19 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
+@pytest.fixture
+def rocm_aiter_disabled():
+    """AITER's ROCm defaults enable custom rms_norm and quant_fp8 kernels."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "0")
+        rocm_aiter_ops.refresh_env_variables()
+        yield
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.usefixtures("rocm_aiter_disabled")
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
