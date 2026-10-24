@@ -933,6 +933,9 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+            except asyncio.CancelledError:
+                output_processor.propagate_error(EngineDeadError())
+                raise
             except Exception as e:
                 if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
                     logger.info(
