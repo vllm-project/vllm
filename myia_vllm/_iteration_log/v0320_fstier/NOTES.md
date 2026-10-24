@@ -1759,3 +1759,65 @@ Aucun 400 à corps > 100 K.
 **Condensation.** Bannière 20:41Z `primary=qwen3.6-35b-a3b @ :5002 … key=OK`. Repli cloud réussi
 à 15:22-15:31Z, pendant les crashs : dégradation gracieuse nominale. Les WARN du log sont des
 `BaselineManager NonNominativeBaselineService`, périmètre RSM, pas vllm.
+
+## 24/10 21:10-21:35Z — mandat user « config au mieux » : rétention du tier disque + KV +10,8 %
+
+**Mandat** (user 21:10Z, en réponse à Q33/Q34/Q35) : « je te laisse faire tes changements de config au
+mieux, tu mesureras le changement de débit global, l'objectif est de servir le mieux et le plus vite ».
+Q35 (seuil long-prefill) écarté par le user : « 2 à 3 tok/s pour moi c'est pareil que 0.2 ».
+
+### Diagnostic (mesuré avant tout geste)
+
+- **Q32 a amélioré le débit global** : sur la même image, 67 min avant contre 71 min après, génération
+  41 → **59 tok/s** (+45 %), requêtes 2,6 → **4,2/min**, préemptions 66 → 3. Télémétrie 1/min : minutes
+  avec file 93 % → 52 %, minutes figées (gen < 5 avec des requêtes en cours) 20 % → 9 %. La gêne
+  ressentie vient de l'**attente silencieuse** : file p90 ≤ 50 s, p99 ≤ 240 s ; côté hub (claudish,
+  5 h), 203/327 requêtes Swift ont un TTFT > 30 s et 104 > 120 s, aucune > 300 s.
+- **La file est une saturation KV, pas un blocage de tête** : sur les 40 minutes avec file, le KV est à
+  80-100 % pendant 28. Il y avait bien un blocage de tête en FCFS (`scheduler.py` : `if new_blocks is None:
+  break`, identique sur upstream main du 24/10), mais backfiller ne gagnerait presque rien. La capacité
+  est d'environ 141 blocs sur 527 par conversation de 200K, soit ~3,7 conversations en même temps.
+- **Origine des tokens de prompt** (20:04→21:16Z) : cache GPU 26 %, tier RAM 61 %, tier disque 5 %,
+  calcul 7,5 % (~670 tok/s en moyenne). Les trous viennent de **7 prefills de 100-200K tokens calculés**
+  en 71 min, ~95 s de moteur partagé chacun.
+- **Le tier disque ne retenait que 1,6 h** : 97 G à son plafond de 96 GiB, fichier le plus ancien
+  1,58 h, ~60 GiB/h d'écriture. Le pruneur supprimait ~25 GiB toutes les 30 min (21:20Z : 951 fichiers).
+  Toute conversation reprise après plus de 1,6 h (lanes en cron 2-6 h) repayait donc tout son prefill.
+- **Défaut de formule du pruneur** : `cap = min(max, free − réserve)` comparait la taille totale du tier
+  à l'espace libre seul, sans compter les octets déjà tenus par le tier. Le tier plafonnait ainsi à la
+  moitié de la place autorisée.
+
+### Gestes
+
+1. **Pruneur, sans coupure** : la formule devient `cap = min(max, tier + free − réserve)` pour l'invité
+   et pour C: (le vhdx ne rétrécit pas, mais le tier réutilise les blocs ext4 qu'il libère). `MaxGiB`
+   passe de 96 à **250**. La réserve de 12 % de C: (arbitrage Maintenance du 20/10) est inchangée.
+   Dry-run : cap 250,0 GiB (C: 251, invité 331), tier 97,8 GiB, 0 suppression. Effet au passage de
+   21:50Z ; rétention attendue ~4 h au débit d'écriture actuel (calcul, pas mesure).
+2. **Restart 21:26:47Z** (annoncé sur le global à 21:26Z), health 200 à 21:30:09Z (3 min 22 s,
+   cache de compilation chaud) :
+   - `gpu-memory-utilization` 0,70 → **0,73** (`${GPU_UTIL_SWIFT15:-0.73}`, rollback = 0.70). KV
+     7,41 GiB/GPU → **831 723 tokens** (+10,8 %, concurrence 3,17× à 262K contre 2,86×).
+   - Q34 (a), partie hors empreinte de compilation : retrait de `NCCL_P2P_DISABLE`,
+     `CUDA_DEVICE_MAX_CONNECTIONS`, `--disable-custom-all-reduce` (mesuré :
+     `torch.cuda.can_device_access_peer(0,1)` = False, le P2P n'est jamais utilisé) et `shm_size`
+     (ignoré avec `ipc: host`).
+   - **Gardés bien qu'inertes** : `--gdn-prefill-backend triton`, `VLLM_USE_DEEP_GEMM=0`,
+     `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`. Ils entrent dans l'empreinte du cache de compilation
+     (`additional_config` / `envs.compile_factors`, alors que `disable_custom_all_reduce` et
+     `gpu_memory_utilization` sont des facteurs ignorés). Les retirer coûtait une compilation à froid
+     (~11 min de coupure le 19/10) pour un gain nul ; ils partiront à la prochaine montée d'image.
+3. **Portes** : génération réelle 200 (« 391 », 0,3 s), watchdog `OK … engine is warm` à 21:30:22Z,
+   0 `not found in cache` / OOM / Traceback, RC 0. VRAM juste après le boot GPU 0 21 478 / GPU 1
+   20 724 MiB. `/dev/shm` 48G → 24G (purge bornée au StartedAt, 7 fichiers).
+
+### Mesure « après » à faire (cycle suivant, même fenêtre horaire si possible)
+
+Base « avant » : `.tmp/m_now.txt` (20:04:54→21:16:25Z) et `.tmp/pre_cfg_metrics.txt` (→ 21:26:15Z),
+plus la télémétrie 1/min. Indicateurs, par levier :
+- débit global : `generation_tokens_total`/s, requêtes servies/min, minutes figées, minutes avec file ;
+- latence : file / TTFT p50-p90-p99, et table `[ttft]` du hub sur 22:00→23:30Z (demandée à claudish) ;
+- tier disque : part `disk` de `prompt_tokens_cached_by_source`, nombre de requêtes à > 50K tokens
+  calculés, âge du plus vieux fichier du tier ;
+- KV : nombre de requêtes en cours quand il y a une file, préemptions, VRAM GPU 0 en charge
+  (alerte > 23 000 MiB ; rollback `GPU_UTIL_SWIFT15=0.70` en cas de dépassement).

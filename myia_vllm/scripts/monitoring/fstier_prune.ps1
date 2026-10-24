@@ -10,7 +10,14 @@
     via /mnt/d.
 
     DRY-RUN PAR DEFAUT. `-Apply` est requis pour supprimer quoi que ce soit.
-    Plafond : min(MaxGiB, libre invité − GuestFloorGiB, libre guard-mount − ReservePct%).
+    Plafond : min(MaxGiB, tier + libre invité − GuestFloorGiB,
+                  tier + libre guard-mount − ReservePct%).
+    MaxGiB = 250 depuis le 24/10 soir (mandat user « au mieux ») : a 96 GiB le
+    tier ne retenait que 1,6 h de blocs (ecriture ~60 GiB/h, ~25 GiB supprimes
+    toutes les 30 min) ; toute conversation reprise apres plus de 1,6 h de pause
+    repayait 100-200 K tokens de prefill (~95 s de machine figee pour tous).
+    A 250 GiB : ~4 h de retention. La formule comptait aussi l'espace libre
+    seul, sans les octets du tier : corrige le meme jour.
     MaxGiB = 96 depuis le 24/10 (GO user) : a 48 GiB le pruneur supprimait
     ~23 GiB toutes les 90 min, en pleine sonde (23:50:02Z : 896 fichiers /
     22,9 GiB), ce qui detruisait le cache prefixe des conversations longues
@@ -27,7 +34,7 @@
 [CmdletBinding()]
 param(
     [switch]$Apply,
-    [double]$MaxGiB = 96,
+    [double]$MaxGiB = 250,
     [double]$ReservePct = 12,
     [int]$MinAgeMin = 30,
     [string]$GuardMounts = '/mnt/c',

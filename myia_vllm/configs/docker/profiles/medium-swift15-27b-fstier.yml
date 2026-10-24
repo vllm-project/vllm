@@ -90,6 +90,19 @@
 # NOTE: KV_OFFLOAD_GB_SWIFT15=0 does NOT disable offload -- config/vllm.py:1039
 # tests `is None`.  ROLLBACK of the offload = remove the two --kv-offloading
 # flags (pin=0 stays: it is the only working offload config on this host).
+# 2026-10-24 evening (user mandate "config au mieux", Q34=a):
+#   gpu-util 0.70 -> 0.73 (KV 750,747 -> ~831K tokens, +10.8%): queued minutes
+#   ran at 80-100% KV, i.e. concurrency is KV-bound (~3.7 conversations of
+#   200K); GPU 0 under load 21,471 MiB -> ~22,200, under the 23,000 alert line.
+#   Rollback: GPU_UTIL_SWIFT15=0.70.  Removed as inert (Q34): NCCL_P2P_DISABLE,
+#   CUDA_DEVICE_MAX_CONNECTIONS, --disable-custom-all-reduce (CUDA reports no
+#   P2P between GPUs 0/1 under WSL2, so NCCL and custom all-reduce never use
+#   it), shm_size (ignored with ipc: host).  KEPT although inert:
+#   --gdn-prefill-backend triton (auto = triton on SM89), VLLM_USE_DEEP_GEMM=0,
+#   VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 -- all three are compile-cache hash factors
+#   (additional_config / envs.compile_factors), so removing them forces a cold
+#   compile (~11 min outage measured 19/10).  Drop them at the next image bump,
+#   which recompiles anyway.
 # ---------------------------------------------------------------------------
 # ⚠ Operator traps (all live incidents): --env-file myia_vllm/.env on EVERY
 # compose command · NO '#' inside the backslash-continued command block ·
@@ -129,7 +142,7 @@ services:
           --tensor-parallel-size 2 \
           --gdn-prefill-backend triton \
           --no-enable-flashinfer-autotune \
-          --gpu-memory-utilization 0.70 \
+          --gpu-memory-utilization ${GPU_UTIL_SWIFT15:-0.73} \
           --max-model-len 262144 \
           --kv-cache-dtype ${KV_DTYPE_SWIFT15:-nvfp4} \
           --dtype auto \
@@ -152,7 +165,6 @@ services:
           --tool-call-parser qwen3_coder \
           --reasoning-parser qwen3 \
           --distributed-executor-backend mp \
-          --disable-custom-all-reduce \
           --async-scheduling \
           --default-chat-template-kwargs '{"preserve_thinking":true,"reasoning_effort":"medium"}' \
           --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"repetition_penalty":1.0}' \
@@ -160,7 +172,6 @@ services:
     labels:
       - "autoheal=False"
     ipc: host
-    shm_size: '16gb'
     deploy:
       resources:
         reservations:
@@ -183,10 +194,8 @@ services:
       - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
       - VLLM_FLOAT32_MATMUL_PRECISION=high
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-      - NCCL_P2P_DISABLE=1
       - VLLM_USE_FLASHINFER_SAMPLER=0
       - VLLM_WSL2_ENABLE_PIN_MEMORY=0 # VERDICT (fenetre 05/10): cudaHostRegister of the shm offload region is BROKEN under WSL2, chunked or not -- v0.30.0 (monolithic) crashed at is_padding.fill_, v0.31.0+#51081 (chunked, PR tested live) crashed at async_utils copy_event.synchronize. pin=0 = the only working offload config on this host.
-      - CUDA_DEVICE_MAX_CONNECTIONS=8
     volumes:
       - ${VLLM_MODELS_PATH:-./models}:/models:ro
       - type: bind
