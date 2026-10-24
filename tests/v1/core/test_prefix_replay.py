@@ -35,9 +35,11 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
+    rebuilt_state_window: int | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
-    replayed sliding-window group."""
+    replayed sliding-window group, plus optionally a state group the replay
+    rebuilds (as DeepSeek-V4's compressor states)."""
     base = create_scheduler(
         block_size=BLOCK_SIZE,
         enable_prefix_caching=True,
@@ -71,6 +73,20 @@ def _replay_scheduler(
             ),
         ],
     )
+    if rebuilt_state_window is not None:
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["state"],
+                SlidingWindowMLASpec(
+                    block_size=BLOCK_SIZE,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.float32,
+                    sliding_window=rebuilt_state_window,
+                    rebuilt_by_replay=True,
+                ),
+            )
+        )
     scheduler = Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
@@ -154,6 +170,33 @@ def test_hit_replays_window_without_reallocating():
 
     scheduler.update_from_output(out, _step_output(out, [first, second]))
     assert second.num_computed_tokens == NUM_PROMPT_TOKENS
+
+
+def test_state_rebuilt_by_replay_is_not_prefix_cached():
+    """A state group rebuilt by the SWA replay neither hits nor adds a second
+    replay window; the hit still replays the SWA window once."""
+    state_window = 8
+    scheduler = _replay_scheduler(rebuilt_state_window=state_window)
+    state_spec = scheduler.kv_cache_config.kv_cache_groups[2].kv_cache_spec
+    assert not state_spec.prefix_cacheable
+    assert state_spec.prefix_replay_tokens == 0
+    assert scheduler.prefix_replay_tokens == WINDOW
+
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        same_prompt=True,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    scheduler.add_request(second)
+    out = scheduler.schedule()
+
+    assert _new_req_data(out, second).replay_start == HIT_TOKENS - WINDOW
+    first_state = scheduler.kv_cache_manager.get_blocks(first.request_id).blocks[2]
+    second_state = scheduler.kv_cache_manager.get_blocks(second.request_id).blocks[2]
+    live = [b for b in second_state if not b.is_null]
+    assert live and not {b.block_id for b in live} & {b.block_id for b in first_state}
 
 
 def test_replay_only_chunks_make_progress():

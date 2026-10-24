@@ -81,6 +81,7 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
     finalize_mega_moe_weights,
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -1507,6 +1508,12 @@ def _make_deepseek_v4_weights_mapper(
     )
 
 
+def _swa_replay_model_state_cls():
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+
+    return DeepseekV41ModelState
+
+
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
     finalizes_weights_during_load = False
@@ -1545,6 +1552,14 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        # SWA replay (UMBP on ROCm) needs the replay-aware model state: it
+        # passes replay_start to the SWA metadata and pads the replayed slots
+        # of the prefix-cached groups so their restored KV is not rewritten.
+        if dsv4_swa_replay_enabled(vllm_config):
+            self.get_model_state_cls = _swa_replay_model_state_cls
+
+    # No engram lookback; read by the replay model state.
+    token_lookback_depth = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
