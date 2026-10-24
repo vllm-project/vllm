@@ -673,7 +673,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
+        quantized_hidden_states: QuantizedActivation | None = None,
     ) -> torch.Tensor:
+        """``quantized_hidden_states`` is ``hidden_states`` as the input
+        ``fused_wqa_wkv`` consumes, when its producer already quantized it;
+        the BF16 copy still feeds the other input projections."""
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
@@ -682,7 +686,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
-            hidden_states
+            hidden_states, quantized_hidden_states
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
@@ -958,9 +962,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _fused_wqa_wkv_gemm(
+        self, hidden_states: torch.Tensor | QuantizedActivation
+    ) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
+        if isinstance(hidden_states, QuantizedActivation):
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+            return qr_kv
         num_tokens = hidden_states.shape[0]
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
@@ -979,7 +988,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return self.wq_b(qr)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        quantized_hidden_states: QuantizedActivation | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1019,8 +1030,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             aux_fns[1] = indexer_weights_proj
 
+        wqa_wkv_input: torch.Tensor | QuantizedActivation = hidden_states
+        if quantized_hidden_states is not None:
+            wqa_wkv_input = quantized_hidden_states
         qr_kv, (kv_score, indexer_weights) = execute_in_parallel(
-            lambda: self._fused_wqa_wkv_gemm(hidden_states),
+            lambda: self._fused_wqa_wkv_gemm(wqa_wkv_input),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:3],

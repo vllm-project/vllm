@@ -502,12 +502,19 @@ def bf16_mega_gate(
     image_token_mask: torch.Tensor | None = None,
     fix_routing_mask: torch.Tensor | None = None,
     unmapped_topk_idx: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run DeepGEMM Mega Gate.
 
     The output order follows vLLM's router contract: weights, then indices.
     Passing PyTorch-owned outputs to DeepGEMM makes their storage part of CUDA
     graph capture.
+
+    Tokens where the bool ``[num_tokens]`` ``mask`` is false are left
+    unrouted: expert id -1, weight 0. ``out`` is the ``(topk_weights,
+    topk_idx)`` pair to write, float32 and int64 ``[num_tokens, num_topk]``,
+    e.g. the MegaMoE symmetric buffer slices.
     """
     _lazy_init()
     if _bf16_mega_gate_impl is None:
@@ -515,10 +522,15 @@ def bf16_mega_gate(
             "DeepGEMM MegaMoE requires a DeepGEMM build with bf16_mega_gate."
         )
 
-    topk_idx = torch.empty((x.shape[0], num_topk), dtype=torch.int64, device=x.device)
-    topk_weights = torch.empty(
-        (x.shape[0], num_topk), dtype=torch.float32, device=x.device
-    )
+    if out is None:
+        topk_weights = torch.empty(
+            (x.shape[0], num_topk), dtype=torch.float32, device=x.device
+        )
+        topk_idx = torch.empty(
+            (x.shape[0], num_topk), dtype=torch.int64, device=x.device
+        )
+    else:
+        topk_weights, topk_idx = out
     _bf16_mega_gate_impl(
         x,
         weight,
@@ -533,6 +545,7 @@ def bf16_mega_gate(
         image_token_mask=image_token_mask,
         fix_routing_mask=fix_routing_mask,
         unmapped_topk_idx=unmapped_topk_idx,
+        mask=mask,
         out=(topk_idx, topk_weights),
     )
     return topk_weights, topk_idx

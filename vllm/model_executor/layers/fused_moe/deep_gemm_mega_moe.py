@@ -12,7 +12,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import signature
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -41,6 +41,38 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
+
+
+class MegaMoEInputs(NamedTuple):
+    """Symmetric-buffer slices one step's MegaMoE inputs are staged into.
+
+    A producer that writes a field here in place spares the experts from
+    staging it: the router's top-k via ``bf16_mega_gate(out=...)`` (with padded
+    tokens already unrouted), the activations via a fused norm + MXFP8 cast.
+    """
+
+    x: torch.Tensor
+    """``[num_tokens, hidden]`` dispatched activations."""
+    x_sf: torch.Tensor | None
+    """``[num_tokens, hidden / 128]`` UE8M0 scales packed four per int32,
+    K-major; set when the format takes MXFP8 activations."""
+    shared_x_sf: torch.Tensor | None
+    """The fused shared expert's MN-major copy of ``x_sf`` over the whole
+    buffer, row-permuted for ``shared_block_m``."""
+    shared_block_m: int | None
+    """BLOCK_M the MegaMoE scheduler runs this step with."""
+    topk_idx: torch.Tensor
+    """``[num_tokens, top_k]`` int64 expert ids, -1 for unrouted slots."""
+    topk_weights: torch.Tensor
+    """``[num_tokens, top_k]`` float32 routing weights."""
+
+
+def megamoe_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    """This step's ``[num_tokens]`` padding mask MegaMoE leaves unrouted."""
+    if not (envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available()):
+        return None
+    is_padding = get_forward_context().is_padding
+    return None if is_padding is None else is_padding[:num_tokens]
 
 
 @dataclass(frozen=True)
@@ -665,6 +697,35 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return deep_gemm.get_block_m_for_nvfp4_mega_moe(*args)
         return deep_gemm.get_block_m_for_mega_moe(*args, self.weight_format.mma_type)
 
+    @property
+    def takes_mxfp8_input(self) -> bool:
+        """Whether the activations are staged as MXFP8 with packed UE8M0 scales."""
+        return self.weight_format.hidden_quant == kMxfp8Dynamic
+
+    def input_buffers(self, num_tokens: int) -> MegaMoEInputs | None:
+        """Where a producer may write this step's inputs; see ``forward``.
+
+        None for NVFP4, whose per-token activation scale only the staging
+        kernel computes.
+        """
+        if self.weight_format.uses_nvfp4_api:
+            return None
+        symm_buffer = self.get_symm_buffer()
+        mxfp8 = self.takes_mxfp8_input
+        shared = (
+            mxfp8
+            and self.shared_spec is not None
+            and self.shared_spec.scale_group_k is not None
+        )
+        return MegaMoEInputs(
+            x=symm_buffer.x[:num_tokens],
+            x_sf=symm_buffer.x_sf[:num_tokens] if mxfp8 else None,
+            shared_x_sf=symm_buffer.shared_l1_acts_sf if shared else None,
+            shared_block_m=self.get_block_m(num_tokens) if shared else None,
+            topk_idx=symm_buffer.topk_idx[:num_tokens],
+            topk_weights=symm_buffer.topk_weights[:num_tokens],
+        )
+
     def set_eplb_state(
         self,
         moe_layer_idx: int,
@@ -725,8 +786,14 @@ class DeepGemmMegaMoEExperts(nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts: nn.Module | None = None,
+        *,
+        hidden_states_staged: bool = False,
     ) -> torch.Tensor:
         """Run the routed and shared experts on this rank's tokens.
+
+        Inputs a producer already wrote into ``input_buffers()`` are not
+        staged again: routing whose ``topk_ids`` is the buffer's own
+        ``topk_idx`` slice, and activations when ``hidden_states_staged``.
 
         Args:
             hidden_states: BF16 ``[num_tokens, hidden_size]`` activations.
@@ -735,6 +802,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
             shared_experts: Unfused shared MLP, run on ``hidden_states`` and
                 added to the output. Must be ``None`` when this layer fused the
                 shared expert at construction.
+            hidden_states_staged: ``hidden_states`` is already in the buffer
+                as MXFP8 with both scale layouts (``takes_mxfp8_input``).
 
         Returns:
             BF16 ``[num_tokens, hidden_size]`` routed plus shared expert output.
@@ -751,13 +820,14 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 f"MegaMoE got {num_tokens} tokens, but the symmetric buffer was "
                 f"sized for {self.max_num_tokens}."
             )
+        if hidden_states_staged and not self.takes_mxfp8_input:
+            raise ValueError(
+                f"{self.prefix} stages {self.weight_format.name} activations "
+                "itself; only MXFP8 activations can be written in place."
+            )
         self._synchronize_first_launch()
 
-        is_padding = None
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-            if is_padding is not None:
-                is_padding = is_padding[:num_tokens]
+        is_padding = megamoe_padding_mask(num_tokens)
 
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
@@ -783,18 +853,21 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 else None,
             )
 
+        symm_buffer = self.get_symm_buffer()
+        # Mapped physical ids are a new tensor, so they are staged again.
+        routing_staged = topk_ids.data_ptr() == symm_buffer.topk_idx.data_ptr()
+
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
         fmt = self.weight_format
-        symm_buffer = self.get_symm_buffer()
-        shared_x_sf = None
-        shared_block_m = None
-        if self.shared_spec is not None and self.shared_spec.scale_group_k:
-            shared_x_sf = symm_buffer.shared_l1_acts_sf
-            shared_block_m = self.get_block_m(num_tokens)
         kwargs = dict(self._kernel_kwargs)
         if fmt.uses_nvfp4_api:
+            shared_x_sf = None
+            shared_block_m = None
+            if self.shared_spec is not None and self.shared_spec.scale_group_k:
+                shared_x_sf = symm_buffer.shared_l1_acts_sf
+                shared_block_m = self.get_block_m(num_tokens)
             l2_activation_scale = self.l2_activation_scale
             prepare_megamoe_nvfp4_inputs(
                 hidden_states,
@@ -822,18 +895,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 use_x_scales=True,
             )
         else:
-            quantized = fmt.hidden_quant is not None
+            inputs = self.input_buffers(num_tokens)
+            assert inputs is not None
             prepare_megamoe_inputs(
-                hidden_states,
-                topk_weights,
-                topk_ids,
-                symm_buffer.x[:num_tokens],
-                symm_buffer.x_sf[:num_tokens] if quantized else None,
-                symm_buffer.topk_idx[:num_tokens],
-                symm_buffer.topk_weights[:num_tokens],
+                None if hidden_states_staged else hidden_states,
+                None if routing_staged else topk_weights,
+                None if routing_staged else topk_ids,
+                inputs.x,
+                inputs.x_sf,
+                inputs.topk_idx,
+                inputs.topk_weights,
                 is_padding=is_padding,
-                shared_x_sf=shared_x_sf,
-                shared_block_m=shared_block_m,
+                shared_x_sf=inputs.shared_x_sf,
+                shared_block_m=inputs.shared_block_m,
                 hidden_quant=fmt.hidden_quant,
             )
 

@@ -41,6 +41,7 @@ from vllm.models.deepseek_v41.nvidia.model import (
     DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
 )
 from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
+    MegaMhcFp8Out,
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
@@ -48,6 +49,29 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+
+
+class _HalfAttention(nn.Module):
+    """Stands in for the decoder's attention: halves its input."""
+
+    def __init__(self):
+        super().__init__()
+        self.fused_wqa_wkv = nn.Identity()
+
+    def forward(self, positions, x, _, quantized_hidden_states=None):
+        assert quantized_hidden_states is None
+        return x * 0.5
+
+
+class _QuarterFfn(nn.Module):
+    """Stands in for the decoder's MoE: quarters its input."""
+
+    def mega_moe_inputs(self, num_tokens):
+        return None
+
+    def forward(self, x, input_ids, mega_gate_metadata=None, **kwargs):
+        assert not kwargs.get("hidden_states_staged")
+        return x * 0.25
 
 
 @pytest.mark.parametrize(
@@ -592,8 +616,8 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(5120, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
+    decoder.attn = _HalfAttention()
+    decoder.ffn = _QuarterFfn()
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -664,11 +688,12 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         capture_aux=False,
         stream=None,
         reduce_results=False,
+        fp8_out=None,
         **kw,
     ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
         aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
-        return residual, *reference(residual, *args, **kw), aux
+        return residual, *reference(residual, *args, **kw), aux, None
 
     monkeypatch.setattr(
         "vllm.models.deepseek_v41.nvidia.model.mhc_pre_delayed_tilelang",
@@ -713,8 +738,8 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(5120, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
+    decoder.attn = _HalfAttention()
+    decoder.ffn = _QuarterFfn()
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -859,6 +884,124 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
                 for result, ref in zip(captured, eager, strict=True):
                     torch.testing.assert_close(result, ref, atol=0, rtol=0)
         torch.cuda.current_stream().wait_stream(stream)
+
+
+def _mega_mhc_args(num_tokens: int, hidden_size: int = 5120, hc_mult: int = 4):
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    return (
+        x,
+        residual,
+        torch.rand(num_tokens, hc_mult, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        1.25,
+        2e-6,
+        10,
+        torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE).uniform_(
+            0.9, 1.1
+        ),
+        7e-6,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 129])
+def test_deep_gemm_mega_mhc_fp8_gemm_output(num_tokens):
+    """The MXFP8 output for a DeepGEMM GEMM is exactly the packed MXFP8
+    quantization of the BF16 output, which itself is unchanged."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8_packed_for_deepgemm,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8DynamicPacked,
+    )
+
+    if not is_mega_mhc_supported(5120, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+    set_random_seed(0)
+    args = _mega_mhc_args(num_tokens)
+    expected = mhc_shifted_post_pre_deep_gemm(*args)
+    fp8_out = MegaMhcFp8Out.for_gemm(num_tokens, 5120, args[0].device)
+    actual = mhc_shifted_post_pre_deep_gemm(*args, fp8_out=fp8_out)
+    for result, ref in zip(actual, expected, strict=True):
+        torch.testing.assert_close(result, ref, atol=0, rtol=0)
+
+    y = fp8_out.as_gemm_input()
+    assert y.quant_key == kMxfp8DynamicPacked
+    ref_q, ref_sf = per_token_group_quant_fp8_packed_for_deepgemm(
+        actual[3], group_size=32, use_ue8m0=True
+    )
+    assert torch.equal(y.data.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(y.scale, ref_sf)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens,shared_block_m", [(1, 128), (7, 64), (200, 96)])
+def test_deep_gemm_mega_mhc_fp8_mega_moe_output(num_tokens, shared_block_m):
+    """Writing into the MegaMoE buffer matches what the MoE input staging
+    would write for the same BF16 output, including the shared-expert view."""
+    from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+        MegaMoEInputs,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
+        prepare_megamoe_inputs,
+    )
+
+    if not is_mega_mhc_supported(5120, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+    set_random_seed(0)
+    hidden, max_tokens, top_k = 5120, 256, 6
+    aligned_block_m = -(-shared_block_m // 128) * 128
+    shared_rows = -(-max_tokens // shared_block_m) * aligned_block_m
+
+    def buffers() -> MegaMoEInputs:
+        return MegaMoEInputs(
+            x=torch.zeros(num_tokens, hidden, device=DEVICE).to(torch.float8_e4m3fn),
+            x_sf=torch.zeros(
+                num_tokens, hidden // 128, device=DEVICE, dtype=torch.int32
+            ),
+            shared_x_sf=torch.zeros(
+                hidden // 128, shared_rows, device=DEVICE, dtype=torch.int32
+            ).T,
+            shared_block_m=shared_block_m,
+            topk_idx=torch.zeros(num_tokens, top_k, device=DEVICE, dtype=torch.int64),
+            topk_weights=torch.zeros(num_tokens, top_k, device=DEVICE),
+        )
+
+    args = _mega_mhc_args(num_tokens)
+    written = buffers()
+    outputs = mhc_shifted_post_pre_deep_gemm(
+        *args, fp8_out=MegaMhcFp8Out.for_mega_moe(written)
+    )
+    staged = buffers()
+    prepare_megamoe_inputs(
+        outputs[3],
+        None,
+        None,
+        staged.x,
+        staged.x_sf,
+        staged.topk_idx,
+        staged.topk_weights,
+        shared_x_sf=staged.shared_x_sf,
+        shared_block_m=shared_block_m,
+    )
+    assert torch.equal(written.x.view(torch.uint8), staged.x.view(torch.uint8))
+    assert torch.equal(written.x_sf, staged.x_sf)
+    assert torch.equal(written.shared_x_sf, staged.shared_x_sf)
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:

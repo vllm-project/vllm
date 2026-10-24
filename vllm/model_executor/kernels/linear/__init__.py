@@ -110,7 +110,7 @@ from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
-    DeepGemmMxfp8BmmLinearKernel,
+    DeepGemmMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
@@ -338,7 +338,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
-        DeepGemmMxfp8BmmLinearKernel,
+        DeepGemmMxfp8LinearKernel,
     },
     "torch": {
         PerTensorTorchFP8ScaledMMLinearKernel,
@@ -569,6 +569,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
         TorchMxFp8LinearKernel,
+        # Last resort by default; chosen first for a producer that already
+        # emits its packed activations (Mxfp8LinearLayerConfig.input_quant_key).
+        DeepGemmMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -949,20 +952,28 @@ def choose_mp_linear_kernel(
 
 
 def init_mxfp8_linear_kernel(
-    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
+    *,
+    weight_shape: tuple[int, int],
+    bmm_batch_size: int | None = None,
+    input_quant_key: QuantKey | None = None,
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape."""
+    current platform and `(N, K)` weight shape.
+
+    ``input_quant_key`` restricts the choice to kernels that consume
+    activations its producer already quantized in that format.
+    """
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
+        input_quant_key=input_quant_key,
     )
 
     platform = current_platform._enum
     possible: list[type[Mxfp8LinearKernel]]
     if bmm_batch_size is not None:
         possible = (
-            [DeepGemmMxfp8BmmLinearKernel, EmulationMxfp8LinearKernel]
+            [DeepGemmMxfp8LinearKernel, EmulationMxfp8LinearKernel]
             if current_platform.is_cuda()
             else []
         )
@@ -994,8 +1005,14 @@ def init_mxfp8_linear_kernel(
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
+        kernel = kernel_cls(config)
+        if input_quant_key is not None and kernel.input_quant_key() != input_quant_key:
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: does not consume {input_quant_key} input"
+            )
+            continue
         logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
-        return kernel_cls(config)
+        return kernel
 
     raise ValueError(
         "Failed to find a kernel that can implement the "

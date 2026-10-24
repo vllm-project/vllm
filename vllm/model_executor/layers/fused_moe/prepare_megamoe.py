@@ -4,7 +4,8 @@
 
 Quantize hidden states to fp8 with E8M0 group scales, to NVFP4 with per-token
 global scales, or copy them as BF16, and repack the routing top-k tensors into
-the int64/float32 layout that the DeepGEMM MegaMoE kernels consume.
+the int64/float32 layout that the DeepGEMM MegaMoE kernels consume. Either half
+is skipped when its producer already wrote it into the symmetric buffer.
 """
 
 import torch
@@ -138,17 +139,15 @@ def _store_topk(
     )
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def _prepare_megamoe_inputs_kernel(
+@triton.jit
+def _stage_hidden(
     hidden_states,
     x_out,
     x_sf,
     shared_x_sf,
-    topk_ids,
-    topk_weights,
-    is_padding,
-    topk_idx_out,
-    topk_weights_out,
+    token_id,
+    token_mask,
+    k_block_id,
     hidden_stride_m: tl.constexpr,
     hidden_stride_k: tl.constexpr,
     x_stride_m: tl.constexpr,
@@ -157,30 +156,14 @@ def _prepare_megamoe_inputs_kernel(
     x_sf_stride_k: tl.constexpr,
     shared_x_sf_stride_m: tl.constexpr,
     shared_x_sf_stride_k: tl.constexpr,
-    topk_ids_stride_m: tl.constexpr,
-    topk_ids_stride_k: tl.constexpr,
-    topk_weights_stride_m: tl.constexpr,
-    topk_weights_stride_k: tl.constexpr,
-    is_padding_stride_m: tl.constexpr,
-    topk_idx_stride_m: tl.constexpr,
-    topk_idx_stride_k: tl.constexpr,
-    topk_weights_out_stride_m: tl.constexpr,
-    topk_weights_out_stride_k: tl.constexpr,
-    num_tokens,
     hidden_size: tl.constexpr,
-    top_k: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_K: tl.constexpr,
-    BLOCK_TOPK: tl.constexpr,
     SHARED_BLOCK_M: tl.constexpr,
     QUANTIZE: tl.constexpr,
     USE_UE8M0: tl.constexpr,
 ) -> None:
-    token_id = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    token_mask = token_id < num_tokens
-    k_block_id = tl.program_id(1)
-
     k_offsets = k_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
     k_mask = token_mask[:, None] & (k_offsets[None, :] < hidden_size)
     hidden = tl.load(
@@ -240,7 +223,79 @@ def _prepare_megamoe_inputs_kernel(
                 mask=token_mask,
             )
 
-    if k_block_id == 0:
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def _prepare_megamoe_inputs_kernel(
+    hidden_states,
+    x_out,
+    x_sf,
+    shared_x_sf,
+    topk_ids,
+    topk_weights,
+    is_padding,
+    topk_idx_out,
+    topk_weights_out,
+    hidden_stride_m: tl.constexpr,
+    hidden_stride_k: tl.constexpr,
+    x_stride_m: tl.constexpr,
+    x_stride_k: tl.constexpr,
+    x_sf_stride_m: tl.constexpr,
+    x_sf_stride_k: tl.constexpr,
+    shared_x_sf_stride_m: tl.constexpr,
+    shared_x_sf_stride_k: tl.constexpr,
+    topk_ids_stride_m: tl.constexpr,
+    topk_ids_stride_k: tl.constexpr,
+    topk_weights_stride_m: tl.constexpr,
+    topk_weights_stride_k: tl.constexpr,
+    is_padding_stride_m: tl.constexpr,
+    topk_idx_stride_m: tl.constexpr,
+    topk_idx_stride_k: tl.constexpr,
+    topk_weights_out_stride_m: tl.constexpr,
+    topk_weights_out_stride_k: tl.constexpr,
+    num_tokens,
+    hidden_size: tl.constexpr,
+    top_k: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+    SHARED_BLOCK_M: tl.constexpr,
+    QUANTIZE: tl.constexpr,
+    USE_UE8M0: tl.constexpr,
+    STAGE_HIDDEN: tl.constexpr,
+    STAGE_TOPK: tl.constexpr,
+) -> None:
+    token_id = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    token_mask = token_id < num_tokens
+    k_block_id = tl.program_id(1)
+
+    if STAGE_HIDDEN:
+        _stage_hidden(
+            hidden_states,
+            x_out,
+            x_sf,
+            shared_x_sf,
+            token_id,
+            token_mask,
+            k_block_id,
+            hidden_stride_m,
+            hidden_stride_k,
+            x_stride_m,
+            x_stride_k,
+            x_sf_stride_m,
+            x_sf_stride_k,
+            shared_x_sf_stride_m,
+            shared_x_sf_stride_k,
+            hidden_size,
+            BLOCK_M,
+            BLOCK_K,
+            GROUP_K,
+            SHARED_BLOCK_M,
+            QUANTIZE,
+            USE_UE8M0,
+        )
+
+    if STAGE_TOPK and k_block_id == 0:
         _store_topk(
             token_id,
             token_mask,
@@ -437,9 +492,9 @@ def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bo
 
 
 def prepare_megamoe_inputs(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
+    hidden_states: torch.Tensor | None,
+    topk_weights: torch.Tensor | None,
+    topk_ids: torch.Tensor | None,
     x: torch.Tensor,
     x_sf: torch.Tensor | None,
     topk_idx_out: torch.Tensor,
@@ -451,11 +506,16 @@ def prepare_megamoe_inputs(
 ) -> None:
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
+    Pass ``hidden_states=None`` when the producer already wrote ``x`` (and its
+    scales), and ``topk_ids=topk_weights=None`` when the router already wrote
+    the routing; nothing is launched when both are in place.
+
     Args:
         hidden_states: Input activations of shape ``[num_tokens, hidden_dim]``.
         topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
         topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
-        x: Output buffer for the dispatched hidden states.
+        x: Output buffer for the dispatched hidden states,
+            ``[num_tokens, hidden_dim]``.
         x_sf: Output buffer for the hidden-state scale factors; ``None`` when
             ``hidden_quant`` is ``None``.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
@@ -469,9 +529,18 @@ def prepare_megamoe_inputs(
             ``None`` copies the hidden states into ``x`` unquantized.
 
     """
-    num_tokens, hidden_size = hidden_states.shape
-    if num_tokens == 0:
+    num_tokens, hidden_size = x.shape
+    stage_hidden = hidden_states is not None
+    stage_topk = topk_ids is not None
+    if num_tokens == 0 or not (stage_hidden or stage_topk):
         return
+    if (topk_weights is None) != (topk_ids is None):
+        raise ValueError("MegaMoE routing staging needs both topk_ids and weights.")
+    if hidden_states is not None and hidden_states.shape != x.shape:
+        raise ValueError(
+            f"MegaMoE hidden states {tuple(hidden_states.shape)} do not match the "
+            f"staging buffer {tuple(x.shape)}."
+        )
     if hidden_size % 128 != 0:
         raise ValueError(
             "MegaMoE input staging requires hidden_size to be a multiple of 128."
@@ -485,12 +554,14 @@ def prepare_megamoe_inputs(
         if hidden_quant is None
         else _resolve_hidden_quant(hidden_quant, block_k)
     )
-    top_k = topk_ids.shape[1]
-    if topk_weights.shape != topk_ids.shape:
-        raise ValueError(
-            "MegaMoE input staging requires topk_weights and "
-            "topk_ids to have the same shape."
-        )
+    top_k = topk_idx_out.shape[1]
+    if topk_ids is not None:
+        assert topk_weights is not None
+        if topk_weights.shape != topk_ids.shape or topk_ids.shape[1] != top_k:
+            raise ValueError(
+                "MegaMoE input staging requires topk_weights and topk_ids of "
+                f"shape (num_tokens, {top_k})."
+            )
     if (shared_x_sf is None) != (shared_block_m is None):
         raise ValueError(
             "MegaMoE shared input staging requires both shared_x_sf and shared_block_m."
@@ -520,7 +591,8 @@ def prepare_megamoe_inputs(
 
     # On GB200, eight-row tiles win from 64 tokens; keep smaller batches untiled.
     block_m = 8 if num_tokens >= 64 else 1
-    grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
+    num_k_blocks = triton.cdiv(hidden_size, block_k) if stage_hidden else 1
+    grid = (triton.cdiv(num_tokens, block_m), num_k_blocks)
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
     _prepare_megamoe_inputs_kernel[grid](
@@ -533,18 +605,18 @@ def prepare_megamoe_inputs(
         is_padding,
         topk_idx_out,
         topk_weights_out,
-        hidden_states.stride(0),
-        hidden_states.stride(1),
+        hidden_states.stride(0) if hidden_states is not None else 0,
+        hidden_states.stride(1) if hidden_states is not None else 0,
         x.stride(0),
         x.stride(1),
         x_sf.stride(0) if x_sf is not None else 0,
         x_sf.stride(1) if x_sf is not None else 0,
         shared_x_sf.stride(0) if shared_x_sf is not None else 0,
         shared_x_sf.stride(1) if shared_x_sf is not None else 0,
-        topk_ids.stride(0),
-        topk_ids.stride(1),
-        topk_weights.stride(0),
-        topk_weights.stride(1),
+        topk_ids.stride(0) if topk_ids is not None else 0,
+        topk_ids.stride(1) if topk_ids is not None else 0,
+        topk_weights.stride(0) if topk_weights is not None else 0,
+        topk_weights.stride(1) if topk_weights is not None else 0,
         padding_stride_m,
         topk_idx_out.stride(0),
         topk_idx_out.stride(1),
@@ -560,6 +632,8 @@ def prepare_megamoe_inputs(
         SHARED_BLOCK_M=shared_block_m or 1,
         QUANTIZE=quantize,
         USE_UE8M0=use_ue8m0,
+        STAGE_HIDDEN=stage_hidden,
+        STAGE_TOPK=stage_topk,
         num_warps=4,
     )
 

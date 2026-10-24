@@ -17,6 +17,9 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+    DeepGemmMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
@@ -33,6 +36,7 @@ from vllm.utils.deep_gemm import (
     _import_deep_gemm,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
+    get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -117,18 +121,25 @@ def _extract_data_from_fused_moe_module(
     return w13, w13_s, w2, w2_s, num_topk
 
 
+# The MXFP8 recipe: per-row activations and weights in groups of 32.
+_MXFP8_RECIPE = (1, 1, 32)
+
+
 def _deep_gemm_linear_data(
     module: torch.nn.Module,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Return (weight, weight_scale) for a layer whose kernel stamped itself as
-    ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``, else None.
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int] | None] | None:
+    """Return (weight, weight_scale, recipe) for a layer whose kernel stamped
+    itself as ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``,
+    else None. The recipe is None for 128-blocked FP8 with float32 scales.
     """
     provider = getattr(module, "deep_gemm_warmup_provider", None)
+    if isinstance(provider, DeepGemmMxfp8LinearKernel):
+        return *provider.get_deep_gemm_warmup_weights(module), _MXFP8_RECIPE
     if not isinstance(provider, DeepGemmFp8BlockScaledMMKernel):
         return None
     if module.weight_block_size != get_mk_alignment_for_contiguous_layout():
         return None
-    return provider.get_deep_gemm_warmup_weights(module)
+    return *provider.get_deep_gemm_warmup_weights(module), None
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
@@ -172,7 +183,7 @@ def _mega_moe_may_use_deep_gemm(
     return kimi is not None and isinstance(module, kimi.KimiMoE) and module.use_mega_moe
 
 
-FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
+FP8_GEMM_NT_WARMUP_CACHE: set[tuple[torch.Size, tuple[int, int, int] | None]] = set()
 
 
 def _get_fp8_gemm_nt_m_values(w: torch.Tensor, max_tokens: int) -> list[int]:
@@ -197,9 +208,11 @@ def _deepgemm_fp8_gemm_nt_warmup(
     w: torch.Tensor,
     ws: torch.Tensor,
     max_tokens: int,
+    recipe: tuple[int, int, int] | None = None,
     pbar: tqdm | None = None,
 ):
-    if w.size() in FP8_GEMM_NT_WARMUP_CACHE:
+    key = (w.size(), recipe)
+    if key in FP8_GEMM_NT_WARMUP_CACHE:
         return
 
     n, k = w.size()
@@ -216,13 +229,28 @@ def _deepgemm_fp8_gemm_nt_warmup(
     m_values = _get_fp8_gemm_nt_m_values(w, max_tokens)
 
     for num_tokens in m_values:
-        fp8_gemm_nt(
-            (a1q[:num_tokens], a1q_scales[:num_tokens]), (w, ws), out[:num_tokens]
-        )
+        if recipe is None:
+            fp8_gemm_nt(
+                (a1q[:num_tokens], a1q_scales[:num_tokens]), (w, ws), out[:num_tokens]
+            )
+        else:
+            # Packed UE8M0 scales, MN-major with a TMA-aligned token stride.
+            packed_scales = torch.zeros(
+                (k // 128, get_tma_aligned_size(num_tokens, torch.int32.itemsize)),
+                device=device,
+                dtype=torch.int32,
+            ).T[:num_tokens]
+            fp8_gemm_nt(
+                (a1q[:num_tokens], packed_scales),
+                (w, ws),
+                out[:num_tokens],
+                recipe=recipe,
+                is_deep_gemm_e8m0_used=True,
+            )
         if pbar is not None:
             pbar.update(1)
 
-    FP8_GEMM_NT_WARMUP_CACHE.add(w.size())
+    FP8_GEMM_NT_WARMUP_CACHE.add(key)
 
 
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
@@ -434,8 +462,10 @@ def deepgemm_fp8_gemm_nt_warmup(
 ):
     for m in model.modules():
         if (data := _deep_gemm_linear_data(m)) is not None:
-            w, ws = data
-            _deepgemm_fp8_gemm_nt_warmup(w=w, ws=ws, max_tokens=max_tokens, pbar=pbar)
+            w, ws, recipe = data
+            _deepgemm_fp8_gemm_nt_warmup(
+                w=w, ws=ws, max_tokens=max_tokens, recipe=recipe, pbar=pbar
+            )
 
 
 def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
@@ -464,7 +494,7 @@ def deepgemm_fp8_fp4_mega_moe_warmup(
 
 
 def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
-    seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
+    seen_fp8_keys = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
@@ -473,10 +503,10 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     total = 0
     for m in model.modules():
         if (data := _deep_gemm_linear_data(m)) is not None:
-            w, _ = data
-            if w.size() not in seen_fp8_sizes:
+            w, _, recipe = data
+            if (w.size(), recipe) not in seen_fp8_keys:
                 total += len(_get_fp8_gemm_nt_m_values(w, max_tokens))
-                seen_fp8_sizes.add(w.size())
+                seen_fp8_keys.add((w.size(), recipe))
         elif _fused_moe_grouped_gemm_may_use_deep_gemm(m):
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
             if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:

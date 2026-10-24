@@ -34,6 +34,8 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    MegaMoEInputs,
+    megamoe_padding_mask,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -93,9 +95,13 @@ logger = init_logger(__name__)
 
 
 class MegaGateRoutingMetadata(typing.NamedTuple):
+    """Per-step Mega Gate inputs shared by every MoE layer."""
+
     safe_hash_input_ids: torch.Tensor | None
     image_token_mask: torch.Tensor | None
     hash_token_mask: torch.Tensor | None
+    token_mask: torch.Tensor | None
+    """False for padding tokens, which the gate leaves unrouted."""
 
 
 def prepare_mega_gate_routing_metadata(
@@ -104,22 +110,26 @@ def prepare_mega_gate_routing_metadata(
     has_hash_routing: bool,
     image_sentinel_base_id: int | None,
 ) -> MegaGateRoutingMetadata:
+    is_padding = megamoe_padding_mask(input_ids.shape[0])
+    token_mask = None if is_padding is None else ~is_padding
     if image_sentinel_base_id is None:
         return MegaGateRoutingMetadata(
             input_ids if has_hash_routing else None,
             None,
             torch.ones_like(input_ids, dtype=torch.bool) if has_hash_routing else None,
+            token_mask,
         )
 
     image_token_mask = (input_ids >= image_sentinel_base_id) & (
         input_ids < image_sentinel_base_id + 5
     )
     if not has_hash_routing:
-        return MegaGateRoutingMetadata(None, image_token_mask, None)
+        return MegaGateRoutingMetadata(None, image_token_mask, None, token_mask)
     return MegaGateRoutingMetadata(
         torch.where(image_token_mask, 0, input_ids),
         image_token_mask,
         ~image_token_mask,
+        token_mask,
     )
 
 
@@ -446,12 +456,25 @@ class DeepseekV4MoE(nn.Module):
             is_sequence_parallel=self.use_sequence_parallel,
         )
 
+    def mega_moe_inputs(self, num_tokens: int) -> MegaMoEInputs | None:
+        """MegaMoE buffers the FFN input producer may write MXFP8 into."""
+        if not self.use_native_mega_moe or not self.experts.takes_mxfp8_input:
+            return None
+        return self.experts.input_buffers(num_tokens)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+        *,
+        hidden_states_staged: bool = False,
     ) -> torch.Tensor:
+        """Route and run the experts.
+
+        ``hidden_states_staged``: the producer also wrote ``hidden_states`` as
+        MXFP8 into ``mega_moe_inputs()``.
+        """
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
         # getattr for test doubles that fake the gate module.
@@ -501,6 +524,8 @@ class DeepseekV4MoE(nn.Module):
                 ]
                 fix_routing_mask = mega_gate_metadata.hash_token_mask
 
+            # Route straight into the MegaMoE buffer, padding left unrouted.
+            inputs = self.experts.input_buffers(hidden_states.shape[0])
             topk_weights, topk_ids = bf16_mega_gate(
                 hidden_states,
                 self.gate.weight,
@@ -515,9 +540,15 @@ class DeepseekV4MoE(nn.Module):
                 image_token_mask=mega_gate_metadata.image_token_mask,
                 fix_routing_mask=fix_routing_mask,
                 unmapped_topk_idx=unmapped_topk_idx,
+                mask=mega_gate_metadata.token_mask,
+                out=None if inputs is None else (inputs.topk_weights, inputs.topk_idx),
             )
         final_hidden_states = self.experts(
-            hidden_states, topk_weights, topk_ids, self.shared_experts
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            self.shared_experts,
+            hidden_states_staged=hidden_states_staged,
         )
         return final_hidden_states.view(org_shape)
 
