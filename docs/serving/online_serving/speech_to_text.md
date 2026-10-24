@@ -202,7 +202,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
-| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name", "language": "en", "prompt": "..."}`. `language` and `prompt` are optional and work as in the Transcriptions API for Qwen3-ASR; Voxtral Realtime accepts them but does not use them. Each `session.update` replaces both, and they apply from the next `input_audio_buffer.commit`. |
 
 ### Server → Client Events
 
