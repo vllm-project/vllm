@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+import contextlib
+from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
 import torch
@@ -11,7 +12,10 @@ from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
@@ -71,6 +75,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_shard
+from vllm.models.kimi_k3.amd import sp
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -654,12 +660,73 @@ class KimiDecoderLayer(nn.Module):
             positions=positions,
         )
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _output_unreduced(proj: RowParallelLinear) -> Iterator[None]:
+        # Row-parallel outputs stay partial so the caller can reduce-scatter.
+        assert isinstance(proj, RowParallelLinear) and proj.reduce_results
+        proj.reduce_results = False
+        try:
+            yield
+        finally:
+            proj.reduce_results = True
+
+    def _run_self_attn_sp(
+        self,
+        positions: torch.Tensor,
+        hidden_shard: torch.Tensor | QuantizedActivation,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        hidden_states = sp.gather_activation(hidden_shard, num_tokens)
+        with self._output_unreduced(self.self_attn.o_proj):
+            out = self._run_self_attn(positions, hidden_states)
+        return sp.scatter_tokens(out)
+
+    def _run_moe_sp_shard_routed(self, hidden_shard: torch.Tensor) -> torch.Tensor:
+        runner = self.mlp.experts
+        assert isinstance(runner, ROCmLatentMoERunner)
+        router_logits, _ = self.mlp.gate(hidden_shard)
+        latent, topk_weights, topk_ids = runner.sp_route_shard(
+            hidden_shard, router_logits
+        )
+        hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+        latent = tensor_model_parallel_all_gather(latent.contiguous(), dim=0)
+        topk = sp.all_gather_routing(topk_weights, topk_ids)
+        # Only read by select_experts, which returns the gathered top-k instead.
+        logits = router_logits.new_empty((latent.size(0), router_logits.size(1)))
+        with sp.pre_routed(runner.router, topk):
+            return runner(
+                hidden_states=latent,
+                router_logits=logits,
+                shared_experts_input=hidden_states,
+                token_sharded=True,
+            )
+
+    def _run_mlp_sp(
+        self, hidden_shard: torch.Tensor | QuantizedActivation
+    ) -> torch.Tensor:
+        # MLPs are per-token, so they run on the TP-padded token set as is.
+        if isinstance(self.mlp, KimiMoE):
+            assert isinstance(hidden_shard, torch.Tensor)
+            if self.mlp.use_latent_moe and self.mlp.experts.token_shardable:
+                return self._run_moe_sp_shard_routed(hidden_shard)
+            hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+            out = self.mlp(hidden_states)
+            # The MoE output is fully reduced; keep this rank's tokens.
+            shard = hidden_shard.size(0)
+            return out.narrow(0, get_tensor_model_parallel_rank() * shard, shard)
+        hidden_states = sp.gather_activation(hidden_shard)
+        with self._output_unreduced(self.mlp.down_proj):
+            out = self.mlp(hidden_states)
+        return tensor_model_parallel_reduce_scatter(out, dim=0)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         prefix_delta: torch.Tensor | None = None,
+        sp_num_tokens: int | None = None,
         **kwargs,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
@@ -668,8 +735,9 @@ class KimiDecoderLayer(nn.Module):
         if self.use_attn_residuals:
             assert residual is not None
             return self.forward_attn_residual(
-                positions, hidden_states, residual, prefix_delta
+                positions, hidden_states, residual, prefix_delta, sp_num_tokens
             )
+        assert sp_num_tokens is None
 
         assert prefix_delta is None
         # Self Attention
@@ -692,7 +760,10 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
         prefix_delta: torch.Tensor | None,
+        sp_num_tokens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``sp_num_tokens`` is the unpadded token count when the residual
+        stream is token-sharded (see :mod:`.sp`), else None."""
         prefix_sum = hidden_states
         attention_quant_key = (
             self.self_attn.get_input_quant_key()
@@ -714,7 +785,12 @@ class KimiDecoderLayer(nn.Module):
         if self.is_block_write_layer:
             prefix_sum = None
 
-        hidden_states = self._run_self_attn(positions, hidden_states)
+        if sp_num_tokens is not None:
+            hidden_states = self._run_self_attn_sp(
+                positions, hidden_states, sp_num_tokens
+            )
+        else:
+            hidden_states = self._run_self_attn(positions, hidden_states)
 
         if prefix_sum is None:
             prefix_sum = hidden_states
@@ -740,7 +816,10 @@ class KimiDecoderLayer(nn.Module):
             ),
         )
 
-        hidden_states = self.mlp(hidden_states)
+        if sp_num_tokens is not None:
+            hidden_states = self._run_mlp_sp(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return prefix_sum, block_residual, hidden_states
 
 
@@ -750,6 +829,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.routing_observed = (
+            vllm_config.aux_output_config.enable_return_routed_experts
+            or vllm_config.parallel_config.enable_eplb
+        )
 
         self.vocab_size = config.vocab_size
 
@@ -891,6 +974,16 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
+        num_tokens = hidden_states.size(0)
+        # Specialized decode kernels take the full token batch.
+        use_sp = step is None and sp.should_shard(
+            num_tokens,
+            has_residual=residual is not None,
+            has_aux_layers=bool(self.aux_hidden_state_layers),
+            routing_observed=self.routing_observed,
+        )
+        if use_sp:
+            hidden_states = sp_shard(hidden_states)
         block_residual = hidden_states.new_empty(
             hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
         )
@@ -904,9 +997,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             start=self.start_layer,
         ):
             kernel = step.layer(layer_idx) if step is not None else None
-            hidden_states, residual, prefix_delta = (kernel or layer)(
-                positions, hidden_states, residual, prefix_delta
-            )
+            if kernel is not None:
+                hidden_states, residual, prefix_delta = kernel(
+                    positions, hidden_states, residual, prefix_delta
+                )
+            else:
+                hidden_states, residual, prefix_delta = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_delta=prefix_delta,
+                    sp_num_tokens=num_tokens if use_sp else None,
+                )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
@@ -929,6 +1031,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             attn_res_block_num,
             delta=prefix_delta,
         )
+        if use_sp:
+            hidden_states = sp.gather_tokens(hidden_states, num_tokens)
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
         if aux_hidden_states:
