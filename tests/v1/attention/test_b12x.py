@@ -134,6 +134,15 @@ def test_b12x_attention_config_support(
     assert reason == expected_reason
 
 
+@pytest.mark.parametrize(
+    ("head_size", "supported"),
+    [(64, False), (128, True), (192, True), (256, True)],
+)
+def test_b12x_attention_head_size_support(head_size: int, supported: bool) -> None:
+    """head_dim 64 cannot be planned by the b12x paged decode kernel."""
+    assert B12xPagedAttentionBackend.supports_head_size(head_size) is supported
+
+
 def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     spec = B12xPagedAttentionBackend.customize_spec(
         FullAttentionSpec(
