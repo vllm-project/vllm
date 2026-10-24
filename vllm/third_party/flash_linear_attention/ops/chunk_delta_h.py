@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,6 +20,42 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+
+# This kernel carries the recurrent state across chunks, so it cannot parallelize over
+# the chunk axis: the grid is (cdiv(V, BV), N*H), which is 96 workgroups at BV=64 for a
+# single sequence against 304 CUs. It still is not occupancy bound -- a finer tile does
+# not help.
+#
+# The knob that does help is the MFMA width, which this space cannot express: adding
+# matrix_instr_nonkdim=16 to the configs already here is worth 1.096x of the 1.113x
+# total, 86% of it. num_warps=8 is included because it wins once the MFMA width is set,
+# not because the warp count helps by itself -- extending the warp range alone measures
+# 0.982x, slightly slower than the stock space.
+#
+# Medians of 5 runs on MI325X at the Qwen3-Next GDN shapes, T=30720. Output and
+# recurrent state are bit-identical to the stock search space for every config added
+# here; this kernel keeps its tile, so it has no analogue of chunk_o's wide-K case.
+#
+# ``matrix_instr_nonkdim`` is an option of Triton's AMD backend rather than a kernel
+# argument: the backend lifts it out of the config kwargs at compile time. A Triton that
+# does not recognize it raises instead of being skipped, because the autotuner only
+# swallows ``OutOfResources``. That is the one way these configs can break a build that
+# works today, so it is pinned by the tests rather than left implicit.
+_GFX942_CONFIGS: list[triton.Config] = []
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942
+
+    if on_gfx942():
+        _GFX942_CONFIGS = [
+            triton.Config(
+                {"BV": BV, "matrix_instr_nonkdim": 16},
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+            for num_warps in [4, 8]
+            for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+            for BV in [32, 64]
+        ]
 
 
 @triton.heuristics(
@@ -37,7 +74,8 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         for num_warps in [2, 4]
         for num_stages in _CHUNK_DELTA_H_NUM_STAGES
         for BV in [32, 64]
-    ],
+    ]
+    + _GFX942_CONFIGS,
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
 )
