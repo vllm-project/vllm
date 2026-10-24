@@ -1,0 +1,6 @@
+# Client-side benchmark harness. vLLM itself is installed separately from the
+# repo root (see scripts/install.sh) so the server under test is this fork.
+aiperf>=0.2.0
+matplotlib>=3.8
+pytest>=8.0
+pytest-cov>=5.0
