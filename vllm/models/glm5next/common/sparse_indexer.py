@@ -4,10 +4,182 @@
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
+from vllm.triton_utils import tl, triton
+
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _gather_kpool_prefill_warmup_inputs(
+    *, tail_cache, head_dim: int, kpool: int, dtype: torch.dtype
+):
+    tail = tail_cache.kv_cache
+    return {
+        **{
+            name: TritonWarmupTensor(dtype)
+            for name in ("k_ptr", "score_ptr", "out_k_ptr", "out_score_ptr")
+        },
+        **{
+            name: TritonWarmupTensor(torch.int64)
+            for name in ("slots_ptr", "pos_ptr", "tail_slots_ptr")
+        },
+        "tail_ptr": TritonWarmupTensor(
+            tail.dtype, ptr_range_bytes=tail.untyped_storage().nbytes()
+        ),
+        "write_mask_ptr": TritonWarmupTensor(torch.bool),
+        "k_stride_0": head_dim,
+        "k_stride_1": 1,
+        "s_stride_0": head_dim,
+        "s_stride_1": 1,
+        **{f"t_stride_{i}": stride for i, stride in enumerate(tail.stride())},
+        "POOL": kpool,
+        "DIM": head_dim,
+        "RING": tail.shape[2],
+        "BLOCK_D": triton.next_power_of_2(head_dim),
+        "num_warps": 2,
+        "grid": (1,),
+    }
+
+
+@triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_gather_kpool_prefill_warmup_inputs,
+)
+@triton.jit(do_not_specialize_on_alignment=["slots_ptr", "pos_ptr", "tail_slots_ptr"])
+def _gather_kpool_prefill_kernel(
+    k_ptr,
+    score_ptr,
+    slots_ptr,
+    pos_ptr,
+    tail_ptr,
+    tail_slots_ptr,
+    out_k_ptr,
+    out_score_ptr,
+    write_mask_ptr,
+    k_stride_0: tl.constexpr,
+    k_stride_1: tl.constexpr,
+    s_stride_0: tl.constexpr,
+    s_stride_1: tl.constexpr,
+    t_stride_0: tl.constexpr,
+    t_stride_1: tl.constexpr,
+    t_stride_2: tl.constexpr,
+    t_stride_3: tl.constexpr,
+    POOL: tl.constexpr,
+    DIM: tl.constexpr,
+    RING: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Gather [N, POOL, DIM] keys/scores for writable completions only.
+
+    Batch and tail buffers are read-only; masked output rows stay untouched.
+    """
+    row = tl.program_id(0).to(tl.int64)
+    tail_slot = tl.load(tail_slots_ptr + row).to(tl.int64)
+    valid = (tl.load(slots_ptr + row) >= 0) & (tail_slot >= 0)
+    tl.store(write_mask_ptr + row, valid)
+    if valid:
+        members = tl.arange(0, POOL)
+        dims = tl.arange(0, BLOCK_D)
+        source = row - (POOL - 1) + members
+        position = tl.load(pos_ptr + row) - (POOL - 1) + members
+        block = tail_slot // RING
+        source_pos = tl.load(pos_ptr + source, source >= 0, other=-1)
+        source_slot = tl.load(tail_slots_ptr + source, source >= 0, other=-1).to(
+            tl.int64
+        )
+        from_batch = (
+            (source >= 0)
+            & (source_slot >= 0)
+            & (source_pos == position)
+            & (source_slot // RING == block)
+        )
+        k = tl.load(
+            k_ptr + source[:, None] * k_stride_0 + dims[None, :] * k_stride_1,
+            from_batch[:, None] & (dims[None, :] < DIM),
+            other=0,
+        )
+        s = tl.load(
+            score_ptr + source[:, None] * s_stride_0 + dims[None, :] * s_stride_1,
+            from_batch[:, None] & (dims[None, :] < DIM),
+            other=0,
+        )
+        tail_offset = (
+            block * t_stride_0
+            + (position % RING)[:, None] * t_stride_2
+            + dims[None, :] * t_stride_3
+        )
+        tail_k = tl.load(
+            tail_ptr + tail_offset,
+            ~from_batch[:, None] & (dims[None, :] < DIM),
+            other=0,
+        )
+        tail_s = tl.load(
+            tail_ptr + tail_offset + t_stride_1,
+            ~from_batch[:, None] & (dims[None, :] < DIM),
+            other=0,
+        )
+        output = (row * POOL + members[:, None]) * DIM + dims[None, :]
+        tl.store(
+            out_k_ptr + output,
+            tl.where(from_batch[:, None], k, tail_k),
+            dims[None, :] < DIM,
+        )
+        tl.store(
+            out_score_ptr + output,
+            tl.where(from_batch[:, None], s, tail_s),
+            dims[None, :] < DIM,
+        )
+
+
+def _gather_kpool_prefill(
+    k: torch.Tensor,
+    gate_score: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kpool: int,
+    positions: torch.Tensor | None,
+    tail_kv_cache: torch.Tensor | None,
+    tail_slot_mapping: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Assemble complete pools from this batch and each request's prior tail."""
+    n = slot_mapping.shape[0]
+    if (
+        positions is not None
+        and tail_kv_cache is not None
+        and tail_slot_mapping is not None
+    ):
+        keys = torch.empty((n, kpool, k.shape[1]), dtype=k.dtype, device=k.device)
+        scores = torch.empty_like(keys, dtype=gate_score.dtype)
+        write_mask = torch.empty(n, dtype=torch.bool, device=k.device)
+        _gather_kpool_prefill_kernel[(n,)](
+            k,
+            gate_score,
+            slot_mapping,
+            positions,
+            tail_kv_cache,
+            tail_slot_mapping,
+            keys,
+            scores,
+            write_mask,
+            *k.stride(),
+            *gate_score.stride(),
+            *tail_kv_cache.stride(),
+            POOL=kpool,
+            DIM=k.shape[1],
+            RING=tail_kv_cache.shape[2],
+            BLOCK_D=triton.next_power_of_2(k.shape[1]),
+            num_warps=2,
+        )
+        return keys, scores, write_mask
+    rows = torch.arange(n, device=k.device)
+    offsets = torch.arange(kpool, device=k.device)
+    indices = (rows[:, None] - (kpool - 1) + offsets).clamp(0, n - 1)
+    write_mask = (slot_mapping >= 0) & (rows >= kpool - 1)
+    return k[indices], gate_score[indices], write_mask
 
 
 def _build_decode_scatter_indices(
