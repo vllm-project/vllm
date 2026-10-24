@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 import torch
 from torch import Generator
@@ -304,6 +305,104 @@ class TestTritonTopkTopp:
         # Randomly disable top-p for some rows (~25%)
         disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
         p.masked_fill_(disable_mask, 1.0)
+
+        self._compare_results(logits, k=None, p=p)
+
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    @pytest.mark.parametrize("background_logit", [-200.0, -100.0])
+    @pytest.mark.parametrize("hot_tokens", [(0, 2000), (1000, 2000), (10000, 20000)])
+    def test_topp_sparse_probabilities(
+        self, batch_size: int, background_logit: float, hot_tokens: tuple[int, int]
+    ):
+        """Top-p must trim sparse rows regardless of hot-token positions."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, 151936), background_logit)
+        logits[:, list(hot_tokens)] = 0.0
+        p = torch.full((batch_size,), 0.5)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+        expected_kept = torch.isfinite(expected).sum(dim=-1)
+        actual_kept = torch.isfinite(actual).sum(dim=-1)
+
+        assert torch.equal(actual_kept, expected_kept)
+        assert (actual_kept == 1).all()
+        assert (actual[torch.isfinite(actual)] == 0.0).all()
+
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    @pytest.mark.parametrize(
+        "vocab_size, background_logit", [(1024, -10.0), (32000, -20.0)]
+    )
+    def test_topp_tied_probabilities(
+        self, batch_size: int, vocab_size: int, background_logit: float
+    ):
+        """Boundary ties must be trimmed without reconstructing their logits."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, vocab_size), background_logit)
+        logits[:, [1, 50, 100]] = 0.0
+        p = torch.full((batch_size,), 0.3)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        assert torch.equal(
+            torch.isfinite(actual).sum(dim=-1), torch.isfinite(expected).sum(dim=-1)
+        )
+        assert (torch.isfinite(actual).sum(dim=-1) == 1).all()
+        assert (actual[torch.isfinite(actual)] == 0.0).all()
+
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    def test_topp_large_tied_group(self, batch_size: int):
+        """A near-tied maximum must not disable the boundary duplicate budget."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, 16384), -float("inf"))
+        logits[:, :8190] = 0.0
+        logits[:, 8192] = 1e-4
+        logits[:, 8193] = -1e-4
+        p = torch.full((batch_size,), 0.5)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        assert torch.equal(
+            torch.isfinite(actual).sum(dim=-1), torch.isfinite(expected).sum(dim=-1)
+        )
+        assert (torch.isfinite(actual).sum(dim=-1) == 4096).all()
+        assert (actual[:, 8192] == 1e-4).all()
+        assert torch.isneginf(actual[:, 8193]).all()
+
+    @pytest.mark.parametrize("top_p", [0.1, 0.9])
+    def test_topp_nan_row_unchanged(self, top_p: float):
+        """Monolithic normalization must preserve the existing NaN-row fallback."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.randn(65, 32000, generator=self.generator)
+        logits[:, 16000] = float("nan")
+        p = torch.full((65,), top_p)
+
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        torch.testing.assert_close(actual, logits, rtol=0, atol=0, equal_nan=True)
+
+    def test_topp_dense_quarter_mass(self):
+        """Normalization must not introduce a coarse cutoff on a dense row."""
+        vocab_size = 32768
+        rng = np.random.default_rng(25)
+        values = -rng.exponential(1.0, vocab_size)
+        values[: vocab_size // 4] = 1.5 + rng.exponential(1.0, vocab_size // 4)
+        values = rng.permutation(values).astype(np.float32)
+        probabilities = np.exp(values.astype(np.float64) - values.max())
+        probabilities /= probabilities.sum()
+        cumulative = np.cumsum(np.sort(probabilities)[::-1])
+        cutoff = np.float32(cumulative[vocab_size // 4 - 1])
+        for _ in range(2):
+            cutoff = np.nextafter(cutoff, np.float32(1.0))
+
+        logits = torch.tensor(values).repeat(65, 1)
+        p = torch.full((65,), float(cutoff))
 
         self._compare_results(logits, k=None, p=p)
 
