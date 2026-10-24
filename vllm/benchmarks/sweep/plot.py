@@ -454,12 +454,41 @@ def plot(
     if not all_data:
         raise ValueError(f"Did not find any parameter sweep results under {output_dir}")
 
-    fig_dir.mkdir(parents=True, exist_ok=True)
-
     fig_groups = full_groupby(
         all_data,
         key=lambda item: _get_group(item, fig_by),
     )
+
+    path_groups = full_groupby(
+        fig_groups,
+        key=lambda item: _get_fig_path(fig_dir, item[0], fig_name),
+    )
+    for fig_path, groups in path_groups:
+        if len(groups) < 2:
+            continue
+        if filter_by:
+            try:
+                import pandas as pd
+            except ImportError:
+                pd = PlaceholderModule("pandas")
+
+            if (
+                sum(
+                    not filter_by.apply(
+                        pd.DataFrame.from_records(_convert_inf_nan_strings(data))
+                    ).empty
+                    for _, data in groups
+                )
+                < 2
+            ):
+                continue
+        raise ValueError(
+            f"Figure groups map to the same figure output path: {fig_path}. "
+            "Change --fig-by or use group labels that remain distinct "
+            "after filename sanitization."
+        )
+
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
     with DummyExecutor() if len(fig_groups) <= 1 else ProcessPoolExecutor() as executor:
         # Resolve the iterable to ensure that the workers are run
