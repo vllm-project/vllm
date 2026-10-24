@@ -5,16 +5,24 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.model_executor.layers.attention.attention import (
+    Attention,
     _largest_kernel_block_within,
 )
 from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
+from vllm.v1.core.kv_cache_utils import unify_kv_cache_spec_page_size
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
-from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpecKind,
+    SlidingWindowSpec,
+    get_kv_quant_mode,
+)
 
 
 @pytest.mark.parametrize(
@@ -33,6 +41,72 @@ def test_largest_kernel_block_within(supported_sizes, expected):
             return supported_sizes
 
     assert _largest_kernel_block_within(Backend, 1024, 1024 * 1536, 2048) == expected
+
+
+@pytest.mark.parametrize(
+    "supported_sizes,divisor_of,expected",
+    [
+        # FlashInfer on sm_120 next to a 1648-token hybrid (GDN) block: neither
+        # 64 nor 32 divides 1648, so only 16 lets ``unify`` scale the page.
+        ([16, 32, 64], 1648, 16),
+        ([16, 32, 64], 1536, 64),
+        ([MultipleOf(16)], 1648, 1648),
+        # No supported block divides it: keep the largest fitting block.
+        ([MultipleOf(32)], 1648, 1632),
+        ([2048], 1648, 2048),
+    ],
+)
+def test_largest_kernel_block_within_divisor_of(supported_sizes, divisor_of, expected):
+    class Backend:
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+            return supported_sizes
+
+    per_token = 1024
+    got = _largest_kernel_block_within(
+        Backend, per_token, per_token * divisor_of, divisor_of, divisor_of=divisor_of
+    )
+    assert got == expected
+
+
+@pytest.mark.parametrize("primary_block_size", [1648, 1536])
+def test_sliding_window_spec_unifies_without_padding(primary_block_size):
+    # A SW draft layer next to a hybrid primary block, on a backend limited to
+    # small kernel blocks (FlashInfer on sm_120).
+    backend = SimpleNamespace(
+        is_mla=lambda: False,
+        customize_spec=lambda spec: spec,
+        get_supported_kernel_block_sizes=lambda kv_cache_spec=None: [16, 32, 64],
+    )
+    layer = SimpleNamespace(
+        attn_type=AttentionType.DECODER,
+        kv_cache_dtype="fp8",
+        kv_cache_torch_dtype=torch.float8_e4m3fn,
+        sliding_window=2048,
+        attn_backend=backend,
+        num_kv_heads=8,
+        head_size=128,
+        head_size_v=128,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=primary_block_size, skip_page_size_padded=None
+        )
+    )
+    sw_spec = Attention.get_kv_cache_spec(layer, vllm_config)
+    assert isinstance(sw_spec, SlidingWindowSpec)
+    assert primary_block_size % sw_spec.block_size == 0
+
+    primary_spec = FullAttentionSpec(
+        block_size=primary_block_size,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=get_kv_quant_mode("fp8"),
+    )
+    unified = unify_kv_cache_spec_page_size({"sw": sw_spec, "full": primary_spec})
+    assert unified["sw"].block_size == primary_block_size
+    assert unified["sw"].page_size_padded is None
 
 
 @pytest.mark.parametrize(
