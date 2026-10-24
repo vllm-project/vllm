@@ -79,6 +79,15 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+### GLM-5.3-Flash Kpool Indexer
+
+GLM-5.3-Flash's compressed sparse attention indexer supports chunked prefill
+boundaries within a pool. The indexer combines tokens from the current chunk
+with that request's cached tail before updating the tail for the next step.
+No extra option is required, and `max_num_batched_tokens` does not need to be
+a multiple of the indexer's pool size. This also applies when decode requests
+leave a prefill budget that is not pool-aligned.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
