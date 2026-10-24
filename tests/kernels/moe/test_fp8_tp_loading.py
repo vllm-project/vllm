@@ -218,6 +218,30 @@ def test_fp8_block_aligned_tp_rejects_presharded_weights(monkeypatch):
         )
 
 
+def test_fp8_block_expert_weights_give_each_region_once(monkeypatch):
+    """Humming registers each block scale under `*_weight_scale` and
+    `*_weight_scale_inv` as two Parameters over one storage. EPLB must get
+    each memory region once, so NIXL can register it and no rows move twice."""
+    layer = _make_fp8_tp_experts(monkeypatch, 1, 0)
+    for prefix in ("w13", "w2"):
+        scale = getattr(layer, f"{prefix}_weight_scale_inv")
+        layer.register_parameter(
+            f"{prefix}_weight_scale",
+            torch.nn.Parameter(scale.data, requires_grad=False),
+        )
+
+    expert_weights = list(layer.get_expert_weights())
+
+    expected = [
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale_inv,
+        layer.w2_weight_scale_inv,
+    ]
+    assert [w.data_ptr() for w in expert_weights] == [w.data_ptr() for w in expected]
+    assert all(w.shape[0] == layer.local_num_experts for w in expert_weights)
+
+
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize("num_tokens", [1, 17])
 @torch.inference_mode()
