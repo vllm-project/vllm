@@ -221,6 +221,28 @@ def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
     assert communicator.should_custom_ar(oversized) is batch_invariant
 
 
+def test_capture_registers_graph_buffers_only_after_success(monkeypatch) -> None:
+    """An exception in the capture reaches the caller without the
+    registration collective, which the other ranks may never join."""
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator._ptr = 0
+    registrations: list[bool] = []
+    monkeypatch.setattr(
+        communicator, "register_graph_buffers", lambda: registrations.append(True)
+    )
+
+    with pytest.raises(RuntimeError, match="out of memory"), communicator.capture():
+        raise RuntimeError("CUDA error: out of memory")
+    assert registrations == []
+    assert not communicator._IS_CAPTURING
+
+    with communicator.capture():
+        assert communicator._IS_CAPTURING
+    assert registrations == [True]
+    assert not communicator._IS_CAPTURING
+
+
 @pytest.mark.parametrize("batch_invariant", [False, True])
 def test_custom_reduce_scatter_disabled_under_batch_invariance(
     monkeypatch, batch_invariant: bool
