@@ -83,20 +83,25 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         spec = self.speculative_config
         target_parallel = base.parallel_config
 
-        return replace(
-            base,
-            quant_config=None,
-            parallel_config=replace(
-                spec.draft_parallel_config,
-                rank=target_parallel.rank,
-                decode_context_parallel_size=(
-                    target_parallel.decode_context_parallel_size
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
+        return install_draft_quant_config(
+            replace(
+                base,
+                parallel_config=replace(
+                    spec.draft_parallel_config,
+                    rank=target_parallel.rank,
+                    decode_context_parallel_size=(
+                        target_parallel.decode_context_parallel_size
+                    ),
+                    cp_kv_cache_interleave_size=(
+                        target_parallel.cp_kv_cache_interleave_size
+                    ),
+                    dcp_comm_backend=target_parallel.dcp_comm_backend,
+                    dcp_q_replicate=target_parallel.dcp_q_replicate,
                 ),
-                cp_kv_cache_interleave_size=target_parallel.cp_kv_cache_interleave_size,
-                dcp_comm_backend=target_parallel.dcp_comm_backend,
-                dcp_q_replicate=target_parallel.dcp_q_replicate,
-            ),
-            model_config=spec.draft_model_config,
+                model_config=spec.draft_model_config,
+            )
         )
 
     @override

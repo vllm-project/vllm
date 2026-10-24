@@ -1007,6 +1007,17 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     )
 
 
+def install_draft_quant_config(vllm_config: VllmConfig) -> VllmConfig:
+    """Pin the draft quant config after ``VllmConfig`` construction.
+
+    ``replace`` reruns ``__post_init__``, which fills a missing quant config
+    from ``model_config``. Draft construction still carries the target model
+    config, so an unquantized draft would otherwise inherit the target scheme.
+    """
+    vllm_config.quant_config = get_draft_quant_config(vllm_config)
+    return vllm_config
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """Extract the layer index from the module name.
 
@@ -1117,6 +1128,89 @@ direct_register_custom_op(
     fake_impl=sequence_parallel_chunk_impl_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def capture_eagle_vocab_map(
+    name: str,
+    loaded_weight: torch.Tensor,
+    vocab_map: dict[str, torch.Tensor],
+) -> bool:
+    """Record an Eagle ``d2t`` or ``t2d`` tensor.
+
+    Returns True when ``name`` is ``t2d``, which is not a model parameter and
+    must be skipped by the weight loader. ``d2t`` is recorded and still loaded.
+    """
+    if "t2d" in name:
+        vocab_map["t2d"] = loaded_weight
+        return True
+    if "d2t" in name:
+        vocab_map["d2t"] = loaded_weight
+    return False
+
+
+def validate_eagle_vocab_map(vocab_map: Mapping[str, torch.Tensor]) -> None:
+    """Raise if ``d2t`` does not land on ``t2d``.
+
+    Draft id ``i`` maps to target id ``i + d2t[i]``. Each of those ids must be
+    in range, marked by ``t2d``, and distinct. Extra ``t2d`` marks are ignored.
+
+    Args:
+        vocab_map: Tensors recorded by :func:`capture_eagle_vocab_map`.
+
+    Raises:
+        ValueError: Both tensors are present and disagree.
+    """
+    d2t = vocab_map.get("d2t")
+    t2d = vocab_map.get("t2d")
+    if d2t is None or t2d is None:
+        return
+
+    d2t_ids = d2t.detach().to(device="cpu", dtype=torch.int64).reshape(-1)
+    t2d_mask = t2d.detach().to(device="cpu").reshape(-1)
+    if t2d_mask.dtype != torch.bool:
+        logger.warning(
+            "Skipping Eagle d2t/t2d check; t2d dtype is %s, expected bool.",
+            t2d_mask.dtype,
+        )
+        return
+
+    n_draft = int(d2t_ids.shape[0])
+    targets = torch.arange(n_draft) + d2t_ids
+    in_range = (targets >= 0) & (targets < t2d_mask.shape[0])
+    hits = torch.zeros(n_draft, dtype=torch.bool)
+    if bool(in_range.any()):
+        hits[in_range] = t2d_mask[targets[in_range]]
+    n_hit = int(hits.sum().item())
+    n_marked = int(t2d_mask.sum().item())
+    n_unique = int(torch.unique(targets).numel()) if n_draft else 0
+    if n_hit == n_draft and n_unique == n_draft:
+        if n_marked != n_draft:
+            logger.warning_once(
+                "Eagle t2d marks %d target ids for a draft vocab of %d. "
+                "Extra marks are ignored.",
+                n_marked,
+                n_draft,
+            )
+        return
+
+    details = [f"{n_unique} distinct targets, t2d marks {n_marked}"]
+    if n_hit != n_draft:
+        details.insert(
+            0,
+            f"{n_draft - n_hit} of {n_draft} draft ids map outside t2d",
+        )
+    if n_unique != n_draft:
+        n_shared = n_draft - n_unique
+        if n_shared == 1:
+            shared = "1 draft id shares a target with another draft id"
+        else:
+            shared = f"{n_shared} draft ids share a target with another draft id"
+        details.insert(0, shared)
+    raise ValueError(
+        "Eagle d2t does not match t2d: "
+        + "; ".join(details)
+        + ". Each draft id must map to a distinct target id that t2d marks."
+    )
 
 
 def process_eagle_weight(
