@@ -352,6 +352,7 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    max_varlen_decode_reqs: int | None = None,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -375,6 +376,7 @@ def _make_spec_decode_manager(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
         varlen_decode=varlen_decode,
+        max_varlen_decode_reqs=max_varlen_decode_reqs,
     )
     manager._graphs_captured = True
     return manager
@@ -452,6 +454,35 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     assert desc.max_query_len == _DECODE_QUERY_LEN
     assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
     assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_varlen_decode_graphs_pad_to_max_varlen_decode_reqs(monkeypatch):
+    """Dummy runs replay a varlen decode graph with every request slot filled.
+    When a DFlash/DSpark draft pass fits fewer requests than max_num_seqs, the
+    graphs must pad to that limit instead, and sizes that many requests cannot
+    fill get no varlen graph."""
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        capture_sizes=[1, 2, 4, 8, 12, 16, 24],
+        varlen_decode=True,
+        max_varlen_decode_reqs=4,
+    )
+
+    assert [
+        (desc.num_tokens, desc.num_reqs)
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    ] == [(12, 4), (8, 4), (4, 4), (2, 2), (1, 1)]
+
+    # A full decode step at the request cap still replays a FULL graph.
+    desc = manager.dispatch(
+        num_reqs=4,
+        num_tokens=4 * _DECODE_QUERY_LEN,
+        uniform_token_count=None,
+        num_active_loras=0,
+        max_query_len=_DECODE_QUERY_LEN,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_reqs == 4
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):

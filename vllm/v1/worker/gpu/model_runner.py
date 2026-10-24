@@ -769,6 +769,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
             ubatch_runner=self.ubatch_runner,
+            # Dummy runs fill every request slot of a varlen decode graph. Cap
+            # the slots as _dummy_run caps requests, so the draft pass fits.
+            max_varlen_decode_reqs=(
+                self.max_num_tokens // self.speculator.num_query_per_req
+                if self.speculator is not None
+                else None
+            ),
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
             self.fast_prefill = FastPrefillHelper(
