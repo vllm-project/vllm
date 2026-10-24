@@ -25,7 +25,8 @@ def _register_signal_handlers():
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTSTP, signal_handler)
+    if hasattr(signal, "SIGTSTP"):
+        signal.signal(signal.SIGTSTP, signal_handler)
 
 
 def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
@@ -127,14 +128,25 @@ def chat(
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
     initial_conversation = conversation.copy()
+    read_input = input
+    if interactive and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from prompt_toolkit import PromptSession
+        except ImportError:
+            print(
+                "Line editing is unavailable. Install vllm[chat] to enable it.",
+                file=sys.stderr,
+            )
+        else:
+            read_input = PromptSession[str]().prompt
 
     print("Please enter a message for the chat model:")
     if interactive:
         print("Commands: /help, /clear, /exit. Prefix a message with // to send /.")
     while True:
         try:
-            input_message = input("> ")
-        except EOFError:
+            input_message = read_input("> ")
+        except (EOFError, KeyboardInterrupt):
             break
         if interactive:
             command = input_message.strip()
@@ -274,6 +286,7 @@ class ChatCommand(CLISubcommand):
             action="store_true",
             help=(
                 "Enable /help, /clear, /exit and recovery from API errors. "
+                "Install vllm[chat] for terminal line editing and session history. "
                 "Full error tracebacks are preserved. Disabled by default. "
                 "Cannot be combined with --quick."
             ),

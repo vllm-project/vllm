@@ -109,6 +109,19 @@ system prompt), and `/exit`. Commands are handled locally; prefix a message with
 `//` to send a literal leading slash. Unknown commands display a hint without
 sending a request.
 
+Install the optional line editor with `uv pip install 'vllm[chat]'`. In `-i` mode,
+when both input and output are terminals, it enables arrow-key input history and
+Emacs-style editing (Ctrl+A/Ctrl+E for the start/end of the line and
+Ctrl+B/Ctrl+F for moving backward/forward). The line editor uses `prompt_toolkit`,
+which supports Linux, macOS, and Windows terminals; it does not change vLLM's
+platform requirements. Without this optional dependency, or when input/output
+is redirected, the CLI uses plain `input()`.
+
+Input history stays in memory for the current chat session and is not written to
+disk. It is separate from the conversation sent to the model: `/clear` resets
+the conversation but keeps recalled input available through the arrow keys.
+Ctrl+C and end-of-input exit the prompt cleanly.
+
 In this mode, API errors during a chat request or response stream print their
 full traceback and return to the prompt. Startup errors still propagate.
 Previously completed turns remain in history; a failed or interrupted turn is

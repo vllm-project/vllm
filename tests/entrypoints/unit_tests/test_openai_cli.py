@@ -3,11 +3,16 @@
 import argparse
 import io
 import json
+import queue
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import openai
 import pytest
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 from vllm.entrypoints.cli.openai import ChatCommand
 
@@ -15,7 +20,17 @@ from vllm.entrypoints.cli.openai import ChatCommand
 @pytest.fixture
 def chat_api():
     """Only the external model service is replaced; use the real CLI and SDK."""
-    requests = []
+
+    class RequestLog(list):
+        def __init__(self):
+            super().__init__()
+            self.received: queue.Queue[dict] = queue.Queue()
+
+        def append(self, item):
+            super().append(item)
+            self.received.put(item)
+
+    requests = RequestLog()
     failures: dict[str, int | str] = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -137,3 +152,88 @@ def test_interactive_rejects_quick_mode(capsys):
     with pytest.raises(SystemExit):
         parser.parse_args(["-i", "--quick", "hello"])
     assert "not allowed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("exit_keys", ["/exit\n", "\x04", "\x03"])
+def test_terminal_line_editing_and_history_survive_conversation_clear(
+    chat_api, monkeypatch, exit_keys
+):
+    """Feed real editing keys through a real PromptSession, without a display."""
+    url, requests, _ = chat_api
+    cleared = threading.Event()
+
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+
+        def write(self, text):
+            result = super().write(text)
+            if "Conversation cleared" in text:
+                cleared.set()
+            return result
+
+    monkeypatch.setattr("sys.stdin", Terminal("fallback\n/exit\n"))
+    output = Terminal()
+    monkeypatch.setattr("sys.stdout", output)
+    parser = ChatCommand.add_cli_args(argparse.ArgumentParser())
+    args = parser.parse_args(["--url", url, "-i", "--system-prompt", "Be concise."])
+
+    with (
+        create_pipe_input() as keys,
+        create_app_session(input=keys, output=DummyOutput()),
+    ):
+        errors: list[Exception] = []
+
+        def type_messages():
+            try:
+                keys.send_text("alpha\n")
+                assert (
+                    requests.received.get(timeout=10)["messages"][-1]["content"]
+                    == "alpha"
+                )
+                keys.send_text("\x1b[A\x01\x06\x02X\x05\x02Y\n")
+                assert (
+                    requests.received.get(timeout=10)["messages"][-1]["content"]
+                    == "XalphYa"
+                )
+                keys.send_text("/clear\n")
+                assert cleared.wait(timeout=10)
+                keys.send_text("\x1b[A\x1b[A\x1b[A\x1b[B\n")
+                requests.received.get(timeout=10)
+                keys.send_text(exit_keys)
+            except Exception as error:
+                errors.append(error)
+                keys.send_text("\x04")
+
+        driver = threading.Thread(target=type_messages)
+        driver.start()
+        ChatCommand.cmd(args)
+        driver.join(timeout=15)
+        assert not driver.is_alive()
+        assert not errors
+
+    assert len(requests) == 3
+    assert requests[0]["messages"][-1]["content"] == "alpha"
+    assert requests[1]["messages"][-1]["content"] == "XalphYa"
+    assert requests[2]["messages"] == [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "XalphYa"},
+    ]
+    assert "Conversation cleared" in output.getvalue()
+
+
+def test_missing_line_editor_falls_back_to_plain_input(chat_api, monkeypatch, capsys):
+    url, requests, _ = chat_api
+
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", None)
+    monkeypatch.setattr("sys.stdin", Terminal("hello\n/exit\n"))
+    monkeypatch.setattr("sys.stdout", Terminal())
+    parser = ChatCommand.add_cli_args(argparse.ArgumentParser())
+    ChatCommand.cmd(parser.parse_args(["--url", url, "-i"]))
+
+    assert requests[0]["messages"] == [{"role": "user", "content": "hello"}]
+    assert "Install vllm[chat]" in capsys.readouterr().err

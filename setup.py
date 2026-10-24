@@ -1713,6 +1713,7 @@ setup(
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.14.0.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
+        "chat": ["prompt-toolkit>=3.0.52,<4"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
