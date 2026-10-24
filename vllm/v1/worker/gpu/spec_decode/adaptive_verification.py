@@ -96,36 +96,53 @@ def build_cost_tables_from_curves(
             function. Above it there is no padding, so cost is continuous.
 
     """
-
-    def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
-        xs, ys = np.asarray(curve, dtype=np.float64).T
-        ys = np.maximum.accumulate(ys)
-        values = np.arange(limit + 1)
-        # Execution pads to the next captured size, so cost is a step
-        # function of the padded size: smooth interpolation would invent
-        # marginal per-token costs that don't exist within a pad bucket.
-        idx = np.searchsorted(xs, values, side="left")
-        result = ys[np.minimum(idx, len(xs) - 1)]
-        # Past the capture limit nothing pads, so cost really is continuous in
-        # size; snapping to the next profiled point overestimates badly when
-        # the profiled points are far apart. Interpolate only between points
-        # that are themselves past the limit: crossing the limit loses
-        # cudagraphs entirely, which is a genuine discontinuity, so the first
-        # point above it must not be blended with the last one below.
-        if cudagraph_limit:
-            smooth = values > cudagraph_limit
-            above = xs > cudagraph_limit
-            if smooth.any() and above.any():
-                result[smooth] = np.interp(values[smooth], xs[above], ys[above])
-        if len(xs) > 1:
-            after = values > xs[-1]
-            slope = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
-            result[after] = ys[-1] + slope * (values[after] - xs[-1])
-        return result
-
-    draft_table = np.maximum(build_table(max_num_reqs, draft_curve), 0.0)
-    verify_table = np.maximum(build_table(max_batch_tokens, verify_curve), 1e-6)
+    draft_table = np.maximum(
+        _step_cost_table(max_num_reqs, draft_curve, cudagraph_limit), 0.0
+    )
+    verify_table = np.maximum(
+        _step_cost_table(max_batch_tokens, verify_curve, cudagraph_limit), 1e-6
+    )
     return draft_table, verify_table
+
+
+def _step_cost_table(
+    limit: int, curve: list[tuple[int, float]], cudagraph_limit: int
+) -> np.ndarray:
+    xs, ys = np.asarray(curve, dtype=np.float64).T
+    ys = np.maximum.accumulate(ys)
+    values = np.arange(limit + 1)
+    # Execution pads to the next captured size, so cost is a step
+    # function of the padded size: smooth interpolation would invent
+    # marginal per-token costs that don't exist within a pad bucket.
+    idx = np.searchsorted(xs, values, side="left")
+    result = ys[np.minimum(idx, len(xs) - 1)]
+    # Past the capture limit nothing pads, so cost really is continuous in
+    # size; snapping to the next profiled point overestimates badly when
+    # the profiled points are far apart. Interpolate only between points
+    # that are themselves past the limit: crossing the limit loses
+    # cudagraphs entirely, which is a genuine discontinuity, so the first
+    # point above it must not be blended with the last one below.
+    if cudagraph_limit:
+        smooth = values > cudagraph_limit
+        above = xs > cudagraph_limit
+        if smooth.any() and above.any():
+            result[smooth] = np.interp(values[smooth], xs[above], ys[above])
+    if len(xs) > 1:
+        after = values > xs[-1]
+        slope = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
+        result[after] = ys[-1] + slope * (values[after] - xs[-1])
+    return result
+
+
+def _per_request_price_table(
+    curve: list[tuple[int, float]] | None, max_num_reqs: int
+) -> np.ndarray:
+    if not curve:
+        return np.zeros(max_num_reqs + 1)
+    xs, ys = np.asarray(curve, dtype=np.float64).T
+    # A unit price, not a batch cost: smooth in the request count even where
+    # the batch cost is not, so no padding staircase and no monotonic floor.
+    return np.maximum(np.interp(np.arange(max_num_reqs + 1), xs, ys), 0.0)
 
 
 class AdaptiveVerificationManager:
@@ -148,6 +165,16 @@ class AdaptiveVerificationManager:
         self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        # Price of one draft slot by request count, and the no-draft base split
+        # into step cost by token count with no KV context and KV-read price per
+        # context token by request count. A batch's base is then
+        # token_table[tokens] + kv_table[requests] * its computed context.
+        self.slot_cost_table: np.ndarray | None = None
+        self.base_cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        self._profile_context_len = 0
+        # Request count -> token count of the profiling shapes that price a
+        # draft slot, kept so those shapes stay out of the verify curve.
+        self._slope_shapes: dict[int, int] = {}
         # Largest cudagraph-captured token count; above it nothing pads.
         self._cudagraph_limit = 0
         self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
@@ -202,11 +229,35 @@ class AdaptiveVerificationManager:
                 size = min(size * 2, max_num_tokens)
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
-        for num_tokens in capture_sizes + sorted(tail_sizes):
+        context_len = self._profile_context_len = (
+            envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+        )
+        request_axis = capture_sizes + sorted(tail_sizes)
+        for num_tokens in request_axis:
+            for _ in range(_PROFILE_REPLAYS):
+                yield {"num_tokens": num_tokens, "context_len": context_len}
+        # The same shapes with no context behind any request. The difference
+        # from the pass above is what the fabricated context costs, the only
+        # part of the base that depends on context.
+        if context_len:
+            for num_tokens in request_axis:
+                for _ in range(_PROFILE_REPLAYS):
+                    yield {"num_tokens": num_tokens, "context_len": 0}
+        # Draft tokens extend sequences already in the batch and read no new KV,
+        # so the draft axis is profiled at a fixed request count with the full
+        # query length.
+        query_len = self.num_speculative_steps + self.num_bonus_tokens
+        self._slope_shapes = {}
+        for num_reqs in capture_sizes:
+            num_tokens = num_reqs * query_len
+            if num_reqs > self.req_states.max_num_reqs or num_tokens > max_num_tokens:
+                break
+            self._slope_shapes[num_reqs] = num_tokens
             for _ in range(_PROFILE_REPLAYS):
                 yield {
                     "num_tokens": num_tokens,
-                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
+                    "num_reqs": num_reqs,
+                    "context_len": context_len,
                 }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
@@ -218,6 +269,13 @@ class AdaptiveVerificationManager:
                 grouped[key].append(value)
             return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
 
+        # Everything but the base's token curve is priced at the profiled
+        # context. The context-free pass exists only to be subtracted from it.
+        with_context = self._profile_context_len > 0
+        context_free = [s for s in samples if with_context and not s.context_len]
+        if with_context:
+            samples = [s for s in samples if s.context_len]
+
         # Draft curve: eager-target steps inflate drafter timings (the CPU is
         # still launching kernels, opening gaps between the drafter's events),
         # and request counts — unlike token counts — collide across execution
@@ -225,33 +283,125 @@ class AdaptiveVerificationManager:
         draft_curve = median_curve(
             (s.num_reqs, s.drafter_ms) for s in samples if s.full_cudagraph
         )
+        slope_shapes = self._slope_shapes
+        max_num_reqs = self.req_states.max_num_reqs
+
+        def is_slope_sample(sample: StepTimingSample) -> bool:
+            return slope_shapes.get(sample.num_reqs) == sample.num_target_tokens
+
+        def is_request_axis(sample: StepTimingSample) -> bool:
+            # One token per request, which is what the verify curve means by a
+            # token count. A slope probe at the same token count runs far fewer
+            # requests and so is far cheaper; letting it into the curve would
+            # undercut the point it landed on.
+            return sample.num_reqs == min(sample.num_target_tokens, max_num_reqs)
+
+        def is_decode(sample: StepTimingSample) -> bool:
+            return (
+                is_request_axis(sample) and sample.num_target_tokens == sample.num_reqs
+            )
+
         verify_curve = median_curve(
-            (s.num_target_tokens, s.forward_ms) for s in samples
+            (s.num_target_tokens, s.forward_ms) for s in samples if is_request_axis(s)
         )
-        self.set_cost_curves(draft_curve, verify_curve)
+        token_curve = median_curve(
+            (s.num_target_tokens, s.forward_ms)
+            for s in context_free
+            if is_request_axis(s)
+        )
+        decode_at = dict(
+            median_curve((s.num_reqs, s.forward_ms) for s in samples if is_decode(s))
+        )
+        no_context_at = dict(
+            median_curve(
+                (s.num_reqs, s.forward_ms) for s in context_free if is_decode(s)
+            )
+        )
+        profiled_context = dict(
+            median_curve((s.num_reqs, s.context_len) for s in samples if is_decode(s))
+        )
+        # One draft slot costs the rise from a one-token-per-request step to a
+        # full-query-length one at the same request count, over the slots that
+        # rise bought. Whatever the batch pays regardless of query length --
+        # weights, KV reads, launch overhead -- cancels in the difference, and
+        # is what the base already covers.
+        full_query = median_curve(
+            (s.num_reqs, s.forward_ms) for s in samples if is_slope_sample(s)
+        )
+        slope_curve = [
+            (num_reqs, (forward_ms - decode_at[num_reqs]) / extra_slots)
+            for num_reqs, forward_ms in full_query
+            if num_reqs in decode_at
+            and (extra_slots := slope_shapes[num_reqs] - num_reqs) > 0
+        ]
+        # KV read price per context token: the decode step with context minus
+        # the same step without, over the context tokens that difference read.
+        kv_curve = [
+            (num_reqs, (forward_ms - no_context_at[num_reqs]) / (num_reqs * context))
+            for num_reqs, forward_ms in sorted(decode_at.items())
+            if num_reqs in no_context_at
+            and (context := profiled_context.get(num_reqs, 0)) > 0
+        ]
+        self.set_cost_curves(
+            draft_curve,
+            verify_curve,
+            slope_curve=slope_curve,
+            token_curve=token_curve,
+            kv_curve=kv_curve,
+        )
 
     def set_cost_curves(
         self,
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
+        slope_curve: list[tuple[int, float]] | None = None,
+        token_curve: list[tuple[int, float]] | None = None,
+        kv_curve: list[tuple[int, float]] | None = None,
     ) -> None:
-        draft_curve, verify_curve = get_tp_group().broadcast_object(
-            (draft_curve, verify_curve), src=0
+        curves = get_tp_group().broadcast_object(
+            (draft_curve, verify_curve, slope_curve, token_curve, kv_curve), src=0
         )
+        draft_curve, verify_curve, slope_curve, token_curve, kv_curve = curves
         if not draft_curve or not verify_curve:
             raise RuntimeError(
                 "Adaptive verification could not profile step costs. Pass "
                 "`enable_adaptive_verification=false` in the speculative config to "
                 "verify a fixed number of drafts instead."
             )
+        max_num_reqs = self.req_states.max_num_reqs
+        max_num_tokens = self.req_states.max_num_batched_tokens
         self.cost_tables = build_cost_tables_from_curves(
             draft_curve,
             verify_curve,
-            self.req_states.max_num_reqs,
-            self.req_states.max_num_batched_tokens,
+            max_num_reqs,
+            max_num_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
+        # The memory-profiling capture samples only the largest graphs, which
+        # leaves no draft-axis shape to probe; the real capture reprofiles.
+        if not slope_curve and self._slope_shapes:
+            logger.warning(
+                "Adaptive verification could not profile the draft-slot price; "
+                "pricing draft slots as free."
+            )
+        self.slot_cost_table = _per_request_price_table(slope_curve, max_num_reqs)
+        self.base_cost_tables = None
+        if token_curve and kv_curve:
+            self.base_cost_tables = (
+                np.maximum(
+                    _step_cost_table(
+                        max_num_tokens, token_curve, self._cudagraph_limit
+                    ),
+                    1e-6,
+                ),
+                _per_request_price_table(kv_curve, max_num_reqs),
+            )
+        logger.debug(
+            "DSpark cost tables: %s, slot: %s, base: %s",
+            self.cost_tables,
+            self.slot_cost_table,
+            self.base_cost_tables,
+        )
 
     def record_confidences(
         self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
@@ -278,6 +428,42 @@ class AdaptiveVerificationManager:
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
             self._copy_events[write_idx].record()
+
+    def _budget_costs_ms(
+        self,
+        num_reqs: int,
+        num_non_draft_tokens: int,
+        slots: np.ndarray,
+        max_draft_budget: int,
+    ) -> np.ndarray:
+        """Step cost of each draft budget from 0 to max_draft_budget."""
+        assert self.cost_tables is not None and self.slot_cost_table is not None
+        draft_cost_ms, verify_cost_ms = self.cost_tables
+        budgets = np.arange(max_draft_budget + 1)
+        slot_costs_ms = self.slot_cost_table[num_reqs] * budgets
+        if self.base_cost_tables is None:
+            return (
+                draft_cost_ms[num_reqs]
+                + verify_cost_ms[num_non_draft_tokens]
+                + slot_costs_ms
+            )
+        token_cost_ms, kv_cost_ms = self.base_cost_tables
+        # The drafter and the KV read of the computed context, which drafts
+        # do not change. The context is host-side, so this needs no device read.
+        context_tokens = int(self.req_states.num_computed_tokens_np[slots].sum())
+        fixed_ms = draft_cost_ms[num_reqs] + kv_cost_ms[num_reqs] * context_tokens
+        costs = fixed_ms + token_cost_ms[num_non_draft_tokens] + slot_costs_ms
+        # A linear slot price cannot express the jump from losing cudagraphs when
+        # the step crosses the capture limit, so past it the step is priced from
+        # the token table at its full size.
+        step_tokens = num_non_draft_tokens + budgets
+        ungraphed = step_tokens > self._cudagraph_limit
+        if ungraphed.any():
+            sized = token_cost_ms[
+                np.minimum(step_tokens[ungraphed], len(token_cost_ms) - 1)
+            ]
+            costs[ungraphed] = np.maximum(costs[ungraphed], fixed_ms + sized)
+        return costs
 
     def get_num_tokens(
         self,
@@ -317,7 +503,6 @@ class AdaptiveVerificationManager:
             max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
         )
         scores = scores[:max_draft_budget]
-        draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
             self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
             >= self.req_states.prefill_len.np[slots]
@@ -325,13 +510,8 @@ class AdaptiveVerificationManager:
         num_tokens_to_estimated_accepted_tokens = np.concatenate(
             ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
         )
-        costs = (
-            draft_cost_ms[len(req_ids)]
-            + verify_cost_ms[
-                num_non_draft_tokens_total : num_non_draft_tokens_total
-                + max_draft_budget
-                + 1
-            ]
+        costs = self._budget_costs_ms(
+            num_reqs, num_non_draft_tokens_total, slots, max_draft_budget
         )
         num_drafts_per_req = {
             req_id: int(num_drafts)

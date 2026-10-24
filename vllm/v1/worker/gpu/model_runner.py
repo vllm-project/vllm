@@ -845,6 +845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        num_reqs: int = 0,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -856,8 +857,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # one correction slot per request during prefill. The scheduler
         # accounts for these slots, while dummy runs bypass the scheduler.
         # Adjust the dummy token count only when the expanded draft batch
-        # would exceed the token budget.
-        num_reqs = min(num_tokens, self.max_num_reqs)
+        # would exceed the token budget. The default spreads the tokens one to
+        # a request; pricing verification, whose extra tokens land on sequences
+        # already in the batch, passes num_reqs to hold the request count.
+        num_reqs = min(num_reqs or num_tokens, self.max_num_reqs, num_tokens)
         if uniform_decode:
             # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
             # and for spec-decode with MTP we want to make sure the dummy runs use
