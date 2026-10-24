@@ -1108,7 +1108,7 @@ def test_scheduler_request_finished():
     delay_free, _ = scheduler_connector.request_finished(request, block_ids=([12],))
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
-    assert "id-1" in scheduler_connector._reqs_not_processed
+    assert "id-1" in scheduler_connector._transfers_not_processed
 
 
 @contextlib.contextmanager
