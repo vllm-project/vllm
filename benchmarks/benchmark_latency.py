@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
+"""
+Benchmark latency script.
+"""
+
+from vllm.benchmarks.latency import add_cli_args, main
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if __name__ == "__main__":
-    print("""DEPRECATED: This script has been moved to the vLLM CLI.
-
-Please use the following command instead:
-    vllm bench latency
-
-For help with the new command, run:
-    vllm bench latency --help
-
-Alternatively, you can run the new command directly with:
-    python -m vllm.entrypoints.cli.main bench latency --help
-""")
-    sys.exit(1)
+    parser = FlexibleArgumentParser(description="Benchmark latency.")
+    add_cli_args(parser)
+    args = parser.parse_args()
+    main(args)
