@@ -125,7 +125,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - rocm-smi
+      - amd-smi
       - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
       - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
@@ -168,7 +168,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - rocm-smi
+      - amd-smi
       - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
@@ -203,7 +203,7 @@ steps:
       - vllm/platforms/rocm.py
       - tests/compile/fusions_e2e/
       commands:
-      - rocm-smi
+      - amd-smi
       - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "test_tp1_fp8_fusions and inductor_partition and not +rms_norm and not True and ((Llama-3 and TRITON_ATTN) or (Qwen3-30B and +quant_fp8 and TRITON_ATTN) or (DeepSeek-Coder and +quant_fp8 and TRITON_MLA))"
 
 - label: ":nvidia: (H100) Fusion E2E TP2 Quick"
