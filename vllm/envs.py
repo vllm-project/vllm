@@ -289,6 +289,8 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
+    VLLM_MNNVL_REDUCE_SCATTER_MAX_BYTES: int = 16 * 1024 * 1024
+    VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES: int = 64 * 1024 * 1024
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
@@ -2033,6 +2035,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
+    ),
+    # Max reduce-scatter input size (bytes) served by the MNNVL Lamport
+    # reduce-scatter backend.
+    "VLLM_MNNVL_REDUCE_SCATTER_MAX_BYTES": lambda: int(
+        os.getenv("VLLM_MNNVL_REDUCE_SCATTER_MAX_BYTES", str(16 * 1024 * 1024))
+    ),
+    # Max reduce-scatter input size (bytes) served by the low-SM MNNVL
+    # multimem reduce-scatter backend. Set this to 0 (or below
+    # VLLM_MNNVL_REDUCE_SCATTER_MAX_BYTES) to disable the multimem backend
+    # without disabling the other custom collectives.
+    "VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES": lambda: int(
+        os.getenv("VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES", str(64 * 1024 * 1024))
     ),
     # DeepEP v2: use NVLink+RDMA hybrid communication across NVLink domains.
     #   * hybrid mode = multi-node RDMA
