@@ -4418,6 +4418,59 @@ def test_priority_scheduling_preemption_victim_selection():
     assert waiting_req_ids == ["1", "0"]
 
 
+def test_priority_self_preemption_keeps_scheduling_later_running_requests():
+    """A running request that preempts itself must not end the running loop.
+
+    Under PRIORITY the preemption victim is the lowest-priority running request,
+    which can sit in the middle of `running`. When it is the request being
+    scheduled, it preempts itself; the requests after it have higher priority
+    and may still fit, so they must be scheduled in the same step.
+    """
+    block_size = 16
+    # One block each for A, B and C, plus exactly one free block.
+    scheduler = create_scheduler_with_priority(
+        num_blocks=5, block_size=block_size, max_num_batched_tokens=256
+    )
+    # A and B (14-token prompts) need a new block on the same decode step; B has
+    # the lowest priority. C arrives one step later, so it sits behind B in
+    # `running`, and never needs a second block here.
+    req_a, req_b = create_requests_with_priority(
+        num_requests=2,
+        priorities=[0, 5],
+        arrival_times=[0.0, 1.0],
+        num_tokens=block_size - 2,
+        block_size=block_size,
+        req_ids=["A", "B"],
+    )
+    (req_c,) = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=10,
+        block_size=block_size,
+        req_ids=["C"],
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    output = scheduler.schedule()  # prefill A and B
+    _model_output(scheduler, output, [[100], [100]])
+    scheduler.add_request(req_c)
+    output = scheduler.schedule()  # decode A and B, prefill C
+    _model_output(scheduler, output, [[100]] * 3)
+    output = scheduler.schedule()  # decode A, B and C
+    _model_output(scheduler, output, [[100]] * 3)
+    assert [r.request_id for r in scheduler.running] == ["A", "B", "C"]
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 1
+
+    # A and B both cross a block boundary now. A takes the free block, B finds
+    # none and preempts itself; C needs no new block and must still run.
+    output = scheduler.schedule()
+    assert output.preempted_req_ids == {"B"}
+    assert output.num_scheduled_tokens == {"A": 1, "C": 1}
+    assert [r.request_id for r in scheduler.running] == ["A", "C"]
+
+
 def test_priority_scheduling_equal_priority_preemption():
     """Test arrival time tiebreaker when requests have equal priority."""
     # This test verifies that arrival time is used as a tiebreaker for equal
