@@ -1123,3 +1123,40 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+@pytest.mark.parametrize(
+    "moe_backend",
+    [
+        "deep_gemm_mega_moe",
+        "flashinfer_moe_ep_cutedsl",
+        "flashinfer_moe_ep_mega_deep_gemm",
+        "aiter_mega_moe",
+    ],
+)
+def test_lora_rejects_megamoe(vllm_runner, tmp_path, moe_backend):
+    from transformers import LlamaConfig
+
+    # Configuration validation must fail before loading weights or a tokenizer.
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=128,
+    ).save_pretrained(tmp_path)
+    with (
+        pytest.raises(
+            ValueError, match=f"LoRA is not supported with moe_backend='{moe_backend}'"
+        ),
+        vllm_runner(
+            str(tmp_path),
+            enable_lora=True,
+            moe_backend=moe_backend,
+            max_model_len=32,
+            skip_tokenizer_init=True,
+        ),
+    ):
+        pytest.fail("MegaMoE with LoRA must fail during configuration validation")
