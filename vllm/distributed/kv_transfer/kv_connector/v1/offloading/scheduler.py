@@ -573,6 +573,10 @@ class OffloadingConnectorScheduler:
             spec, vllm_config, kv_cache_config
         )
         self.manager: OffloadingManager = spec.get_manager()
+        fault_tolerance_config = vllm_config.parallel_config.fault_tolerance_config
+        self.enable_nan_fault_tolerance = (
+            fault_tolerance_config.enable_nan_fault_tolerance
+        )
         self._connector_stats = OffloadingConnectorStats()
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -734,6 +738,17 @@ class OffloadingConnectorScheduler:
             pending.remove(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
+
+    @staticmethod
+    def _num_validated_tokens(request: Request) -> int:
+        if request.status in (
+            RequestStatus.FINISHED_ERROR,
+            RequestStatus.FINISHED_ABORTED,
+        ):
+            return 0
+        # Scheduling advances num_computed_tokens before logits are checked.
+        # Preemption can reset it while stale outputs are still in flight.
+        return max(0, request.num_computed_tokens - request.num_in_flight_tokens)
 
     def _calc_num_offloadable_tokens(
         self, req_status: RequestOffloadState, num_computed_tokens: int
@@ -1496,6 +1511,17 @@ class OffloadingConnectorScheduler:
         if not handoffs:
             return {}
 
+        if self.enable_nan_fault_tolerance:
+            validated_handoffs = {}
+            for req_id, entries in handoffs.items():
+                req_status = self._req_status.get(req_id)
+                if req_status is not None:
+                    validated_tokens = self._num_validated_tokens(req_status.req)
+                    validated_handoffs[req_id] = [
+                        entry for entry in entries if entry[2] <= validated_tokens
+                    ]
+            handoffs = validated_handoffs
+
         store_jobs = self._build_aligned_boundary_store_jobs(handoffs)
         if not self.config.supports_partial_tail:
             return store_jobs
@@ -1678,6 +1704,11 @@ class OffloadingConnectorScheduler:
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
+
+            if self.enable_nan_fault_tolerance:
+                num_tokens_after_batch = min(
+                    num_tokens_after_batch, self._num_validated_tokens(req)
+                )
 
             num_offloadable_tokens = self._calc_num_offloadable_tokens(
                 req_status, num_tokens_after_batch

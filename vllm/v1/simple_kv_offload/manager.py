@@ -247,6 +247,10 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
+        fault_tolerance_config = vllm_config.parallel_config.fault_tolerance_config
+        self.enable_nan_fault_tolerance = (
+            fault_tolerance_config.enable_nan_fault_tolerance
+        )
         # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
         self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
@@ -860,6 +864,12 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
+        if self.enable_nan_fault_tolerance:
+            # Prefill has no output placeholders, but its logits may be pending.
+            confirmed_tokens = min(
+                confirmed_tokens,
+                max(0, request.num_computed_tokens - request.num_in_flight_tokens),
+            )
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
