@@ -31,24 +31,6 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
-def prepare_fp8_moe_layer_for_xpu(
-    w13: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if w13_scale is not None and w13_scale.ndim == 3:
-        w13_scale = w13_scale.transpose(-1, -2).contiguous()
-    if w2_scale is not None and w2_scale.ndim == 3:
-        w2_scale = w2_scale.transpose(-1, -2).contiguous()
-    return (
-        w13.transpose(-1, -2).contiguous(),
-        w13_scale,
-        w2.transpose(-1, -2).contiguous(),
-        w2_scale,
-    )
-
-
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
@@ -65,12 +47,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
-        is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
-        if not is_xe2_or_xe3:
-            raise NotImplementedError(
-                "XPUExperts is only supported on Intel Xe2/Xe3 GPUs"
-            )
-        self._expects_unquantized_inputs = is_xe2_or_xe3
+        # Only the Xe3P grouped GEMM consumes quantized activations natively.
+        self._expects_unquantized_inputs = not torch.ops._xpu_C.is_xe3p_arch()
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -159,6 +137,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             ):
                 w1 = w1.view(torch.float4_e2m1fn_x2)
                 w2 = w2.view(torch.float4_e2m1fn_x2)
+            # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
+            # in place for this device's grouped GEMM.
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
