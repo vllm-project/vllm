@@ -7,6 +7,21 @@ The `vllm serve` command is used to launch the OpenAI-compatible server.
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 To see the available options, take a look at the [CLI Reference](../cli/README.md)!
 
+### JSON argument aliases
+
+Short aliases keep their single dash, including when setting nested JSON fields.
+For example, these forms are equivalent:
+
+```bash
+vllm serve MODEL -cc.mode=none
+vllm serve MODEL --compilation-config.mode=none
+```
+
+The spelling `--cc.mode=none` is not a registered option. If the first
+unrecognized option is a short alias with an extra dash, the parser's error
+message lists the registered spellings. The same rule applies to `-ac` /
+`--attention-config`.
+
 ## Configuration file
 
 You can load CLI arguments via a [YAML](https://yaml.org/) config file.
