@@ -50,6 +50,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
     RequestFuncOutput,
     async_request_profile,
+    async_request_with_cancellation,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (
@@ -371,6 +372,7 @@ class BenchmarkMetrics:
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
+    cancelled: int = 0
 
 
 @dataclass
@@ -691,7 +693,7 @@ def calculate_metrics(
             if is_good_req:
                 good_completed += 1
 
-    if completed == 0:
+    if completed == 0 and not any(output.cancelled for output in outputs):
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
@@ -704,7 +706,9 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
-    failed_outputs = [output for output in outputs if not output.success]
+    failed_outputs = [
+        output for output in outputs if not output.success and not output.cancelled
+    ]
 
     if len(failed_outputs) > 0:
         print("Failed requests during benchmark run detected (capping to 10):")
@@ -773,6 +777,7 @@ def calculate_metrics(
     metrics = BenchmarkMetrics(
         completed=completed,
         failed=len(failed_outputs),
+        cancelled=sum(output.cancelled for output in outputs),
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -843,7 +848,22 @@ async def benchmark(
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
     probe_request_rate: float = 0.0,
+    cancellation_rate: float = 0.0,
+    cancellation_delay: float = 1.0,
+    cancellation_seed: int = 0,
 ):
+    if not 0 <= cancellation_rate <= 1:
+        raise ValueError("--cancellation-rate must be between 0 and 1")
+    if not 0 < cancellation_delay < float("inf"):
+        raise ValueError("--cancellation-delay must be finite and greater than 0")
+    if cancellation_rate and endpoint_type not in ("vllm", "openai", "openai-chat"):
+        raise ValueError("Cancellation workloads require a completions or chat backend")
+    # A separate RNG keeps dataset sampling and request arrivals unchanged.
+    cancellation_indices = set(
+        random.Random(cancellation_seed).sample(
+            range(len(input_requests)), int(len(input_requests) * cancellation_rate)
+        )
+    )
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     except KeyError:
@@ -1005,11 +1025,15 @@ async def benchmark(
     )
 
     async def limited_request_func(
-        request_func_input, session, pbar, request_arrival_time
+        request_func_input, session, pbar, request_arrival_time, cancel_after
     ):
         async with semaphore:
-            output = await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
+            output = await async_request_with_cancellation(
+                request_func=request_func,
+                request_func_input=request_func_input,
+                session=session,
+                pbar=pbar,
+                cancel_after=cancel_after,
             )
         # Preserve start_time as the time the request was sent. It is used by
         # throughput calculations; record client-side semaphore delay separately.
@@ -1111,7 +1135,11 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input, session, pbar, request_arrival_time
+                    request_func_input,
+                    session,
+                    pbar,
+                    request_arrival_time,
+                    cancellation_delay if len(tasks) in cancellation_indices else None,
                 )
             )
         )
@@ -1220,6 +1248,9 @@ async def benchmark(
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
     print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
+    if cancellation_rate:
+        assert isinstance(metrics, BenchmarkMetrics)
+        print("{:<40} {:<10}".format("Cancelled requests:", metrics.cancelled))
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
@@ -1357,6 +1388,16 @@ async def benchmark(
     result.update(_get_server_metrics_results(outputs))
 
     queue_times: list[float] | None = None
+    if cancellation_rate:
+        assert isinstance(metrics, BenchmarkMetrics)
+        result.update(
+            cancellation_rate=cancellation_rate,
+            cancellation_delay=cancellation_delay,
+            cancellation_seed=cancellation_seed,
+            cancellation_targeted=len(cancellation_indices),
+            cancelled=metrics.cancelled,
+            cancellations=[output.cancelled for output in outputs],
+        )
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
         queue_times = [output.client_queue_time for output in outputs if output.success]
@@ -1573,6 +1614,7 @@ def save_to_pytorch_benchmark_format(
         "itls",
         "generated_texts",
         "errors",
+        "cancellations",
         "server_queue_times",
         "server_ttfts",
     ]
@@ -1689,6 +1731,23 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "if the server is not processing requests fast enough to keep up.",
     )
 
+    parser.add_argument(
+        "--cancellation-rate",
+        type=float,
+        default=0.0,
+        help="Fraction of benchmark requests selected for intentional cancellation "
+        "(0 to 1, default disabled). Selects floor(num_prompts * rate) requests "
+        "using --seed, independently of request arrivals. Completions/chat only.",
+    )
+    parser.add_argument(
+        "--cancellation-delay",
+        type=float,
+        default=1.0,
+        help="Seconds after acquiring the client concurrency permit to cancel a "
+        "selected request (default 1). Requests that finish earlier are successful. "
+        "Warmups and probes are not cancelled. Partial outputs from cancelled "
+        "requests are excluded from token throughput and latency statistics.",
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -2296,6 +2355,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ssl_context=ssl_context,
         self_timed=args.self_timed,
         probe_request_rate=args.probe_request_rate,
+        cancellation_rate=args.cancellation_rate,
+        cancellation_delay=args.cancellation_delay,
+        cancellation_seed=args.seed,
     )
 
     # Save config and results to json
@@ -2435,6 +2497,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "itls",
             "generated_texts",
             "errors",
+            "cancellations",
             "server_queue_times",
             "server_ttfts",
         ]:

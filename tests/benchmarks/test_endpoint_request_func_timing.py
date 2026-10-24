@@ -9,7 +9,8 @@ the measured end of the request, and pin that chat chunks carrying no token
 (the opening role chunk, an empty delta) are skipped for TTFT and ITL while a
 token that renders as an empty string is still counted.
 
-Driven against a fake session and a scripted clock: no GPU, model, or socket.
+Timing tests use a fake session and scripted clock. Cancellation tests also
+exercise local HTTP streams; neither needs a GPU or model.
 """
 
 import asyncio
@@ -17,6 +18,7 @@ import importlib.util
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import aiohttp
 import numpy as np
@@ -30,10 +32,140 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
+    async_request_with_cancellation,
 )
 from vllm.benchmarks.serve import _get_server_metrics_results
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.parametrize("cancel_after", [None, 60.0])
+def test_cancellation_preserves_completed_and_failed_results(cancel_after):
+    async def run():
+        for success in (True, False):
+            expected = RequestFuncOutput(
+                success=success, error="" if success else "HTTP 500"
+            )
+
+            async def request(*args, expected=expected):
+                return expected
+
+            assert (
+                await async_request_with_cancellation(
+                    request,
+                    _make_input("http://test/v1/completions", 3, "completions"),
+                    None,
+                    cancel_after,
+                )
+                is expected
+            )
+
+    asyncio.run(run())
+
+
+def test_external_cancellation_propagates_after_request_cleanup():
+    async def run():
+        started = asyncio.Event()
+        cleaned_up = asyncio.Event()
+
+        async def request(*args):
+            try:
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                cleaned_up.set()
+
+        task = asyncio.create_task(
+            async_request_with_cancellation(
+                request,
+                _make_input("http://test/v1/completions", 3, "completions"),
+                None,
+                60.0,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleaned_up.is_set()
+
+    asyncio.run(run())
+
+
+def test_request_timeout_is_not_an_intentional_cancellation():
+    async def request(*args):
+        raise TimeoutError("backend timeout")
+
+    with pytest.raises(TimeoutError, match="backend timeout"):
+        asyncio.run(
+            async_request_with_cancellation(
+                request,
+                _make_input("http://test/v1/completions", 3, "completions"),
+                None,
+                60.0,
+            )
+        )
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("send_token", [False, True])
+def test_intentional_cancellation_closes_streaming_connection(chat, send_token):
+    """Both a silent prefill and an interrupted decode release the HTTP stream."""
+    from aiohttp import web
+
+    async def run():
+        disconnected = asyncio.Event()
+
+        async def stream(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            try:
+                if send_token:
+                    await response.write(_token_chunk(0, chat=chat))
+                while True:
+                    await asyncio.sleep(0.01)
+                    await response.write(b": keepalive\n\n")
+            except ConnectionResetError:
+                disconnected.set()
+            return response
+
+        app = web.Application()
+        suffix = "/v1/chat/completions" if chat else "/v1/completions"
+        app.router.add_post(suffix, stream)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        progress = Mock()
+        try:
+            async with aiohttp.ClientSession() as session:
+                output = await async_request_with_cancellation(
+                    async_request_openai_chat_completions
+                    if chat
+                    else async_request_openai_completions,
+                    _make_input(
+                        f"http://127.0.0.1:{port}{suffix}",
+                        3,
+                        "chat" if chat else "completions",
+                    ),
+                    session,
+                    0.1,
+                    progress,
+                )
+                assert output.cancelled and not output.success
+                assert not output.error
+                assert output.output_tokens == 0
+                assert output.prompt_len == 7
+                assert output.start_time > 0
+                assert output.latency > 0
+                progress.update.assert_called_once_with(1)
+                await asyncio.wait_for(disconnected.wait(), 2)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
 
 AUDIO_SAMPLE_RATE = 16_000
 

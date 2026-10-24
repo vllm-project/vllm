@@ -12,6 +12,8 @@
 --blazedit-max-distance
 --blazedit-min-distance
 --burstiness
+--cancellation-delay
+--cancellation-rate
 --chat-template-kwargs
 --custom-ensure-client-side-data
 --custom-output-len

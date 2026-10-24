@@ -119,6 +119,42 @@ P99 ITL (ms):                            8.39
     If cache reuse is not intended, vary `--seed`, reset or restart the server,
     or use `vllm bench sweep serve`, which resets server caches between runs.
 
+#### Request Cancellation Workloads
+
+To exercise serving under client abandonment, select a reproducible fraction of
+requests for cancellation. This is useful when testing agent branches that are
+discarded or interactive generations that users interrupt:
+
+```bash
+vllm bench serve --backend openai --model <model> \
+  --dataset-name random --num-prompts 100 --request-rate 10 \
+  --cancellation-rate 0.25 --cancellation-delay 0.5 --seed 42 \
+  --save-result --save-detailed
+```
+
+The client selects `floor(num_prompts * cancellation_rate)` requests using
+`--seed`. The selection uses a separate random generator, so enabling it does
+not change the dataset or arrival schedule. This option supports the `openai`,
+`vllm` and `openai-chat` backends and is disabled by default. It is available in
+the Python client; leave `VLLM_USE_RUST_BENCH` disabled for this workload.
+
+For each selected request, the deadline starts after acquiring the
+`--max-concurrency` permit, just before invoking the HTTP request function.
+Client queue time is excluded; connection setup, server queueing and generation
+are included. A request that finishes before its deadline retains its normal
+result. Readiness checks, warmups and probe requests are never selected.
+
+The result reports `cancelled` separately from `completed` and `failed`.
+`cancellation_targeted` records how many requests were selected, and detailed
+results include a per-request `cancellations` list. Cancellation closes the HTTP
+stream and awaits client cleanup. The client does not measure when the server
+reclaims KV cache or finishes aborting the engine request.
+
+Token throughput, goodput and latency summaries include successful requests
+only. Partial output from cancelled requests is not counted, so token throughput
+is not a measure of all server work under this workload. In detailed results,
+the latency of a cancelled request is the time until client cleanup completes.
+
 #### Understanding the Latency Metrics
 
 `vllm bench serve` measures latency at the benchmark client:
