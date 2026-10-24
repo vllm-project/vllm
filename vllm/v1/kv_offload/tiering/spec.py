@@ -462,6 +462,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
+            if secondary_tiers and not (
+                self.config.canonical_layout
+                and self.config.parallel.is_parallelism_agnostic
+            ):
+                logger.warning(
+                    "Secondary-tier KV is only valid for engines with the same "
+                    "parallel configuration; sharing it across TP sizes needs "
+                    "canonical_layout=true in kv_connector_extra_config, "
+                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
+                )
 
         return self._manager
 

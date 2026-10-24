@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -54,6 +55,7 @@ def _make_offloading_config(
     data_parallel_rank_local: int | None = None,
     is_parallelism_agnostic: bool = False,
     replicated_layout: bool = False,
+    canonical_layout: bool = False,
     extra_config: dict[str, Any] | None = None,
 ) -> OffloadingConfig:
     normalized_extra_config = dict(extra_config or {})
@@ -89,6 +91,7 @@ def _make_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
     )
 
 
@@ -271,6 +274,48 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
+
+
+@pytest.mark.parametrize(
+    "secondary_tiers,canonical_layout,is_parallelism_agnostic,warns",
+    [
+        ([{"type": "example"}], False, True, True),
+        ([{"type": "example"}], False, False, True),
+        ([{"type": "example"}], True, False, True),
+        ([{"type": "example"}], True, True, False),
+        ([], False, False, False),
+    ],
+)
+def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
+    caplog_vllm,
+    monkeypatch,
+    secondary_tiers,
+    canonical_layout,
+    is_parallelism_agnostic,
+    warns,
+):
+    """Direct-layout KV warns even when it is flagged parallelism-agnostic."""
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    for name in ("SharedOffloadRegion", "CPUPrimaryTierOffloadingManager"):
+        monkeypatch.setattr(tiering_spec_module, name, MagicMock())
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        is_parallelism_agnostic=is_parallelism_agnostic,
+        canonical_layout=canonical_layout,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+
+    spec.get_manager().shutdown()
+
+    warnings = [
+        record
+        for record in caplog_vllm.records
+        if record.name == tiering_spec_module.__name__
+        and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == int(warns)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
