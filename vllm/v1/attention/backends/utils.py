@@ -357,6 +357,16 @@ def resolve_kv_cache_layout(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
+    quant_config = getattr(vllm_config, "quant_config", None)
+    prefer_block_outer = (
+        vllm_config.model_config is not None
+        and vllm_config.model_config.is_hybrid
+        and quant_config is not None
+        and quant_config.has_layerwise_kv_cache()
+        and len(hnc_shapes) > 1
+    )
+    if prefer_block_outer:
+        candidates.sort(key=lambda layout: not layout.is_block_outermost)
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
@@ -428,6 +438,26 @@ def get_per_layer_parameters(
         )
 
     return per_layer_params
+
+
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the runtime KV encoding shared by an attention group."""
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {getattr(layer, "kv_cache_dtype", None) for layer in layers.values()}
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
 
 
 def get_num_attention_heads_from_layers(
