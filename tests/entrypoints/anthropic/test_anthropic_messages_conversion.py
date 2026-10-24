@@ -1454,6 +1454,28 @@ class TestDetectMergeInlineSystem:
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
+    def test_template_with_tools_guard_renders_without_error(self):
+        """Templates checking `tools is not none` render without TypeError (#61919)."""
+        template = (
+            "{%- if tools is not none -%}"
+            "{{ tools | tojson }}"
+            "{%- endif -%}"
+            "{%- for m in messages -%}"
+            "{{ m.role }}: {{ m.content }}\n"
+            "{%- endfor -%}"
+        )
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(template)
+            is False
+        )
+
+    def test_template_raising_template_error_defaults_to_merge(self):
+        """Templates raising TemplateError default safely to merge (#61919)."""
+        template = "{{ undefined_func() }}"
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(template) is True
+        )
+
     @pytest.mark.parametrize(
         ("resolved", "expected"),
         [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
