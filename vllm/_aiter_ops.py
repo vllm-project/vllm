@@ -2835,6 +2835,37 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def qk_norm_rope_cache_supports_q_fp8(cls) -> bool:
+        """Probe whether the fused QK-norm+RoPE+KV-cache op can emit fp8 Q.
+
+        Added in https://github.com/ROCm/aiter/pull/5914 (>=0.1.25). Older
+        AITER must keep the separate query quantization. AITER's compiled-op
+        wrapper hides the signature, so this checks the package version.
+        """
+        from importlib.metadata import PackageNotFoundError, version
+
+        from packaging.version import Version
+
+        try:
+            return Version(version("amd-aiter")) >= Version("0.1.25")
+        except PackageNotFoundError:
+            return False
+
+    @staticmethod
+    def qk_norm_rope_shuffle_layout_supported(
+        head_size: int, kv_cache_dtype: str
+    ) -> bool:
+        """Whether the fused QK-norm+RoPE+KV-cache shuffle write fits head_size.
+
+        The AITER kernel requires x >= head_size // 32, where x is the number
+        of cache elements per 16 bytes (e.g. head_size 512 needs an fp8 cache).
+        """
+        x = 16 if kv_cache_dtype.startswith("fp8") else 8
+        return x >= head_size // 32
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -3927,11 +3958,20 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        per_tensor_q_scale: torch.Tensor | None = None,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
         )
 
+        q_fp8_kwargs = {}
+        if q_out_fp8 is not None:
+            q_fp8_kwargs = {
+                "q_out_fp8": q_out_fp8,
+                "per_tensor_q_scale": per_tensor_q_scale,
+            }
         fused_qk_norm_rope_cache_pts_quant_shuffle(
             qkv,
             q_weight,
@@ -3958,6 +3998,8 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
+            v_norm,
+            **q_fp8_kwargs,
         )
 
     @staticmethod
@@ -3982,6 +4024,9 @@ class rocm_aiter_ops:
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
         return_kv: bool,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4033,6 +4078,9 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            v_norm=v_norm,
+            q_out_fp8=q_out_fp8,
+            per_tensor_q_scale=q_scale,
         )
         if dequant_k_out:
             ops.convert_fp8(k_out, kernel_k_out, float(k_scale), kv_cache_dtype)
