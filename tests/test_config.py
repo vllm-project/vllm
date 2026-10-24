@@ -2424,28 +2424,36 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     ]
 
 
+_IDENTITY = "torch.nn.modules.linear.Identity"
+_CROSS_ENCODER = {"model_type": "CrossEncoder", "activation_fn": _IDENTITY}
+_TRANSFORMER = {"type": "sentence_transformers.base.modules.transformer.Transformer"}
+_LOGIT_SCORE = {
+    "type": "sentence_transformers.cross_encoder.modules.logit_score.LogitScore"
+}
+
+
 @pytest.mark.parametrize(
-    ("st_config", "expected"),
+    ("st_config", "modules", "expected"),
     [
+        (_CROSS_ENCODER, None, _IDENTITY),
+        (_CROSS_ENCODER, [_TRANSFORMER], _IDENTITY),
+        # e.g. Qwen3 rerankers and jina-reranker-m0: vLLM scores these itself.
+        (_CROSS_ENCODER, [_TRANSFORMER, _LOGIT_SCORE], None),
         (
-            {
-                "model_type": "CrossEncoder",
-                "activation_fn": "torch.nn.modules.linear.Identity",
-            },
-            "torch.nn.modules.linear.Identity",
-        ),
-        (
-            {
-                "model_type": "SentenceTransformer",
-                "activation_fn": "torch.nn.modules.linear.Identity",
-            },
+            _CROSS_ENCODER,
+            [{"type": "custom_transformer.JinaRerankerTransformer"}],
             None,
         ),
-        ({"model_type": "CrossEncoder"}, None),
+        ({"model_type": "SentenceTransformer", "activation_fn": _IDENTITY}, None, None),
+        ({"model_type": "CrossEncoder"}, None, None),
     ],
 )
-def test_get_sentence_transformers_activation_fn(tmp_path, st_config, expected):
+def test_get_sentence_transformers_activation_fn(
+    tmp_path, st_config, modules, expected
+):
     _write_json(tmp_path / "config_sentence_transformers.json", st_config)
+    if modules is not None:
+        _write_json(tmp_path / "modules.json", modules)
 
     assert get_sentence_transformers_activation_fn(str(tmp_path)) == expected
 

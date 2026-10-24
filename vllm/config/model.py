@@ -802,7 +802,9 @@ class ModelConfig:
                     self.model, self.revision
                 )
             ) and not is_cross_encoder_activation_overridden(
-                self.hf_config, self.model, self.revision
+                self.hf_config,
+                self.hf_config_path or self.model,
+                self._hf_config_revision or self.revision,
             ):
                 self.hf_config.sentence_transformers = {
                     **(getattr(self.hf_config, "sentence_transformers", None) or {}),

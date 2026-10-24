@@ -1459,25 +1459,39 @@ def get_sentence_transformers_activation_fn(
     `config_sentence_transformers.json` and prefers it over the copies older
     versions kept in `config.json`.
 
+    The activation applies to the output of the last module, so it is only
+    returned when that is the classifier output vLLM computes: a lone
+    Transformer module. Pipelines with more or custom modules (e.g. the
+    LogitScore of the Qwen3 rerankers) keep vLLM's own activation.
+
     Args:
         model: Local checkpoint path or Hugging Face model ID.
         revision: Model revision to inspect.
 
     Returns:
         The qualified name of the activation function, or `None` if the
-        checkpoint is not a CrossEncoder that declares one.
+        checkpoint is not a plain CrossEncoder that declares one.
 
     """
     try:
         st_config = get_hf_file_to_dict(
             "config_sentence_transformers.json", model, revision
         )
+        modules = get_hf_file_to_dict("modules.json", model, revision)
     except Exception:
         logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
         return None
 
     if not isinstance(st_config, dict) or st_config.get("model_type") != "CrossEncoder":
         return None
+    if modules is not None:
+        types = [m.get("type", "") if isinstance(m, dict) else "" for m in modules]
+        if not (
+            len(types) == 1
+            and types[0].startswith("sentence_transformers.")
+            and types[0].endswith(".Transformer")
+        ):
+            return None
     activation_fn = st_config.get("activation_fn")
     return activation_fn if isinstance(activation_fn, str) else None
 
@@ -1489,7 +1503,11 @@ def is_cross_encoder_activation_overridden(
 ) -> bool:
     """Whether `hf_overrides` changed the CrossEncoder activation that
     `config.json` declares, through a dict or a callable."""
-    saved = get_hf_file_to_dict("config.json", model, revision) or {}
+    try:
+        saved = get_hf_file_to_dict("config.json", model, revision) or {}
+    except Exception:
+        logger.debug("Failed to read config.json", exc_info=True)
+        return False
     return (
         (getattr(hf_config, "sentence_transformers", None) or {}).get("activation_fn")
         != (saved.get("sentence_transformers") or {}).get("activation_fn")
