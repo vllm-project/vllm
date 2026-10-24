@@ -804,6 +804,61 @@ def test_padded_moe_reload_releases_each_layer(
                 assert torch.equal(original[mask], expected[name][mask])
 
 
+@pytest.mark.parametrize("padded", [False, True])
+def test_online_quant_padded_moe_processes_each_layer(monkeypatch, padded):
+    """Online-quant MoE weights padded by maybe_roundup_sizes still process
+    each layer once its checkpoint shards are loaded."""
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerBlockOnlineMoEMethod,
+    )
+
+    hidden, intermediate, experts = 4, 3, 2
+    stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
+    config = SimpleNamespace(
+        hidden_dim_unpadded=hidden,
+        intermediate_size_per_partition_unpadded=intermediate,
+        is_act_and_mul=True,
+        w13_num_shards=2,
+        has_bias=False,
+        tp_rank=0,
+        tp_shard_with_padding=False,
+        moe_parallel_config=SimpleNamespace(tp_size=1),
+    )
+    method = object.__new__(Fp8PerBlockOnlineMoEMethod)
+    method.moe = config
+    method.requantization_source = None
+    processed: list[torch.nn.Module] = []
+    monkeypatch.setattr(method, "process_weights_after_loading", processed.append)
+    layer = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = config
+    layer.quant_config = SimpleNamespace(
+        get_name=lambda: "fp8_per_block", online_quantization_config=None
+    )
+    layer.quant_method = method
+    layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+    layer._loaded_expert_biases = set()
+    layer._fused_shared_expert_quantizer = None
+    method.create_weights(
+        layer,
+        experts,
+        stored_hidden,
+        stored_intermediate,
+        torch.float32,
+        weight_loader=layer.weight_loader,
+    )
+
+    for expert in range(experts):
+        for shard in ("w1", "w3", "w2"):
+            name = "w2_weight" if shard == "w2" else "w13_weight"
+            shape = (hidden, intermediate) if shard == "w2" else (intermediate, hidden)
+            param = getattr(layer, name)
+            param.weight_loader(param, torch.ones(shape), name, shard, expert)
+
+    assert processed == [layer]
+
+
 def test_get_numel_loaded():
     param = torch.empty(10, device="meta")
     loaded_weight = torch.empty(10)
