@@ -1161,10 +1161,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
                     if self.adaptive_verification is not None and not profile_only:
+                        profiled_batch = None
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
                                 self.cudagraph_manager.captured_token_counts()
                             ):
+                                if batch != profiled_batch:
+                                    # Release the previous shape's cached blocks, or
+                                    # the cache grows to the sum of all shapes.
+                                    torch.accelerator.empty_cache()
+                                    profiled_batch = batch
                                 self._dummy_run(**batch)
                         self.adaptive_verification.set_initial_cost_curves(timings)
                         # Release the profiling runs' activations, or the
