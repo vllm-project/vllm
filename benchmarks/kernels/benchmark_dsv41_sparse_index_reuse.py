@@ -128,21 +128,17 @@ def benchmark_prefill(num_tokens: int, baseline_layers: int, reuse_layers: int, 
         compressed_len,
     )
 
-    def sweep(layers: int, fill_cache: bool):
+    def sweep(layers: int):
         def run(*run_inputs):
             for _ in range(layers):
-                if fill_cache:
-                    indices.fill_(-1)
                 combine_topk_swa_indices(*run_inputs, out=(indices, lens))
 
         return run
 
     baseline_us, baseline_n = _bench(
-        sweep(baseline_layers, fill_cache=False), inputs, args.repeat_time_ms
+        sweep(baseline_layers), inputs, args.repeat_time_ms
     )
-    reuse_us, reuse_n = _bench(
-        sweep(reuse_layers, fill_cache=True), inputs, args.repeat_time_ms
-    )
+    reuse_us, reuse_n = _bench(sweep(reuse_layers), inputs, args.repeat_time_ms)
     return {
         "phase": "prefill",
         "num_tokens": num_tokens,

@@ -381,11 +381,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         num_prefill_tokens = topk_indices.shape[0]
         width = round_up(top_k + self.window_size, 128)
-        combined_indices = torch.full(
-            (num_prefill_tokens, width),
-            -1,
-            dtype=torch.int32,
-            device=topk_indices.device,
+        combined_indices = torch.empty(
+            (num_prefill_tokens, width), dtype=torch.int32, device=topk_indices.device
         )
         combined_lens = torch.empty(
             num_prefill_tokens, dtype=torch.int32, device=topk_indices.device
