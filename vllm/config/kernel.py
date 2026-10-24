@@ -284,6 +284,15 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    flashinfer_autotune_execution_mode: Literal["auto", "eager", "cuda_graph"] = "auto"
+    """Measurement objective for managed FlashInfer autotuning. ``auto`` keeps
+    FlashInfer's per-operation defaults. ``eager`` includes recurring host cost;
+    ``cuda_graph`` measures captured replay. An explicit objective applies to
+    the entire warmup and uses a separate managed cache identity. It does not
+    change vLLM's execution mode or select different winners per runtime path.
+    Requires FlashInfer autotuning and an eligible managed-cache deployment.
+    """
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 

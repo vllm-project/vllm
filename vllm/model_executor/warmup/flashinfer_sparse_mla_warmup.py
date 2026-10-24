@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     resolve_flashinfer_autotune_v2_root,
+    resolve_flashinfer_measurement_policy,
     use_flashinfer_autotune_v2,
     write_flashinfer_autotune_cache,
 )
@@ -161,6 +162,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
             worker, num_tokens, log_label, dummy_run_kwargs
         )
 
+    resolve_flashinfer_measurement_policy(runner, managed=False)
     cache_path = resolve_flashinfer_autotune_file(runner)
 
     if is_leader:
@@ -249,6 +251,7 @@ def _run_sparse_mla_decode_autotune_v2(
     runner = worker.model_runner
     world = get_world_group()
     cache_root = resolve_flashinfer_autotune_v2_root()
+    measurement_policy = resolve_flashinfer_measurement_policy(runner, managed=True)
     if world.rank_in_group == 0:
         logger.info(
             "Autotuning FlashInfer SM120 sparse MLA %s decode with the managed "
@@ -265,12 +268,20 @@ def _run_sparse_mla_decode_autotune_v2(
                 worker.execute_model,
                 worker.sample_tokens,
                 num_tokens,
-                mixed_step_context=autotune_v2(mode="tune", cache_root=cache_root),
+                mixed_step_context=autotune_v2(
+                    mode="tune",
+                    cache_root=cache_root,
+                    measurement_policy=measurement_policy,
+                ),
                 req_id_prefix="_sparse_mla_v2_warmup",
             )
         else:
             warmup_executed = True
-            with autotune_v2(mode="tune", cache_root=cache_root):
+            with autotune_v2(
+                mode="tune",
+                cache_root=cache_root,
+                measurement_policy=measurement_policy,
+            ):
                 runner._dummy_run(**dummy_run_kwargs)
 
     if not warmup_executed:
