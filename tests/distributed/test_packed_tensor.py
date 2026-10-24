@@ -602,6 +602,22 @@ class TestPackTensors:
 class TestPackedIpcProducer:
     """Test the packed_ipc_producer generator."""
 
+    @pytest.mark.parametrize("shapes", [[(0, 3)], [(2, 0), (0,)]])
+    def test_producer_preserves_zero_sized_tensor_metadata(self, shapes):
+        """A nonempty weight iterator must retain metadata even with zero bytes."""
+        params = [
+            (f"w{i}", torch.empty(shape, device="cuda"))
+            for i, shape in enumerate(shapes)
+        ]
+        chunks = list(
+            packed_ipc_producer(iter(params), "test-uuid", lambda x: x[1], 1024)
+        )
+        assert len(chunks) == 1
+        assert chunks[0].names == [name for name, _ in params]
+        assert chunks[0].shapes == [list(shape) for shape in shapes]
+        assert chunks[0].dtype_names == ["float32"] * len(params)
+        assert chunks[0].tensor_sizes == [0] * len(params)
+
     def test_producer_yields_chunks(self):
         """Test that the producer yields PackedIpcChunk objects."""
         params = [

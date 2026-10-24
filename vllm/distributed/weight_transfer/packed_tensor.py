@@ -371,7 +371,7 @@ def packed_ipc_producer(
         tensor_sizes.append(flat.numel())
         total_bytes += flat.numel()
 
-    if total_bytes:
+    if names:
         torch.cuda.current_stream().synchronize()
         yield PackedIpcChunk(
             names=names,
