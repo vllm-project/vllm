@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from functools import cached_property
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -47,12 +48,19 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from .clip import CLIPVisionModel
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -496,6 +504,7 @@ class LlavaForConditionalGeneration(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -654,6 +663,139 @@ class LlavaForConditionalGeneration(
             return []
 
         return self._process_image_input(image_input)
+
+    @cached_property
+    def _encoder_tokens_per_image(self) -> int:
+        vision_info = get_vision_encoder_info(self.config)
+        image_size = self.config.vision_config.image_size
+        return get_num_selected_vision_tokens(
+            vision_info.get_num_image_tokens(
+                image_width=image_size, image_height=image_size
+            ),
+            self.config.vision_feature_select_strategy,
+        )
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            if self.config.vision_feature_select_strategy != "full":
+                raise NotImplementedError(
+                    "Pixtral encoder CUDA graphs require full vision features."
+                )
+            return self.vision_tower.get_encoder_cudagraph_config(
+                self.config.text_config.hidden_size
+            )
+        if not isinstance(
+            self.config.vision_config, (CLIPVisionConfig, SiglipVisionConfig)
+        ):
+            raise NotImplementedError(
+                f"Unsupported vision config: {type(self.config.vision_config)}"
+            )
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            max_budget = min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            )
+            return min(256, max_budget), max_budget
+        return (
+            self._encoder_tokens_per_image,
+            max(
+                self._encoder_tokens_per_image,
+                min(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config.model_config.max_model_len,
+                ),
+            ),
+        )
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            patch = self.config.vision_config.patch_size
+            sizes = [
+                (image.shape[-2] // patch) * (image.shape[-1] // patch)
+                for image in mm_kwargs["pixel_values"]
+            ]
+            return [EncoderItemSpec(input_size=n, output_tokens=n) for n in sizes]
+        return [
+            EncoderItemSpec(input_size=1, output_tokens=self._encoder_tokens_per_image)
+            for _ in range(len(mm_kwargs["pixel_values"]))
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return {"pixel_values": [mm_kwargs["pixel_values"][i] for i in indices]}
+        return {"pixel_values": mm_kwargs["pixel_values"][indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return self.vision_tower.prepare_encoder_cudagraph_capture_inputs(
+                token_budget, max_batch_size, device, dtype
+            )
+        num_images = min(
+            max_batch_size, max(token_budget // self._encoder_tokens_per_image, 1)
+        )
+        image_size = self.config.vision_config.image_size
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "pixel_values": torch.zeros(
+                    num_images, 3, image_size, image_size, device=device, dtype=dtype
+                )
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return self.vision_tower.prepare_encoder_cudagraph_replay_buffers(
+                mm_kwargs["pixel_values"]
+            )
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            features = self.vision_tower.encoder_cudagraph_forward(values)
+            return self.multi_modal_projector(features)
+        features = self._image_pixels_to_features(
+            self.vision_tower, values["pixel_values"]
+        )
+        return self.multi_modal_projector(features).flatten(0, 1)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return torch.cat(self.embed_multimodal(**mm_kwargs))
+        return self.encoder_cudagraph_forward(mm_kwargs, path=path)
 
     def forward(
         self,
