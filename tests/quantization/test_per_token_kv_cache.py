@@ -18,6 +18,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.kernels.attention.test_triton_unified_attention import (
+    _spy_reduce_segments,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -526,22 +529,38 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     [
         [(1, 128)],
         [(1, 64), (1, 32)],
+        [(4, 128), (4, 97)],
     ],
 )
 @pytest.mark.parametrize("num_heads", [(4, 4)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("seq_threshold_3D", [0, 8])
 @torch.inference_mode()
 def test_triton_unified_attention_per_token_head_scale(
+    monkeypatch,
     qcfg: QuantConfig,
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
     block_size: int,
+    seq_threshold_3D: int,
 ):
     """End-to-end: quantized KV with per-token-head scale caches."""
     from vllm.utils.math_utils import next_power_of_2
+    from vllm.v1.attention.backends.triton_attn import (
+        TritonAttentionBackend,
+        TritonAttentionImpl,
+    )
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    if (
+        qcfg is FP8_CONFIG
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("fp8e4nv is not supported on CUDA arch < 89")
 
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
@@ -635,6 +654,34 @@ def test_triton_unified_attention_per_token_head_scale(
             qcfg.cache_dtype
         )
 
+    # Read through the backend's packed cache, as when serving.
+    impl = TritonAttentionImpl(
+        num_heads=num_query_heads,
+        head_size=head_size,
+        scale=scale,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=qcfg.kv_cache_dtype_str,
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=qcfg.cache_dtype,
+        kv_quant_mode=qcfg.kv_quant_mode,
+    )
+    content = TritonAttentionBackend.customize_spec(spec).state_content_size_bytes
+    kv_cache = torch.empty(
+        num_blocks, num_kv_heads, block_size, content, dtype=qcfg.cache_dtype
+    )
+    key_cache, value_cache = impl._pth_key_value_caches(kv_cache)
+    key_cache[..., : key_cache_q.shape[-1]].copy_(key_cache_q)
+    value_cache[..., : value_cache_q.shape[-1]].copy_(value_cache_q)
+    assert impl._k_scale_cache is not None and impl._v_scale_cache is not None
+    k_scale_cache = impl._k_scale_cache.copy_(k_scale_cache)
+    v_scale_cache = impl._v_scale_cache.copy_(v_scale_cache)
+
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
     )
@@ -646,26 +693,27 @@ def test_triton_unified_attention_per_token_head_scale(
     )
 
     head_size_padded = next_power_of_2(head_size)
-    seq_threshold_3D = 0
     num_par_softmax_segments = 16
+    scratch_rows = seq_threshold_3D * max_query_len
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
     softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
 
+    reduce_grids = _spy_reduce_segments(monkeypatch)
     output_q = torch.empty_like(query)
     unified_attention(
         q=query,
-        k=key_cache_q,
-        v=value_cache_q,
+        k=key_cache,
+        v=value_cache,
         out=output_q,
         cu_seqlens_q=cu_query_lens,
         seqused_k=kv_lens_t,
@@ -707,7 +755,7 @@ def test_triton_unified_attention_per_token_head_scale(
         q_descale=None,
         k_descale=None,
         v_descale=None,
-        seq_threshold_3D=seq_threshold_3D,
+        seq_threshold_3D=0,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
         softmax_segm_max=softmax_segm_max,
@@ -723,3 +771,5 @@ def test_triton_unified_attention_per_token_head_scale(
     else:
         atol, rtol = 5e-2, 5e-2
     torch.testing.assert_close(output_q, output_ref, atol=atol, rtol=rtol)
+    # INT4 has its own launcher; INT8/FP8 must take split-K when enabled.
+    assert is_int4 or len(reduce_grids) == (seq_threshold_3D > 0)
