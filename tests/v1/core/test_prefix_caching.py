@@ -5899,6 +5899,44 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
+def test_mamba_align_siblings_hit_committed_boundary_in_one_step():
+    """Requests that hit a Mamba state committed in an earlier step must not
+    defer each other. Re-caching that boundary through the prompt-tail path
+    used to mark its hash as cached in the current step, so every sibling
+    sharing the boundary was refused until the next step and siblings ran one
+    per engine step (e.g. many reads over one shared prompt)."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    shared = [7] * (2 * block_size)
+
+    # Step 1: the producer prefills up to the end of the shared prefix, which
+    # commits the Mamba state at that block boundary.
+    manager.new_step_starts()
+    producer = make_request("p", shared + [50] * 8, block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    assert manager.allocate_slots(producer, 2 * block_size, num_computed, blocks)
+    producer.num_computed_tokens = 2 * block_size
+
+    # Step 2: the producer finishes its prompt, and siblings that share the
+    # committed boundary are all admitted in the same step.
+    manager.new_step_starts()
+    assert manager.allocate_slots(producer, 8) is not None
+    for i, tail in enumerate((60, 70, 80)):
+        sibling = make_request(f"s{i}", shared + [tail] * 8, block_size, sha256)
+        blocks, num_computed, _ = manager.get_computed_blocks(sibling)
+        assert num_computed == 2 * block_size
+        new_blocks = manager.allocate_slots(
+            sibling, len(sibling.all_token_ids) - num_computed, num_computed, blocks
+        )
+        assert new_blocks is not None, f"sibling {i} was deferred"
+
+
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under

@@ -1541,6 +1541,8 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+        self._limit_max_model_len_to_draft()
+
         if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
@@ -3009,6 +3011,34 @@ class VllmConfig:
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
 
+    def _limit_max_model_len_to_draft(self) -> None:
+        """Lower max_model_len to the draft model's when the V2 model runner
+        can't serve longer sequences.
+        """
+        spec_config = self.speculative_config
+        if (
+            spec_config is None
+            or spec_config.draft_model_config is None
+            or self.model_config is None
+            or not self.use_v2_model_runner
+            # The draft's positional capacity was raised to match the target.
+            or spec_config.draft_shares_target_positions()
+        ):
+            return
+        draft_max_model_len = spec_config.draft_model_config.max_model_len
+        target_max_model_len = self.model_config.max_model_len
+        if draft_max_model_len >= target_max_model_len:
+            return
+        logger.warning(
+            "The draft model's max_model_len (%d) is smaller than the target "
+            "model's (%d) and the V2 model runner can't skip speculation for "
+            "longer sequences; reducing max_model_len to %d.",
+            draft_max_model_len,
+            target_max_model_len,
+            draft_max_model_len,
+        )
+        self.model_config.max_model_len = draft_max_model_len
+
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
@@ -3518,6 +3548,10 @@ class VllmConfig:
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
+            # A KDA RecoverSSM request's state is its conv and SSM state in the
+            # stock Mamba page (the verify records are kept outside the KV
+            # cache), so KV connectors transfer it as usual.
+            and not self.cache_config.use_kda_recoverssm
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "

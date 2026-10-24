@@ -2102,12 +2102,9 @@ class MambaManager(SingleTypeKVCacheManager):
         source_block = blocks[block_idx]
         if source_block.is_null:
             return None
-        if (
-            num_tokens % self.block_size == 0
-            and source_block.block_hash_num_tokens == num_tokens
-        ):
-            # Full boundaries need no partial registration. Fresh full blocks
-            # retain their same-step protection in cache_blocks().
+        # Already keyed here by a hit or an earlier step; re-caching would
+        # mark it cached this step and defer every sibling that hits it.
+        if source_block.block_hash_num_tokens == num_tokens:
             return None
 
         partial_hash = self.block_pool.cache_partial_block(
