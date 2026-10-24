@@ -23,12 +23,19 @@ __global__ void __launch_bounds__(512, 1)
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   barrier_at_start<ngpus>(sg, self_sg, rank);
+  // Each rank starts at its own shard, so the peers read different sources at
+  // the same time, and the loads from all sources are issued before the stores.
+  for (int idx = tid; idx < size_per_rank; idx += stride) {
+    CopyPack packs[ngpus];
 #pragma unroll
-  for (int src_rank = 0; src_rank < ngpus; ++src_rank) {
-    auto src = reinterpret_cast<const CopyPack*>(dp.ptrs[src_rank]);
-    auto dst = result + src_rank * size_per_rank;
-    for (int idx = tid; idx < size_per_rank; idx += stride) {
-      dst[idx] = src[idx];
+    for (int i = 0; i < ngpus; ++i) {
+      int src_rank = (rank + i) % ngpus;
+      packs[i] = reinterpret_cast<const CopyPack*>(dp.ptrs[src_rank])[idx];
+    }
+#pragma unroll
+    for (int i = 0; i < ngpus; ++i) {
+      int src_rank = (rank + i) % ngpus;
+      result[src_rank * size_per_rank + idx] = packs[i];
     }
   }
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
