@@ -18,6 +18,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -30,7 +31,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness CuMem'
   key: basic-correctness-cumem
   device: intel_gpu
@@ -55,7 +56,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s basic_correctness/memory/cumem || true'
+    pytest --continue-on-collection-errors -v -s basic_correctness/memory/cumem || true'
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode'
   key: basic-correctness-sleep-mode
   device: intel_gpu
@@ -80,7 +81,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s basic_correctness/memory/sleep_mode || true'
+    pytest --continue-on-collection-errors -v -s basic_correctness/memory/sleep_mode || true'
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload'
   key: basic-correctness-cpu-offload
   device: intel_gpu
@@ -105,7 +106,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s basic_correctness/cpu_offload || true'
+    pytest --continue-on-collection-errors -v -s basic_correctness/cpu_offload || true'
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload'
   key: basic-correctness-prefetch-offload
   device: intel_gpu
@@ -130,4 +131,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s basic_correctness/prefetch_offload || true'
+    pytest --continue-on-collection-errors -v -s basic_correctness/prefetch_offload || true'

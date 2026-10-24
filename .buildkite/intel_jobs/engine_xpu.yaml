@@ -72,9 +72,9 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/engine/test_preprocess_error_handling.py || true &&
-    pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true &&
-    pytest -v -s v1/test_tensor_ipc_queue.py || true'
+    pytest --continue-on-collection-errors -v -s v1/engine/test_preprocess_error_handling.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/test_tensor_ipc_queue.py || true'
 - label: ':nvidia: (H200 MIG 18GB) E2E Scheduling'
   key: e2e-scheduling-1-gpu
   device: intel_gpu
@@ -90,6 +90,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
   source_file_dependencies:
@@ -99,7 +100,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/general/test_async_scheduling.py || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/general/test_async_scheduling.py || true'
 - label: ':nvidia: (H200 MIG 18GB) E2E Scheduling Accuracy'
   key: e2e-scheduling-accuracy-1-gpu
   device: intel_gpu
@@ -124,7 +125,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/general/test_async_scheduling_accuracy.py || true'
 - label: ':nvidia: (H200 MIG 18GB) E2E Core'
   key: e2e-core-1-gpu
   device: intel_gpu
@@ -150,7 +151,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k not test_mamba_prefix_cache_mrv2 || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k not test_mamba_prefix_cache_mrv2 || true'
 - label: ':nvidia: (H200 MIG 35GB) E2E Core Large Memory'
   key: e2e-core-large-memory
   device: intel_gpu
@@ -176,8 +177,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py || true &&
-    pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer || true'
 - label: ':nvidia: (H100) ReplaySSM E2E'
   key: replayssm-e2e
   device: intel_gpu
@@ -213,8 +214,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/test_replayssm_decode.py || true'
-- label: ':nvidia: (L4) V1 E2E'
+    pytest --continue-on-collection-errors -v -s v1/e2e/test_replayssm_decode.py || true'
+- label: ':nvidia: (L4) [Nightly] V1 E2E'
   key: v1-e2e-2-gpus-2
   device: intel_gpu
   timeout_in_minutes: 25
@@ -256,8 +257,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
-- label: ':nvidia: (B200) V1 E2E Hybrid Chunked Prefill'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
+- label: ':nvidia: (B200) [Nightly] V1 E2E Hybrid Chunked Prefill'
   key: v1-e2e-hybrid-chunked-prefill-b200
   device: intel_gpu
   timeout_in_minutes: 35
@@ -284,4 +285,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/test_hybrid_chunked_prefill.py || true'

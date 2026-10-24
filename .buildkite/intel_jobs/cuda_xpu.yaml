@@ -32,9 +32,9 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s cuda/test_cuda_context.py || true &&
-    pytest -v -s cuda/test_platform_no_cuda_init.py || true &&
-    pytest -v -s cuda/test_cuda_compatibility_path.py || true'
+    pytest --continue-on-collection-errors -v -s cuda/test_cuda_context.py || true &&
+    pytest --continue-on-collection-errors -v -s cuda/test_platform_no_cuda_init.py || true &&
+    pytest --continue-on-collection-errors -v -s cuda/test_cuda_compatibility_path.py || true'
 - label: ':nvidia: (H200 MIG 18GB) CUDAGraph'
   key: cudagraph
   device: intel_gpu
@@ -72,7 +72,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py || true &&
-    pytest -v -s v1/cudagraph/test_cudagraph_mode.py || true &&
-    pytest -v -s v1/cudagraph/test_breakable_cudagraph.py || true &&
-    pytest -v -s v1/cudagraph/test_encoder_cudagraph.py || true'
+    pytest --continue-on-collection-errors -v -s v1/cudagraph/test_cudagraph_dispatch.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/cudagraph/test_cudagraph_mode.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/cudagraph/test_breakable_cudagraph.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/cudagraph/test_encoder_cudagraph.py || true'
