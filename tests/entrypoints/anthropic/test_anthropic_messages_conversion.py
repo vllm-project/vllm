@@ -57,6 +57,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers import cached_get_tokenizer
 
 _convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -72,6 +73,121 @@ def _make_request(
         messages=messages,
         **kwargs,
     )
+
+
+@pytest.mark.parametrize("count_tokens", [False, True])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "The answer is (",
+        [{"type": "text", "text": "The answer is ("}],
+        [{"type": "text", "text": "The answer "}, {"type": "text", "text": "is ("}],
+        [
+            {"type": "thinking", "thinking": "Let me choose.", "signature": "sig"},
+            {"type": "text", "text": "The answer is ("},
+        ],
+    ],
+)
+def test_final_assistant_text_is_continued(content, count_tokens):
+    """Both Anthropic endpoints render the same partial assistant turn."""
+    messages = [
+        {"role": "user", "content": "Choose A or B."},
+        {"role": "assistant", "content": content},
+    ]
+    request = (
+        AnthropicCountTokensRequest(model="test-model", messages=messages)
+        if count_tokens
+        else _make_request(messages)
+    )
+    converted = _convert(request)
+    assert converted.continue_final_message
+    assert not converted.add_generation_prompt
+
+
+@pytest.mark.parametrize("count_tokens", [False, True])
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param([], id="empty-blocks"),
+        pytest.param([{"type": "text", "text": ""}], id="empty-text"),
+        pytest.param(
+            [{"type": "thinking", "thinking": "Let me check.", "signature": "sig"}],
+            id="thinking-only",
+        ),
+        *[
+            pytest.param(
+                text_blocks
+                + [
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "weather",
+                        "input": {"city": "Paris"},
+                    }
+                ],
+                id=name,
+            )
+            for name, text_blocks in (
+                ("tool-only", []),
+                ("text-and-tool", [{"type": "text", "text": "Let me check."}]),
+            )
+        ],
+        pytest.param(
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "https://example.com/image.png"},
+                }
+            ],
+            id="image-only",
+        ),
+    ],
+)
+def test_final_assistant_without_text_or_with_tools_keeps_prompt(content, count_tokens):
+    """Non-prefill turns keep the complete prompt, including any tool calls."""
+    messages = [
+        {"role": "user", "content": "What is the weather in Paris?"},
+        {"role": "assistant", "content": content},
+    ]
+    request = (
+        AnthropicCountTokensRequest(model="test-model", messages=messages)
+        if count_tokens
+        else _make_request(messages)
+    )
+    converted = _convert(request)
+    tokenizer = cached_get_tokenizer("Qwen/Qwen3-0.6B")
+    expected = tokenizer.apply_chat_template(
+        converted.messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        enable_thinking=False,
+    )
+    actual = tokenizer.apply_chat_template(
+        converted.messages,
+        tokenize=False,
+        add_generation_prompt=converted.add_generation_prompt,
+        continue_final_message=converted.continue_final_message,
+        enable_thinking=False,
+    )
+    assert actual == expected
+    if converted.messages[-1].get("tool_calls"):
+        assert (
+            '<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}' in actual
+        )
+
+
+def test_assistant_history_does_not_continue_after_user_message():
+    request = _make_request(
+        [
+            {"role": "assistant", "content": "Hello."},
+            {"role": "user", "content": "Choose A or B."},
+        ]
+    )
+    converted = _convert(request)
+    assert not converted.continue_final_message
+    assert converted.add_generation_prompt
 
 
 # ======================================================================

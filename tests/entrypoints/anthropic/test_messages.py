@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from typing import Any
 
 import anthropic
 import pytest
@@ -47,6 +48,122 @@ async def test_simple_messages(client: anthropic.AsyncAnthropic):
     assert resp.role == "assistant"
 
     print(f"Anthropic response: {resp.model_dump_json()}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_assistant_prefill_matches_chat_continuation(client, server, stream):
+    """Prefill text and token counts agree with the explicit OpenAI continuation."""
+    model = "claude-3-7-sonnet-latest"
+    messages = [
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is"},
+    ]
+    template_kwargs = {"enable_thinking": False}
+    async with server.get_async_client() as openai_client:
+        expected = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=16,
+            temperature=0,
+            extra_body={
+                "continue_final_message": True,
+                "add_generation_prompt": False,
+                "chat_template_kwargs": template_kwargs,
+            },
+        )
+    counted = await client.messages.count_tokens(
+        model=model,
+        messages=messages,
+        extra_body={"chat_template_kwargs": template_kwargs},
+    )
+    assert counted.input_tokens == expected.usage.prompt_tokens
+
+    response = await client.messages.create(
+        model=model,
+        messages=messages,
+        max_tokens=16,
+        stream=stream,
+        extra_body={"temperature": 0, "chat_template_kwargs": template_kwargs},
+    )
+    if stream:
+        text = ""
+        input_tokens = None
+        async for event in response:
+            if event.type == "message_start":
+                input_tokens = event.message.usage.input_tokens
+            elif (
+                event.type == "content_block_delta" and event.delta.type == "text_delta"
+            ):
+                text += event.delta.text
+    else:
+        text = "".join(block.text for block in response.content if block.type == "text")
+        input_tokens = response.usage.input_tokens
+    assert text == expected.choices[0].message.content
+    assert input_tokens == counted.input_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool-only", "thinking-only", "text-and-tool"])
+async def test_final_assistant_non_prefill_keeps_prompt(client, server, kind):
+    """Both HTTP endpoints retain non-text content and the new assistant turn."""
+    blocks: list[dict[str, Any]]
+    assistant: dict[str, Any]
+    if kind == "thinking-only":
+        blocks = [{"type": "thinking", "thinking": "Let me check.", "signature": "sig"}]
+        assistant = {"role": "assistant", "reasoning": "Let me check."}
+    else:
+        blocks = [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "weather",
+                "input": {"city": "Paris"},
+            }
+        ]
+        assistant = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": '{"city": "Paris"}'},
+                }
+            ],
+        }
+        if kind == "text-and-tool":
+            blocks.insert(0, {"type": "text", "text": "Let me check."})
+            assistant["content"] = "Let me check."
+
+    model = "claude-3-7-sonnet-latest"
+    user = {"role": "user", "content": "What is the weather in Paris?"}
+    messages = [user, {"role": "assistant", "content": blocks}]
+    template_kwargs = {"enable_thinking": False}
+    async with server.get_async_client() as openai_client:
+        expected = await openai_client.chat.completions.create(
+            model=model,
+            messages=[user, assistant],
+            max_tokens=1,
+            temperature=0,
+            extra_body={
+                "continue_final_message": False,
+                "add_generation_prompt": True,
+                "chat_template_kwargs": template_kwargs,
+            },
+        )
+    counted = await client.messages.count_tokens(
+        model=model,
+        messages=messages,
+        extra_body={"chat_template_kwargs": template_kwargs},
+    )
+    response = await client.messages.create(
+        model=model,
+        messages=messages,
+        max_tokens=1,
+        extra_body={"temperature": 0, "chat_template_kwargs": template_kwargs},
+    )
+    assert counted.input_tokens == expected.usage.prompt_tokens
+    assert response.usage.input_tokens == expected.usage.prompt_tokens
 
 
 @pytest.mark.asyncio
