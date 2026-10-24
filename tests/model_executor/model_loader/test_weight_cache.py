@@ -477,6 +477,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             ),
             model_config=SimpleNamespace(is_moe=False),
             cache_config=None,
+            kernel_config=None,
         )
         server = daemon.WeightCacheDaemon(
             vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
@@ -663,6 +664,7 @@ def test_ipc_rope_matching(
                         model_config,
                         default_vllm_config.cache_config,
                         default_vllm_config.parallel_config,
+                        default_vllm_config.kernel_config,
                     )
             if is_reload:
                 expected = torch.zeros(2) if mismatch else server.model.rotary_cache
@@ -747,7 +749,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     import torch
 
-    from vllm.config import CacheConfig, LoadConfig, ParallelConfig
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -771,6 +773,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
+        kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.cache_config = CacheConfig(
@@ -799,6 +802,88 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.parallel_config.enable_expert_parallel = True
     config.parallel_config.expert_placement_strategy = "round_robin"
     loader.load_weights(model, model_config)
+    assert len(requested_keys) == 2
+    for key in requested_keys:
+        assert server.cache_key.mismatched_fields(key) == mismatched_fields
+
+
+@pytest.mark.parametrize(
+    "engine_kernel_config,mismatched_fields",
+    [
+        ({"moe_backend": "flashinfer_cutlass"}, []),
+        ({"moe_backend": "flashinfer_trtllm"}, ["moe_backend"]),
+        (
+            {"moe_backend": "flashinfer_cutlass", "linear_backend": "cutlass"},
+            ["linear_backend"],
+        ),
+        (
+            {
+                "moe_backend": "flashinfer_cutlass",
+                "linear_backend_per_quant": {"nvfp4_w4a16": "humming"},
+            },
+            ["linear_backend_per_quant"],
+        ),
+    ],
+)
+def test_ipc_cache_key_tracks_kernel_backends(
+    tmp_path, monkeypatch, engine_kernel_config, mismatched_fields
+):
+    """Weights processed for one MoE or linear backend have that backend's
+    layout, so an engine selecting a different backend must not reuse them."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["Qwen3MoeForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+        is_moe=True,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=ParallelConfig(),
+        speculative_config=None,
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    config.kernel_config = KernelConfig(**engine_kernel_config)
+    for name in ("get_dp_group", "get_pp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key, *, is_reload=False):
+        requested_keys.append(key)
+        return WeightCacheState(entries={}, aliases={}, attrs={})
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    loader.load_model(config, model_config)
+    # A standalone reload on a fresh loader has no recorded key, so it keys on
+    # the current engine config.
+    reloader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(reloader, "_request_state", request_state)
+    reloader.load_weights(torch.nn.Module(), model_config)
     assert len(requested_keys) == 2
     for key in requested_keys:
         assert server.cache_key.mismatched_fields(key) == mismatched_fields
