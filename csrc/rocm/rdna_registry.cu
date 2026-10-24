@@ -1,6 +1,7 @@
-// Torch ops over the RDNA3.5 attention kernels built into _rocm_C.
+// Torch ops over the RDNA attention kernels built into _rocm_C.
 // rdna_*_configs list a table's entries and
-// rdna_{decode,prefill}_attn launch a build by its index.
+// rdna_{decode,prefill}_attn launch a build by its index, both in the tables
+// of the current device's GPU family (rdna_attn_types.h).
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -18,30 +19,88 @@
 #include "rdna_prefill_batch_configs.h"
 #include "rdna_prefill_configs.h"
 
-rdna::LaunchFn* rdna::decode_launchers() {
-  static LaunchFn launchers[std::size(kDecodeConfigs)] = {};
-  return launchers;
+rdna::LaunchFn* rdna::decode_launchers(Arch arch) {
+  static LaunchFn gfx1151[std::size(kGfx1151DecodeConfigs)] = {};
+  static LaunchFn gfx1150[std::size(kGfx1150DecodeConfigs)] = {};
+  return arch == Arch::kGfx1151 ? gfx1151 : gfx1150;
 }
 
-rdna::LaunchFn* rdna::decode_batch_launchers() {
-  static LaunchFn launchers[std::size(kDecodeBatchConfigs)] = {};
-  return launchers;
+rdna::LaunchFn* rdna::decode_batch_launchers(Arch arch) {
+  static LaunchFn gfx1151[std::size(kGfx1151DecodeBatchConfigs)] = {};
+  static LaunchFn gfx1150[std::size(kGfx1150DecodeBatchConfigs)] = {};
+  return arch == Arch::kGfx1151 ? gfx1151 : gfx1150;
 }
 
-rdna::PrefillFn* rdna::prefill_launchers() {
-  static PrefillFn launchers[std::size(kPrefillConfigs)] = {};
-  return launchers;
+rdna::PrefillFn* rdna::prefill_launchers(Arch arch) {
+  static PrefillFn gfx1151[std::size(kGfx1151PrefillConfigs)] = {};
+  static PrefillFn gfx1150[std::size(kGfx1150PrefillConfigs)] = {};
+  return arch == Arch::kGfx1151 ? gfx1151 : gfx1150;
 }
 
 namespace {
 
-constexpr int64_t kNumDecodeConfigs = std::size(rdna::kDecodeConfigs);
-constexpr int64_t kNumDecodeBatchConfigs = std::size(rdna::kDecodeBatchConfigs);
-constexpr int64_t kNumPrefillConfigs = std::size(rdna::kPrefillConfigs);
+using rdna::Arch;
+using rdna::DecodeConfig;
+using rdna::LaunchFn;
+using rdna::PrefillBatchConfig;
+using rdna::PrefillConfig;
+using rdna::PrefillFn;
 
-bool on_gfx1151() {
-  const std::string arch = at::cuda::getCurrentDeviceProperties()->gcnArchName;
-  return arch.find("gfx1151") != std::string::npos;
+// A GPU family's tables and their launch functions.
+struct Table {
+  const DecodeConfig* decode = nullptr;
+  int64_t num_decode = 0;
+  LaunchFn* decode_launchers = nullptr;
+  const DecodeConfig* decode_batch = nullptr;
+  int64_t num_decode_batch = 0;
+  LaunchFn* decode_batch_launchers = nullptr;
+  const PrefillConfig* prefill = nullptr;
+  int64_t num_prefill = 0;
+  PrefillFn* prefill_launchers = nullptr;
+  const PrefillBatchConfig* prefill_batch = nullptr;
+  int64_t num_prefill_batch = 0;
+};
+
+Table table_of(Arch arch) {
+  const int a = static_cast<int>(arch);
+  const auto decode = rdna::kDecodeConfigs[a];
+  const auto decode_batch = rdna::kDecodeBatchConfigs[a];
+  const auto prefill = rdna::kPrefillConfigs[a];
+  const auto prefill_batch = rdna::kPrefillBatchConfigs[a];
+  return {decode.data(),
+          static_cast<int64_t>(decode.size()),
+          rdna::decode_launchers(arch),
+          decode_batch.data(),
+          static_cast<int64_t>(decode_batch.size()),
+          rdna::decode_batch_launchers(arch),
+          prefill.data(),
+          static_cast<int64_t>(prefill.size()),
+          rdna::prefill_launchers(arch),
+          prefill_batch.data(),
+          static_cast<int64_t>(prefill_batch.size())};
+}
+
+// The tables of the current device's GPU family; empty if this build carries
+// no code for it.
+Table device_table() {
+  const std::string name = at::cuda::getCurrentDeviceProperties()->gcnArchName;
+  const auto is = [&](const char* arch) {
+    return name.find(arch) != std::string::npos;
+  };
+#ifdef VLLM_RDNA_ATTN_GFX1150
+  if (is("gfx1150")) return table_of(Arch::kGfx1150);
+#endif
+#ifdef VLLM_RDNA_ATTN_GFX1151
+  if (is("gfx1151")) return table_of(Arch::kGfx1151);
+#endif
+#ifdef VLLM_RDNA_ATTN_GFX1152
+  if (is("gfx1152")) return table_of(Arch::kGfx1150);
+#endif
+#ifdef VLLM_RDNA_ATTN_GFX1153
+  if (is("gfx1153")) return table_of(Arch::kGfx1150);
+#endif
+  (void)is;
+  return {};
 }
 
 // The kernels expect (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM).
@@ -67,13 +126,12 @@ void check_device(const torch::Tensor& q,
 
 }  // namespace
 
-// Every build of a decode table, its DecodeConfig fields in order; none off
-// gfx1151. Raises if a build has no instantiation unit.
+// Every build of a decode table, its DecodeConfig fields in order; none on
+// other devices. Raises if a build has no instantiation unit.
 std::vector<int64_t> decode_configs(const rdna::DecodeConfig* configs,
                                     int64_t n, rdna::LaunchFn* launchers,
                                     const char* kernel) {
   std::vector<int64_t> fields;
-  if (!on_gfx1151()) return fields;
   for (int64_t i = 0; i < n; ++i) {
     const rdna::DecodeConfig& c = configs[i];
     TORCH_CHECK(launchers[i], kernel, " build ", i, " (head dim ",
@@ -91,24 +149,25 @@ std::vector<int64_t> decode_configs(const rdna::DecodeConfig* configs,
 }
 
 std::vector<int64_t> rdna_decode_configs() {
-  return decode_configs(rdna::kDecodeConfigs, kNumDecodeConfigs,
-                        rdna::decode_launchers(), "decode");
+  const Table t = device_table();
+  return decode_configs(t.decode, t.num_decode, t.decode_launchers, "decode");
 }
 
 std::vector<int64_t> rdna_decode_batch_configs() {
-  return decode_configs(rdna::kDecodeBatchConfigs, kNumDecodeBatchConfigs,
-                        rdna::decode_batch_launchers(), "batched decode");
+  const Table t = device_table();
+  return decode_configs(t.decode_batch, t.num_decode_batch,
+                        t.decode_batch_launchers, "batched decode");
 }
 
-// Every prefill build, its PrefillConfig fields in order; none off gfx1151.
-// Raises if a build has no instantiation unit.
+// Every prefill build of the device's table set, its PrefillConfig fields in
+// order; none on other devices. Raises if a build has no instantiation unit.
 std::vector<int64_t> rdna_prefill_configs() {
   std::vector<int64_t> fields;
-  if (!on_gfx1151()) return fields;
-  for (int64_t i = 0; i < kNumPrefillConfigs; ++i) {
-    const rdna::PrefillConfig& c = rdna::kPrefillConfigs[i];
-    TORCH_CHECK(rdna::prefill_launchers()[i], "prefill build ", i,
-                " (head dim ", static_cast<int>(c.head_dim), ", bf16 ",
+  const Table t = device_table();
+  for (int64_t i = 0; i < t.num_prefill; ++i) {
+    const rdna::PrefillConfig& c = t.prefill[i];
+    TORCH_CHECK(t.prefill_launchers[i], "prefill build ", i, " (head dim ",
+                static_cast<int>(c.head_dim), ", bf16 ",
                 c.dtype == rdna::Dtype::kBf16,
                 ") has no unit in cmake/rocm_rdna_attn.cmake");
     fields.insert(
@@ -121,17 +180,17 @@ std::vector<int64_t> rdna_prefill_configs() {
   return fields;
 }
 
-// Every prefill batch cell, its fields in order; none off gfx1151. Raises if
-// a cell names no prefill build.
+// Every prefill batch cell of the device's table set, its fields in order;
+// none on other devices. Raises if a cell names no prefill build.
 std::vector<int64_t> rdna_prefill_batch_configs() {
   using namespace rdna;
   std::vector<int64_t> fields;
-  if (!on_gfx1151()) return fields;
-  for (const PrefillBatchConfig& b : kPrefillBatchConfigs) {
+  const Table t = device_table();
+  for (int64_t i = 0; i < t.num_prefill_batch; ++i) {
+    const PrefillBatchConfig& b = t.prefill_batch[i];
     for (Dtype dtype : {Dtype::kFp16, Dtype::kBf16}) {
       const bool built = std::any_of(
-          std::begin(kPrefillConfigs), std::end(kPrefillConfigs),
-          [&](const PrefillConfig& c) {
+          t.prefill, t.prefill + t.num_prefill, [&](const PrefillConfig& c) {
             return c.head_dim == b.head_dim && c.num_q_heads == b.num_q_heads &&
                    c.num_kv_heads == b.num_kv_heads && c.window == b.window &&
                    c.page_size == b.page_size && c.dtype == dtype &&
@@ -159,14 +218,13 @@ void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
                       const std::optional<torch::Tensor>& mm_ranges,
                       bool batched) {
   using namespace rdna;
-  LaunchFn* launchers = batched ? decode_batch_launchers() : decode_launchers();
-  TORCH_CHECK(
-      config >= 0 &&
-          config < (batched ? kNumDecodeBatchConfigs : kNumDecodeConfigs) &&
-          launchers[config],
-      "no ", batched ? "batched " : "", "decode build ", config);
-  const DecodeConfig& c =
-      batched ? kDecodeBatchConfigs[config] : kDecodeConfigs[config];
+  const Table t = device_table();
+  LaunchFn* launchers = batched ? t.decode_batch_launchers : t.decode_launchers;
+  TORCH_CHECK(config >= 0 &&
+                  config < (batched ? t.num_decode_batch : t.num_decode) &&
+                  launchers[config],
+              "no ", batched ? "batched " : "", "decode build ", config);
+  const DecodeConfig& c = batched ? t.decode_batch[config] : t.decode[config];
   const int maxm = c.max_query_len;
   TORCH_CHECK(q.is_contiguous() && out.is_contiguous(),
               "q and out must be contiguous");
@@ -283,10 +341,11 @@ void rdna_prefill_attn(int64_t config, torch::Tensor& q,
                        const std::optional<torch::Tensor>& query_start_loc,
                        int64_t head_group) {
   using namespace rdna;
+  const Table t = device_table();
   TORCH_CHECK(
-      config >= 0 && config < kNumPrefillConfigs && prefill_launchers()[config],
+      config >= 0 && config < t.num_prefill && t.prefill_launchers[config],
       "no prefill build ", config);
-  const PrefillConfig& c = kPrefillConfigs[config];
+  const PrefillConfig& c = t.prefill[config];
   TORCH_CHECK(q.is_contiguous() && out.is_contiguous(),
               "q and out must be contiguous");
   TORCH_CHECK(
@@ -363,7 +422,7 @@ void rdna_prefill_attn(int64_t config, torch::Tensor& q,
                 "scratch too small for this build: needs ", rows * d, ", ",
                 2 * rows, ", ", target, " elements");
   }
-  prefill_launchers()[config](
+  t.prefill_launchers[config](
       {q.data_ptr(), kv_cache.data_ptr(), block_table.data_ptr<int>(),
        out.data_ptr(), seq_lens.data_ptr<int>(), partial_o.data_ptr<float>(),
        partial_ml.data_ptr<float>(), counters.data_ptr<int>(), (int)q.size(0),

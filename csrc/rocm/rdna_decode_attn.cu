@@ -1240,7 +1240,9 @@ struct DecodeBatch {
   int blockTableStride, accStride, statStride, counterStride, mmStride;
 };
 
-template <DecodeConfig C, bool kBatched, typename OutT>
+// A is the GPU family the entry is built for: an entry in two families'
+// tables is two kernels, each in its family's code objects.
+template <DecodeConfig C, bool kBatched, typename OutT, Arch A>
 __global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
     const typename Decode<C, kBatched>::elem_t* __restrict__ q,
     const typename Decode<C, kBatched>::elem_t* __restrict__ kv,
@@ -1288,7 +1290,7 @@ __global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
 }
 
 // Arguments are checked by rdna_registry.cu.
-template <DecodeConfig C, bool kBatched = false>
+template <DecodeConfig C, bool kBatched = false, Arch A = Arch::kGfx1151>
 void launch_decode(const LaunchArgs& a) {
   using K = Decode<C, kBatched>;
   using elem_t = typename K::elem_t;
@@ -1303,17 +1305,21 @@ void launch_decode(const LaunchArgs& a) {
     (void)hipDeviceGetAttribute(&numWgps, hipDeviceAttributeMultiprocessorCount,
                                 device);
     (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
-        &perWgp, decode_attn<C, kBatched, elem_t>, K::kThreads, 0);
-    // The runtime assumes 64 KiB of LDS per WGP; gfx1151 has 128 KiB.
+        &perWgp, decode_attn<C, kBatched, elem_t, A>, K::kThreads, 0);
+    // The runtime assumes 64 KiB of LDS per WGP; gfx1150..gfx1153 have
+    // 128 KiB (64 KiB at most per workgroup).  VGPRs a SIMD lane: 1536 in
+    // blocks of 24 on gfx1151, 1024 in blocks of 16 on the others.
     hipFuncAttributes attrs;
     hipDeviceProp_t prop;
-    if (hipFuncGetAttributes(&attrs, reinterpret_cast<const void*>(
-                                         decode_attn<C, kBatched, elem_t>)) ==
-            hipSuccess &&
+    if (hipFuncGetAttributes(
+            &attrs, reinterpret_cast<const void*>(
+                        decode_attn<C, kBatched, elem_t, A>)) == hipSuccess &&
         hipGetDeviceProperties(&prop, device) == hipSuccess &&
-        strstr(prop.gcnArchName, "gfx1151")) {
+        strstr(prop.gcnArchName, "gfx115")) {
+      const bool gfx1151 = strstr(prop.gcnArchName, "gfx1151");
+      const int vgprs = gfx1151 ? 1536 : 1024, block = gfx1151 ? 24 : 16;
       const int wavesPerSimd =
-          std::min(16, 1536 / ((attrs.numRegs + 23) / 24 * 24));
+          std::min(16, vgprs / ((attrs.numRegs + block - 1) / block * block));
       const int byWaves = 2 * (2 * wavesPerSimd / K::kWaves);
       const int byLds = attrs.sharedSizeBytes
                             ? 128 * 1024 / (int)attrs.sharedSizeBytes
@@ -1340,7 +1346,7 @@ void launch_decode(const LaunchArgs& a) {
         << 1;
     batch = {a.bt_stride, a.acc_stride, a.ml_stride, a.cnt_stride, a.mm_stride};
   }
-  hipLaunchKernelGGL((decode_attn<C, kBatched, elem_t>), grid, threads, 0,
+  hipLaunchKernelGGL((decode_attn<C, kBatched, elem_t, A>), grid, threads, 0,
                      a.stream, static_cast<const elem_t*>(a.q),
                      static_cast<const elem_t*>(a.kv), a.bt, a.acc, a.m, a.l,
                      a.cnt, static_cast<elem_t*>(a.out), a.seq_lens, a.bt_width,
