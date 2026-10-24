@@ -15,6 +15,10 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.trace_builder import _GRANITE_SCENARIOS, _build_granite
+from vllm.entrypoints.generate.base.protocol import FunctionDefinition
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.parser.granite import GraniteParser, _granite_arg_converter
 
 TOOL_TOKEN = "<|tool_call|>"
@@ -188,6 +192,37 @@ class TestNonStreaming:
         assert [t.name for t in tools] == ["get_weather"]
         assert json.loads(tools[0].arguments) == {"city": "SF"}
 
+    def test_untyped_param_keeps_emitted_type(self, parser, mock_request):
+        # Granite emits JSON arguments, so values arrive typed; a property
+        # without ``type`` must not stringify them.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"description": "Any JSON value."},
+                            "flag": {"description": "Any JSON value."},
+                            "note": {"description": "Any JSON value."},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": 5, "flag": true, "note": null}}}}]'
+        )
+        _, _, tools = parser.parse(text, mock_request)
+        assert [t.name for t in tools] == ["submit"]
+        assert json.loads(tools[0].arguments) == {
+            "count": 5,
+            "flag": True,
+            "note": None,
+        }
+
     def test_marker_without_array_is_not_a_tool_call(self, parser, mock_request):
         # A non-array body after the marker (malformed) yields no tool call.
         text = f'{TOOL_TOKEN} {{"name": "func", "arguments": {{}}}}'
@@ -224,6 +259,90 @@ class TestStreaming:
         text = f'{TOOL_TOKEN} [{{"name": "func", "arguments": {{"a": 1'
         results = _stream(parser, mock_request, text, 3)
         assert TOOL_TOKEN not in _collect_content(results)
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7])
+    def test_streamed_middle_param_corrected(self, parser, mock_request, chunk_size):
+        # The first argument is complete before the object closes, so it must
+        # be corrected on its own; otherwise "5" streams and the final 5 then
+        # cannot extend the already-sent prefix.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": "5", "note": "x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, chunk_size)
+        args = _collect_args(results)
+        assert json.loads(args[0]) == {"count": 5, "note": "x"}
+
+    def test_streamed_nonfinite_middle_param_valid_json(self, parser, mock_request):
+        # A NaN in an already-complete middle value must be sanitized before
+        # it streams, or the client ends up with invalid JSON.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"description": "Any JSON value."},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": NaN, "note": "x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, 1)
+        args = _collect_args(results)
+        assert json.loads(args[0]) == {"count": "NaN", "note": "x"}
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7])
+    def test_streamed_compact_args_survive_correction(
+        self, parser, mock_request, chunk_size
+    ):
+        # Compact separators and no space after ':' must survive correction:
+        # re-serializing with json.dumps normalizes them, which cannot extend
+        # the already-streamed prefix and truncates the call.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count":"5","note":"x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, chunk_size)
+        args = _collect_args(results)
+        assert args[0] == '{"count":5,"note":"x"}'
 
 
 class TestReplay:

@@ -6,7 +6,7 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -1077,14 +1077,75 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def extract_types_from_schema(schema: Any) -> list[str]:
+def schema_admits_any_value(schema: Any) -> bool:
+    """Whether *schema* is explicitly untyped, i.e. admits any JSON value.
+
+    An empty dict or ``true`` schema is untyped, as is a union with an
+    untyped ``anyOf``/``oneOf`` branch.  Sibling keywords are conjunctive:
+    every present ``anyOf``/``oneOf`` must have an untyped branch, and
+    every ``allOf`` branch must be untyped.  ``type``/``enum``/``const``
+    narrow the schema, and an unresolved ``$ref`` is unknown rather than
+    untyped.
+    """
+    if schema is True:
+        return True
+    if not isinstance(schema, dict):
+        return False
+    if any(key in schema for key in ("type", "enum", "const", "$ref", "$dynamicRef")):
+        return False
+
+    for choice_field in ("anyOf", "oneOf"):
+        choices = schema.get(choice_field)
+        if isinstance(choices, list) and not any(
+            schema_admits_any_value(choice) for choice in choices
+        ):
+            return False
+
+    all_of = schema.get("allOf")
+    if not isinstance(all_of, list):
+        return True
+    return all(schema_admits_any_value(choice) for choice in all_of)
+
+
+def _json_type_name(value: Any) -> str | None:
+    """JSON Schema type name of *value*, or ``None`` for a non-JSON type."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
+
+
+def extract_types_from_schema(
+    schema: Any,
+    *,
+    fallback: list[str] | None = None,
+) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
-    when no type information can be determined.
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``.  A schema with no declared
+    type returns *fallback* (default ``["string"]``), except that a non-dict
+    schema and one whose only constraint is an unresolved
+    ``$ref``/``$dynamicRef`` are unknown rather than untyped and return
+    ``["string"]``; explicit ``type``/``enum`` siblings of a ``$ref`` still
+    apply.
     """
-    if schema is None or not isinstance(schema, dict):
+    if fallback is None:
+        fallback = ["string"]
+    if schema is True:
+        return list(fallback)
+    if not isinstance(schema, dict):
         return ["string"]
 
     types: set[str] = set()
@@ -1098,29 +1159,29 @@ def extract_types_from_schema(schema: Any) -> list[str]:
                 if isinstance(t, str):
                     types.add(t)
 
-    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+    if "enum" in schema and isinstance(schema["enum"], list):
         for value in schema["enum"]:
-            if value is None:
-                types.add("null")
-            elif isinstance(value, bool):
-                types.add("boolean")
-            elif isinstance(value, int):
-                types.add("integer")
-            elif isinstance(value, float):
-                types.add("number")
-            elif isinstance(value, str):
-                types.add("string")
-            elif isinstance(value, list):
-                types.add("array")
-            elif isinstance(value, dict):
-                types.add("object")
+            type_name = _json_type_name(value)
+            if type_name is not None:
+                types.add(type_name)
+
+    if "const" in schema:
+        type_name = _json_type_name(schema["const"])
+        if type_name is not None:
+            types.add(type_name)
 
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
             for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice))
+                types.update(extract_types_from_schema(choice, fallback=fallback))
 
-    return list(types) if types else ["string"]
+    if types:
+        return list(types)
+    if "$ref" in schema or "$dynamicRef" in schema:
+        # The only constraint lives behind an unresolved reference; the
+        # type is unknown rather than untyped, so keep the string default.
+        return ["string"]
+    return list(fallback)
 
 
 _TYPE_ALIASES: dict[str, str] = {
@@ -1150,6 +1211,11 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+def canonical_schema_types(types: Iterable[str]) -> set[str]:
+    """Normalize schema type strings to the JSON Schema names vLLM coerces to."""
+    return {_TYPE_ALIASES.get(t.strip().lower(), t.strip().lower()) for t in types}
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1166,9 +1232,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if isinstance(schema_type, str):
         schema_type = [schema_type]
 
-    normalized_types = {
-        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
-    }
+    normalized_types = canonical_schema_types(schema_type)
 
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
@@ -1240,6 +1304,60 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if not _is_json_finite(parsed):
         return value
     return parsed
+
+
+def coerce_typed_value(value: Any, schema: Any) -> tuple[Any, bool]:
+    """Coerce an already-typed value according to its property *schema*.
+
+    Unlike :func:`coerce_to_schema_type`, *value* may be any JSON value;
+    non-string values are serialized before coercion. A schema admitting any
+    value (see :func:`schema_admits_any_value`) leaves the value as emitted,
+    since no branch of it justifies changing the type. Returns
+    ``(value, changed)``.
+    """
+    if not isinstance(schema, dict):
+        return value, False
+    if schema_admits_any_value(schema):
+        return value, False
+    types = extract_types_from_schema(schema, fallback=[])
+    if not types:
+        return value, False
+    raw_value = (
+        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    )
+    coerced = coerce_to_schema_type(raw_value, types)
+    return coerced, type(coerced) is not type(value) or coerced != value
+
+
+def sanitize_non_finite(value: Any) -> tuple[Any, bool]:
+    """Replace non-finite floats with their string form, recursively.
+
+    ``json.dumps`` renders ``NaN``/``Infinity`` as invalid JSON, so values
+    headed for serialization are sanitized first. Containers are updated in
+    place. Returns ``(value, changed)``.
+    """
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value, False
+        # Spell it the way json.dumps spells it ("NaN"/"Infinity").
+        return json.dumps(value), True
+    if isinstance(value, dict):
+        changed = False
+        for key, item in value.items():
+            sanitized, item_changed = sanitize_non_finite(item)
+            if item_changed:
+                value[key] = sanitized
+                changed = True
+        return value, changed
+    if isinstance(value, list):
+        changed = False
+        for i, item in enumerate(value):
+            sanitized, item_changed = sanitize_non_finite(item)
+            if item_changed:
+                value[i] = sanitized
+                changed = True
+        return value, changed
+    return value, False
 
 
 def compute_tool_delta(

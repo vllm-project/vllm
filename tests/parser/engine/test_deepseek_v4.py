@@ -216,6 +216,38 @@ class TestArgConverter:
         assert isinstance(result["n"], str)
 
 
+class TestUntypedSchemaParams:
+    def test_untyped_param_keeps_emitted_type(self, mock_tokenizer):
+        # ``string="false"`` is the model declaring a JSON value; a property
+        # without ``type`` must not stringify it.
+        request = _test_request(
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "submit",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"count": {"description": "Any value."}},
+                        },
+                    },
+                }
+            ]
+        )
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}submit{DSML_INVOKE_NAME_END}\n"
+            f"{_param('count', 'false', '5')}\n"
+            f"{DSML_TOOL_END}"
+        )
+        result = parser.extract_tool_calls(text, request)
+
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"count": 5}
+
+
 class TestImplicitParameterClose:
     def test_non_streaming_recovers_next_parameter(self, mock_tokenizer, mock_request):
         text = (
