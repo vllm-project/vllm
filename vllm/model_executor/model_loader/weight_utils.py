@@ -616,6 +616,64 @@ def filter_duplicate_safetensors_files(
     return hf_weights_files
 
 
+# HF sharded checkpoints follow the "<name>-<i>-of-<M>.safetensors" naming
+# convention (e.g. "model-00003-of-00003.safetensors").
+_SHARDED_SAFETENSORS_RE = re.compile(r"-(\d+)-of-(\d+)\.safetensors$")
+
+
+def raise_on_missing_safetensors_shards(hf_weights_files: list[str]) -> None:
+    """Fail fast when sharded checkpoint files are incomplete on disk.
+
+    When ``model.safetensors.index.json`` is absent, the loader globs
+    ``*.safetensors`` and has no manifest to compare against, so a partially
+    downloaded checkpoint (missing shards) loads "successfully" with holes in
+    the state dict, only to surface much later as misleading errors (e.g.
+    quantized layers whose scales were never loaded). The shard numbering in
+    the filenames is enough to detect this: if files named ``-i-of-M`` are
+    present but not all M exist, the download is incomplete.
+
+    No-op for checkpoints that do not use the numbered-shard naming.
+    """
+    present: dict[int, str] = {}
+    family: str | None = None
+    total_shards: int | None = None
+    for fname in hf_weights_files:
+        match = _SHARDED_SAFETENSORS_RE.search(os.path.basename(fname))
+        if match is None:
+            # Un-numbered file (consolidated.safetensors, adapters, ...):
+            # nothing inferable about completeness.
+            return
+        idx, total = int(match.group(1)), int(match.group(2))
+        if not 1 <= idx <= total:
+            # Unexpected numbering scheme: don't judge completeness.
+            return
+        this_family = os.path.basename(fname)[: match.start()]
+        if family is None:
+            family = this_family
+            total_shards = total
+        elif this_family != family or total != total_shards or idx in present:
+            # Mixed shard families: too ambiguous to judge completeness.
+            return
+        present[idx] = os.path.basename(fname)
+
+    if total_shards is None:
+        return
+    missing = sorted(set(range(1, total_shards + 1)) - set(present))
+    if missing:
+        missing_names = [
+            f"{family}-{i:05d}-of-{total_shards:05d}.safetensors" for i in missing
+        ]
+        raise FileNotFoundError(
+            f"Checkpoint on disk is incomplete: found {len(present)} of "
+            f"{total_shards} shards "
+            f"({'-'.join(str(i) for i in sorted(present))} of "
+            f"1-{total_shards}). "
+            f"Missing shard file(s): {', '.join(missing_names)}. "
+            "A partial checkpoint would load with uninitialized weights and "
+            "fail later with confusing errors — re-download the model."
+        )
+
+
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
     """Exclude files that are not needed for inference.
 
