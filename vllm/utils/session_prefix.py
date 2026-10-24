@@ -14,6 +14,21 @@ from typing import Generic, TypeVar
 _T = TypeVar("_T")
 
 
+def lcp(a: str, b: str) -> int:
+    """Exact common prefix length; slice comparisons run in CPython's C code."""
+    n = min(len(a), len(b))
+    if a[:n] == b[:n]:
+        return n
+    lo, hi = 0, n  # a[:lo] == b[:lo] and a[:hi] != b[:hi]
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if a[lo:mid] == b[lo:mid]:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
 def token_bytes(ids: list[int]) -> int:
     if sys.implementation.name == "cpython" and type(ids) is list:
         from vllm import _session_prefix

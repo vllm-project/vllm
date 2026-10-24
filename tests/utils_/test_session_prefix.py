@@ -10,7 +10,35 @@ from typing import cast
 
 import pytest
 
-from vllm.utils.session_prefix import PrefixContext, SessionPrefixStore, token_bytes
+from vllm.utils.session_prefix import (
+    PrefixContext,
+    SessionPrefixStore,
+    lcp,
+    token_bytes,
+)
+
+
+def test_lcp_matches_character_scan():
+    def reference(a, b):
+        i = 0
+        while i < min(len(a), len(b)) and a[i] == b[i]:
+            i += 1
+        return i
+
+    rng = random.Random(0)
+    alphabet = "ab<>中文🙂é"
+    cases = [("", ""), ("", "a"), ("abc", "abc"), ("abc", "abx"), ("abc", "ab")]
+    cases.append(("🙂éa", "🙂éb"))
+    long_text = "中文🙂é" * 4096
+    cases.extend((long_text, long_text[:i] + "x") for i in (0, 1, 8192, len(long_text)))
+    for _ in range(500):
+        a = "".join(rng.choices(alphabet, k=rng.randrange(40)))
+        b = a[: rng.randrange(len(a) + 1)] + "".join(
+            rng.choices(alphabet, k=rng.randrange(10))
+        )
+        cases.append((a, b))
+    for a, b in cases:
+        assert lcp(a, b) == lcp(b, a) == reference(a, b)
 
 
 @pytest.mark.parametrize(

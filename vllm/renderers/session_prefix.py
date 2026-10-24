@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.utils.session_prefix import PrefixContext, SessionPrefixStore, token_bytes
+from vllm.utils.session_prefix import (
+    PrefixContext,
+    SessionPrefixStore,
+    lcp,
+    token_bytes,
+)
 
 if TYPE_CHECKING:
     from vllm.renderers.params import TokenizeParams
@@ -120,7 +125,7 @@ class SessionTokenCache:
                 if text == old.text:
                     route = "exact"
                 else:
-                    common = self.helper.lcp(text, old.text)
+                    common = lcp(text, old.text)
                     at = bisect.bisect_right(old.cuts, (common, sys.maxsize))
                     if at:
                         boundary, tokens = old.cuts[at - 1]
