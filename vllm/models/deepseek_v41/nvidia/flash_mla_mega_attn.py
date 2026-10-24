@@ -13,6 +13,9 @@ of bf16, since the output needs no rotation or quantization here.
 GEMMs speak the kernel's chunk-interleaved layouts directly. A step's prefill
 and decode segments write disjoint token ranges of one output buffer pair, so
 a single ``wo_a`` einsum covers the whole step.
+
+Small decode steps with 16 or 32 live heads run a swap-AB kernel with the same
+inputs and output instead (see ``_swapab_decode_supported``).
 """
 
 from dataclasses import replace
@@ -21,6 +24,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
@@ -46,6 +50,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -63,10 +68,10 @@ _QUANT_GROUP = 32
 _ROPE_ARGS = (False, _ROPE_DIM)
 _SF_ARGS = (_QUANT_GROUP, True, True, True)
 
-# Decode always goes through the mega kernel: there is no batch size at which
-# falling back to the split-KV decode pays, so there is no minimum-token
-# threshold and no fallback path to maintain. What decides whether this layer
-# is worth selecting at all is TP, not the batch size.
+# Decode never falls back to the split-KV decode: there is no batch size at
+# which that pays, so there is no minimum-token threshold and no fallback path
+# to maintain. What decides whether this layer is worth selecting at all is TP,
+# not the batch size.
 #
 # Measured on one GB300 with benchmarks/kernels/benchmark_dsv41_mega_attn.py,
 # CUDA graphs on, counting every per-step op each path runs (64-head model,
@@ -102,6 +107,39 @@ def is_flashmla_mega_attn_supported() -> tuple[bool, str | None]:
     if not hasattr(torch.ops._flashmla_C, "permute_q_b_proj"):
         return False, "vllm._flashmla_C predates the mega attention weight permutes."
     return True, None
+
+
+# Decode steps of up to this many tokens take the swap-AB kernel where the layer
+# supports it. Each token gets a cluster of up to 8 CTAs, one per SM, so its cost
+# grows with the token count sooner than the mega kernel's.
+_SWAPAB_MAX_TOKENS = 16
+
+
+def _swapab_decode_supported(layer: "DeepseekV4MegaAttnAttention") -> bool:
+    """Whether the layer's small decode steps take the swap-AB kernel.
+
+    The mega kernel pads the query heads to 64, so at 32 or 16 live heads half
+    or three quarters of its MMA work is padding. Batch-invariant runs keep the
+    mega kernel at every step size, as the two kernels round the FP8 output
+    differently.
+    """
+    if (
+        layer.compress_ratio == 0
+        or layer.n_local_heads not in (16, 32)
+        or envs.VLLM_BATCH_INVARIANT
+        or not current_platform.is_device_capability_family(100)
+        # The kernel's module imports the CuTe DSL when it loads.
+        or not has_cutedsl()
+    ):
+        return False
+    from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+        swapab_decode_supported,
+    )
+
+    assert layer.topk_indices_buffer is not None
+    return swapab_decode_supported(
+        layer.n_local_heads, layer.window_size, layer.topk_indices_buffer.shape[-1]
+    )
 
 
 def alloc_mega_attn_output(
@@ -193,6 +231,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         permute_on_load(self.wo_a.weight, o_perm, dim=1)
         o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
+        self._use_swapab = _swapab_decode_supported(self)
+        # The swap-AB compile key holds the compressed cache's page, which is
+        # final once the cache is allocated: bind_kv_cache registers it.
+        self._swapab_jit_warmup = (
+            self._use_swapab and vllm_config.kernel_config.enable_jit_warmup
+        )
 
     # ---- interface contract ------------------------------------------------
 
@@ -205,6 +249,25 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         # This kernel is the only one that reads an NVFP4 compressed cache, so
         # it is what an unspecific --kv-cache-dtype resolves to here.
         return "nvfp4_ds_mla"
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        # Only kv sources own a compressed cache, and the layers reading it
+        # share its swap-AB compile key.
+        if self._swapab_jit_warmup:
+            from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+                _SWAPAB_DECODE_KERNEL,
+            )
+
+            assert self.topk_indices_buffer is not None
+            _SWAPAB_DECODE_KERNEL.register_warmup(
+                heads=self.n_local_heads,
+                swa_width=self.window_size,
+                extra_width=self.topk_indices_buffer.shape[-1],
+                extra_record=self.kv_cache.shape[-1],
+                swa_page=self.swa_cache_layer.block_size,
+                extra_page=self.kv_cache.shape[1],
+            )
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
@@ -365,16 +428,49 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         The caches are ``[num_blocks, page, 1, bytes]``, the record taken from
         ``bytes`` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
         cache beside an fp8 SWA one), and the indices ``[s_q, topk]`` int32
-        slot ids (``block * page + offset``, ``-1`` invalid).
+        slot ids (``block * page + offset``, ``-1`` invalid). Where
+        ``_use_swapab`` holds, steps of at most ``_SWAPAB_MAX_TOKENS`` tokens
+        take the swap-AB kernel instead, which reads the same inputs and
+        writes the same output layout.
         """
         extra_cache, extra_idx, extra_len = self._decode_compressed_kv_and_topk(
             flashmla_metadata, swa_metadata
         )
         assert swa_metadata.decode_swa_indices is not None
+        swa_idx = swa_metadata.decode_swa_indices.view(q.shape[0], -1)
+        if (
+            self._use_swapab
+            and q.shape[0] <= _SWAPAB_MAX_TOKENS
+            and extra_cache is not None
+            # The cluster and the warmed-up compile key are sized for the
+            # window; DSpark's non-causal draft steps widen the SWA list past it.
+            and swa_idx.shape[-1] == self.window_size
+        ):
+            from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+                _SWAPAB_DECODE_KERNEL,
+            )
+
+            _SWAPAB_DECODE_KERNEL(
+                q=q,
+                swa_cache=self.swa_cache_layer.kv_cache,
+                swa_idx=swa_idx,
+                swa_len=swa_metadata.decode_swa_lens,
+                extra_cache=extra_cache.squeeze(-2),
+                extra_idx=extra_idx,
+                extra_len=extra_len,
+                positions=positions_int32,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                sink=self.attn_sink,
+                heads=self.n_local_heads,
+                softmax_scale=self.scale,
+                out_data=out.data,
+                out_scale=out.scale,
+            )
+            return
         torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
             q,
             self.swa_cache_layer.kv_cache.unsqueeze(-2),
-            swa_metadata.decode_swa_indices.view(q.shape[0], -1),
+            swa_idx,
             self.scale,
             _HEAD_DIM_V,
             self.attn_sink,
