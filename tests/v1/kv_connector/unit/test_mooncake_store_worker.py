@@ -5187,6 +5187,42 @@ def test_blob_block_hashes_wire_roundtrip():
         _ = view[5]
 
 
+def test_worker_close_ended_store_requests_respects_preempted_req_ids():
+    worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    worker.finished_store_req = set()
+    worker.kv_send_thread = MagicMock()
+    worker.kv_send_thread.stored_requests = {"req-A": 1, "req-B": 2}
+
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(
+        unfinished_request_ids=set(),
+        preempted_req_ids={"req-B"},
+    )
+
+    worker._close_ended_store_requests(finished_req_ids=set(), meta=meta)
+
+    worker.kv_send_thread.delete_finished_stored_request.assert_called_once_with(
+        "req-B"
+    )
+
+
+def test_worker_close_ended_store_requests_deletes_all_preempted():
+    worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    worker.finished_store_req = set()
+    worker.kv_send_thread = MagicMock()
+    worker.kv_send_thread.stored_requests = {"req-A": 1, "req-B": 2}
+
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(
+        unfinished_request_ids=set(),
+        preempted_req_ids={"req-A", "req-B"},
+    )
+
+    worker._close_ended_store_requests(finished_req_ids=set(), meta=meta)
+
+    assert worker.kv_send_thread.delete_finished_stored_request.call_count == 2
+    worker.kv_send_thread.delete_finished_stored_request.assert_any_call("req-A")
+    worker.kv_send_thread.delete_finished_stored_request.assert_any_call("req-B")
+
+
 def test_blob_block_hashes_empty():
     """Empty lookups send hash_len=0 and an empty payload."""
     view = BlobBlockHashes(memoryview(b""), 0)
