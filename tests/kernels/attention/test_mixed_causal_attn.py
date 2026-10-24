@@ -25,6 +25,79 @@ BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
 
 
+# DiffusionGemma passes its persistent per-request causal buffer as int32.
+CAUSAL_FLAG_DTYPES = [torch.bool, torch.int32]
+
+
+@pytest.mark.parametrize("causal_dtype", CAUSAL_FLAG_DTYPES)
+@pytest.mark.parametrize(
+    ("window_left", "expected_starts", "expected_ends"),
+    [
+        (-1, [0, 0, 0, 0, 0], [3, 4, 5, 5, 5]),
+        (1, [2, 3, 2, 3, 4], [3, 4, 4, 5, 5]),
+    ],
+)
+def test_flashinfer_mixed_causal_variable_window_bounds(
+    window_left: int,
+    expected_starts: list[int],
+    expected_ends: list[int],
+    causal_dtype: torch.dtype,
+):
+    from vllm.v1.attention.backends.flashinfer import _make_variable_window_bounds
+
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    seq_lens = torch.tensor([5, 6], dtype=torch.int32)
+    causal = torch.tensor([1, 0], dtype=causal_dtype)
+
+    starts, ends = _make_variable_window_bounds(
+        query_start_loc,
+        seq_lens,
+        causal,
+        window_left,
+        num_tokens=5,
+    )
+
+    assert starts.tolist() == expected_starts
+    assert ends.tolist() == expected_ends
+
+
+@pytest.mark.parametrize("causal_dtype", CAUSAL_FLAG_DTYPES)
+def test_flashinfer_mixed_causal_token_mask(causal_dtype: torch.dtype):
+    from vllm.v1.attention.backends.flashinfer import _make_token_causal_mask
+
+    query_start_loc = torch.tensor([0, 2, 5, 6], dtype=torch.int32)
+    causal = torch.tensor([1, 0, 1], dtype=causal_dtype)
+
+    mask = _make_token_causal_mask(query_start_loc, causal, num_tokens=6)
+
+    assert mask.dtype == torch.bool
+    assert mask.tolist() == [True, True, False, False, False, True]
+
+
+def test_flashinfer_mixed_causal_full_cudagraph_padding():
+    """A FULL CUDA graph batch pads requests with empty queries and tokens past
+    query_start_loc[-1]; padding tokens get [0, 0] bounds and no causal flag."""
+    from vllm.v1.attention.backends.flashinfer import (
+        _make_token_causal_mask,
+        _make_variable_window_bounds,
+    )
+
+    # Two real requests (as in the bounds test), one padded request, and two
+    # padding tokens.
+    query_start_loc = torch.tensor([0, 2, 5, 5], dtype=torch.int32)
+    seq_lens = torch.tensor([5, 6, 0], dtype=torch.int32)
+    causal = torch.tensor([1, 0, 0], dtype=torch.int32)
+
+    starts, ends = _make_variable_window_bounds(
+        query_start_loc, seq_lens, causal, window_left=1, num_tokens=7
+    )
+    mask = _make_token_causal_mask(query_start_loc, causal, num_tokens=7)
+
+    assert starts.tolist() == [2, 3, 2, 3, 4, 0, 0]
+    assert ends.tolist() == [3, 4, 4, 5, 5, 0, 0]
+    assert mask.tolist() == [True, True, False, False, False, False, False]
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
