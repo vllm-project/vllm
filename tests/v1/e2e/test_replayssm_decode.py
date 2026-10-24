@@ -535,7 +535,10 @@ def _generate_with_preemption(llm, block_size: int):
                 f"{after['vllm:num_preemptions'] - before['vllm:num_preemptions']}"
             )
         result.append((completion.token_ids, completion.text, completion.logprobs))
-    return result
+    long = latest["long"]
+    assert long.prompt_token_ids is not None
+    history = long.prompt_token_ids + list(long.outputs[0].token_ids)
+    return result, history
 
 
 @requires_flashinfer_replayssm_materialization
@@ -556,13 +559,15 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
     questions = questions[:16]
     labels = [get_answer_value(question["answer"]) for question in questions]
     assert len(labels) == 16 and INVALID not in labels
-    quality_outputs, stress_outputs, scores = [], [], []
+    quality_outputs, stress_outputs, scores, boundary_outputs = {}, {}, {}, {}
+    probe_history = None
     prompts = None
     try:
         with monkeypatch.context() as patch:
             patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
             envs.disable_envs_cache()
-            for use_replayssm in (False, True):
+            # Retain the accepted ON history for the fresh OFF reference.
+            for use_replayssm in (True, False):
                 with vllm_runner(
                     MAMBA2_MTP_MODEL,
                     trust_remote_code=True,
@@ -589,7 +594,42 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     assert config.use_v2_model_runner is use_v2
                     assert config.scheduler_config.async_scheduling is async_scheduling
                     (block_size,) = runner.collective_rpc(_stress_mamba_block_size)
-                    stress_outputs.append(_generate_with_preemption(llm, block_size))
+                    stress_outputs[use_replayssm], history = _generate_with_preemption(
+                        llm, block_size
+                    )
+                    if use_replayssm:
+                        probe_history = history
+                    else:
+                        assert llm.reset_prefix_cache()
+                    assert probe_history is not None
+                    before_probe = _stress_metric_counts(llm)
+                    (probe,) = llm.generate(
+                        [{"prompt_token_ids": probe_history}],
+                        SamplingParams(temperature=0.0, max_tokens=1, logprobs=5),
+                    )
+                    after_probe = _stress_metric_counts(llm)
+                    assert probe.finished and len(probe.outputs[0].token_ids) == 1
+                    assert probe.prompt_token_ids == probe_history
+                    if use_replayssm:
+                        assert probe.num_cached_tokens is not None
+                        assert probe.num_cached_tokens >= 3 * block_size
+                        assert (
+                            after_probe["vllm:prefix_cache_hits"]
+                            > before_probe["vllm:prefix_cache_hits"]
+                        )
+                    else:
+                        assert probe.num_cached_tokens == 0
+                    completion = probe.outputs[0]
+                    boundary_outputs[use_replayssm] = [
+                        (completion.token_ids, completion.text, completion.logprobs)
+                    ]
+                    print(
+                        f"ReplaySSM={use_replayssm}: boundary probe "
+                        f"history_tokens={len(probe_history)}, "
+                        f"cached_tokens={probe.num_cached_tokens}, "
+                        f"token_ids={completion.token_ids}, "
+                        f"logprobs={completion.logprobs}"
+                    )
 
                     tokenizer = llm.get_tokenizer()
                     if prompts is None:
@@ -668,17 +708,15 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     score = sum(
                         actual == expected for actual, expected in zip(answers, labels)
                     )
-                    scores.append(score)
-                    quality_outputs.append(
-                        [
-                            (
-                                output.outputs[0].token_ids,
-                                output.outputs[0].text,
-                                output.outputs[0].logprobs,
-                            )
-                            for output in outputs
-                        ]
-                    )
+                    scores[use_replayssm] = score
+                    quality_outputs[use_replayssm] = [
+                        (
+                            output.outputs[0].token_ids,
+                            output.outputs[0].text,
+                            output.outputs[0].logprobs,
+                        )
+                        for output in outputs
+                    ]
                     prefix_hits = (
                         after["vllm:prefix_cache_hits"]
                         - before["vllm:prefix_cache_hits"]
@@ -703,15 +741,21 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
     finally:
         envs.disable_envs_cache()
 
-    assert all(score >= 12 for score in scores), scores
-    assert scores[1] >= scores[0], scores
+    check_logprobs_close(
+        outputs_0_lst=boundary_outputs[False],
+        outputs_1_lst=boundary_outputs[True],
+        name_0="baseline_fresh_accepted_history",
+        name_1="replayssm_cached_accepted_history",
+    )
+    assert all(score >= 12 for score in scores.values()), scores
+    assert scores[True] >= scores[False], scores
     for name, outputs in (
         ("stress", stress_outputs),
         ("cached_gsm8k", quality_outputs),
     ):
         check_logprobs_close(
-            outputs_0_lst=outputs[0],
-            outputs_1_lst=outputs[1],
+            outputs_0_lst=outputs[False],
+            outputs_1_lst=outputs[True],
             name_0=f"baseline_{name}",
             name_1=f"replayssm_{name}",
         )
