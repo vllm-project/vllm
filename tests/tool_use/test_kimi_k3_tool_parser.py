@@ -373,6 +373,105 @@ def test_streaming_split_markers_do_not_leak():
     assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
 
 
+@pytest.mark.parametrize("chunk_size", [1, 3, 7, 16, 31, 128, 4096])
+@pytest.mark.parametrize(
+    "output",
+    [
+        _response("answer"),
+        "answer" + RESPONSE_CLOSE,
+        _response("answer") + f'{OPEN}tools{SEP}{OPEN}call tool="calc"{SEP}partial',
+        _response("answer")
+        + _tools(
+            _call("calc", 1, _arg("text", "string", "long value")),
+            _call("calc", 2, _arg("x", "number", "2")),
+        ),
+        _response("answer") + f"{OPEN}{' ' * 32}tools{SEP}" + _call("calc", 1),
+        _response("answer")
+        + _tools(_call("calc", 1).replace(f"{CLOSE}call", f"{CLOSE}{' ' * 32}call")),
+        _response("answer") + _tools(f"{OPEN}call!" + _call("calc", 1)),
+        _response("answer")
+        + _tools(
+            f'{OPEN}call tool="a{CLOSE}call{SEP}b"{SEP}'
+            f"{CLOSE}call{SEP}" + _call("calc", 2)
+        ),
+        _response("answer")
+        + _tools(f'{OPEN}call index="1"{SEP}{CLOSE}call{SEP}' + _call("calc", 2)),
+    ],
+    ids=[
+        "response-only",
+        "consumed-response-prefix",
+        "truncated-call",
+        "parallel",
+        "spaced-tools",
+        "spaced-close",
+        "invalid-opener",
+        "close-in-attributes",
+        "missing-name",
+    ],
+)
+def test_streaming_call_boundaries(output, chunk_size):
+    request = _request()
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    expected = KimiK3ToolParser(_dummy_tokenizer()).extract_tool_calls(output, request)
+    previous_text = ""
+    content = []
+    calls = []
+    for chunk_start in range(0, len(output), chunk_size):
+        delta_text = output[chunk_start : chunk_start + chunk_size]
+        current_text = previous_text + delta_text
+        message = parser.extract_tool_calls_streaming(
+            previous_text, current_text, delta_text, [], [], [], request
+        )
+        if message is not None:
+            content.append(message.content or "")
+            calls.extend(message.tool_calls or [])
+        previous_text = current_text
+
+    assert "".join(content) == "answer"
+    assert [call.index for call in calls] == list(range(len(expected.tool_calls)))
+    functions = []
+    for call in calls:
+        assert call.function is not None
+        functions.append(call.function.model_dump())
+    assert functions == [
+        {"name": call.function.name, "arguments": call.function.arguments}
+        for call in expected.tool_calls
+    ]
+
+
+def test_streaming_does_not_redecode_completed_calls(monkeypatch):
+    request = _request()
+    call = _call("calc", 1, _arg("text", "string", "x" * 4096))
+    output = _tools(call) + "trailing output"
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    decode_count = 0
+    original_decode_call = parser._decode_call
+
+    def counted_decode_call(attrs: str, body: str):
+        nonlocal decode_count
+        decode_count += 1
+        return original_decode_call(attrs, body)
+
+    monkeypatch.setattr(parser, "_decode_call", counted_decode_call)
+
+    previous_text = ""
+    for chunk_start in range(0, len(output), 11):
+        delta_text = output[chunk_start : chunk_start + 11]
+        current_text = previous_text + delta_text
+        parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        previous_text = current_text
+
+    assert decode_count == 1
+
+
 def test_tool_call_ids_are_unique_across_messages():
     output = _tools(_call("calc", 1))
 
