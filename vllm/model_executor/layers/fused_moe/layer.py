@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 )
 from vllm.model_executor.layers.fused_moe.expert_substitution import (
     SubstitutedRoutedExperts,
+    decoder_layer_index,
     make_expert_substitution,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -78,7 +79,24 @@ def determine_expert_counts(
     num_redundant_experts: int,
     n_shared_experts: int | None,
     fuse_shared_experts: bool,
+    quant_config: QuantizationConfig | None = None,
+    prefix: str | None = None,
 ) -> tuple[int, int, int]:
+    # A REAP-pruned checkpoint keeps a different number of experts per layer,
+    # recorded in its quantization config; the model config carries only the
+    # maximum. Its router gate and expert weights are compacted to the
+    # per-layer count, so the router and the experts must use it too.
+    layer_idx = decoder_layer_index(prefix) if prefix else None
+    if quant_config is not None and layer_idx is not None:
+        layer_num_experts = quant_config.get_num_experts_for_layer(layer_idx)
+        if layer_num_experts is not None and layer_num_experts != num_experts:
+            if num_redundant_experts:
+                raise NotImplementedError(
+                    "per-layer expert counts of a pruned checkpoint do not "
+                    "support EPLB redundant experts"
+                )
+            num_experts = layer_num_experts
+
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
 
@@ -257,6 +275,8 @@ def FusedMoEFactory(
             num_redundant_experts,
             n_shared_experts,
             fuse_shared_experts,
+            quant_config=quant_config,
+            prefix=prefix,
         )
     )
     expert_substitution = make_expert_substitution(
