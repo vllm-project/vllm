@@ -4,6 +4,8 @@
 
 import torch
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 
@@ -50,10 +52,6 @@ class RotaryEmbeddingBase(CustomOp):
         self.use_aiter = (
             self.enabled() and rocm_aiter_ops.is_triton_rotary_embed_enabled()
         )
-        if self.use_aiter:
-            self.rocm_aiter_triton_rotary_embedding = (
-                rocm_aiter_ops.get_triton_rotary_embedding_op()
-            )
 
         if init_cache:
             cache = self._compute_cos_sin_cache()
@@ -208,6 +206,16 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        if key is not None:
+            return ir.ops.rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox_style,
+            )
         return self.forward_static(
             positions,
             query,
@@ -238,9 +246,6 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         from vllm import _custom_ops as ops
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
         ops.rotary_embedding(
             positions,
             query,
@@ -257,18 +262,19 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_aiter:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
-        return self.forward_cuda(positions, query, key)
+        if key is None:
+            return self.forward_cuda(positions, query, key)
+
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        return ir.ops.rotary_embedding.maybe_inplace(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            cos_sin_cache,
+            self.is_neox_style,
+        )
 
     def forward_xpu(
         self,

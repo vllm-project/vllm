@@ -85,3 +85,39 @@ def fused_add_rms_norm(
 
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+def rotary_embedding_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    return (
+        rotary_dim == cos_sin_cache.shape[-1]
+        and query.dtype == key.dtype == cos_sin_cache.dtype
+    )
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "vllm_c",
+    supports_args=rotary_embedding_supported_args,
+    supported=IS_ROCM,
+    inplace=True,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    from vllm import _custom_ops as ops
+
+    ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox)
+    return query, key

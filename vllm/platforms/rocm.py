@@ -1360,6 +1360,7 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
@@ -1384,11 +1385,19 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        if not cc.is_custom_op_enabled("rotary_embedding"):
+            rotary_embedding = ["native"]
+        elif rocm_aiter_ops.is_triton_rotary_embed_enabled():
+            rotary_embedding = ["aiter", "vllm_c", "native"]
+        else:
+            rotary_embedding = ["vllm_c", "native"]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["native"],
+            rotary_embedding=rotary_embedding,
         )
 
     @classmethod
