@@ -320,6 +320,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/worker/test_gpu_worker.py::test_cpu_worker_without_triton
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
@@ -644,6 +645,7 @@ steps:
   - vllm/v1/
   - vllm/version.py
   - cmake/utils.cmake
+  - cmake/hipify.py
   - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
