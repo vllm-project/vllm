@@ -95,10 +95,6 @@ class EmbeddingCache:
             assert key not in self._entries, (
                 f"EmbeddingCache: duplicate alloc for {key!r}"
             )
-            assert n_blocks <= self._num_blocks, (
-                f"EmbeddingCache: {n_blocks} blocks requested but capacity "
-                f"is {self._num_blocks}"
-            )
             if len(self._free_blocks) + self._evictable_block_count < n_blocks:
                 return None
             self._evict_until(n_blocks)
