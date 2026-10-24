@@ -91,6 +91,23 @@ class BaseLayerWithLoRA(nn.Module):
         """Overwrites lora tensors at index."""
         ...
 
+    def slot_weights(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        """Views of the LoRA A and B buffers of GPU slot `index`, per slice.
+
+        A is `(max_lora_rank, input_size)` and B is
+        `(output_size, max_lora_rank)`, the orientation `set_lora` takes, but
+        local to this rank (sharded the way `set_lora` shards) and padded to
+        `max_lora_rank`. The views alias the buffers the forward reads, so an
+        in-place write takes effect on the next forward without a copy.
+        MoE factors additionally carry the local expert axis (one for shared
+        factors); see `FusedMoEWithLoRA.slot_weights` for their slice order.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not expose its LoRA slot buffers"
+        )
+
     def set_mapping(
         self,
         punica_wrapper,
