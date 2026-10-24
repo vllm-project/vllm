@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
     SupportsHMA,
+    TransferPriority,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -721,6 +722,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _default_transfer_priority = TransferPriority.CRITICAL
     _cache_hit_source = CacheHitSource.P2P
 
     def __init__(
