@@ -36,6 +36,11 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -312,6 +317,67 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
         module.ngram_embedding.weight,
         torch.cat((shard_0[2:4], shard_1[0:2])),
     )
+
+
+def test_ngram_embedding_skips_nonlocal_shards_before_weight_loader() -> None:
+    module = _make_ngram_embedding_for_load_test()
+    module.split_ngram_parts = 4
+    weight = module.ngram_embedding.weight
+    loader = weight.weight_loader
+    loaded_starts = []
+
+    def recording_loader(param, loaded_weight, checkpoint_start):
+        loaded_starts.append(checkpoint_start)
+        loader(param, loaded_weight, checkpoint_start=checkpoint_start)
+
+    weight.weight_loader = recording_loader
+    shards = torch.arange(16, dtype=torch.float32).reshape(4, 2, 2)
+
+    loaded = module.load_weights(
+        [(f"ngram_embedding.shard_{i}.weight", shard) for i, shard in enumerate(shards)]
+    )
+
+    assert loaded == {"ngram_embedding.weight"}
+    assert loaded_starts == [2, 4]
+    torch.testing.assert_close(weight, torch.cat((shards[1], shards[2])))
+
+
+def test_ngram_embedding_reload_keeps_host_table_on_cpu() -> None:
+    module = _make_ngram_embedding_for_load_test()
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.org_vocab_size = 8
+    embedding.embedding_dim = 2
+    embedding.shard_indices = module.ngram_embedding.shard_indices
+    embedding.weight = nn.Parameter(torch.full((4, 2), -1.0), requires_grad=False)
+    embedding.weight.weight_loader = lambda param, loaded_weight, checkpoint_start: (
+        copy_ple_embedding_shard_(
+            param,
+            loaded_weight,
+            checkpoint_start=checkpoint_start,
+            tp_start=2,
+            tp_end=6,
+        )
+    )
+    module.ngram_embedding = embedding
+    host_weight = embedding.weight
+    shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    shard_1 = torch.arange(8, 16, dtype=torch.float32).reshape(4, 2)
+
+    # A meta default device stands in for the accelerator.
+    with torch.device("meta"):
+        record_metadata_for_reloading(embedding)
+    initialize_layerwise_reload(embedding)
+    module.load_weights(
+        [
+            ("ngram_embedding.shard_0.weight", shard_0),
+            ("ngram_embedding.shard_1.weight", shard_1),
+        ]
+    )
+    finalize_layerwise_reload(embedding, model_config=None)
+
+    assert embedding.weight is host_weight
+    torch.testing.assert_close(host_weight, torch.cat((shard_0[2:4], shard_1[0:2])))
 
 
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
