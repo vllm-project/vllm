@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl_moe_nvfp4
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -362,6 +362,8 @@ EXPERTS_BACKENDS = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "trtllm_fp8",
+    "flashinfer_trtllm_nvfp4",
+    "flashinfer_cutedsl_nvfp4",
 ]
 
 
@@ -377,6 +379,98 @@ def _make_experts(
 ):
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
+
+    if experts_backend.endswith("_nvfp4"):
+        from types import SimpleNamespace
+
+        from tests.kernels.quantization.nvfp4_utils import (
+            FLOAT4_E2M1_MAX,
+            FLOAT8_E4M3_MAX,
+            dequantize_nvfp4_to_dtype,
+        )
+        from vllm import _custom_ops as ops
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            backend_to_kernel_cls as nvfp4_backend_to_kernel_cls,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            convert_to_nvfp4_moe_kernel_format,
+            make_nvfp4_moe_quant_config,
+            map_nvfp4_backend,
+        )
+
+        def quant_dequant(x: torch.Tensor, global_scale: torch.Tensor):
+            x_q, x_s = ops.scaled_fp4_quant(
+                x, global_scale, is_sf_swizzled_layout=False
+            )
+            x_dq = dequantize_nvfp4_to_dtype(
+                x_q,
+                x_s,
+                global_scale,
+                dtype=x.dtype,
+                device=x.device,
+                is_sf_linear_layout=True,
+            )
+            return x_q, x_s, x_dq
+
+        def quantize_experts(w: torch.Tensor):
+            # One global scale per expert, as NVFP4 checkpoints store them.
+            global_scales = (
+                FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w.abs().amax(dim=(1, 2)).float()
+            )
+            w_q, w_s, w_dq = zip(
+                *(quant_dequant(we, gs) for we, gs in zip(w, global_scales))
+            )
+            alphas = 1 / global_scales
+            return torch.stack(w_q), torch.stack(w_s), alphas, torch.stack(w_dq)
+
+        w1_q, w1_s, w1_alphas, w1_dq = quantize_experts(w1_bf16)
+        w2_q, w2_s, w2_alphas, w2_dq = quantize_experts(w2_bf16)
+        # Unit activation scales: the deepep_v2 receiver quantizes with them.
+        one = torch.ones(1, device="cuda", dtype=torch.float32)
+        _, _, a_dq = quant_dequant(test_tensors.rank_tokens, one)
+        torch_combined = torch_experts(
+            a_dq, w1_dq, w2_dq, test_tensors.topk_weights, test_tensors.topk
+        )
+
+        backend = map_nvfp4_backend(experts_backend.removesuffix("_nvfp4"))
+        (
+            w1_ep,
+            w1_s_ep,
+            w1_alphas_ep,
+            a1_scale,
+            w2_ep,
+            w2_s_ep,
+            w2_alphas_ep,
+            a2_scale,
+        ) = convert_to_nvfp4_moe_kernel_format(
+            backend,
+            SimpleNamespace(activation=moe_config.activation, moe_config=moe_config),
+            w1_q[e_start:e_end],
+            w1_s[e_start:e_end],
+            w1_alphas[e_start:e_end],
+            one,
+            w2_q[e_start:e_end],
+            w2_s[e_start:e_end],
+            w2_alphas[e_start:e_end],
+            one,
+            is_act_and_mul=True,
+        )
+        quant_config = make_nvfp4_moe_quant_config(
+            backend,
+            w13_scale=w1_s_ep,
+            w2_scale=w2_s_ep,
+            w13_scale_2=w1_alphas_ep,
+            w2_scale_2=w2_alphas_ep,
+            a13_scale=a1_scale,
+            a2_scale=a2_scale,
+        )
+        experts_cls = next(
+            cls
+            for cls in nvfp4_backend_to_kernel_cls(backend)
+            if issubclass(cls, mk.FusedMoEExpertsModular)
+        )
+        fused_experts = experts_cls(moe_config=moe_config, quant_config=quant_config)
+        return fused_experts, w1_ep, w2_ep, torch_combined, 1e-1, 2e-1
 
     if experts_backend != "trtllm_fp8":
         from vllm.model_executor.layers.fused_moe.config import (
@@ -607,6 +701,13 @@ def _deep_ep_v2_moe_backends(
                 )
 
     torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
+    assert isinstance(out, torch.Tensor)
+    # NVFP4 noise needs an atol that would also pass a wrong output; so compare
+    # direction too.
+    cosine = torch.nn.functional.cosine_similarity(
+        out.flatten().float(), torch_combined.flatten().float(), dim=0
+    )
+    assert cosine > 0.99, f"cosine similarity {cosine:.4f} below 0.99"
 
 
 @pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
@@ -632,6 +733,11 @@ def test_deep_ep_v2_moe_backends(
     use_cudagraph: bool,
     workspace_init,
 ):
+    if (
+        experts_backend == "flashinfer_cutedsl_nvfp4"
+        and not has_flashinfer_cutedsl_moe_nvfp4()
+    ):
+        pytest.skip("Requires FlashInfer CuTeDSL NVFP4 MoE")
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(

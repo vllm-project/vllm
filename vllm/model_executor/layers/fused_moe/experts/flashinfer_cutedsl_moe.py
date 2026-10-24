@@ -234,7 +234,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             w2_weight_sf=self.w2_scale,
             w2_alpha=self.g2_alphas,
             num_experts=self.global_num_experts,
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
