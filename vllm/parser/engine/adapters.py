@@ -49,6 +49,9 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self._parser_engine = self._parser_engine_cls(tokenizer, **kwargs)  # type: ignore[call-arg]
         self._parser_engine_kwargs = kwargs
         self._counting_parser_engine: ParserEngine | None = None
+        self._counted_token_ids: list[int] = []
+        # None after a single-pass parse
+        self._num_fed_counting_tokens: int | None = None
         # TODO: Remove once Responses finalization reuses accumulated streaming
         # parser results instead of reparsing the complete output.
         self._streaming_count_valid = False
@@ -72,6 +75,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self._parser_engine.set_prompt_token_ids(prompt_token_ids)
         if self._counting_parser_engine is not None:
             self._counting_parser_engine.set_prompt_token_ids(prompt_token_ids)
+            self._counted_token_ids = []
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
@@ -156,10 +160,44 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             self._counting_parser_engine._prompt_closes_reasoning = (
                 self._parser_engine._prompt_closes_reasoning
             )
-        self._counting_parser_engine._single_pass_parse(
-            self.model_tokenizer.decode(token_ids), token_ids
-        )
-        return self._counting_parser_engine.count_reasoning_tokens(token_ids)
+        engine = self._counting_parser_engine
+        counted = self._counted_token_ids
+        # parse only the tokens added since the last call.
+        if (
+            counted
+            and len(counted) <= len(token_ids)
+            and list(token_ids[: len(counted)]) == counted
+        ):
+            if len(counted) < len(token_ids):
+                self._feed_counting_tokens(engine, token_ids[len(counted) :])
+            return engine.count_reasoning_tokens(token_ids)
+        engine._single_pass_parse(self.model_tokenizer.decode(token_ids), token_ids)
+        self._counted_token_ids = list(token_ids)
+        self._num_fed_counting_tokens = None
+        return engine.count_reasoning_tokens(token_ids)
+
+    def _feed_counting_tokens(
+        self, engine: ParserEngine, new_token_ids: Sequence[int]
+    ) -> None:
+        token_ids = self._counted_token_ids
+        token_ids.extend(new_token_ids)
+        num_fed = self._num_fed_counting_tokens or 0
+        start = max(0, num_fed - 4)
+        prefix_text = self.model_tokenizer.decode(token_ids[start:num_fed])
+        end = len(token_ids)
+        text = self.model_tokenizer.decode(token_ids[start:end])
+        # Hold back only an unfinished trailing character. For utf-8 this backs off
+        # at most 3 tokens.
+        while end > num_fed and text.endswith("\ufffd"):
+            end -= 1
+            text = self.model_tokenizer.decode(token_ids[start:end])
+        if end == num_fed:
+            return
+        if self._num_fed_counting_tokens is None:
+            # A single-pass parse finished the engine; replay its input.
+            engine._reset()
+        engine._feed(text[len(prefix_text) :], token_ids[num_fed:end])
+        self._num_fed_counting_tokens = end
 
 
 class ParserEngineToolAdapter(ToolParser):

@@ -598,3 +598,70 @@ def test_prompt_reasoning_streaming_matches_non_streaming(tokenizer, case):
 
     assert (streamed_reasoning, streamed_content) == non_streaming
     assert parser.count_reasoning_tokens(output_ids) == non_streaming_count
+
+
+@pytest.mark.parametrize("case", ["continue_final_message", "template_closed_thinking"])
+def test_prompt_closed_streaming_count_parses_once(tokenizer, case, monkeypatch):
+    prompt_ids, request, output = prompt_case(tokenizer, case)
+    output_ids = encode(tokenizer, output)
+    parser = reasoning_parser(tokenizer)
+    parser.set_prompt_token_ids(prompt_ids)
+    expected = parser.count_reasoning_tokens(output_ids)
+
+    single_passes = 0
+    single_pass_parse = ParserEngine._single_pass_parse
+
+    def counting_single_pass_parse(self, *args, **kwargs):
+        nonlocal single_passes
+        single_passes += 1
+        return single_pass_parse(self, *args, **kwargs)
+
+    monkeypatch.setattr(ParserEngine, "_single_pass_parse", counting_single_pass_parse)
+
+    parser = reasoning_parser(tokenizer)
+    for i, token_id in enumerate(output_ids):
+        parser.parse_delta(
+            tokenizer.decode([token_id]),
+            [token_id],
+            request,
+            prompt_token_ids=prompt_ids,
+            finished=i == len(output_ids) - 1,
+        )
+        count = parser.count_reasoning_tokens(tuple(output_ids[: i + 1]))
+
+    assert count == expected
+    assert single_passes == 1
+
+
+# Byte-level BPE splits these characters across several tokens.
+MULTIBYTE_REASONED_OUTPUT = (
+    "<think>\nlet me think about 𝔘𝔫𝔦𝔠𝔬𝔡𝔢\n</think>\n\n" + PLAIN_TEXT
+)
+
+
+def test_incremental_count_matches_single_pass(tokenizer):
+    output_ids = encode(tokenizer, MULTIBYTE_REASONED_OUTPUT)
+    expected = reasoning_parser(tokenizer).count_reasoning_tokens(output_ids)
+    assert expected > 0
+
+    parser = reasoning_parser(tokenizer)
+    for i in range(1, len(output_ids) + 1):
+        count = parser.count_reasoning_tokens(tuple(output_ids[:i]))
+
+    assert count == expected
+
+
+def test_incremental_count_holds_split_character_after_single_pass(tokenizer):
+    """A delta ending mid-character right after a single-pass parse must
+    keep the previous count instead of resetting the counting engine."""
+    output_ids = encode(tokenizer, MULTIBYTE_REASONED_OUTPUT)
+    split = next(
+        i
+        for i in range(2, len(output_ids))
+        if tokenizer.decode(output_ids[:i]).endswith("\ufffd")
+    )
+    parser = reasoning_parser(tokenizer)
+    before = parser.count_reasoning_tokens(tuple(output_ids[: split - 1]))
+    assert before > 0
+
+    assert parser.count_reasoning_tokens(tuple(output_ids[:split])) == before
