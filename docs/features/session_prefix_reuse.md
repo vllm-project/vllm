@@ -26,11 +26,14 @@ content validation. No new request protocol fields are required.
 
 ## Initial support
 
-Token reuse supports text Chat Completions using the audited Qwen3-0.6B
-tokenizer revision above, Transformers 5.19.0 and tokenizers 0.23.3. Activation
-checks the complete backend configuration and public encoding implementation;
-a model name alone is insufficient. The tokenizer must remain immutable.
-Other models/configurations continue through native tokenization.
+Token reuse supports text Chat Completions using the audited Qwen3 tokenizer
+configuration identified by the Qwen3-0.6B revision above, Transformers 5.19.0
+and tokenizers 0.23.3. Other model revisions using the same audited configuration
+can pass the same checks. Activation checks the complete backend configuration
+and public encoding implementation; a model name alone is insufficient.
+The tokenizer must remain immutable. Unsupported configurations or library
+versions disable token reuse with a warning and use native tokenization, even
+when those library versions satisfy vLLM's installation requirements.
 
 This initial native helper path requires a GIL-enabled CPython build.
 If the helper extension is unavailable, the corresponding reuse stage is
@@ -43,8 +46,16 @@ NFC normalization. Their literals do not overlap across a complete marker,
 consume neighboring whitespace or require word context. Subsequent regex,
 ByteLevel and deterministic BPE processing is local to the separated text.
 Consequently an unchanged prefix ending at a complete certified marker has
-the same IDs when a suffix changes. The source/token boundary index also
-relies on added-token IDs being disjoint from ordinary BPE IDs. The pinned
+the same IDs when a suffix changes. Snapshots store only the prompt text and
+token IDs. On a partial match, the frontend finds the last complete marker in
+the common prefix and locates its token by walking from the nearer end of the
+snapshot, where text and token IDs are aligned. Every added-token ID on that
+walk must match the markers in the text, otherwise the full prompt is encoded.
+Only an added token that cannot overlap another added token and needs no word
+context ends a reused prefix; a right-stripping one does so only when the new
+suffix does not start with whitespace. Other added tokens are still matched
+during the walk.
+This relies on added-token IDs being disjoint from ordinary BPE IDs. The pinned
 backend fingerprint covers these properties; this argument does not apply
 automatically to arbitrary special tokens or other tokenizers.
 
@@ -75,10 +86,11 @@ does not disable independent hash reuse, or vice versa.
 
 Simple LRU eviction bounds charged history state, including reservations and
 snapshots still held by readers after replacement. Oversized items or requests
-that cannot obtain a reservation are not cached. Cache-only copies and boundary
-metadata require a reservation before allocation. Accounting conservatively
+that cannot obtain a reservation are not cached. Cache-only token copies require
+a reservation of the snapshot size before allocation. Accounting conservatively
 charges shared Python objects; it is not an exact process RSS limit. Native
 request inputs, outputs, Python allocators and other serving state are separate.
+Temporary text-matching workspace is outside the retained-history budget.
 
 Cancelled/failed frontend preprocessing does not publish a partial result.
 Cache clearing and shutdown invalidate in-flight publication. EngineCore

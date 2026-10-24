@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Session-selected token reuse for the initially audited Qwen tokenizer."""
 
-import bisect
 import hashlib
 import importlib.metadata
 import json
@@ -13,6 +12,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import regex as re
+
 from vllm.logger import init_logger
 from vllm.utils.session_prefix import (
     PrefixContext,
@@ -22,6 +23,8 @@ from vllm.utils.session_prefix import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from vllm.renderers.params import TokenizeParams
     from vllm.tokenizers import TokenizerLike
 
@@ -38,11 +41,55 @@ _ENCODING_METHODS = (
 )
 
 
+def _marker_tables(
+    tokens: list[dict],
+) -> tuple[dict[str, int], set[str], set[str]]:
+    """Return scanned markers, boundary markers and right-stripping boundaries.
+
+    Non-normalized added tokens are extracted from the raw text by
+    leftmost-longest matching before other processing, so the text scan uses
+    all of them. A marker may end a reused prefix only if none of its
+    occurrences can overlap another marker occurrence and it needs no word
+    context; other markers are still scanned but never used as boundaries.
+    """
+    markers = {
+        t["content"]: t["id"] for t in tokens if t["content"] and not t["normalized"]
+    }
+    prefixes: dict[str, set[str]] = {}
+    suffixes: dict[str, set[str]] = {}
+    for m in markers:
+        for i in range(1, len(m)):
+            prefixes.setdefault(m[:i], set()).add(m)
+            suffixes.setdefault(m[i:], set()).add(m)
+    overlapping = set()
+    for m in markers:
+        for i in range(1, len(m)):
+            # A proper suffix of m starts another marker, or a proper prefix
+            # of m ends another marker.
+            overlapping |= prefixes.get(m[i:], set()) | suffixes.get(m[:i], set())
+            if m[i:] in prefixes or m[:i] in suffixes:
+                overlapping.add(m)
+        for i in range(len(m)):
+            for j in range(i + 1, len(m) + 1):
+                if (i, j) != (0, len(m)) and m[i:j] in markers:
+                    overlapping |= {m, m[i:j]}
+    flags = {t["content"]: t for t in tokens if t["content"] in markers}
+    boundaries = {
+        m for m in markers if m not in overlapping and not flags[m]["single_word"]
+    }
+    rstrip = {m for m in boundaries if flags[m]["rstrip"]}
+    return markers, boundaries, rstrip
+
+
+def _alternation(literals: "Iterable[str]") -> str:
+    # Longest first: the leftmost match is then the longest, as in tokenizers.
+    return "|".join(re.escape(m) for m in sorted(literals, key=len, reverse=True))
+
+
 @dataclass(frozen=True)
 class TokenSnapshot:
     text: str
     ids: list[int]
-    cuts: list[tuple[int, int]]
 
 
 class SessionTokenCache:
@@ -51,7 +98,6 @@ class SessionTokenCache:
         self.stats: Counter[str] = Counter()
         self._stats_lock = threading.Lock()
         self.enabled = False
-        self.markers = None
         try:
             from transformers import TokenizersBackend
 
@@ -76,17 +122,22 @@ class SessionTokenCache:
                 json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             if digest != _QWEN_BACKEND:
-                raise ValueError(
-                    "tokenizer differs from the audited Qwen3-0.6B revision"
-                )
-            from vllm import _session_prefix
-
-            self.helper = _session_prefix
-            self.markers = self.helper.make_markers(
-                {t["id"]: t["content"] for t in graph["added_tokens"]}
+                raise ValueError("tokenizer differs from the audited Qwen3 tokenizer")
+            markers, boundaries, self.rstrip_markers = _marker_tables(
+                graph["added_tokens"]
             )
+            if not boundaries:
+                raise ValueError("no added token can end a reused prefix")
+            # token_bytes() uses the native helper.
+            from vllm import _session_prefix  # noqa: F401
+
+            self.marker_ids = markers
+            self.marker_set = frozenset(markers.values())
+            self.pattern = re.compile(_alternation(markers))
+            # Reverse search finds the last boundary marker before a position.
+            self.boundary_pattern = re.compile("(?r)" + _alternation(boundaries))
             self.enabled = True
-        except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        except (AttributeError, ImportError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Session token cache disabled: %s", exc)
 
     def context(self, session: str | None, salt: str | None) -> PrefixContext | None:
@@ -99,6 +150,53 @@ class SessionTokenCache:
             self.stats[route] += 1
             self.stats["reused_tokens"] += tokens
         logger.debug("Session token reuse: route=%s reused_tokens=%d", route, tokens)
+
+    def _boundary(
+        self, old: TokenSnapshot, new: str, common: int
+    ) -> tuple[int, int] | None:
+        """Return the last boundary marker end within ``common`` and its token end.
+
+        Text and token IDs are aligned at both ends, so only the markers between
+        the boundary and the nearer end are matched against the token IDs.
+        """
+        text, ids, end = old.text, old.ids, common
+        while match := self.boundary_pattern.search(text, 0, end):
+            # A right-stripping marker would absorb whitespace the new suffix
+            # starts with, so the suffix could not be encoded separately.
+            if (
+                match.group() not in self.rstrip_markers
+                or not new[match.end() : match.end() + 1].isspace()
+            ):
+                break
+            end = match.start()
+        else:
+            return None
+        boundary = match.end()
+        if boundary > len(text) - boundary:
+            expected = [
+                self.marker_ids[m] for m in self.pattern.findall(text, boundary)
+            ]
+            expected.reverse()
+            expected.append(self.marker_ids[match.group()])
+            index = len(ids)
+            for marker in expected:
+                index -= 1
+                while index >= 0 and ids[index] not in self.marker_set:
+                    index -= 1
+                if index < 0 or ids[index] != marker:
+                    raise ValueError("source markers differ from token IDs")
+        else:
+            expected = [
+                self.marker_ids[m] for m in self.pattern.findall(text, 0, boundary)
+            ]
+            index = -1
+            for marker in expected:
+                index += 1
+                while index < len(ids) and ids[index] not in self.marker_set:
+                    index += 1
+                if index == len(ids) or ids[index] != marker:
+                    raise ValueError("source markers differ from token IDs")
+        return boundary, index + 1
 
     def encode(
         self, tokenizer: "TokenizerLike", text: str, params: "TokenizeParams"
@@ -119,75 +217,53 @@ class SessionTokenCache:
         ):
             return None
         with self.store.borrow(context.key) as old:
-            boundary = tokens = at = 0
             route = "miss"
+            boundary = tokens = 0
             if old is not None:
                 if text == old.text:
                     route = "exact"
                 else:
-                    common = lcp(text, old.text)
-                    at = bisect.bisect_right(old.cuts, (common, sys.maxsize))
-                    if at:
-                        boundary, tokens = old.cuts[at - 1]
+                    try:
+                        found = self._boundary(old, text, lcp(text, old.text))
+                    except ValueError:
+                        found = None
+                        self._count("index_declined")
+                    if found is not None:
+                        boundary, tokens = found
                         route = "partial"
             if route == "exact":
                 assert old is not None
                 ids = old.ids.copy()
-                suffix_ids = None
             elif route == "partial":
                 assert old is not None
-                suffix_ids = tokenizer(text[boundary:], **params.get_encode_kwargs())[
-                    "input_ids"
-                ]
-                ids = old.ids[:tokens] + suffix_ids
+                ids = (
+                    old.ids[:tokens]
+                    + tokenizer(text[boundary:], **params.get_encode_kwargs())[
+                        "input_ids"
+                    ]
+                )
             else:
                 ids = tokenizer(text, **params.get_encode_kwargs())["input_ids"]
-                suffix_ids = None
             maximum = params.max_input_tokens
             if maximum is not None and len(ids) > maximum:
                 # Native encoding caps the reported length at maximum + 1.
                 # Reuse its validation error without re-encoding or publishing.
                 return params._token_len_check(tokenizer, ids[: maximum + 1])
             self._count(route, len(ids) if route == "exact" else tokens)
-            fixed = (
+            # Reserve the snapshot size before the cache-only ID copy.
+            size = (
                 1024
                 + sum(sys.getsizeof(part) for part in context.key)
                 + sys.getsizeof(text)
                 + token_bytes(ids)
             )
-            # Reserve before cache-only copies and boundary metadata. Include
-            # transient tail/prefix lists and two Py_ssize_t-sized ints per cut.
-            reserved = fixed + 256 * len(ids) + 128
-            reservation = self.store.reserve(context.key, reserved)
-            if reservation is not None:
-                try:
-                    if route == "exact":
-                        assert old is not None
-                        cuts = old.cuts.copy()
-                    elif route == "partial":
-                        assert old is not None
-                        assert suffix_ids is not None
-                        cuts = old.cuts[:at] + self.helper.boundaries(
-                            self.markers, text[boundary:], suffix_ids, boundary, tokens
-                        )
-                    else:
-                        cuts = self.helper.boundaries(self.markers, text, ids)
-                    snapshot = TokenSnapshot(text, ids.copy(), cuts)
-                    size = (
-                        fixed
-                        + sys.getsizeof(cuts)
-                        + sum(
-                            sys.getsizeof(pair) + sum(map(sys.getsizeof, pair))
-                            for pair in cuts
-                        )
-                    )
-                    context.stage(reservation, snapshot, size)
-                except (ValueError, OverflowError):
-                    reservation.cancel()
-                    self._count("index_declined")
-                except BaseException:
-                    reservation.cancel()
-                    raise
-            else:
+            reservation = self.store.reserve(context.key, size)
+            if reservation is None:
                 self._count("capacity_declined")
+                return ids
+            try:
+                context.stage(reservation, TokenSnapshot(text, ids.copy()), size)
+            except BaseException:
+                reservation.cancel()
+                raise
             return ids

@@ -23,9 +23,13 @@ from vllm.inputs.engine import TokensInput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import TokenizeParams
-from vllm.renderers.session_prefix import SessionTokenCache
+from vllm.renderers.session_prefix import (
+    SessionTokenCache,
+    TokenSnapshot,
+    _marker_tables,
+)
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.session_prefix import SessionPrefixStore
+from vllm.utils.session_prefix import SessionPrefixStore, lcp
 
 MODEL = os.environ.get("VLLM_TEST_QWEN3_MODEL", "Qwen/Qwen3-0.6B")
 
@@ -54,15 +58,86 @@ def renderer(request):
     result.shutdown()
 
 
-def test_helper_marker_configuration_is_per_instance():
-    first = _session_prefix.make_markers({900: "<a>"})
-    second = _session_prefix.make_markers({901: "<b>"})
-    assert _session_prefix.boundaries(first, "中文<a>🙂", [1, 900, 2]) == [(5, 2)]
-    assert _session_prefix.boundaries(second, "<b>e\u0301", [901, 3]) == [(3, 1)]
-    with pytest.raises(ValueError, match="source markers"):
-        _session_prefix.boundaries(first, "<b>", [900])
-    assert _session_prefix.lcp("🙂e\u0301a", "🙂e\u0301b") == 3
+def test_marker_tables_keep_every_safe_boundary():
+    """Unsafe markers are scanned but do not disable the other boundaries."""
+    specs = [
+        # content, normalized, single_word, rstrip
+        ("<end_of_turn>", False, False, False),
+        ("[INST]", False, False, False),  # no leading "<" is needed
+        ("\n", False, False, False),  # contained in "\n\n"
+        ("\n\n", False, False, False),
+        ("ab", False, False, False),  # "b" ends one and starts the other
+        ("bc", False, False, False),
+        ("<w>", False, True, False),  # needs word context
+        ("<r>", False, False, True),  # right-stripping
+        ("<n>", True, False, False),  # matched after normalization
+    ]
+    markers, boundaries, rstrip = _marker_tables(
+        [
+            {"id": i, "content": c, "normalized": n, "single_word": w, "rstrip": r}
+            for i, (c, n, w, r) in enumerate(specs)
+        ]
+    )
+    assert set(markers) == {c for c, n, *_ in specs if not n}
+    assert boundaries == {"<end_of_turn>", "[INST]", "<r>"}
+    assert rstrip == {"<r>"}
     assert _session_prefix.token_lcp([1000, 2000], [int("1000"), 3000], 2) == 1
+
+
+def test_right_stripping_boundary_requires_non_space_suffix(renderer):
+    cache = renderer.session_token_cache
+    if not cache.enabled:
+        assert renderer.session_prefix_context("rstrip", None) is None
+        return  # The pinned-version CI exercises lookup.
+    params = TokenizeParams(max_total_tokens=1024, add_special_tokens=False)
+    prefix = "<|im_start|>user\nhi<|im_end|>"
+    old = prefix + "\nX"
+    snapshot = TokenSnapshot(
+        old, renderer.tokenize_prompt({"prompt": old}, params)["prompt_token_ids"]
+    )
+    for suffix, rstrip, boundary in (
+        (" Y", set(), len(prefix)),
+        ("Y", {"<|im_end|>"}, len(prefix)),
+        (" Y", {"<|im_end|>"}, len("<|im_start|>")),
+    ):
+        cache.rstrip_markers = rstrip
+        new = prefix + suffix
+        found = cache._boundary(snapshot, new, lcp(new, old))
+        assert found is not None and found[0] == boundary
+
+
+@pytest.mark.parametrize("edit_at", ["head", "tail"])
+def test_snapshot_markers_are_checked_from_the_nearer_end(renderer, edit_at):
+    """A token-side marker mismatch falls back to full encoding."""
+    cache = renderer.session_token_cache
+    if not cache.enabled:
+        assert renderer.session_prefix_context("checked", None) is None
+        return  # The pinned-version CI exercises lookup.
+    params = TokenizeParams(max_total_tokens=1024, add_special_tokens=False)
+    old = ("<|im_start|>user\n" + "one two " * 20 + "<|im_end|>\n") * 4
+    old += "<|im_start|>assistant\n"
+    # The edit selects a boundary after the first or the last <|im_start|>.
+    text = old[:30] + "X" + old[31:] if edit_at == "head" else old[:-3] + "X"
+    ids = renderer.tokenize_prompt({"prompt": old}, params)["prompt_token_ids"]
+    start = cache.marker_ids["<|im_start|>"]
+    position = ids.index(start)
+    if edit_at == "tail":
+        position = len(ids) - 1 - ids[::-1].index(start)
+    expected = renderer.tokenize_prompt({"prompt": text}, params)["prompt_token_ids"]
+    for forged, route in ((True, "index_declined"), (False, "partial")):
+        snapshot_ids = ids[:position] + ids[position + 1 :] if forged else ids
+        reservation = cache.store.reserve((None, "checked"), 1)
+        assert reservation is not None
+        assert reservation.commit(TokenSnapshot(old, snapshot_ids), 1)
+        cache.stats.clear()
+        context = cache.context("checked", None)
+        actual = renderer.tokenize_prompt(
+            {"prompt": text}, replace(params, session_prefix_context=context)
+        )
+        assert context is not None
+        context.finish(publish=False)
+        assert actual["prompt_token_ids"] == expected
+        assert cache.stats[route] == 1
 
 
 @pytest.mark.parametrize(
@@ -281,6 +356,32 @@ def test_length_error_and_unsupported_offsets_do_not_publish(renderer):
         context.finish(publish=True)
     assert result["prompt_token_offsets"]
     assert cache.store.bytes_used == 0
+
+
+def test_publication_reserves_measured_size_without_evicting(renderer):
+    """A full store keeps other sessions when the new snapshot fits."""
+    cache = renderer.session_token_cache
+    if not cache.enabled:
+        assert renderer.session_prefix_context("a", None) is None
+        return  # The pinned-version CI exercises publication.
+    params = TokenizeParams(max_total_tokens=1024, add_special_tokens=False)
+    text = "<|im_start|>user\n" + "one two three four " * 40 + "<|im_end|>"
+
+    def publish(session):
+        context = cache.context(session, None)
+        renderer.tokenize_prompt(
+            {"prompt": text}, replace(params, session_prefix_context=context)
+        )
+        context.finish(publish=True)
+
+    publish("a")
+    size = cache.store.bytes_used
+    cache.store.capacity = 2 * size
+    publish("b")
+    assert cache.store.bytes_used == 2 * size
+    for session in ("a", "b"):
+        with cache.store.borrow((None, session)) as snapshot:
+            assert snapshot is not None
 
 
 @pytest.mark.parametrize("renderer", ["left", "right"], indirect=True)

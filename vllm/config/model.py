@@ -422,7 +422,7 @@ class ModelConfig:
 
     session_token_cache_mb: int = Field(default=0, ge=0)
     """Per-renderer CPU session token history budget in MiB; zero disables it.
-    Initially supports only the audited Qwen3-0.6B HF tokenizer and text chat.
+    Initially supports only the audited Qwen3 HF tokenizer configuration and text chat.
     Session IDs select candidates; exact content validation remains required.
     """
 
