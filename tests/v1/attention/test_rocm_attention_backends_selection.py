@@ -731,7 +731,9 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
 def turboquant_run_config():
     """Current config of a run whose KV cache dtype is a turboquant_* preset."""
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4")
+        model_config=None,
+        speculative_config=None,
+        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4"),
     )
     with patch(
         "vllm.config.get_current_vllm_config_or_none",
@@ -933,21 +935,23 @@ def test_rocm_attn_rejects_kv_connector(mock_vllm_config, mock_get_cdna_version)
 
 
 @pytest.mark.parametrize(
-    "aiter_found, expected_backend",
+    "aiter_found, gfx950, expected_backend",
     [
-        (True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (False, AttentionBackendEnum.TRITON_ATTN),
+        (True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, True, AttentionBackendEnum.TRITON_ATTN),
+        (False, False, AttentionBackendEnum.TRITON_ATTN),
     ],
 )
 def test_auto_selection_for_kv_connector(
-    aiter_found, expected_backend, mock_vllm_config, mock_get_cdna_version
+    aiter_found, gfx950, expected_backend, mock_vllm_config, mock_get_cdna_version
 ):
     """Auto-selection with a KV connector and AITER enabled resolves to unified attn,
-    and to triton attn if AITER not enabled."""
+    and to triton attn if AITER not enabled or on gfx950."""
     from vllm.platforms.rocm import RocmPlatform
 
-    with patch(
-        "vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found
+    with (
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found),
+        patch("vllm.platforms.rocm.on_gfx950", return_value=gfx950),
     ):
         backend_path = RocmPlatform.get_attn_backend_cls(
             selected_backend=None,
@@ -993,3 +997,90 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+@pytest.mark.parametrize(
+    "speculative, hybrid, aiter_found, gfx950, expected_backend",
+    [
+        (False, False, True, True, AttentionBackendEnum.ROCM_ATTN),
+        (True, False, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, True, True, AttentionBackendEnum.TRITON_ATTN),
+        (True, False, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, True, True, True, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, False, False, AttentionBackendEnum.TRITON_ATTN),
+    ],
+)
+def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
+    speculative, hybrid, aiter_found, gfx950, expected_backend, mock_get_cdna_version
+):
+    """Speculative decoding and hybrid models would run ROCM_ATTN's Triton
+    fallbacks, so unified attention ranks above it, and TRITON_ATTN above both
+    on gfx950."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace() if speculative else None,
+        model_config=SimpleNamespace(is_hybrid=hybrid),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+    )
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+    with (
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found),
+        patch("vllm.platforms.rocm.on_gfx950", return_value=gfx950),
+    ):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None, attn_selector_config=attn_selector_config
+        )
+
+    assert backend_path == expected_backend.get_path()
+
+
+@pytest.mark.parametrize(
+    "use_spec_decode, is_hybrid, use_kv_connector",
+    [
+        (False, False, False),
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+@pytest.mark.parametrize("gfx950", [False, True])
+def test_backend_priorities_order(use_spec_decode, is_hybrid, use_kv_connector, gfx950):
+    from vllm.platforms.rocm import _get_backend_priorities
+
+    with (
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=True),
+        patch("vllm.platforms.rocm.on_gfx950", return_value=gfx950),
+    ):
+        priorities = _get_backend_priorities(
+            use_mla=False,
+            use_sparse=False,
+            use_kv_connector=use_kv_connector,
+            use_spec_decode=use_spec_decode,
+            is_hybrid=is_hybrid,
+        )
+
+    rocm_attn = AttentionBackendEnum.ROCM_ATTN
+    unified = AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    triton_attn = AttentionBackendEnum.TRITON_ATTN
+    order = [b for b in priorities if b in (rocm_attn, unified, triton_attn)]
+    expected = [triton_attn, unified] if gfx950 else [unified, triton_attn]
+    if use_spec_decode or is_hybrid:
+        expected.append(rocm_attn)
+    else:
+        expected.insert(0, rocm_attn)
+    if use_kv_connector:
+        expected.remove(rocm_attn)
+    assert order == expected
