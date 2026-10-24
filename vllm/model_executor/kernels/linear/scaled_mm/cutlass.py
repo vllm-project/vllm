@@ -265,6 +265,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    supports_partial_sum_dtype = True
+
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -308,7 +310,16 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        out_dtype = self.config.out_dtype
+        return self.apply_block_scaled_mm_out(A, B, As, Bs, self.config.out_dtype)
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
         return ops.cutlass_scaled_mm(
             A,
             B.T,
