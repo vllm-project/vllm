@@ -2486,6 +2486,8 @@ class DPEngineCoreProc(EngineCoreProc):
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
+                    # [PATCH] Yield CPU to prevent 100% busy-wait spin on ROCm.
+                    time.sleep(0.005)
                     continue
 
                 # Execute a dummy pass when no ready requests ran, unless the
