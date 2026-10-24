@@ -64,6 +64,21 @@ class AsyncEplbLayerResult:
     """
 
 
+def experts_being_acquired(
+    old_indices: np.ndarray, new_indices: np.ndarray
+) -> np.ndarray:
+    """Experts that land on a slot they did not already occupy.
+
+    Only these can need a transfer. If every slot now holding an expert already
+    held it, the ranks holding it afterwards are a subset of the ranks holding
+    it before, so its ranks_to_recv -- the new holders minus the old ones -- is
+    empty and the send loop skips it. Restricting the send-side query to this
+    set therefore issues exactly the same transfers, while sizing the query by
+    the rebalance instead of by the deployment.
+    """
+    return np.unique(new_indices[new_indices != old_indices])
+
+
 def get_ep_ranks_with_experts_batch(
     expert_ids: np.ndarray,
     num_local_experts: int,
@@ -404,6 +419,16 @@ def move_to_buffer(
     if send_count > 0:
         experts = send_expert_ids[:send_count]
         srcs = send_src_rows[:send_count]
+
+        # send_count covers every expert resident on this rank, but the loop
+        # below skips any that nobody is acquiring. The query costs roughly
+        # linearly in the experts it is asked about, so on a refresh that moves
+        # a handful of slots the unnarrowed form spends most of the transfer's
+        # cost deciding that almost nothing needs to move.
+        keep = np.isin(experts, experts_being_acquired(old_indices, new_indices))
+        experts = experts[keep]
+        srcs = srcs[keep]
+
         order = np.argsort(experts, kind="stable")
         experts = experts[order]
         srcs = srcs[order]
