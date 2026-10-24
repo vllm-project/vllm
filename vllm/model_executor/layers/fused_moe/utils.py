@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import trap_if
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
 )
@@ -172,6 +173,7 @@ def _count_expert_num_tokens(
     topk_ids_ptr,
     expert_num_tokens_ptr,
     num_experts,
+    num_global_experts,
     topk_numel,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
@@ -187,8 +189,13 @@ def _count_expert_num_tokens(
         mask = offsets < (topk_numel - x * BLOCK_SIZE)
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
+            # -1 marks an unrouted slot; any other id must index expert_map,
+            # whose length is the GLOBAL expert count (num_experts is this
+            # rank's local count). A larger id is a producer bug: fail loudly,
+            # and keep the gather masked so it never reads past the map.
+            trap_if(expert_ids >= num_global_experts)
             expert_map_ptrs = expert_map + expert_ids
-            expert_map_mask = expert_ids >= 0
+            expert_map_mask = (expert_ids >= 0) & (expert_ids < num_global_experts)
             expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
 
         has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
@@ -229,6 +236,7 @@ def count_expert_num_tokens(
         topk_ids,
         expert_num_tokens,
         num_local_experts,
+        expert_map.numel() if expert_map is not None else 0,
         topk_ids.numel(),
         expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
@@ -608,6 +616,7 @@ def _swiglu_limit_pad_aware_kernel(
     input_row_stride,
     num_tokens,
     swiglu_limit,
+    num_experts,
     HAS_LIMIT: tl.constexpr,
     HAS_EXPERT_MAP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -623,12 +632,18 @@ def _swiglu_limit_pad_aware_kernel(
         expert_id = tl.load(topk_ids_ptr + row)
         should_compute = expert_id != -1
         if HAS_EXPERT_MAP:
+            # -1 marks an unrouted row; any other id must index expert_map. A
+            # larger one is a producer bug (observed as garbage ids from an
+            # out-of-bounds router gather), so fail loudly. The load stays
+            # masked so it never reads past the map.
+            trap_if(expert_id >= num_experts)
+            in_range = (expert_id >= 0) & (expert_id < num_experts)
             local_expert_id = tl.load(
                 expert_map_ptr + expert_id,
-                mask=expert_id >= 0,
+                mask=in_range,
                 other=-1,
             )
-            should_compute = should_compute & (local_expert_id != -1)
+            should_compute = should_compute & in_range & (local_expert_id != -1)
 
         if should_compute:
             gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
@@ -677,6 +692,7 @@ def _swiglu_limit_pad_aware(
         gate_up_size,
         num_tokens,
         swiglu_limit,
+        expert_map.numel() if expert_map is not None else 0,
         HAS_LIMIT=swiglu_limit > 0,
         HAS_EXPERT_MAP=expert_map is not None,
         BLOCK_SIZE=BLOCK_SIZE,
