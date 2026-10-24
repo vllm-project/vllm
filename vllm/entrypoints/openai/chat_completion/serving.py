@@ -544,12 +544,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     ChatStreamProcessor(
                         request,
                         self._make_parser(request, tokenizer, chat_template_kwargs),
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=self.parser_cls,
                     )
                     for _ in range(num_choices)
                 ]
             else:
                 processors = [
-                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                    ChatStreamProcessor(
+                        request,
+                        None,
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=None,
+                    )
+                    for _ in range(num_choices)
                 ]
         except Exception as e:
             logger.exception("Error in parser creation.")
