@@ -72,6 +72,24 @@ class RopeState:
             pos = prefill_positions[i].tolist()
             self.prefill_positions.stage_write(self.num_dims * req_idx + i, 0, pos)
 
+    def stage_prefill_positions(
+        self,
+        req_idx: int,
+        positions: list[list[int]],
+        delta: int,
+    ) -> None:
+        if len(positions) != self.num_dims:
+            raise ValueError(
+                f"Expected {self.num_dims} M-RoPE position rows, "
+                f"but received {len(positions)}"
+            )
+        if any(len(row) > self.max_model_len for row in positions):
+            raise ValueError("M-RoPE position state exceeds the maximum model length")
+
+        self.prefill_delta.np[req_idx] = delta
+        for i, row in enumerate(positions):
+            self.prefill_positions.stage_write(self.num_dims * req_idx + i, 0, row)
+
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
         self.prefill_delta.copy_to_uva()

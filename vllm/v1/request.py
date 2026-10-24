@@ -22,6 +22,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -142,6 +143,9 @@ class Request:
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
+        )
+        self.mrope_position_state = MRoPEPositionState.from_kv_transfer_params(
+            self.kv_transfer_params, self.num_prompt_tokens
         )
         self._output_token_ids: list[int] = []
         if self.prompt_token_ids is None:
