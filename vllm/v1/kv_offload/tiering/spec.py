@@ -363,6 +363,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # region.
         self._engine_id = config.engine_id
 
+    @property
+    @override
+    def staged_load_chunks(self) -> int | None:
+        return self.num_chunks if self.secondary_tier_configs else None
+
     @override
     def get_manager(self) -> OffloadingManager:
         """Get the TieringOffloadingManager.

@@ -16,9 +16,16 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_request,
+    create_vllm_config,
+)
+from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
+    scheduler as scheduler_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -45,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
@@ -70,6 +78,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -78,6 +87,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -135,6 +148,7 @@ def test_swa_offload_window_covers_unaligned_hit(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
         get_manager=lambda: manager,
+        staged_load_chunks=None,
     )
     config = SimpleNamespace(
         speculative_config=None,
@@ -535,6 +549,227 @@ def test_invalid_max_load_tokens_is_ignored(value):
     _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (28, True)
+
+
+def _empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "windowed, primary_chunks, expected",
+    [
+        (False, 12, 24),
+        (True, 12, 32),
+        # One slot per group: each group loads one chunk.
+        (False, 2, 4),
+        # Too small for the window and its edges, but a one-chunk load
+        # queries one chunk of the window group.
+        (True, 2, 4),
+    ],
+)
+def test_secondary_tier_hit_larger_than_primary_tier_loads_a_prefix(
+    windowed: bool, primary_chunks: int, expected: int
+):
+    """Promotions of every group must fit in the primary tier together.
+
+    The lookup walks the groups in turn, so without a bound the first group
+    fills the primary tier and the other group's promotions fail.
+    """
+    scheduler = _make_staged_two_group_scheduler(windowed, primary_chunks)
+    manager = scheduler.manager
+    assert isinstance(manager, TieringOffloadingManager)
+    secondary = manager.secondary_tiers[0]
+    assert isinstance(secondary, ExampleSecondaryTierManager)
+    try:
+        request = create_request(num_tokens=64, block_size=4)
+        scheduler.on_new_request(request)
+        for group_idx in range(2):
+            secondary.chunks.update(
+                (make_offload_key(block_hash, group_idx), True)
+                for block_hash in request.block_hashes
+            )
+
+        results = []
+        for _ in range(3):
+            results.append(scheduler.get_num_new_matched_tokens(request, 0))
+            scheduler.build_connector_meta(_empty_scheduler_output())
+    finally:
+        manager.shutdown()
+
+    # Unbounded, the request loaded nothing. Bounded, the window group also
+    # budgets its window and edge chunks.
+    assert results[0] == (None, False)
+    assert results[1] == (expected, True)
+
+
+def _make_staged_two_group_scheduler(
+    windowed: bool, primary_chunks: int
+) -> OffloadingConnectorScheduler:
+    """A full-attention plus full or windowed scheduler over a real tiering
+    manager whose primary tier holds ``primary_chunks`` 4-token chunks."""
+    vllm_config = create_vllm_config(block_size=4)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": primary_chunks
+            * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "secondary_tiers": [{"type": "example"}],
+        },
+    )
+    kwargs = dict(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    other_spec = (
+        SlidingWindowSpec(**kwargs, sliding_window=8)
+        if windowed
+        else FullAttentionSpec(**kwargs)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], FullAttentionSpec(**kwargs)),
+            KVCacheGroupSpec(["other"], other_spec),
+        ],
+    )
+    spec = TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    assert spec.num_chunks == primary_chunks
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+def _make_staged_partial_tail_scheduler(
+    primary_chunks: int,
+) -> OffloadingConnectorScheduler:
+    """A hybrid full-attention/recurrent scheduler over a real tiering
+    manager whose primary tier holds ``primary_chunks`` chunks."""
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+
+    def make_spec(cpu_bytes_to_use: int) -> TieringOffloadingSpec:
+        vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "spec_name": "TieringOffloadingSpec",
+                "cpu_bytes_to_use": cpu_bytes_to_use,
+                "secondary_tiers": [{"type": "example"}],
+            },
+        )
+        return TieringOffloadingSpec(
+            build_offloading_config(vllm_config, kv_cache_config)
+        )
+
+    spec = make_spec(primary_chunks * make_spec(1 << 20).kv_bytes_per_chunk)
+    assert spec.num_chunks == primary_chunks
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+@pytest.mark.parametrize(
+    "primary_chunks, tail_boundaries, expected",
+    [
+        # The bound (16 tokens) shortens the lookup and leaves no partial tail.
+        (5, (20, 24, 28), 16),
+        # The bound (32 tokens) does not shorten this lookup.
+        (6, (20, 24, 28), 28),
+        (6, (20, 24), 24),
+    ],
+)
+def test_staged_partial_tail_promotes_one_boundary_at_a_time(
+    primary_chunks: int, tail_boundaries: tuple[int, ...], expected: int
+):
+    """The bound leaves room in the primary tier for one partial-tail
+    boundary, whether or not it shortens the lookup. Promotions for several
+    boundaries would evict the complete chunk the lookup already reported."""
+    scheduler = _make_staged_partial_tail_scheduler(primary_chunks)
+    manager = scheduler.manager
+    assert isinstance(manager, TieringOffloadingManager)
+    secondary = manager.secondary_tiers[0]
+    assert isinstance(secondary, ExampleSecondaryTierManager)
+    try:
+        request = create_request(num_tokens=30, block_size=4)
+        scheduler.on_new_request(request)
+
+        def keys(boundary: int) -> list[OffloadKey]:
+            block_hash = request.block_hashes[boundary // 4 - 1]
+            return [make_offload_key(block_hash, group_idx) for group_idx in (0, 1)]
+
+        # An earlier request stored the complete chunk, which has cascaded to
+        # the secondary tier; the partial tails are found only there.
+        seed = ReqContext(req_id="seed")
+        manager.on_new_request(seed)
+        manager.prepare_store(keys(16), seed)
+        manager.complete_store(keys(16), seed, success=True)
+        manager.on_request_finished(seed)
+        while manager.has_pending_work():
+            scheduler.build_connector_meta(_empty_scheduler_output())
+        assert all(key in secondary.chunks for key in keys(16))
+        for boundary in tail_boundaries:
+            secondary.chunks.update(dict.fromkeys(keys(boundary), True))
+        probe = ReqContext(req_id="probe")
+        manager.on_new_request(probe)
+
+        # The complete chunk loads at once while the partial tail is promoted;
+        # its load needs it in the primary tier.
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
+        assert [manager.lookup(key, probe) for key in keys(16)] == [
+            LookupResult.HIT
+        ] * 2
+        scheduler.build_connector_meta(_empty_scheduler_output())
+
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, True)
+        manager.on_request_finished(probe)
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("num_tokens, recomputes", [(64, True), (16, False)])
+def test_bounded_lookup_recomputes_after_staged_load_timeout(
+    monkeypatch: pytest.MonkeyPatch, num_tokens: int, recomputes: bool
+):
+    """A lookup the bound shortened recomputes once its promotions have been
+    pending longer than staged_load_timeout_s; a lookup the bound did not
+    shorten keeps waiting."""
+    now = [1000.0]
+    monkeypatch.setattr(
+        scheduler_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    # The bound (24 tokens) shortens the 64-token lookup only.
+    scheduler = _make_staged_two_group_scheduler(windowed=False, primary_chunks=12)
+    assert scheduler.config.staged_load_tokens == 24
+    manager = scheduler.manager
+    assert isinstance(manager, TieringOffloadingManager)
+    secondary = manager.secondary_tiers[0]
+    assert isinstance(secondary, ExampleSecondaryTierManager)
+    try:
+        request = create_request(num_tokens=num_tokens, block_size=4)
+        scheduler.on_new_request(request)
+        for group_idx in range(2):
+            secondary.chunks.update(
+                (make_offload_key(block_hash, group_idx), True)
+                for block_hash in request.block_hashes
+            )
+
+        # No engine step runs, so the promotions stay pending.
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+        now[0] += scheduler.config.staged_load_timeout_s
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+        now[0] += 1
+        expected = (0, False) if recomputes else (None, False)
+        assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+    finally:
+        manager.shutdown()
 
 
 def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():

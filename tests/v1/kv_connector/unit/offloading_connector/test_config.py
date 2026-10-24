@@ -1313,3 +1313,24 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.parametrize("secondary_tiers", [[{"type": "example"}], []])
+def test_tiering_spec_bounds_loads_only_with_secondary_tiers(secondary_tiers):
+    config = _make_vllm_config(
+        extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 1 << 20,
+            "secondary_tiers": secondary_tiers,
+        }
+    )
+    kv_cache_config = _make_kv_cache_config()
+    spec = TieringOffloadingSpec(build_offloading_config(config, kv_cache_config))
+
+    scheduler_config = SchedulerOffloadConfig.from_spec(spec, config, kv_cache_config)
+
+    if secondary_tiers:
+        # Every primary-tier chunk is usable.
+        assert scheduler_config.staged_load_tokens == spec.num_chunks * 16
+    else:
+        assert scheduler_config.staged_load_tokens is None
