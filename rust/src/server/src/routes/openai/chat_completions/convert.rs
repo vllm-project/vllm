@@ -1458,6 +1458,44 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_tolerates_duplicate_reasoning_aliases() {
+        // Agent harnesses replaying prior assistant turns emit both
+        // spellings; the Python frontend accepts this history, so the
+        // request must not fail with serde's `duplicate field` error.
+        let request = ChatCompletionRequest {
+            messages: vec![
+                serde_json::from_value(json!({
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning": "primary",
+                    "reasoning_content": "legacy",
+                }))
+                .expect("duplicate reasoning aliases are accepted"),
+            ],
+            add_generation_prompt: Some(false),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "primary".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ])]
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_tools_and_tool_history() {
         let request = ChatCompletionRequest {
             messages: vec![
