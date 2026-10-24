@@ -50,6 +50,10 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     MinimaxM3QKVParallelLinearWithIndexer,
@@ -60,6 +64,9 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -95,7 +102,9 @@ from vllm.models.minimax_m3.amd.indexer_aiter import (
 )
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_fp8,
     gemma_rmsnorm,
+    gemma_rmsnorm_fp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
@@ -143,6 +152,52 @@ if TYPE_CHECKING:
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
+
+
+class _Mm3AttnPtpcFp8Config(QuantizationConfig):
+    """Online PTPC FP8 for the attention projections (VLLM_MINIMAX_M3_FP8_ATTN_PROJ).
+
+    The checkpoint keeps q/k/v/o in bf16 (Quark excludes them); this quantizes
+    them at load time to per-output-channel FP8 weights with dynamic per-token
+    FP8 activations. The routed experts keep the checkpoint's MXFP4 config.
+    """
+
+    def get_name(self) -> str:
+        return "mm3_attn_ptpc_fp8"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 0
+
+    @staticmethod
+    def get_config_filenames() -> list[str]:
+        return []
+
+    @classmethod
+    def from_config(cls, config: dict) -> "_Mm3AttnPtpcFp8Config":
+        return cls()
+
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str):
+        from vllm.model_executor.layers.linear import LinearBase
+        from vllm.model_executor.layers.quantization.online.fp8 import (
+            Fp8PtpcOnlineLinearMethod,
+        )
+
+        if isinstance(layer, LinearBase):
+            return Fp8PtpcOnlineLinearMethod()
+        return None
+
+
+def _attn_proj_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> QuantizationConfig | None:
+    if envs.VLLM_MINIMAX_M3_FP8_ATTN_PROJ:
+        logger.info_once("MiniMax-M3: online PTPC FP8 attention q/k/v/o projections")
+        return _Mm3AttnPtpcFp8Config()
+    return quant_config
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -531,7 +586,7 @@ class MiniMaxM3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.qkv_proj",
         )
         # reduce_results=False: the attention all-reduce is fused with the
@@ -542,7 +597,7 @@ class MiniMaxM3Attention(nn.Module):
             self.hidden_size,
             bias=False,
             reduce_results=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.o_proj",
         )
 
@@ -686,7 +741,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.total_idx_heads,
             self.idx_head_dim,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.qkv_proj",
         )
         # reduce_results=False: the attention all-reduce is fused with the
@@ -697,7 +752,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.hidden_size,
             bias=False,
             reduce_results=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.o_proj",
         )
 
@@ -1342,6 +1397,32 @@ class MiniMaxM3DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+    def _input_norm(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
+        norm = self.input_layernorm
+        quant_key = get_input_quant_key(self.self_attn.qkv_proj)
+        if quant_key != kFp8DynamicTokenSym or envs.VLLM_BATCH_INVARIANT:
+            if residual is None:
+                return norm(hidden_states), hidden_states
+            return norm(hidden_states, residual)
+        # qkv_proj runs a per-token FP8 GEMM (VLLM_MINIMAX_M3_FP8_ATTN_PROJ):
+        # quantize in the norm instead of in a separate kernel.
+        fp8_dtype = quant_key.dtype
+        if residual is None:
+            data, scale = gemma_rmsnorm_fp8(
+                hidden_states, norm.weight, norm.variance_epsilon, fp8_dtype
+            )
+            residual = hidden_states
+        else:
+            data, scale, residual = gemma_fused_add_rmsnorm_fp8(
+                hidden_states, residual, norm.weight, norm.variance_epsilon, fp8_dtype
+            )
+        normed = QuantizedActivation(
+            data, scale, hidden_states.dtype, hidden_states.shape, quant_key
+        )
+        return normed, residual
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -1349,11 +1430,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = self._input_norm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
