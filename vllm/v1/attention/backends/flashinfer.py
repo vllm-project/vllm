@@ -60,6 +60,7 @@ from vllm.utils.torch_utils import (
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
     nvfp4_split_data_scale,
+    sync_copy_to_cpu,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -1652,7 +1653,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             else:
                 with gpu_sync_allowed():
-                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+                    seq_lens_cpu = sync_copy_to_cpu(common_attn_metadata.seq_lens)
         else:
             seq_lens_cpu = None
 
