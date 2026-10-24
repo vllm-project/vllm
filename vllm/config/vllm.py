@@ -125,7 +125,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
-        return frozenset({"DeepseekV41ForCausalLM"})
+        #
+        # GLM-5.3-Flash cannot torch.compile either, so without breakable
+        # graphs it falls back to FULL_DECODE_ONLY and every prefill or mixed
+        # step runs eagerly.
+        return frozenset(
+            {
+                "DeepseekV41ForCausalLM",
+                "Glm5NextForCausalLM",
+                "Glm5NextForConditionalGeneration",
+            }
+        )
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
