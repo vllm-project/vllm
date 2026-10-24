@@ -63,7 +63,7 @@ what may differ.
 
 <sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
-<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
+<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported with pull (`NixlPullConnector`); push (`NixlPushConnector`) requires identical P/D block sizes.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
@@ -91,7 +91,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 ### What can safely differ between P and D
 
 - `tensor-parallel-size` (heterogeneous TP, subject to model restrictions above)
-- `block-size` (heterogeneous block size, subject to restrictions above)
+- `block-size` (heterogeneous block size, subject to restrictions above; not with `NixlPushConnector`)
 - Number of KV cache blocks (determined by available memory on each instance)
 - `num_speculative_tokens` (prefill and decode may use different draft depths)
 - Draft-model `attention_backend` (each instance auto-selects independently; the
