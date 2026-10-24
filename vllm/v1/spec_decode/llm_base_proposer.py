@@ -53,6 +53,7 @@ from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
+    DoubleBufferedCpuGpuBuffer,
     _copy_and_expand_eagle_inputs,
     _eagle_prepare_inputs_padded,
     _eagle_prepare_next_token_padded,
@@ -62,7 +63,6 @@ from vllm.v1.spec_decode.utils import (
     extend_all_queries_by_N,
     next_power_of_2,
 )
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import AttentionGroup
@@ -248,11 +248,8 @@ class SpecDecodeBaseProposer:
             device=device,
         )
 
-        self.backup_next_token_ids = CpuGpuBuffer(
-            self.max_batch_size,
-            dtype=torch.int32,
-            device=device,
-            with_numpy=True,
+        self.backup_next_token_ids = DoubleBufferedCpuGpuBuffer(
+            self.max_batch_size, dtype=torch.int32, device=device
         )
         self._enable_probabilistic_draft_probs = (
             self.speculative_config.rejection_sample_method in ("standard", "fly")
@@ -1060,12 +1057,13 @@ class SpecDecodeBaseProposer:
         """
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
+        backup = self.backup_next_token_ids.acquire()
         for i in range(num_reqs):
-            self.backup_next_token_ids.np[i] = requests[
-                gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+            backup.np[i] = requests[gpu_input_batch.req_ids[i]].get_token_id(
+                gpu_input_batch.num_tokens_no_spec[i] - 1
+            )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
-        backup_tokens_gpu = self.backup_next_token_ids.gpu
+        backup_tokens_gpu = backup.gpu
 
         batch_size, num_tokens = sampled_token_ids.shape
         device = sampled_token_ids.device
