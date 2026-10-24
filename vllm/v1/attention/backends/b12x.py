@@ -191,10 +191,6 @@ class B12xPagedAttentionBackend(AttentionBackend):
         return list(_B12X_SUPPORTED_PAGE_SIZES)
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
-        return block_size is None or int(block_size) in _B12X_SUPPORTED_PAGE_SIZES
-
-    @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
         if int(default_block_size) in _B12X_SUPPORTED_PAGE_SIZES:
             return int(default_block_size)

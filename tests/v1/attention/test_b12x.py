@@ -25,6 +25,7 @@ from vllm.v1.attention.backends.b12x import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.worker.utils import select_common_block_size
 
 
 def _require_b12x_paged_attention() -> None:
@@ -152,6 +153,17 @@ def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     )
     assert B12xPagedAttentionBackend.supports_block_size(128)
     assert not B12xPagedAttentionBackend.supports_block_size(32)
+
+
+def test_b12x_attention_accepts_multiples_of_its_kernel_pages() -> None:
+    """Hybrid mamba/attention alignment can raise the manager block size well
+    above the b12x page sizes (e.g. 2176); the worker then splits each block
+    into kernel pages, so the backend must accept any multiple of them.
+    """
+    assert B12xPagedAttentionBackend.supports_block_size(2176)
+    assert select_common_block_size(2176, [B12xPagedAttentionBackend]) == 128
+    assert select_common_block_size(192, [B12xPagedAttentionBackend]) == 64
+    assert not B12xPagedAttentionBackend.supports_block_size(96)
 
 
 def test_b12x_attention_hybrid_cache_capacity_includes_expansion() -> None:
