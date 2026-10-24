@@ -295,6 +295,7 @@ def test_multi_example_connector_consistency():
                 {
                     "kv_connector": "TestExampleConnector",
                     "kv_role": "kv_both",
+                    "engine_id": "storage1-engine",
                     "kv_connector_extra_config": {
                         "shared_storage_path": str(storage_1_path),
                         "name": "storage1",
@@ -510,6 +511,29 @@ def get_connector_events() -> dict[str, list[str]]:
             print(f"[ERROR] Could not read connector events for {name}: {e}")
 
     return connector_events
+
+
+def test_multi_connector_child_engine_ids():
+    connectors = [
+        {
+            "kv_connector": "ExampleConnector",
+            "kv_role": "kv_both",
+            "engine_id": "child-engine",
+        },
+        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+    ]
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": connectors},
+    )
+    child_configs = MultiConnector._get_connector_classes_and_configs(config)
+
+    assert [child.kv_transfer_config.engine_id for _, child in child_configs] == [
+        "child-engine",
+        config.kv_transfer_config.engine_id,
+    ]
+    assert connectors[0]["engine_id"] == "child-engine"
+    assert "engine_id" not in connectors[1]
 
 
 def test_engine_id_conflict():
