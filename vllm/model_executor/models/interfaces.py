@@ -101,6 +101,13 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
     ]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+    ]
 )
 
 

@@ -12,6 +12,9 @@ from .fused_recurrent import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
+from .fused_recurrent_replayssm import (
+    fused_recurrent_gated_delta_rule_replayssm,
+)
 from .fused_sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from .layernorm_guard import RMSNormGated
 
@@ -20,6 +23,7 @@ __all__ = [
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
     "fused_recurrent_gated_delta_rule_packed_decode",
+    "fused_recurrent_gated_delta_rule_replayssm",
     "fused_post_conv_prep",
     "fused_sigmoid_gating_delta_rule_update",
 ]
