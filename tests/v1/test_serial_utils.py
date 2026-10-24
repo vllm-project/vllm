@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from dataclasses import dataclass
+from typing import Any
 
 import msgspec
 import numpy as np
@@ -530,7 +531,7 @@ def test_zero_copy_frames_survive_without_caller_side_references():
     decoder = MsgpackDecoder(RequestWithTensor)
 
     # The buffer handed to zmq must keep the tensor's storage alive by itself.
-    holder = tensor_data(expected).obj
+    holder: Any = tensor_data(expected).obj
     while getattr(holder, "base", None) is not None:
         holder = holder.base
     assert isinstance(holder, torch.Tensor)
