@@ -5,7 +5,7 @@
 class object.
 
 For a basic example of implementing a custom logits processor, see
-the `DummyLogitsProcessor` implementation in `vllm/test_utils.py`.
+the `DummyLogitsProcessor` implementation in `tests/v1/logits_processors/utils.py`.
 
 For testing purposes, a dummy logits processor is employed which, if
 `target_token` is passed as a keyword argument to `SamplingParams.extra_args`,
