@@ -1,5 +1,8 @@
 # Features
 
+See [DoSA sparse indexer](dosa.md) for certified key screening during
+long-context DSA prefill.
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

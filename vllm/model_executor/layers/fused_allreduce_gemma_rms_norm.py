@@ -53,19 +53,36 @@ except (ImportError, AttributeError):
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 
-def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
+def _max_token_num(
+    tp_size: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    *,
+    max_size_bytes: int | None = None,
+) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
-    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
+    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``.
+    An explicit zero disables fusion; None retains the platform defaults.
+    """
     from vllm.config.compilation import PassConfig
 
-    max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
-    if not max_size_mb:
+    if max_size_bytes is None:
+        max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
+        if not max_size_mb:
+            return None
+        max_size_bytes = int(max_size_mb * MiB)
+    if not max_size_bytes:
         return None
     element_size = torch.tensor([], dtype=dtype).element_size()
-    return int(max_size_mb * MiB) // (hidden_size * element_size)
+    return max_size_bytes // (hidden_size * element_size)
 
 
-def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
+def _can_use_flashinfer(
+    hidden_states: torch.Tensor,
+    tp_size: int,
+    *,
+    max_size_bytes: int | None = None,
+) -> tuple[bool, int]:
     """Whether the flashinfer fused path applies; returns (ok, max_token_num)."""
     if (
         flashinfer_trtllm_fused_allreduce_norm is None
@@ -82,7 +99,9 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
         return False, 0
 
     num_tokens, hidden_size = hidden_states.shape
-    max_token_num = _max_token_num(tp_size, hidden_size, hidden_states.dtype)
+    max_token_num = _max_token_num(
+        tp_size, hidden_size, hidden_states.dtype, max_size_bytes=max_size_bytes
+    )
     if max_token_num is None or num_tokens > max_token_num:
         return False, 0
 

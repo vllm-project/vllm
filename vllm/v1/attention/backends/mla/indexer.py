@@ -452,6 +452,18 @@ def build_pcp_global_chunk_plan(
     )
 
 
+@dataclass(frozen=True)
+class IndexerRequestRange:
+    """One request's Q/K range in the gathered prefill buffers."""
+
+    query_start: int
+    query_end: int
+    key_start: int
+    key_end: int
+    common_end: int
+    causal: bool
+
+
 @dataclass
 class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
@@ -474,6 +486,8 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
+    # Host Q/K ranges in this chunk's gathered buffers; not request identities.
+    request_ranges: tuple[IndexerRequestRange, ...] = ()
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -1362,13 +1376,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        max_query_tokens: int | None = None,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
-        - Logits constraint: M * N * 4 <= max_logits_bytes
+        - Query constraint: max_query_tokens for a bounded-scratch selector,
+          otherwise M * N * 4 <= max_logits_bytes for dense logits.
 
-        When a single request-level chunk still exceeds the logits budget,
+        When a single request-level chunk still exceeds the query budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
         Returns list of (req_slice, query_slice) tuples.
@@ -1387,7 +1403,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                fits_queries = (
+                    new_m <= max_query_tokens
+                    if max_query_tokens is not None
+                    else new_m * new_n <= max_logits_elems
+                )
+                if new_n <= workspace_size and fits_queries:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
                 else:
@@ -1403,9 +1424,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 end += 1
 
             req_slice = slice(start + request_offset, end + request_offset)
-            max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
-            )
+            max_q = max_query_tokens
+            if max_q is None:
+                max_q = (
+                    max(1, max_logits_elems // chunk_n)
+                    if chunk_n > 0
+                    else max(1, chunk_m)
+                )
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -1541,6 +1566,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    max_query_tokens=(
+                        self.vllm_config.scheduler_config.max_num_batched_tokens
+                        if self.vllm_config.attention_config.indexer_dosa
+                        and not self.indexer_uses_fp4
+                        and not self.use_pcp
+                        and self.dcp_world_size == 1
+                        and self.vllm_config.speculative_config is None
+                        else None
+                    ),
                 )
 
             chunks = []
@@ -1571,6 +1605,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
+                    collect_request_ranges=self.vllm_config.attention_config.indexer_dosa,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -1852,6 +1887,7 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
+    collect_request_ranges: bool = False,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -1952,6 +1988,29 @@ def build_prefill_chunk_metadata(
     else:
         token_end = query_start_loc_cpu[end_idx].item()
 
+    request_ranges = []
+    if collect_request_ranges and dcp_world_size == 1 and pcp_plan is None:
+        key_start = 0
+        for idx in range(start_idx, end_idx):
+            keys = int(compressed_seq_lens_cpu[idx])
+            begin = max(int(query_start_loc_cpu[idx]), token_start)
+            end = min(int(query_start_loc_cpu[idx + 1]), token_end)
+            if begin < end:
+                remaining = int(query_start_loc_cpu[idx + 1]) - begin
+                linear = compress_ratio == 1
+                common = keys - (remaining + compress_ratio - 1) // compress_ratio
+                request_ranges.append(
+                    IndexerRequestRange(
+                        begin,
+                        end,
+                        key_start,
+                        key_start + keys,
+                        common + int(linear),
+                        linear,
+                    )
+                )
+            key_start += keys
+
     return DeepseekV32IndexerPrefillChunkMetadata(
         pcp_deinterleave_idx=pcp_deinterleave_idx,
         cu_seqlen_ks=cu_seq_len_ks,
@@ -1968,6 +2027,7 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        request_ranges=tuple(request_ranges),
     )
 
 

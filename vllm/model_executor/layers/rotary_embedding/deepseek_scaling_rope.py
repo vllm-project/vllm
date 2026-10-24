@@ -44,8 +44,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         mscale: float = 1,
         mscale_all_dim: float = 0,
         init_cache: bool = True,
+        cache_max_position: int | None = None,
     ) -> None:
         self.scaling_factor = scaling_factor
+        # Cache capacity does not change YaRN's trained position range.
+        self.cache_max_position = max(
+            max_position_embeddings * scaling_factor, cache_max_position or 0
+        )
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
@@ -103,7 +108,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor,
+            self.cache_max_position,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -244,7 +249,7 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor,
+            self.cache_max_position,
             device=inv_freq.device,
             dtype=torch.float32,
         )
