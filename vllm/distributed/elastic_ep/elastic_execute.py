@@ -159,6 +159,8 @@ class ElasticEPScalingExecutor:
         )
         self._async_future: Future[None] | None = None
         self._group_cleanup_future: Future[None] | None = None
+        # The expert maps this rank's CUDA graphs were captured with.
+        self._captured_expert_maps: list[torch.Tensor | None] | None = None
 
     @property
     def worker(self):
@@ -533,6 +535,12 @@ class ElasticEPScalingExecutor:
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
+        if self._can_reuse_fused_moe_kernel() and self._captured_expert_maps is None:
+            # Reused graphs are never recaptured and keep reading the expert
+            # maps they were captured with; update_physical_experts_metadata
+            # below replaces them, and a freed map's memory gets reused. Its
+            # entries for this rank's own slots stay valid in every world.
+            self._captured_expert_maps = [m.expert_map for m in moe_modules]
         with set_current_vllm_config(self.worker.vllm_config):
             model.set_eplb_state(
                 eplb_model_state.expert_load_pass_buffer,
