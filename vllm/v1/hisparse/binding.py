@@ -65,18 +65,22 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
+    resized_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
+    return (
+        kv_cache_spec
+        | resized_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        }
+    )
 
 
 def allocate_hisparse_kv_caches(

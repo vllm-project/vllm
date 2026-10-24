@@ -211,6 +211,21 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     runtime.invalidate_written_slots.assert_called_once()
 
 
+def test_layer_mirror_skipped_outside_connector_step():
+    """Graph-capture forwards run without start_step and must not mirror."""
+    handle = HiSparseCacheHandle(SimpleNamespace())
+    handle.host_mirror_required = True
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.cache_handles = [handle]
+    worker._per_layer_mirrored = set()
+    worker._in_step = False
+
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_layer_mirror(0)
+
+    assert not worker._per_layer_mirrored
+
+
 class _FakeEvent:
     log: list[tuple[str, object]] = []
 

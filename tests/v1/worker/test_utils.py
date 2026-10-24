@@ -879,6 +879,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group(
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
+    worker._in_step = True
     worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     enqueue_row_dma = MagicMock()
