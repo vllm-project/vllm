@@ -3,7 +3,8 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from typing import Any
+from itertools import accumulate
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -27,6 +28,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdaptiveVerificationManager,
+    )
 
 logger = init_logger(__name__)
 
@@ -237,13 +243,22 @@ def warmup_kernels(
         assert rejection_sampler is not None
         rejection_sampler.enable_adaptive_verification = False
     try:
-        _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        _warmup_kernels(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            adaptive_verification,
+        )
         # All PP ranks must run the same forwards to match sends and receives.
         if model_runner.speculative_config is not None:
             # Greedy batches skip logits processing, so rejection kernels
             # also see model-dtype logits instead of FP32.
             _warmup_kernels(
-                model_runner, worker_execute_model, worker_sample_tokens, greedy=True
+                model_runner,
+                worker_execute_model,
+                worker_sample_tokens,
+                adaptive_verification,
+                greedy=True,
             )
     finally:
         model_runner.adaptive_verification = adaptive_verification
@@ -256,6 +271,7 @@ def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    adaptive_verification: "AdaptiveVerificationManager | None" = None,
     greedy: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
@@ -400,6 +416,16 @@ def _warmup_kernels(
 
         def _run_decode_step(indices: list[int], spec_flags: list[bool]) -> None:
             """Decode `indices`, spec-decoding the ones flagged in `spec_flags`."""
+            if adaptive_verification is not None and num_spec_steps > 0:
+                max_spec_reqs = (
+                    adaptive_verification.max_draft_tokens(len(indices))
+                    // num_spec_steps
+                )
+                spec_flags = [
+                    use_spec and num_spec <= max_spec_reqs
+                    for use_spec, num_spec in zip(spec_flags, accumulate(spec_flags))
+                ]
+
             cached_req_data = CachedRequestData.make_empty()
             cached_req_data.req_ids = [req_ids[i] for i in indices]
             cached_req_data.num_computed_tokens = [req_computed[i] for i in indices]

@@ -11,6 +11,7 @@ import torch
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -71,22 +72,31 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Requires CUDA or XPU",
+    not (
+        current_platform.is_cuda()
+        or current_platform.is_rocm()
+        or current_platform.is_xpu()
+    ),
+    reason="Requires CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
+@pytest.mark.parametrize("enable_adaptive_verification", [False, True])
 def test_chunked_scores_match_full_batch(
-    monkeypatch: pytest.MonkeyPatch, logprobs_mode: str
+    monkeypatch: pytest.MonkeyPatch,
+    logprobs_mode: str,
+    enable_adaptive_verification: bool,
 ):
     device = torch.device(current_platform.device_type)
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
     num_logits_per_req = np.diff(cu_num_logits_np)
     idx_mapping_np = np.array([7, 2, 9, 1], dtype=np.int32)
     input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    input_batch.num_draft_tokens = 0
     rejection_sampler = _make_rejection_sampler(
         SimpleNamespace(logprobs_mode=logprobs_mode, return_sampling_mask=False),
         num_speculative_steps=3,
     )
+    rejection_sampler.enable_adaptive_verification = enable_adaptive_verification
 
     def fake_verify(
         self,
@@ -117,9 +127,15 @@ def test_chunked_scores_match_full_batch(
             draft_sampled=torch.arange(10, device=device),
             pos=torch.arange(10, device=device),
             max_chunk_logits=5,
-            max_num_logprobs=2,
+            max_num_logprobs=NO_LOGPROBS if enable_adaptive_verification else 2,
         )
     )
+    if enable_adaptive_verification:
+        assert chunked_logprobs is None
+        assert sampled[:, 0].tolist() == idx_mapping_np.tolist()
+        assert num_sampled.tolist() == num_logits_per_req.tolist()
+        return
+
     score_logits = logits + 1 if logprobs_mode in PROCESSED_LOGPROBS_MODES else logits
     full_logprobs = rejection_sampler._get_logprobs_tensors(
         sampled,
