@@ -18,14 +18,21 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 # Overridden on CPU in vllm/v1/worker/cpu/shm.py.
 PENALTIES_BLOCK_SIZE = 8192
 
 
 class PenaltiesState(LogitsProcessor):
-    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        req_states: LogitsProcRequestState,
+        prompt_embeds_state: "PromptEmbedsState | None" = None,
+    ):
         self.req_states = req_states
+        self.prompt_embeds_state = prompt_embeds_state
         self.device = req_states.device
         max_num_reqs = req_states.max_num_reqs
         vocab_size = req_states.vocab_size
@@ -70,6 +77,7 @@ class PenaltiesState(LogitsProcessor):
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
             max_prefill_len = int(prefill_lens.max())
+            pe_state = self.prompt_embeds_state
             bincount(
                 idx_mapping,
                 self.req_states.all_token_ids.gpu,
@@ -78,6 +86,8 @@ class PenaltiesState(LogitsProcessor):
                 self.prompt_bin_mask,
                 self.output_bin_counts,
                 max_prefill_len,
+                pe_state.embeds_lens.gpu if pe_state is not None else None,
+                pe_state.mask_ptrs.gpu if pe_state is not None else None,
             )
             self._new_penalties_reqs.clear()
 
@@ -223,10 +233,13 @@ def _bincount_kernel(
     all_token_ids_stride,
     prompt_len_ptr,
     prefill_len_ptr,
+    prompt_embeds_lens_ptr,
+    prompt_embeds_mask_ptrs_ptr,
     prompt_bin_mask_ptr,
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
+    HAS_PROMPT_EMBEDS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -241,6 +254,19 @@ def _bincount_kernel(
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     if block_idx * BLOCK_SIZE < prompt_len:
         mask = block < prompt_len
+        if HAS_PROMPT_EMBEDS and tl.load(prompt_embeds_lens_ptr + req_state_idx) > 0:
+            # Prompt-embedding positions hold placeholder zeros in
+            # all_token_ids; exclude them so token 0 is not spuriously
+            # counted as a prompt token.
+            mask_ptr_int = tl.load(prompt_embeds_mask_ptrs_ptr + req_state_idx)
+            if mask_ptr_int == 0:
+                # The whole prompt is embeddings: no token ids to count.
+                mask = tl.full([BLOCK_SIZE], 0, tl.int1)
+            else:
+                # Mixed prompt: the mask marks real token-id positions.
+                is_tok_ptr = mask_ptr_int.to(tl.pointer_type(tl.uint8))
+                is_tok = tl.load(is_tok_ptr + block, mask=mask, other=0)
+                mask = mask & (is_tok != 0)
         prompt_tokens = tl.load(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
         )
@@ -276,6 +302,8 @@ def bincount(
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
     max_prefill_len: int,
+    prompt_embeds_lens: torch.Tensor | None = None,
+    prompt_embeds_mask_ptrs: torch.Tensor | None = None,
 ) -> None:
     # Use index_fill_ instead of `tensor[idx] = 0` to avoid sync.
     idx_long = expanded_idx_mapping.long()
@@ -284,16 +312,20 @@ def bincount(
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
+    has_prompt_embeds = prompt_embeds_lens is not None
     _bincount_kernel[(num_tokens, num_blocks)](
         expanded_idx_mapping,
         all_token_ids,
         all_token_ids.stride(0),
         prompt_len,
         prefill_len,
+        prompt_embeds_lens if has_prompt_embeds else expanded_idx_mapping,
+        prompt_embeds_mask_ptrs if has_prompt_embeds else expanded_idx_mapping,
         prompt_bin_mask,
         prompt_bin_mask.stride(0),
         output_bin_counts,
         output_bin_counts.stride(0),
+        HAS_PROMPT_EMBEDS=has_prompt_embeds,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
