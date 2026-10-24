@@ -39,7 +39,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not slow_test v1/spec_decode || true'
+    pytest --continue-on-collection-errors -v -s -m not slow_test v1/spec_decode || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen'
   key: spec-decode-eagle-1-deepseek-qwen
   device: intel_gpu
@@ -65,7 +65,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/eagle/ -k deepseek_eagle or qwen3_eagle3 || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/eagle/ -k deepseek_eagle or qwen3_eagle3 || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
   key: spec-decode-eagle-2-llama3-qwen-vl-other
   device: intel_gpu
@@ -91,8 +91,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/eagle/ -k not deepseek_eagle and not qwen3_eagle3 || true'
-- label: ':nvidia: (B200) Spec Decode Eagle Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/eagle/ -k not deepseek_eagle and not qwen3_eagle3 || true'
+- label: ':nvidia: (B200) [Nightly] Spec Decode Eagle'
   key: spec-decode-eagle-nightly-b200
   device: intel_gpu
   timeout_in_minutes: 25
@@ -107,6 +107,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/eagle/
   source_file_dependencies:
@@ -117,7 +118,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/eagle/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/eagle/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Speculators'
   key: spec-decode-speculators
   device: intel_gpu
@@ -145,7 +146,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/speculators/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/speculators/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP Gemma4'
   key: spec-decode-mtp-gemma4
   device: intel_gpu
@@ -173,7 +174,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/mtp/gemma4/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/gemma4/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo'
   key: spec-decode-mtp-deepseek-mimo
   device: intel_gpu
@@ -187,7 +188,7 @@ steps:
     VLLM_TEST_DEVICE: xpu
   agent_tags:
     label: production
-    gpu: 1+
+    gpu: 1
     mem: 24+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
@@ -202,8 +203,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/mtp/deepseek/ || true &&
-    pytest -v -s v1/e2e/spec_decode/mtp/mimo/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/deepseek/ || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/mimo/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP Qwen3.5'
   key: spec-decode-mtp-qwen3-5
   device: intel_gpu
@@ -231,8 +232,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/ || true'
-- label: ':nvidia: (B200) Spec Decode Speculators + MTP Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/qwen3_5/ || true'
+- label: ':nvidia: (B200) [Nightly] Spec Decode Speculators + MTP'
   key: spec-decode-speculators-mtp-nightly-b200
   device: intel_gpu
   timeout_in_minutes: 30
@@ -247,6 +248,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/speculators/
   - pytest -v -s v1/e2e/spec_decode/mtp/
@@ -259,8 +261,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/speculators/ || true &&
-    pytest -v -s v1/e2e/spec_decode/mtp/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/speculators/ || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix'
   key: spec-decode-ngram-suffix
   device: intel_gpu
@@ -288,8 +290,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true &&
-    python3 spec_decode/test_custom_proposer.py || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/ngram_suffix/ || true'
 - label: ':nvidia: (H200 MIG 18GB) Spec Decode Draft Model Shard %N'
   key: spec-decode-draft-model
   device: intel_gpu
@@ -306,6 +307,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -316,34 +318,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (B200) Spec Decode Draft Model Nightly'
-  key: spec-decode-draft-model-nightly-b200
-  device: intel_gpu
-  timeout_in_minutes: 40
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/draft_model/
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - tests/v1/e2e/spec_decode/
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/draft_model/ || true'
-- label: ':nvidia: (H100) Speculators Correctness Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H100) [Nightly] Speculators Correctness'
   key: speculators-correctness
   device: intel_gpu
   timeout_in_minutes: 30
@@ -372,8 +348,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
     cd tests &&
-    pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
-- label: ':nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load'
+    pytest --continue-on-collection-errors -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
+- label: ':nvidia: (B200) [Nightly] Spec Decode DeepSeek MTP Parallel Load'
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   device: intel_gpu
   timeout_in_minutes: 30
@@ -402,8 +378,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
-- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DFlash'
   key: spec-decode-dflash-nightly
   device: intel_gpu
   timeout_in_minutes: 90
@@ -418,6 +394,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
   source_file_dependencies:
@@ -432,8 +409,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 || true'
-- label: ':nvidia: (B200) Spec Decode AL DFlash2 Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 || true'
+- label: ':nvidia: (B200) [Nightly] Spec Decode AL DFlash2'
   key: spec-decode-dflash2-nightly-b200
   device: intel_gpu
   timeout_in_minutes: 60
@@ -461,8 +438,35 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 || true'
-- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k dflash2 || true'
+- label: ':nvidia: (H100) [Nightly] Spec Decode AL XPress'
+  key: spec-decode-xpress-nightly
+  device: intel_gpu
+  timeout_in_minutes: 30
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/xpress/
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/xpress/
+  - vllm/model_executor/models/qwen3_xpress.py
+  - tests/v1/e2e/spec_decode/acceptance_rates/xpress/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/xpress/ || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DSpark'
   key: spec-decode-dspark-nightly
   device: intel_gpu
   timeout_in_minutes: 60
@@ -489,8 +493,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/ || true'
-- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dspark/ || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance'
   key: spec-decode-mtp-other-acceptance-nightly
   device: intel_gpu
   timeout_in_minutes: 35
@@ -519,6 +523,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi || true &&
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi || true &&
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi || true'
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi || true &&
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest --continue-on-collection-errors -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi || true &&
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest --continue-on-collection-errors -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi || true'

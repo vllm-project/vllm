@@ -17,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s benchmarks/
   source_file_dependencies:
@@ -28,4 +29,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s benchmarks/ || true'
+    pytest --continue-on-collection-errors -v -s benchmarks/ || true'
