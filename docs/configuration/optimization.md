@@ -46,6 +46,17 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
+### Preemption for Higher-Priority Requests
+
+With `--scheduling-policy priority`, a waiting request does not preempt running requests by default: a high-priority request that finds the KV cache full waits until running requests of a lower priority finish, or until one of them is preempted because a running request cannot grow. `--max-priority-preemptions-per-step N` (0, off, by default) lets the waiting request of the highest priority preempt up to `N` running requests of a strictly lower priority in a step when the KV cache lacks room for its whole sequence: the lowest priority first and, within it, the request whose sequence takes the most blocks, and none if `N` would not make room. They resume like any preempted request once in-flight prefills of a higher priority have the blocks they still need.
+
+`--priority-prefill-budget-cap` (off by default) keeps prefills of a strictly lower priority, running or waiting, out of the steps from the one in which the waiting request of the highest priority fits (a free running slot and KV cache room for its whole sequence), while it loads its KV from a KV connector or prefills, until it has its first `--priority-prefill-budget-cap-tokens` output tokens (16 by default). Decodes are never cut, and a request that does not fit holds nothing back.
+
+```bash
+vllm serve <model> --scheduling-policy priority \
+    --max-priority-preemptions-per-step 2 --priority-prefill-budget-cap
+```
+
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.

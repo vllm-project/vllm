@@ -164,6 +164,30 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties)."""
 
+    max_priority_preemptions_per_step: int = Field(default=0, ge=0)
+    """Under the priority policy, the maximum number of running requests of a
+    strictly lower priority that the waiting request of the highest priority may
+    preempt in a step when the KV cache lacks room for its whole sequence: the
+    lowest priority first, then the request whose sequence takes the most blocks,
+    as few as needed and none if this many would not make room. While a prefill
+    of a higher priority is in flight, a new or preempted request is admitted
+    only if its whole sequence fits beside the blocks that in-flight prefills
+    still need. 0 (the default) disables it."""
+
+    priority_prefill_budget_cap: bool = False
+    """Under the priority policy, keep prefills of a lower priority, running or
+    waiting, out of the steps of a request's first tokens: from the step in which
+    the waiting request of the highest priority fits (a free running slot and
+    room in the KV cache for its whole sequence), while it loads its KV from a KV
+    connector or prefills, until it has its first
+    `priority_prefill_budget_cap_tokens` output tokens. Decodes are never cut. A
+    waiting request that does not fit holds nothing back, nor does one loading
+    its KV while no running slot is free."""
+
+    priority_prefill_budget_cap_tokens: int = Field(default=16, ge=1)
+    """With `priority_prefill_budget_cap`, the number of a request's first output
+    tokens during which prefills of a lower priority sit out."""
+
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
     partially schedule a multimodal item. Only used in V1
@@ -342,6 +366,14 @@ class SchedulerConfig:
             raise ValueError(
                 f"max_num_active_seqs ({self.max_num_active_seqs}) cannot be "
                 f"greater than max_num_seqs ({self.max_num_seqs})."
+            )
+
+        if self.policy != "priority" and (
+            self.max_priority_preemptions_per_step or self.priority_prefill_budget_cap
+        ):
+            raise ValueError(
+                "max_priority_preemptions_per_step and priority_prefill_budget_cap "
+                f"require the priority scheduling policy, not {self.policy!r}."
             )
 
         if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
