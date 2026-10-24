@@ -1088,3 +1088,36 @@ re-prefill par elle-même ; aucune IP nouvelle avec 200.
 0 échec, 0 repli cloud) ; nbaudit ok 10:06:02Z (vague 2 `Image/`) ; G: OK
 (577 GB libres, 85 %) ; commit hôte 79,5 % (marge 81,6 GB) ; 1 WARN RSM
 `[retirement #3782] lookup timed out — fail-open` (périmètre RSM, consigné).
+
+### Addendum 10:45Z — TAXONOMIE DES 400 (12 occurrences sur 24 h) et correction d'une hypothèse
+
+Le dépouillement horodaté (epoch + UTC + local) de **tous** les 400 du journal donne
+deux familles **disjointes** :
+
+| famille | critère | occurrences | corps réponse |
+|---|---|---|---|
+| **mur de contexte** | `model` parsé, body 875 K-1,01 Mo | 20:41:45, 23:47:27, 23:47:30, 00:06:21, 02:48:06, 02:48:16, 05:02:03, 07:20:58 (24/10) | JSON `maximum context length … 262144` (quand la capture est chargée) |
+| **upload abandonné** | `model=None` + corps 467-868 K | 01:57:04, 07:07:23, 07:09:34 | **vide** |
+
+**Le discriminant est `model=None`** : le middleware ne parse `model` qu'au dernier
+chunk de requête (`more_body=false`). `model=None` ⇒ **le corps n'est jamais arrivé
+complet** ⇒ uvicorn émet un 400 sans corps. Ce ne sont **ni des murs de contexte ni
+des retries** — ce sont des abandons client en cours d'upload. Corroboré par le hub
+(po-2025:claudish, DM 11:11Z) : **aucune ligne de mur côté hub à 07:06-07:10Z**, et
+le « 868 K → 466 K » que j'avais lu comme un retry condensé est en réalité **le client
+qui revient après compactage**.
+
+**Correction formelle** : mon DM de 08:48Z proposait l'hypothèse « retry local
+condensé ». Elle est **fausse** — retirée. Ce qui tient : #431 n'est pas en cause (la
+marche haiku→Swift est unique, le 400 remonte au ContextGuard qui synthétise), et le
+hub **apprend** un cap (`cap=229645`, short-circuit depuis 07:21:52Z).
+
+**Fait vérifié côté moteur** : `GET /v1/models` déclare **`max_model_len = 262144`**
+sur les deux noms servis. Le `280 000` du profil hub `vllm-myia` est donc une valeur
+**figée côté hub**, pas une donnée du moteur — le remède robuste est de la **dériver
+de `/v1/models`**. Risque documenté au hub : le cap appris vit en mémoire et est
+**perdu à chaque recreate**, ce qui rouvre la bande 262,1-280k jusqu'au réapprentissage.
+
+**Horloge** : le conteneur tourne en **TZ=UTC** (`local == utc`, pas +2) ; le mur de
+07:20:58Z côté moteur correspond à la seconde près à la ligne du hub — discipline de
+fuseau confirmée des deux côtés.
