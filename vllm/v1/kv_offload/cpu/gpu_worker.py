@@ -77,6 +77,89 @@ class Transfer:
     batch_sizes: torch.Tensor
 
 
+class _HostToDeviceMap(NamedTuple):
+    host_base: np.uint64
+    chunk_bytes: np.uint64
+    device_bases: np.ndarray  # uint64 device address of each registered chunk
+
+
+# Keyed by (data_ptr, row stride in bytes, rows); None means no translation.
+_host_to_device_maps: dict[tuple[int, int, int], _HostToDeviceMap | None] = {}
+
+
+def _host_to_device_map(tensor: torch.Tensor) -> _HostToDeviceMap | None:
+    """Device-address view of a host-registered CPU tensor, if it differs.
+
+    Host memory pinned with cudaHostRegister can be mapped at a device
+    address that differs from its host address (NVIDIA vGPU, WSL2).
+    cudaMemcpyAsync translates such addresses itself, but cuMemcpyBatchAsync
+    and kernels that dereference the pointer (the Triton swap kernel) need
+    the device address. On bare-metal Linux the two are equal and this
+    returns None.
+
+    pin_mmap_region registers the region in row-aligned chunks of
+    MAX_HOST_REGISTER_CHUNK_BYTES, and each chunk may get its own device
+    mapping, so the map keeps one device base per chunk.
+    """
+    if tensor.device.type != "cpu" or not current_platform.is_cuda():
+        return None
+    host_base = tensor.data_ptr()
+    row_stride = tensor.stride(0) * tensor.element_size()
+    num_rows = tensor.shape[0]
+    key = (host_base, row_stride, num_rows)
+    if key in _host_to_device_maps:
+        return _host_to_device_maps[key]
+
+    from cuda.bindings import runtime as cudart
+
+    rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // row_stride, 1)
+    chunk_bytes = rows_per_chunk * row_stride
+    num_chunks = max(-(-num_rows // rows_per_chunk), 1)
+    device_bases: list[int] = []
+    for k in range(num_chunks):
+        err, attr = cudart.cudaPointerGetAttributes(host_base + k * chunk_bytes)
+        if (
+            err != cudart.cudaError_t.cudaSuccess
+            or attr.type != cudart.cudaMemoryType.cudaMemoryTypeHost
+            or not attr.devicePointer
+        ):
+            # Not registered (pageable): the copy APIs take the host address.
+            if err != cudart.cudaError_t.cudaSuccess:
+                cudart.cudaGetLastError()
+            device_bases = []
+            break
+        device_bases.append(int(attr.devicePointer))
+
+    result = None
+    if any(dev != host_base + k * chunk_bytes for k, dev in enumerate(device_bases)):
+        logger.info_once(
+            "Host-registered CPU KV memory is mapped at device addresses that "
+            "differ from its host addresses (e.g. NVIDIA vGPU, WSL2); "
+            "translating CPU-side copy pointers."
+        )
+        result = _HostToDeviceMap(
+            host_base=np.uint64(host_base),
+            chunk_bytes=np.uint64(chunk_bytes),
+            device_bases=np.array(device_bases, dtype=np.uint64),
+        )
+    _host_to_device_maps[key] = result
+    return result
+
+
+def _translate_to_device(tensor: torch.Tensor, ptrs: np.ndarray) -> None:
+    """Rewrite host pointers into ``tensor`` as device pointers, in place."""
+    mapping = _host_to_device_map(tensor)
+    if mapping is None:
+        return
+    # Work on offsets from the tensor base so that no step wraps around,
+    # even when the device address is below the host address.
+    p = ptrs.view(np.uint64)
+    p -= mapping.host_base
+    chunk = p // mapping.chunk_bytes
+    p -= chunk * mapping.chunk_bytes
+    p += mapping.device_bases[chunk]
+
+
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     blocks_per_chunk: int,
@@ -112,6 +195,7 @@ def compute_sub_block_ptrs(
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
         output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
+        _translate_to_device(tensor, output)
         return
 
     # Vectorized expansion for blocks_per_chunk > 1.
@@ -125,6 +209,7 @@ def compute_sub_block_ptrs(
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
+    _translate_to_device(tensor, output)
 
 
 class CopyPlan(NamedTuple):
