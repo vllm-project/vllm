@@ -48,6 +48,9 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -940,6 +943,18 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             ):
                 continue
 
+            # NVFP4 checkpoint: same for MLA projections quantized to NVFP4.
+            # Runs first because the FP8 path also claims ``.weight_scale``.
+            if _try_load_nvfp4_attn_proj(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                kv_a_pad_size,
+            ):
+                continue
+
             # FP8 checkpoint: dequantize BF16-kept MLA projections
             # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16.
             if _try_load_fp8_attn_proj(
@@ -1433,9 +1448,8 @@ def _try_load_fp8_attn_proj(
     The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
     but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
     DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
-    modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
-    normal stacked/direct path loads the FP8 tensor as-is.
+    modules_to_not_convert). Targets with a registered ``weight_scale`` or
+    ``weight_scale_inv`` use the normal stacked/direct loader instead.
     """
     matched = None
     for suffix, info in _FP8_ATTN_PROJS.items():
@@ -1455,12 +1469,19 @@ def _try_load_fp8_attn_proj(
     layer_prefix = name.rsplit(suffix, 1)[0]
     target_w = f"{layer_prefix}.{target_base}.weight"
     target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
+    # Registered scales belong to the normal quantized loader.
+    if target_s in params_dict or (
+        f"{layer_prefix}.{target_base}.weight_scale" in params_dict
+    ):
         return False
 
     entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    if (
+        not is_weight
+        and "weight" in entry
+        and entry["weight"].dtype != torch.float8_e4m3fn
+    ):
+        return False
     entry["weight" if is_weight else "scale"] = tensor
     if "weight" not in entry or "scale" not in entry:
         return True
@@ -1469,6 +1490,24 @@ def _try_load_fp8_attn_proj(
     buf[layer_prefix].pop(key, None)
     block_size = weight_fp8.shape[1] // scale_inv.shape[1]
     weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
+    _load_bf16_attn_proj(
+        weight_bf16,
+        params_dict[target_w],
+        shard_id,
+        is_kva,
+        kv_a_pad_size,
+    )
+    loaded_params.add(target_w)
+    return True
+
+
+def _load_bf16_attn_proj(
+    weight_bf16: torch.Tensor,
+    param,
+    shard_id: int | None,
+    is_kva: bool,
+    kv_a_pad_size: int,
+) -> None:
     # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
     if is_kva and kv_a_pad_size > 0:
         pad = torch.zeros(
@@ -1478,11 +1517,81 @@ def _try_load_fp8_attn_proj(
             device=weight_bf16.device,
         )
         weight_bf16 = torch.cat([weight_bf16, pad], dim=0)
-
-    param = params_dict[target_w]
     if shard_id is None:
         param.weight_loader(param, weight_bf16)
     else:
         param.weight_loader(param, weight_bf16, shard_id)
+
+
+def _try_load_nvfp4_attn_proj(
+    name,
+    tensor,
+    buf,
+    params_dict,
+    loaded_params,
+    kv_a_pad_size: int,
+) -> bool:
+    """Dequantize ModelOpt NVFP4 MLA projections that the model keeps in BF16.
+
+    NVFP4 checkpoints that quantize the MLA projections store a packed e2m1
+    ``weight`` (uint8), e4m3 per-16 ``weight_scale`` and an fp32
+    ``weight_scale_2``. Only BF16 targets without registered weight scales are
+    converted; other destinations use their existing loader.
+    Activation ``input_scale`` tensors are unused by BF16 targets.
+    """
+    matched = None
+    for suffix, info in _FP8_ATTN_PROJS.items():
+        if suffix in name:
+            matched = (suffix, info)
+            break
+    if matched is None:
+        return False
+    suffix, (key, target_base, shard_id, is_kva) = matched
+    if name.endswith(".weight") and tensor.dtype == torch.uint8:
+        part = "weight"
+    elif name.endswith(".weight_scale") and tensor.dtype == torch.float8_e4m3fn:
+        part = "scale"
+    elif name.endswith(".weight_scale_2"):
+        part = "weight_scale_2"
+    elif name.endswith(".input_scale"):
+        part = "input_scale"
+    else:
+        return False
+
+    layer_prefix = name.rsplit(suffix, 1)[0]
+    target_w = f"{layer_prefix}.{target_base}.weight"
+    if (
+        target_w not in params_dict
+        or params_dict[target_w].dtype != torch.bfloat16
+        or f"{layer_prefix}.{target_base}.weight_scale" in params_dict
+        or f"{layer_prefix}.{target_base}.weight_scale_inv" in params_dict
+    ):
+        return False
+    if part == "input_scale":
+        return f"{layer_prefix}.{target_base}.input_scale" not in params_dict
+    # E4M3 scales are ambiguous until the weight dtype is known. Share the
+    # pending entry so the FP8 helper can finish a scale-first FP8 stream.
+    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    if "weight" in entry and entry["weight"].dtype != torch.uint8:
+        return False
+    entry[part] = tensor
+    if not all(p in entry for p in ("weight", "scale", "weight_scale_2")):
+        return True
+
+    buf[layer_prefix].pop(key, None)
+    weight_bf16 = dequantize_to_dtype(
+        entry["weight"],
+        entry["scale"],
+        entry["weight_scale_2"].float(),
+        dtype=torch.bfloat16,
+        swizzle=False,
+    )
+    _load_bf16_attn_proj(
+        weight_bf16,
+        params_dict[target_w],
+        shard_id,
+        is_kva,
+        kv_a_pad_size,
+    )
     loaded_params.add(target_w)
     return True
