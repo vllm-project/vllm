@@ -7195,6 +7195,60 @@ def test_drafter_lookahead_encoder_cache_cap_respects_token_budget(
     assert output.scheduled_encoder_inputs["req"] == [0]
 
 
+@pytest.mark.parametrize("prefill_lookahead", [1, 3])
+@pytest.mark.parametrize(
+    "mm_positions,budget",
+    [
+        # The token budget fits the image but not the image plus look-ahead.
+        ([(10, 64)], 64),
+        # The second image starts fewer than look-ahead tokens after the first.
+        ([(10, 16), (26, 16)], 32),
+    ],
+)
+def test_drafter_lookahead_unchunked_mm_input_progress(
+    prefill_lookahead, mm_positions, budget
+):
+    """With disable_chunked_mm_input, rolling back to before an image must not
+    subtract the drafter look-ahead: that stalls the prompt forever or splits
+    the previous image across chunks."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=budget,
+        max_model_len=2048,
+        disable_chunked_mm_input=True,
+    )
+    scheduler.num_prefill_lookahead = prefill_lookahead
+    scheduler.max_num_encoder_input_tokens = 1000
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+
+    num_tokens = mm_positions[-1][0] + mm_positions[-1][1] + 10
+    request = create_requests(
+        num_requests=1,
+        num_tokens=num_tokens,
+        mm_positions=[[PlaceholderRange(offset=o, length=n) for o, n in mm_positions]],
+        max_tokens=1,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    while request.num_computed_tokens < num_tokens:
+        start = request.num_computed_tokens
+        output = scheduler.schedule()
+        end = start + output.num_scheduled_tokens.get("req", 0)
+        assert end > start
+        assert not any(o < start < o + n or o < end < o + n for o, n in mm_positions)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=["req"],
+                req_id_to_index={"req": 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+
 def test_free_encoder_inputs_unchanged_without_spec_decode():
     """Without speculative decoding, encoder inputs are freed as soon as
     num_computed_tokens passes the placeholder range, as before."""
