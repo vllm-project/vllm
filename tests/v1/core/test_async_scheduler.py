@@ -690,6 +690,7 @@ def test_requires_kv_delivery_defaults_to_producer_role():
     ("kv_role", "defer_free"),
     [
         ("kv_producer", False),
+        ("kv_producer", True),
         ("kv_consumer", False),
         ("kv_consumer", True),
     ],
@@ -704,7 +705,7 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     freed, so the consumer pulls garbage. A consumer hands nothing off, so it
     keeps the lossless deliver-stale path.
 
-    A consumer with overlapping batches (async scheduling or PP) instead fences
+    A connector with overlapping batches (async scheduling or PP) instead fences
     the victim's free behind its in-flight output, so the allocation retry
     stops instead of preempting; the request then finishes from that output
     once it lands. The gate depends on the platform (async scheduling is
@@ -755,7 +756,7 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
 
     assert handoff.num_stale_output_tokens == 0
-    if is_producer:
+    if is_producer and not defer_free:
         # Dropped: recomputed from the waiting queue, so the hand-off happens
         # against real KV.
         assert not handoff.is_finished()

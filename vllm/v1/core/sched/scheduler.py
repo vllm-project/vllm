@@ -184,12 +184,11 @@ class Scheduler(SchedulerInterface):
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
-            # With overlapping batches (async scheduling or PP), a step may
-            # still be writing a freed request's KV blocks. A consumer KV
-            # Connector can reallocate and fill those blocks via a load that
-            # isn't ordered against that write, so defer freeing them.
+            # Hold blocks until their in-flight step completes, including its
+            # load-failure report. The top-level role does not rule out loads:
+            # MultiConnector children have independent transfer roles.
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
-            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
+            if multiple_inflight_batches:
                 self.defer_block_free = True
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
