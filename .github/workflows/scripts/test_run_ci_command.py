@@ -1418,6 +1418,117 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("failed during CI setup", github.comments[0])
         self.assertIn("Use `/ci run`", github.comments[0])
 
+    def _run_retry_with_failed_jobs(
+        self, jobs: list[dict[str, Any]]
+    ) -> tuple[FakeGitHub, FakeBuildkite]:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 122,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/122",
+                    }
+                ],
+            ],
+            [jobs],
+        )
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+        return github, buildkite
+
+    def test_ci_retry_new_head_ignores_soft_failed_image_build(self) -> None:
+        github, buildkite = self._run_retry_with_failed_jobs(
+            [
+                {
+                    "soft_failed": True,
+                    "state": "failed",
+                    "step_key": "image-build-xpu",
+                    "type": "script",
+                },
+                {
+                    "soft_failed": False,
+                    "state": "failed",
+                    "step_key": "lora-tp-distributed",
+                    "type": "script",
+                },
+            ]
+        )
+
+        self.assertNotIn("failed during CI setup", github.comments[0])
+        self.assertEqual(len(buildkite.created_builds), 1)
+        self.assertEqual(
+            json.loads(buildkite.created_builds[0]["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
+            ["lora-tp-distributed"],
+        )
+
+    def test_ci_retry_new_head_skips_soft_failed_jobs(self) -> None:
+        _, buildkite = self._run_retry_with_failed_jobs(
+            [
+                {
+                    "soft_failed": True,
+                    "state": "failed",
+                    "step_key": "flaky-optional-test",
+                    "type": "script",
+                },
+                {
+                    "soft_failed": False,
+                    "state": "failed",
+                    "step_key": "lora-tp-distributed",
+                    "type": "script",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            json.loads(buildkite.created_builds[0]["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
+            ["lora-tp-distributed"],
+        )
+
+    def test_ci_retry_new_head_only_soft_failures_retries_nothing(self) -> None:
+        github, buildkite = self._run_retry_with_failed_jobs(
+            [
+                {
+                    "soft_failed": True,
+                    "state": "failed",
+                    "step_key": "image-build-xpu",
+                    "type": "script",
+                }
+            ]
+        )
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("No failed, timed-out, or expired jobs", github.comments[0])
+
+    def test_ci_retry_new_head_rejects_hard_failed_image_build(self) -> None:
+        github, buildkite = self._run_retry_with_failed_jobs(
+            [
+                {
+                    "soft_failed": False,
+                    "state": "failed",
+                    "step_key": "image-build-xpu",
+                    "type": "script",
+                },
+                {
+                    "soft_failed": False,
+                    "state": "failed",
+                    "step_key": "lora-tp-distributed",
+                    "type": "script",
+                },
+            ]
+        )
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("failed during CI setup", github.comments[0])
+
     def test_buildkite_retry_uses_retry_failed_jobs_endpoint(self) -> None:
         transport = FakeTransport({"retried_jobs_count": 2})
         client = BuildkiteClient(

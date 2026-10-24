@@ -1079,7 +1079,13 @@ def handle_retry_failed(
         )
 
     failed_jobs = buildkite.list_failed_jobs(source_build["number"])
-    failed_script_jobs = [job for job in failed_jobs if job.get("type") == "script"]
+    # A soft-failed job never blocks the PR, so it is neither a setup failure
+    # nor worth re-running.
+    failed_script_jobs = [
+        job
+        for job in failed_jobs
+        if job.get("type") == "script" and not job.get("soft_failed")
+    ]
     missing_step_keys = [job for job in failed_script_jobs if not job.get("step_key")]
     if missing_step_keys:
         return (
