@@ -403,6 +403,110 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
     torch.testing.assert_close(output, expected.to(dtype).expand_as(output))
 
 
+@pytest.mark.parametrize("poison", [float("nan"), float("inf")])
+@pytest.mark.parametrize("causal", [True, False])
+@torch.inference_mode()
+def test_sliding_window_ignores_non_finite_out_of_window_kv(
+    poison: float, causal: bool
+) -> None:
+    """Slots outside every query's sliding window may sit in freed blocks that
+    hold NaN/Inf; they must not reach the output of either kernel."""
+    device, dtype = "cuda:0", torch.float16
+    torch.set_default_device(device)
+    set_random_seed(0)
+    num_heads, num_kv_heads, head_size, block_size = 8, 2, 128, 16
+    sliding_window = 64
+    # Prefills (context_attention_fwd) and decodes (kernel_paged_attention_2d).
+    query_lens = [8, 1, 8, 1, 8]
+    ctx_lens = [30, 200, 300, 1000, 1500]
+    seq_lens = [q + c for q, c in zip(query_lens, ctx_lens)]
+    num_blocks = [(s + block_size - 1) // block_size for s in seq_lens]
+    total_blocks = sum(num_blocks)
+    block_table = torch.zeros(len(seq_lens), max(num_blocks), dtype=torch.int32)
+    perm = torch.randperm(total_blocks, dtype=torch.int32)
+    start = 0
+    for i, n in enumerate(num_blocks):
+        block_table[i, :n] = perm[start : start + n]
+        start += n
+
+    key = torch.randn(sum(seq_lens), num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn_like(key)
+    query = torch.randn(sum(query_lens), num_heads, head_size, dtype=dtype)
+    k_cache = torch.zeros(
+        total_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    v_cache = torch.zeros_like(k_cache)
+    seq_starts = [0]
+    for s in seq_lens:
+        seq_starts.append(seq_starts[-1] + s)
+    for i, seq_len in enumerate(seq_lens):
+        pos = torch.arange(seq_len)
+        slots = block_table[i, pos // block_size].long(), pos % block_size
+        tokens = slice(seq_starts[i], seq_starts[i + 1])
+        k_cache[slots] = key[tokens]
+        v_cache[slots] = value[tokens]
+        # Positions before the first query's window, as if their blocks were
+        # freed and reused.
+        stale = pos < ctx_lens[i] - sliding_window + 1
+        k_cache[slots[0][stale], slots[1][stale]] = poison
+        v_cache[slots[0][stale], slots[1][stale]] = poison
+
+    # ROCM_ATTN layout: K [nb, kvh, D/x, bs, x], V [nb, kvh, D, bs].
+    x = 16 // k_cache.element_size()
+    k_cache_rocm = (
+        k_cache.view(total_blocks, block_size, num_kv_heads, head_size // x, x)
+        .permute(0, 2, 3, 1, 4)
+        .contiguous()
+    )
+    v_cache_rocm = v_cache.permute(0, 2, 3, 1).contiguous()
+    query_start_loc = torch.cumsum(torch.tensor([0] + query_lens), dim=0).to(
+        torch.int32
+    )
+    new_tokens = torch.cat(
+        [
+            torch.arange(seq_starts[i] + ctx_lens[i], seq_starts[i + 1])
+            for i in range(len(seq_lens))
+        ]
+    )
+    output = torch.empty_like(query)
+    scale = torch.tensor(1.0, dtype=torch.float32)
+    chunked_prefill_paged_decode(
+        query=query,
+        key=key[new_tokens],
+        value=value[new_tokens],
+        output=output,
+        kv_cache_dtype="auto",
+        key_cache=k_cache_rocm,
+        value_cache=v_cache_rocm,
+        block_table=block_table,
+        query_start_loc=query_start_loc,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        max_seq_len=max(seq_lens),
+        max_query_len=max(query_lens),
+        k_scale=scale,
+        v_scale=scale,
+        sliding_window=sliding_window,
+        causal=causal,
+    )
+
+    group = num_heads // num_kv_heads
+    for i, seq_len in enumerate(seq_lens):
+        tokens = slice(seq_starts[i], seq_starts[i + 1])
+        k = key[tokens].float().repeat_interleave(group, dim=1)
+        v = value[tokens].float().repeat_interleave(group, dim=1)
+        q = query[query_start_loc[i] : query_start_loc[i + 1]].float()
+        q_pos = ctx_lens[i] + torch.arange(query_lens[i])
+        k_pos = torch.arange(seq_len)
+        mask = k_pos[None, :] > q_pos[:, None] - sliding_window
+        if causal:
+            mask &= k_pos[None, :] <= q_pos[:, None]
+        scores = torch.einsum("qhd,khd->hqk", q, k) * head_size**-0.5
+        scores = scores.masked_fill(~mask[None], float("-inf"))
+        ref = torch.einsum("hqk,khd->qhd", scores.softmax(dim=-1), v)
+        out = output[query_start_loc[i] : query_start_loc[i + 1]]
+        torch.testing.assert_close(out.float(), ref, atol=2e-3, rtol=1e-2)
+
+
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
