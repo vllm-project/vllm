@@ -136,6 +136,106 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     assert specs["draft"].is_draft and not specs["target"].is_draft
 
 
+@pytest.mark.parametrize("runner_kind", ["legacy", "new"])
+@pytest.mark.parametrize(
+    "cache_dtypes",
+    [("fp8_e4m3", "fp8_e5m2"), ("fp8_e4m3", "fp8_e4m3"), ("auto", "auto")],
+)
+def test_attention_groups_isolate_runtime_cache_formats(
+    monkeypatch, runner_kind, cache_dtypes
+):
+    """Equal physical specs may need different kernel plans and metadata."""
+    from vllm.v1.worker import gpu_model_runner
+
+    class Backend:
+        @classmethod
+        def full_cls_name(cls):
+            return (__name__, cls.__name__)
+
+    spec = FullAttentionSpec(
+        block_size=64, num_kv_heads=8, head_size=128, dtype=torch.uint8
+    )
+    layers = {
+        name: SimpleNamespace(
+            get_attn_backend=lambda: Backend, num_heads=32, kv_cache_dtype=dtype
+        )
+        for name, dtype in zip(["layer0", "layer1"], cache_dtypes)
+    }
+    kv_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(layers), spec)],
+    )
+    config = SimpleNamespace(parallel_config=SimpleNamespace())
+    if runner_kind == "legacy":
+        monkeypatch.setattr(
+            gpu_model_runner, "get_layers_from_vllm_config", lambda *_: layers
+        )
+        monkeypatch.setattr(
+            gpu_model_runner, "check_attention_cp_compatibility", lambda _: None
+        )
+        runner = SimpleNamespace(
+            attn_groups=[],
+            vllm_config=config,
+            kv_sharing_fast_prefill_eligible_layers=set(),
+            _check_and_update_cudagraph_mode=lambda *_, **__: None,
+        )
+        gpu_model_runner.GPUModelRunner.initialize_attn_backend(runner, kv_config)
+        groups = runner.attn_groups[0]
+    else:
+        monkeypatch.setattr(
+            attn_utils, "get_layers_from_vllm_config", lambda *_: layers
+        )
+        monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+        monkeypatch.setattr(
+            attn_utils, "get_kv_sharing_fast_prefill_eligible_layers", lambda *_: set()
+        )
+        monkeypatch.setattr(attn_utils, "prepare_kernel_block_sizes", lambda *_: [64])
+        monkeypatch.setattr(attn_utils, "get_num_ubatches", lambda _: 1)
+        monkeypatch.setattr(attn_utils, "get_attn_cg_support", lambda *_: None)
+        monkeypatch.setattr(attn_utils.envs, "VLLM_BATCH_INVARIANT", False)
+        monkeypatch.setattr(
+            AttentionGroup, "create_metadata_builders", lambda *_, **__: None
+        )
+        groups = attn_utils.init_attn_backend(kv_config, config, torch.device("cpu"))[
+            0
+        ][0]
+
+    assert len(groups) == len(set(cache_dtypes))
+    assert {group.kv_cache_dtype for group in groups} == set(cache_dtypes)
+    assert [name for group in groups for name in group.layer_names] == list(layers)
+    for group in groups:
+        group.metadata_builders = [SimpleNamespace()]
+    assert len({group.get_metadata_reuse_key() for group in groups}) == len(groups)
+    assert all(group.kv_cache_spec == spec for group in groups)
+
+
+@pytest.mark.parametrize("cache_dtypes", [[], [None], ["auto"], ["fp8_e4m3"]])
+def test_runtime_cache_dtype_resolution(monkeypatch, cache_dtypes):
+    from vllm.v1.attention.backends import utils as backend_utils
+
+    layers = {
+        str(index): SimpleNamespace(kv_cache_dtype=dtype)
+        for index, dtype in enumerate(cache_dtypes)
+    }
+    monkeypatch.setattr(backend_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    assert backend_utils.get_kv_cache_dtype_from_layers(
+        SimpleNamespace(), list(layers)
+    ) == (cache_dtypes[0] if cache_dtypes else None)
+
+
+def test_runtime_cache_dtype_resolution_rejects_incompatible_layers(monkeypatch):
+    from vllm.v1.attention.backends import utils as backend_utils
+
+    layers = {
+        "layer0": SimpleNamespace(kv_cache_dtype="fp8_e4m3"),
+        "layer1": SimpleNamespace(kv_cache_dtype="fp8_e5m2"),
+    }
+    monkeypatch.setattr(backend_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    with pytest.raises(ValueError, match="must share the same KV cache dtype"):
+        backend_utils.get_kv_cache_dtype_from_layers(SimpleNamespace(), list(layers))
+
+
 class _FakeMetadataBuilder:
     def __init__(self, support: AttentionCGSupport, varlen_bound: int | None = None):
         self.support = support

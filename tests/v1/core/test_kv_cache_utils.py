@@ -39,6 +39,7 @@ from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
+    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -326,6 +327,41 @@ def test_effective_attention_block_size_matches_events(dcp):
         for event in manager.take_events()
         if isinstance(event, BlockStored)
     ] == [block_size]
+
+
+@pytest.mark.skip_global_cleanup
+def test_default_chunked_attention_keeps_uniform_cache_group():
+    """Logical format resolution must not change default Llama4 allocation."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.attention.chunked_local_attention import (
+        ChunkedLocalAttention,
+    )
+    from vllm.v1.attention.backend import AttentionType
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+    )
+    layer = SimpleNamespace(
+        num_kv_heads=8,
+        head_size=128,
+        head_size_v=128,
+        kv_cache_torch_dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        attn_type=AttentionType.DECODER,
+        sliding_window=None,
+        attention_chunk_size=1024,
+    )
+    specs = {
+        "global": Attention.get_kv_cache_spec(layer, config),
+        "chunked": ChunkedLocalAttention.get_kv_cache_spec(layer, config),
+    }
+    groups = get_kv_cache_groups(config, specs)
+
+    assert len(groups) == 1
+    assert type(groups[0].kv_cache_spec) is FullAttentionSpec
+    assert groups[0].layer_names == ["global", "chunked"]
+    assert is_kv_cache_spec_uniform(specs)
 
 
 def test_kv_cache_config_selects_only_transferable_groups():
@@ -1883,6 +1919,16 @@ def test_merge_mla_spec():
     mla_spec = kv_cache_specs[0].merge(kv_cache_specs)
     assert mla_spec == new_mla_spec()
 
+    quantized_specs = [
+        replace(
+            new_mla_spec(),
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+        for _ in range(2)
+    ]
+    merged_quantized = quantized_specs[0].merge(quantized_specs)
+    assert merged_quantized.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+
     kv_cache_specs = [
         new_mla_spec(cache_dtype_str="fp8_ds_mla"),
         new_mla_spec(cache_dtype_str="fp8_ds_mla"),
@@ -1910,6 +1956,26 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
