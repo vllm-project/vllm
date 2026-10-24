@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Loaded-adapter metrics reach the frontend's Prometheus registry, both from
-adapter RPCs on an idle engine and from adapters a step loads."""
+"""Loaded-adapter metrics reach the frontend's Prometheus registry, from
+adapter RPCs on an idle engine, from adapters a step loads, and from dummy
+batches."""
 
 import time
 from collections.abc import Callable
@@ -125,3 +126,19 @@ def test_lora_load_metrics_track_adapter_changes(monkeypatch, multiprocessing):
     series = _series_after(llm, lambda s: ("adapter-4", "gpu", "false") in s)
     assert ("adapter-1", "gpu", "true") in series
     assert _gauge(llm, "vllm:num_gpu_loaded_lora_adapters") == 2
+
+
+@pytest.mark.parametrize("use_v2_model_runner", ["0", "1"])
+def test_lora_load_metrics_follow_dummy_batches(monkeypatch, use_v2_model_runner):
+    """After a dummy batch the reported adapters match the worker's."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner)
+    llm = _make_engine()
+
+    llm.add_lora(make_lora_request(1))
+    llm.add_lora(make_lora_request(3))
+    _series_after(llm, lambda s: len(s) == 2)
+
+    llm.engine_core.execute_dummy_batch()
+    loaded = {f"adapter-{i}" for i in llm.list_loras()}
+    _series_after(llm, lambda s: {name for name, _, _ in s} == loaded)
+    assert _gauge(llm, "vllm:num_cpu_loaded_lora_adapters") == len(loaded)
