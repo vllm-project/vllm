@@ -850,6 +850,7 @@ steps:
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
     - vllm/model_executor/determinism
+    - vllm/utils/flashinfer.py
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
