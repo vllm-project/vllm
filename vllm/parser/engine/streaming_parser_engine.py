@@ -475,6 +475,16 @@ class StreamingParserEngine:
                     ]
                 return []
 
+        if (
+            self.skip_tool_parsing
+            and self._in_skipped_tool_span
+            and terminal not in self._tool_terminals
+        ):
+            # A skipped tool span is handed to the tool pass verbatim, so a
+            # non-tool marker inside it (e.g. a quoted </think> in a Qwen
+            # parameter value) must not fire its reasoning-channel transition.
+            return self._emit_for_state(value, token_count)
+
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
             return self._emit_for_state(value, token_count)
 
