@@ -197,3 +197,109 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+def _sequential_gated_delta_rule_reference(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    initial_states: torch.Tensor,
+    seq_lens: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """FP32 token-by-token definition of the gated delta rule.
+
+    Returns the output [T, HV, V] and the final state [N, HV, V, K] of each
+    sequence. initial_states[n] is the start state of sequence n.
+    """
+    num_v_heads = value.shape[-2]
+    group = num_v_heads // query.shape[-2]
+    q = F.normalize(query[0].float(), dim=-1, eps=1e-6).repeat_interleave(group, 1)
+    k = F.normalize(key[0].float(), dim=-1, eps=1e-6).repeat_interleave(group, 1)
+    q = q * query.shape[-1] ** -0.5
+    v = value[0].float()
+    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias.float())
+    beta = b.float().sigmoid()
+    out = torch.empty_like(v)
+    final_states = []
+    start = 0
+    for n, seq_len in enumerate(seq_lens):
+        h = initial_states[n].float().clone()  # [HV, V, K]
+        for t in range(start, start + seq_len):
+            h = h * g[t].exp()[:, None, None]
+            delta = (v[t] - torch.einsum("hvk,hk->hv", h, k[t])) * beta[t][:, None]
+            h = h + delta[:, :, None] * k[t][:, None, :]
+            out[t] = torch.einsum("hvk,hk->hv", h, q[t])
+        final_states.append(h)
+        start += seq_len
+    return out, torch.stack(final_states)
+
+
+@pytest.mark.parametrize("seq_lens", [[1, 4, 28], [32, 1, 1, 7], [64]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fused_sigmoid_gating_delta_rule_update_varlen_prefill(
+    seq_lens: list[int], dtype: torch.dtype
+) -> None:
+    """Multi-token sequences with 1-D state indices (short prefills merged
+    with decodes): each sequence stores only its final state, in its own slot,
+    and a sequence without an initial state starts from zero."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    num_k_heads, num_v_heads, head_dim = 2, 4, 128
+    num_seqs = len(seq_lens)
+    num_tokens = sum(seq_lens)
+    num_slots = 2 * num_seqs + 1  # slot 0 is NULL_BLOCK_ID
+
+    query = torch.randn(1, num_tokens, num_k_heads, head_dim, dtype=dtype)
+    key = torch.randn(1, num_tokens, num_k_heads, head_dim, dtype=dtype)
+    value = torch.randn(1, num_tokens, num_v_heads, head_dim, dtype=dtype)
+    A_log = torch.rand(num_v_heads, dtype=dtype)
+    dt_bias = torch.rand(num_v_heads, dtype=dtype)
+    a = torch.randn(num_tokens, num_v_heads, dtype=dtype)
+    b = torch.randn(num_tokens, num_v_heads, dtype=dtype)
+    ssm_state = torch.randn(num_slots, num_v_heads, head_dim, head_dim, dtype=dtype)
+    state_indices = (torch.randperm(num_slots - 1, dtype=torch.int32) + 1)[:num_seqs]
+    has_initial_state = torch.arange(num_seqs) % 2 == 0
+    cu_seqlens = torch.zeros(num_seqs + 1, dtype=torch.int32)
+    cu_seqlens[1:] = torch.tensor(seq_lens).cumsum(0)
+
+    initial_states = ssm_state[state_indices.long()].clone()
+    initial_states[~has_initial_state] = 0
+    out_ref, final_ref = _sequential_gated_delta_rule_reference(
+        query, key, value, a, b, A_log, dt_bias, initial_states, seq_lens
+    )
+    untouched = torch.ones(num_slots, dtype=torch.bool)
+    untouched[state_indices.long()] = False
+    state_before = ssm_state.clone()
+
+    out, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=query,
+        k=key,
+        v=value,
+        initial_state=ssm_state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        use_qk_l2norm_in_kernel=True,
+        has_initial_state=has_initial_state,
+    )
+
+    tolerance = 1e-2 if dtype == torch.bfloat16 else 1e-4
+    torch.testing.assert_close(
+        out[0].float(), out_ref, atol=tolerance * 4, rtol=tolerance
+    )
+    torch.testing.assert_close(
+        ssm_state[state_indices.long()].float(),
+        final_ref,
+        atol=tolerance * 4,
+        rtol=tolerance,
+    )
+    # Slots of other requests, and the null slot, are not written.
+    torch.testing.assert_close(ssm_state[untouched], state_before[untouched])
