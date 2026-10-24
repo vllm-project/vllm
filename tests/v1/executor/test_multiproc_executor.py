@@ -68,6 +68,72 @@ def test_execute_worker_rpc_returns_worker_exception():
     assert str(outputs[0]) == "test error"
 
 
+@pytest.mark.parametrize(
+    "method", ["execute_model", "sample_tokens", "execute_dummy_batch"]
+)
+def test_non_output_model_step_rpc_exception_stops_worker(method):
+    def fail():
+        raise RuntimeError("non-output rank failure")
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(**{method: fail})
+    worker_proc.handle_output = lambda output: pytest.fail(
+        "non-output workers must not publish a successful response"
+    )
+
+    with pytest.raises(RuntimeError, match="non-output rank failure"):
+        worker_proc._execute_worker_rpc((method, (), {}, 1))
+
+
+def test_non_output_non_model_rpc_exception_does_not_stop_worker():
+    def fail():
+        raise RuntimeError("non-model RPC failure")
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(take_draft_token_ids=fail)
+    worker_proc.handle_output = lambda output: pytest.fail(
+        "non-output workers must not publish a response"
+    )
+
+    worker_proc._execute_worker_rpc(("take_draft_token_ids", (), {}, 1))
+
+
+def test_model_step_rpc_exception_prevents_next_dequeue():
+    marker_executed = False
+    dequeue_count = 0
+
+    def fail():
+        raise RuntimeError("non-output rank failure")
+
+    def marker():
+        nonlocal marker_executed
+        marker_executed = True
+
+    def dequeue(*, indefinite):
+        nonlocal dequeue_count
+        assert indefinite
+        dequeue_count += 1
+        if dequeue_count == 1:
+            return "execute_model", (), {}, 1
+        if dequeue_count == 2:
+            return "marker", (), {}, None
+        raise _ExitWorkerLoop
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rpc_broadcast_mq = SimpleNamespace(dequeue=dequeue)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(execute_model=fail, marker=marker)
+    worker_proc.handle_output = lambda output: None
+
+    with pytest.raises(RuntimeError, match="non-output rank failure"):
+        worker_proc.worker_busy_loop()
+
+    assert not marker_executed
+    assert dequeue_count == 1
+
+
 @pytest.mark.parametrize("stalled", [False, True])
 @pytest.mark.parametrize(
     "method,result",
