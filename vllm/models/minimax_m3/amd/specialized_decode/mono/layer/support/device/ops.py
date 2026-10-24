@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# SPDX-License-Identifier: MIT
+# Adapted from ROCm/ATOM: atom/mono/device/ops.py
+# Original code is MIT-licensed; see mono/layer/LICENSE and the provenance in
+# specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Device-side primitives of the mono kernels: wave reductions and shuffles, the
 approximate hardware math, bf16 / fp8 packing, buffer resources, the

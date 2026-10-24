@@ -160,7 +160,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             current_platform.is_rocm()
             and kernel_config is not None
             and kernel_config.monokernel
-            and kernel_config.monokernel_mode == "layer"
             and getattr(
                 getattr(target_config, "hf_text_config", None), "model_type", None
             )

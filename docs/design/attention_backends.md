@@ -208,7 +208,8 @@ attends only to those blocks; index keys live in a separate side cache.
 ### MiniMax M3 specialized decode on MI355X
 
 `--monokernel` enables a fused sparse-layer pipeline on TP4 MI355X deployments of
-`amd/MiniMax-M3-MXFP4`. It requires `--moe-backend aiter`, FP8 KV and index
+`amd/MiniMax-M3-MXFP4`, with dedicated, unpartitioned 256-CU GPUs. It requires
+`--moe-backend aiter`, FP8 KV and index
 caches, block size 128, and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
 Decode steps with at most 16
 physical token rows use the fused launch, including EAGLE3 verification and
@@ -223,32 +224,34 @@ For example, add these options to a TP4 deployment:
 --quantization-config '{"targets":{"*self_attn*qkv_proj":"fp8_per_channel","*self_attn*o_proj":"fp8_per_channel"}}'
 ```
 
-The default `layer` implementation fuses normalization, FP8 projections, the
+The MonoKernel implementation fuses normalization, FP8 projections, the
 indexer, sparse attention, and the MoE. Adapted from
 [ATOM](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/models/minimax_m3/mono),
 it uses group-of-32 MXFP8 activations for the MXFP4 experts, BF16 router
 weights and logits, and a BF16 rotary table, matching ATOM's precision choices.
-The kernels and their runtime live in vLLM; ATOM is not a runtime dependency.
+The fused-layer design and kernel implementation originate in ATOM. AMD's
+copyright notices and the original MIT license are retained; the
+[source provenance](https://github.com/vllm-project/vllm/blob/main/vllm/models/minimax_m3/amd/specialized_decode/README.md#atom-provenance)
+maps the ported files to their upstream sources. The kernels and their runtime
+live in vLLM; ATOM is not a runtime dependency.
 The existing FlyDSL and AITER packing utilities are still required. Prefill,
 the first three dense layers, and decode steps above 16 physical rows use the
 standard implementation. Native weights and caches remain available for those
 steps.
 
-To retain the previous FFN-only implementation, set
-`--kernel-config '{"monokernel_mode":"ffn"}'`. This uses BF16 expert
-activations and an FP32 router, with native attention and projection launches.
-Existing deployments without FP8 attention projections must select this mode
-or configure FP8 projections before enabling the new default.
+The previous FFN-only MonoKernel has been removed. `--monokernel` now uses
+this full-layer implementation; there is no mode selector. Existing deployments
+must configure FP8 attention projections before enabling it.
 
 With `--attention-backend TRITON_ATTN`, TP4, FP8 KV caches, and at most eight
-sequences, `layer` mode uses AITER unified attention for dense prefills of at
+sequences, MonoKernel uses AITER unified attention for dense prefills of at
 least 64 query tokens, with BF16 queries and probabilities as in ATOM.
 Quantized queries are dequantized before this attention call. Short queries
 retain the Triton decode kernel with 256 softmax segments.
 
 For long text prompts, `VLLM_USE_FASTOKENS=1` selects the optional `fastokens`
 BPE backend for Hugging Face tokenizers. Install `fastokens>=0.2.0` before
-enabling it. This setting also applies to tokenizers used with layer mode.
+enabling it. This setting also applies to tokenizers used with MonoKernel.
 
 For an EAGLE3 draft, also set `"quantization":"fp8_per_channel"` inside
 `--speculative-config` to quantize its linears. The target's
@@ -258,7 +261,7 @@ The evaluated fastokens and EAGLE3 configuration uses `--max-num-seqs 2`.
 Higher sequence limits changed generation behavior in model evaluations,
 including reasoning that reached the output-token limit.
 
-This layer-mode recipe was evaluated with the 102-case MiniMax verifier and
+This recipe was evaluated with the 102-case MiniMax verifier and
 AgentX at client concurrency one and four on TP4 MI355X. It uses three EAGLE3
 draft tokens and real rejection sampling:
 

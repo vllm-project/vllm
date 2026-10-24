@@ -5,14 +5,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
 
 from vllm.config import CompilationMode, VllmConfig
 
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    mode: Literal["ffn", "layer"] = "layer"
     tp_size: int = 4
     blocks: int = 256
     max_rows: int = 16
@@ -108,7 +106,6 @@ def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
     spec = replace(
         DECODE_CONFIG,
         last_layer=layers - 1,
-        mode=config.kernel_config.monokernel_mode,
     )
     reasons = spec.refusal_reasons(config)
     if reasons:

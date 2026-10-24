@@ -16,9 +16,6 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.caches import CacheBinding
-from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
-    FfnExecutor,
-)
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.routing import decide_step
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import (
     DECODE_CONFIG,
@@ -327,8 +324,6 @@ def test_weight_refusals(match):
 
 
 class _Executor:
-    uses_caches = True
-
     def __init__(self):
         self.fault_word = torch.zeros(4, dtype=torch.int32)
         self.slots: torch.Tensor | None = None
@@ -359,9 +354,6 @@ class _Executor:
 
 def _no_checks(monkeypatch, refusals=()):
     monkeypatch.setattr(runtime, "model_refusals", lambda model, config: list(refusals))
-    monkeypatch.setattr(
-        runtime, "MonoLayerWeights", SimpleNamespace(from_layer=lambda layer: layer)
-    )
     monkeypatch.setattr(runtime, "tp_agree", lambda ok: ok)
 
 
@@ -483,17 +475,3 @@ def test_close_is_idempotent_and_stops_reading_the_word():
     assert executor.calls == Counter(close=1)
     executor.fault_word[0] = 1
     decode.after_step(None)
-
-
-def test_abort_never_raises():
-    executor = object.__new__(FfnExecutor)
-    executor.rank = 1
-
-    def broken():
-        raise RuntimeError("peer view")
-
-    executor.peer = SimpleNamespace(
-        bytes=torch.zeros(16, dtype=torch.uint8),
-        addresses=SimpleNamespace(tolist=broken),
-    )
-    executor.abort()

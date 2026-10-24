@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# SPDX-License-Identifier: MIT
+# Adapted from ROCm/ATOM: atom/models/minimax_m3/mono/layout.py
+# Original code is MIT-licensed; see mono/layer/LICENSE and the provenance in
+# specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Where the mono layer kernel (K4) puts its tasks and data, per decode token count.
 
@@ -11,7 +13,6 @@ so it is testable without a GPU.
 """
 
 from .config import (
-    DENSE_INTER,
     HEAD_DIM,
     HIDDEN,
     INTER,
@@ -118,15 +119,6 @@ SCRATCH = _layout(
         ("mid8p", MOE_SLOTS * INTER * MAX_TOKENS // 8),
         ("midsp", MOE_SLOTS * INTER // 32 * MAX_TOKENS // 2),
         ("ugdone", (TOP_K * MAX_TOKENS + 1) * UG_PER_SLOT // 2),
-        # dense layers (dense_post): the post-attention norm's per-token FP8 rows
-        # as plain words, each row's scale (its pair is the flag), and the MLP's
-        # bf16 mid pairs
-        ("dx8", HIDDEN // 4 * MAX_TOKENS // 2),
-        ("dxs", MAX_TOKENS),
-        ("dmid", DENSE_INTER // 2 * MAX_TOKENS),
-        # and (S > 2) each mid row's per-token FP8 as plain words, then its scale
-        ("dmid8", DENSE_INTER // 4 * MAX_TOKENS // 2),
-        ("dmids", MAX_TOKENS),
         # a debug build's wait records, one a CTA; last, so the regions above
         # keep their offsets in every build
         ("diag", BLOCKS * DIAG_WORDS * 4 // PAIR_BYTES),
@@ -210,57 +202,6 @@ def mailbox_regions(
     if tokens >= AG_RS_FROM:
         regions.append(RegionDecl("ffn_ag", P, "down", exchange=True))
     return regions
-
-
-def dense_mailbox_regions(tokens: int) -> list[RegionDecl]:
-    """The dense layer kernel's (dense_post) mailbox regions: each one's space and
-    the one stage that puts it. Stages, in order: merge (S > 1: the attention
-    output's FP8), o, norm (S > 2), ug, mq (S > 2: the mids' FP8), down."""
-    S, P = Space.SCRATCH, Space.PEER
-    regions = []
-    if tokens > 1:
-        regions.append(RegionDecl("attnq_s", S, "merge"))
-    regions.append(RegionDecl("attn", P, "o", exchange=True))
-    regions.append(
-        RegionDecl("a_ag", P, "o") if tokens >= AG_RS_FROM else RegionDecl("a", S, "o")
-    )
-    if tokens > 2:
-        regions.append(RegionDecl("dxs", S, "norm"))
-    regions.append(RegionDecl("dmid", S, "ug"))
-    if tokens > 2:
-        regions.append(RegionDecl("dmids", S, "mq"))
-    regions.append(RegionDecl("ffn", P, "down", exchange=True))
-    if tokens >= AG_RS_FROM:
-        regions.append(RegionDecl("ffn_ag", P, "down", exchange=True))
-    return regions
-
-
-def diag_region_names(tokens: int, index_heads: int) -> list[str]:
-    """Every region a debug step's layer kernels may record a wait on (they share
-    one ``diag`` record, a region named by its ``region_id``): K4's full table,
-    then the dense kernel's own regions."""
-    names = [d.name for d in mailbox_regions(tokens, index_heads, fuse_k1=True)]
-    return names + [
-        d.name for d in dense_mailbox_regions(tokens) if d.name not in names
-    ]
-
-
-def dense_stage_bases(tokens: int):
-    """Task t of a dense_post stage runs on CTA (base + t) % BLOCKS: the o tasks
-    past the merge tasks (S > 1), then the norm (S > 2) and gate / up tasks on the
-    CTAs the o tasks leave (they start the gate / up weights at once), the mid
-    quant (S > 2) and down tasks after them."""
-    o = tokens if tokens > 1 else 0
-    ug = (o + N_O) % BLOCKS
-    down = (ug + N_DENSE_UG) % BLOCKS
-    return {
-        "merge": 0,
-        "o": o,
-        "norm": ug,
-        "ug": ug,
-        "mq": down,
-        "down": down,
-    }
 
 
 def stage_bases(tokens: int):
@@ -349,11 +290,6 @@ MID_ROW = INTER // 4 + 4
 MIDSC_ROW = INTER // 32 + 4
 # and the o stage's FP8 attention rows (512 words: the same 16-way conflict)
 O_ROW = O_K // 4 + 4
-# the dense layers' (dense_post) per-token FP8 rows: the gate / up input and the
-# down stage's mids
-DX_ROW = HIDDEN // 4 + 4
-DMID_ROW = DENSE_INTER // 4 + 4
-N_DENSE_UG = DENSE_INTER // UG_ROWS  # gate / up tasks, UG_ROWS mid columns each
 
 
 def pool_words(tokens: int) -> int:

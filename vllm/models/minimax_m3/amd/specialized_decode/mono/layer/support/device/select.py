@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# SPDX-License-Identifier: MIT
+# Adapted from ROCm/ATOM: atom/mono/device/select.py
+# Original code is MIT-licensed; see mono/layer/LICENSE and the provenance in
+# specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """A CTA's exact top-k for a small k, by counting: entry e of an LDS array is a
 signed 64-bit sort key (a 32-bit key high, the entry's id low: key, then id,

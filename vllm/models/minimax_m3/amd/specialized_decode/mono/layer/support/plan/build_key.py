@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# SPDX-License-Identifier: MIT
+# Adapted from ROCm/ATOM: atom/mono/plan/build_key.py
+# Original code is MIT-licensed; see mono/layer/LICENSE and the provenance in
+# specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """A kernel build's parameters, all of them in FlyDSL's JIT cache key.
 
@@ -27,22 +29,22 @@ from dataclasses import fields
 from pathlib import Path
 
 _SCALARS = (int, float, bool, str, enum.Enum)
-_ATOM = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 @functools.cache
 def source_digest(*paths: str) -> str:
     """sha256 of every ``.py`` file under ``paths`` (files or directories,
-    relative to the ``atom`` package), each file's path and contents: one model's
+    relative to the kernel package), each file's path and contents: one model's
     kernel sources, so an edit to another model's rebuilds none of these."""
     h = hashlib.sha256()
     for rel in paths:
-        root = _ATOM / rel
+        root = _ROOT / rel
         files = [root] if root.is_file() else sorted(root.rglob("*.py"))
         if not files:
             raise FileNotFoundError(f"no kernel sources at {root}")
         for f in files:
-            h.update(str(f.relative_to(_ATOM)).encode())
+            h.update(str(f.relative_to(_ROOT)).encode())
             h.update(f.read_bytes())
     return h.hexdigest()[:16]
 

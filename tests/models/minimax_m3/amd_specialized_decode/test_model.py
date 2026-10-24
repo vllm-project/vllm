@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layer- and model-level precision of --monokernel on a mini MiniMax M3 at
-the real per-layer shapes, TP4, with random weights (no checkpoint): layers
-0-2 dense and stock, 3-4 sparse and fused, the last one ending in the step-end
-handshake. Engines load dummy weights, so vLLM's real MXFP4 / AITER post-load
-path runs; every rank then overwrites them in place at sensible scales,
-distinct per layer and per TP shard, the experts generated in the checkpoint's
-MXFP4 format and converted by that same path.
+"""Full-layer MonoKernel execution on a seeded five-layer TP4 MiniMax-M3.
 
-- layer: each sparse ``MiniMaxM3DecoderLayer``'s FFN half (seam all-reduce and
-  residual, post-attention norm, MoE) on captured decode-step inputs, native
-  vs the fused launch;
-- model: teacher-forced decode (trace replay) with full-vocabulary logprobs,
-  --monokernel eager and under FULL graphs (with frequent epoch resets) vs
-  native eager;
-- fail-stop: a late rank fault under FULL graphs returns no token."""
+Exercise FULL graph replay, EAGLE3 verification and fail-stop through LLM.
+MXFP8 arithmetic is checked against an independent reference in test_ops.py.
+"""
 
 import zlib
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -44,6 +33,7 @@ ENV = {
     # skinny and AITER tuned GEMMs reduce in a run-dependent order
     "VLLM_ROCM_USE_SKINNY_GEMM": "0",
     "VLLM_ROCM_USE_AITER_LINEAR": "0",
+    "HIP_ONLINE_TUNING": "0",
 }
 
 
@@ -121,11 +111,6 @@ def model_dir(tmp_path_factory):
 
 
 @torch.no_grad()
-def _randomize(worker):
-    _randomize_model(worker.model_runner.get_model())
-
-
-@torch.no_grad()
 def _randomize_model(model, *, stable_prefill=False):
     """Weights at unit-activation scales; TP shards seeded per rank, replicated
     tensors (norms, router, bias) alike on every rank."""
@@ -164,7 +149,7 @@ def _randomize_model(model, *, stable_prefill=False):
     for layer in model.model.layers:
         # q = 0, uniform attention: the FP8 KV cache rounds native's run-to-run
         # last-bit differences into whole FP8 steps, which softmax over q.k
-        # would amplify; the FFN under test needs no attention content
+        # would amplify; the model comparison needs no attention content
         layer.self_attn.q_norm.weight.fill_(-1.0)
         if layer.layer_id not in SPARSE:
             if stable_prefill:
@@ -209,7 +194,8 @@ def _randomize_model(model, *, stable_prefill=False):
 class SeededDummyModelLoader(DummyModelLoader):
     def load_model(self, vllm_config, model_config, prefix=""):
         model = super().load_model(vllm_config, model_config, prefix)
-        _randomize_model(model, stable_prefill=True)
+        if "MiniMaxM3SparseForCausalLM" in model_config.hf_config.architectures:
+            _randomize_model(model, stable_prefill=True)
         return model
 
 
@@ -230,10 +216,8 @@ def _requests():
     return requests
 
 
-def _decode(llm, capture=False):
-    """Full-vocabulary logprobs of every decode step (the first output token
-    comes from prefill, which runs stock), every token forced; ``capture``:
-    also each sparse layer's inputs at the first decode step of each batch."""
+def _decode(llm):
+    """Full-vocabulary decode logprobs along fixed teacher-forced tokens."""
     from vllm import SamplingParams
 
     rows = []
@@ -249,25 +233,12 @@ def _decode(llm, capture=False):
             )
             for trace in traces
         ]
-        if capture:
-            llm.collective_rpc(_install, args=(n,))
         outputs = llm.generate(prompts, params, use_tqdm=False)
-        if capture:
-            assert llm.collective_rpc(_stash, args=(n,)) == [list(SPARSE)] * 4
         for out, trace in zip(outputs, traces):
             assert list(out.outputs[0].token_ids) == trace
             for step in out.outputs[0].logprobs[1:]:
                 rows.append([step[v].logprob for v in range(VOCAB)])
     return torch.tensor(rows)
-
-
-def _metrics(got, want):
-    got, want = got.float(), want.float()
-    err = got - want
-    cos = torch.nn.functional.cosine_similarity(got.flatten(), want.flatten(), dim=0)
-    rel = err.norm() / want.norm()
-    row = (err.norm(dim=-1) / want.norm(dim=-1)).max()
-    return cos.item(), rel.item(), row.item()
 
 
 def _logit_errors(got, want):
@@ -278,85 +249,12 @@ def _logit_errors(got, want):
     return cos.item(), (got - want).norm(dim=-1) / want.norm(dim=-1)
 
 
-def _backbone(worker):
-    return worker.model_runner.get_model().model
-
-
-def _install(worker, s):
-    worker._ffn_cap, worker._ffn_hooks = {}, []
-    for layer in _backbone(worker).layers:
-        if layer.layer_id not in SPARSE:
-            continue
-
-        def pre(mod, args, lid=layer.layer_id):
-            if args[1].shape[0] == s and lid not in worker._ffn_cap:
-                worker._ffn_cap[lid] = [args[1].clone(), args[2].clone(), None]
-
-        def post(mod, args, kwargs, out, lid=layer.layer_id):
-            cap = worker._ffn_cap.get(lid)
-            if cap is not None and cap[2] is None:
-                cap[2] = out.clone()
-
-        worker._ffn_hooks += [
-            layer.register_forward_pre_hook(pre),
-            layer.self_attn.register_forward_hook(post, with_kwargs=True),
-        ]
-
-
-def _stash(worker, s):
-    for hook in worker._ffn_hooks:
-        hook.remove()
-    worker._ffn_caps = getattr(worker, "_ffn_caps", {})
-    worker._ffn_caps[s] = worker._ffn_cap
-    return sorted(worker._ffn_cap)
-
-
-def _replay(worker):
-    """Each captured sparse layer's FFN half, native and fused, on every rank."""
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-        fused_allreduce_gemma_rms_norm,
-    )
-    from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
-        FfnExecutor,
-    )
-    from vllm.models.minimax_m3.amd.specialized_decode.runtime.weights import (
-        MonoLayerWeights,
-    )
-
-    layers = {
-        layer.layer_id: layer
-        for layer in _backbone(worker).layers
-        if layer.layer_id in SPARSE
-    }
-    weights = {i: MonoLayerWeights.from_layer(layer) for i, layer in layers.items()}
-    executor = FfnExecutor(list(layers.values()), weights, BATCHES, 4)
-    results = {}
-    with torch.no_grad(), set_forward_context(None, worker.vllm_config):
-        for s, caps in worker._ffn_caps.items():
-            for i, (hidden, residual, part) in caps.items():
-                layer = layers[i]
-                _, residual = layer.input_layernorm(hidden, residual)
-                x, want_res = fused_allreduce_gemma_rms_norm(
-                    part, residual, layer.post_attention_layernorm
-                )
-                want = layer.block_sparse_moe(x)
-                slots = torch.arange(s, dtype=torch.int64, device=part.device)
-                got, got_res = executor.runner(part, residual, weights[i], slots)
-                results[(s, i)] = (*_metrics(got, want), torch.equal(got_res, want_res))
-    failed = executor.health().failed
-    executor.close()
-    return results, failed
-
-
 def _engine(
     vllm_runner,
     model_dir,
-    mono,
     graphs=False,
-    mono_mode="ffn",
     max_num_seqs=None,
-    load_format="dummy",
+    load_format="minimax_m3_seeded_dummy",
     enforce_eager=None,
     ir_op_priority=None,
     cudagraph_capture_sizes=None,
@@ -366,13 +264,12 @@ def _engine(
     if cudagraph_capture_sizes is not None:
         compilation_config["cudagraph_capture_sizes"] = cudagraph_capture_sizes
     kernel_config = {
-        "ir_op_priority": ir_op_priority or {},
+        "ir_op_priority": ir_op_priority
+        or {"rms_norm": ["aiter"], "fused_add_rms_norm": ["aiter"]},
         "enable_jit_warmup": False,
         "moe_backend": "aiter",
-        "monokernel": mono,
+        "monokernel": True,
     }
-    if mono_mode is not None:
-        kernel_config["monokernel_mode"] = mono_mode
     return vllm_runner(
         model_dir,
         load_format=load_format,
@@ -384,120 +281,42 @@ def _engine(
         attention_backend="TRITON_ATTN",
         attention_config={"indexer_kv_dtype": "fp8"},
         kernel_config=kernel_config,
-        enforce_eager=not graphs if enforce_eager is None else enforce_eager,
+        enforce_eager=False if enforce_eager is None else enforce_eager,
         compilation_config=compilation_config,
         enable_prefix_caching=False,
         enable_trace_replay=True,
         max_logprobs=-1,
         gpu_memory_utilization=0.1,
+        worker_extension_cls=(
+            "tests.models.minimax_m3.amd_specialized_decode.test_model."
+            "SeededWeightsWorkerExtension"
+        ),
+        quantization_config={
+            "targets": {
+                "*self_attn*qkv_proj": "fp8_per_channel",
+                "*self_attn*o_proj": "fp8_per_channel",
+            }
+        },
         **extra,
     )
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _env():
-    with pytest.MonkeyPatch.context() as mp:
-        for name, value in ENV.items():
-            mp.setenv(name, value)
-        yield
+    from vllm._aiter_ops import rocm_aiter_ops
 
-
-@pytest.fixture(scope="module")
-def native(vllm_runner, model_dir):
-    """Native eager: the reference logprobs and the layer replays."""
-    with _engine(vllm_runner, model_dir, mono=False) as runner:
-        runner.llm.collective_rpc(_randomize)
-        logprobs = _decode(runner.llm, capture=True)
-        layers = runner.llm.collective_rpc(_replay)
-    return SimpleNamespace(logprobs=logprobs, layers=layers)
-
-
-def test_sparse_layers_match_native(native):
-    """Every rank, both sparse layers, decode widths 1, 3 and 16: the fused
-    launch against the native FFN half; the residual exactly."""
-    for results, failed in native.layers:
-        assert not failed
-        for cos, rel, row, residual_equal in results.values():
-            assert residual_equal
-            assert cos > 0.9999 and rel < 1e-2 and row < 1e-2
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            for name, value in ENV.items():
+                mp.setenv(name, value)
+            rocm_aiter_ops.refresh_env_variables()
+            yield
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
 
 
 def _executor(worker):
     return worker.model_runner.model_state.backbone.specialized_decode.executor
-
-
-def _reset_every(worker, steps):
-    executor = _executor(worker)
-    executor._reset_launches = steps * len(executor._layers)
-    executor._since_reset = 0
-    return executor.resets
-
-
-def _reset_state(worker):
-    executor = _executor(worker)
-    return executor.resets, executor.health().failed
-
-
-@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
-def test_model_matches_native(vllm_runner, model_dir, native, graphs):
-    """Teacher-forced decode with --monokernel against native eager. Under
-    FULL graphs (async scheduling) the epoch resets every 3 sampled steps,
-    on every rank at the same steps, and no wait times out."""
-    with _engine(
-        vllm_runner,
-        model_dir,
-        mono=True,
-        graphs=graphs,
-        async_scheduling=True if graphs else None,
-    ) as runner:
-        llm = runner.llm
-        llm.collective_rpc(_randomize)
-        if graphs:
-            before = llm.collective_rpc(_reset_every, args=(3,))
-        logprobs = _decode(llm)
-        after = llm.collective_rpc(_reset_state)
-    cos, rows = _logit_errors(logprobs, native.logprobs)
-    close = (rows < 3e-2).float().mean().item()
-    print(f"cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}")
-    # native's MoE sums in BF16 atomics: native reruns differ by ~1e-2 a row,
-    # and by ~0.2 on the 4-13% of rows where that flips a near-tie expert
-    assert cos > 0.99 and close > 0.8
-    assert not any(failed for _, failed in after)
-    if graphs:
-        resets = {n - b for (n, _), b in zip(after, before)}
-        assert len(resets) == 1 and resets.pop() >= len(BATCHES) * STEPS // 3 - 1
-
-
-def _projection_dtypes(worker):
-    return [
-        (layer.self_attn.qkv_proj.weight.dtype, layer.self_attn.o_proj.weight.dtype)
-        for layer in _backbone(worker).layers
-    ]
-
-
-def test_online_fp8_projections_match_native(vllm_runner, model_dir):
-    """FP8 attention projections still run natively around the fused FFN;
-    mono must accept their post-load layout and preserve decode logprobs."""
-    quantization = {
-        "targets": {
-            "*self_attn*qkv_proj": "fp8_per_channel",
-            "*self_attn*o_proj": "fp8_per_channel",
-        }
-    }
-    rows = []
-    for mono in (False, True):
-        with _engine(
-            vllm_runner,
-            model_dir,
-            mono=mono,
-            quantization_config=quantization,
-        ) as runner:
-            runner.llm.collective_rpc(_randomize)
-            for dtypes in runner.llm.collective_rpc(_projection_dtypes):
-                assert dtypes == [(torch.float8_e4m3fn,) * 2] * LAYERS
-            rows.append(_decode(runner.llm))
-    cos, errors = _logit_errors(rows[1], rows[0])
-    assert cos > 0.99 and (errors < 3e-2).float().mean().item() > 0.8
 
 
 def _full_layer_state(worker):
@@ -527,8 +346,7 @@ def test_default_monokernel_graph_replay_matches_uncaptured_forward(
 ):
     """Default --monokernel selects full-layer MXFP8 math under FULL replay.
 
-    The FFN-only tests above retain their BF16 reference. Layer mode's expert
-    arithmetic is checked independently in test_layer_post_matches_mxfp8_reference.
+    Expert arithmetic has an independent MXFP8 reference in test_ops.py.
     Keep native providers and physical batch shapes identical; seed before
     weight packing and graph capture. Padding is checked by the layer op tests.
     """
@@ -539,8 +357,6 @@ def test_default_monokernel_graph_replay_matches_uncaptured_forward(
         with _engine(
             vllm_runner,
             model_dir,
-            mono=True,
-            mono_mode=None,
             graphs=graphs,
             max_num_seqs=8,
             enforce_eager=False,
@@ -552,16 +368,6 @@ def test_default_monokernel_graph_replay_matches_uncaptured_forward(
                 "fused_add_rms_norm": ["aiter"],
             },
             load_format="minimax_m3_seeded_dummy",
-            worker_extension_cls=(
-                "tests.models.minimax_m3.amd_specialized_decode.test_model."
-                "SeededWeightsWorkerExtension"
-            ),
-            quantization_config={
-                "targets": {
-                    "*self_attn*qkv_proj": "fp8_per_channel",
-                    "*self_attn*o_proj": "fp8_per_channel",
-                }
-            },
         ) as runner:
             outputs.append(_decode(runner.llm))
             for full_layer, count, failed, splits in runner.llm.collective_rpc(
@@ -573,28 +379,27 @@ def test_default_monokernel_graph_replay_matches_uncaptured_forward(
     assert cos > 0.99 and (errors < 3e-2).float().mean().item() > 0.8
 
 
-def _arm_late_fault(worker, rank, ticks):
-    _executor(worker).runner.inject.copy_(
-        torch.tensor([rank + 1, ticks], dtype=torch.int32)
-    )
+def _arm_fault(worker, rank):
+    executor = _executor(worker)
+    if executor.rank == rank:
+        executor.abort()
 
 
-def test_late_rank_fault_returns_no_tokens_from_full_graphs(
-    vllm_runner, model_dir, capfd
+def test_host_abort_returns_no_tokens_from_full_graphs(
+    vllm_runner, model_dir, capfd, monkeypatch
 ):
-    """During a replayed step, rank 2 fails 5 ms after the rest of the step's
-    last launch, so the output rank is ahead of it; that step returns no
-    token."""
+    """A host abort on one rank stops generation before any token returns."""
     from vllm import SamplingParams
     from vllm.v1.engine.exceptions import EngineDeadError
 
+    monkeypatch.setenv("HSA_DISABLE_COREDUMP_ON_EXCEPTION", "1")
     prompt = {"prompt_token_ids": list(range(1, 33))}
     params = SamplingParams(max_tokens=8, temperature=0, detokenize=False)
-    with _engine(vllm_runner, model_dir, mono=True, graphs=True) as runner:
+    with _engine(vllm_runner, model_dir, graphs=True) as runner:
         llm = runner.llm
         assert len(llm.generate(prompt, params)[0].outputs[0].token_ids) == 8
         capfd.readouterr()
-        llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
+        llm.collective_rpc(_arm_fault, args=(2,))
         outputs = None
         with pytest.raises(EngineDeadError):
             outputs = llm.generate(prompt, params)
@@ -644,7 +449,7 @@ def draft_dir(tmp_path_factory):
 
 
 def _epoch(worker):
-    return int(_executor(worker).runner.epoch[0])
+    return int(_executor(worker).epoch[0])
 
 
 def _spec_requests():
@@ -658,15 +463,14 @@ def _spec_requests():
     ]
 
 
-def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
-    """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
-    steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
-    launches (the device epoch moves on); the target's full-vocabulary
-    logprobs along the generated tokens match native eager teacher-forced on
-    them. A late rank fault during a verify step then returns no token."""
+def test_eagle3_verify_steps_match_target(
+    vllm_runner, model_dir, draft_dir, monkeypatch
+):
+    """Accepted verify rows match the target's teacher-forced logprobs."""
+    from tests.v1.e2e.spec_decode.utils import compute_acceptance_rate
     from vllm import SamplingParams
-    from vllm.v1.engine.exceptions import EngineDeadError
 
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     greedy = SamplingParams(
         max_tokens=STEPS, temperature=0, logprobs=-1, detokenize=False, ignore_eos=True
     )
@@ -674,16 +478,22 @@ def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, cap
     with _engine(
         vllm_runner,
         model_dir,
-        mono=True,
         graphs=True,
+        max_num_seqs=max(SPEC_BATCHES),
+        cudagraph_capture_sizes=list(range(1, 17)),
+        async_scheduling=False,
+        disable_custom_all_reduce=True,
+        disable_log_stats=False,
         speculative_config={
             "method": "eagle3",
             "model": draft_dir,
             "num_speculative_tokens": SPEC_TOKENS,
+            # A random draft needs forced acceptance to exercise accepted rows.
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_rates": [1.0, 1.0, 0.0],
         },
     ) as runner:
         llm = runner.llm
-        llm.collective_rpc(_randomize)
         for prompts in _spec_requests():
             before = llm.collective_rpc(_epoch)
             outputs = llm.generate(prompts, greedy, use_tqdm=False)
@@ -694,17 +504,19 @@ def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, cap
             for out in outputs:
                 for step in out.outputs[0].logprobs[1:]:
                     mono_rows.append([step[v].logprob for v in range(VOCAB)])
-        capfd.readouterr()
-        llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
-        outputs = None
-        with pytest.raises(EngineDeadError):
-            outputs = llm.generate(_spec_requests()[0], greedy)
-        assert outputs is None
+        for full_layer, count, failed, _ in llm.collective_rpc(_full_layer_state):
+            assert full_layer and count > 0 and not failed
+        assert compute_acceptance_rate(llm.get_metrics()) > 0
 
-    native_rows = []
-    with _engine(vllm_runner, model_dir, mono=False) as runner:
+    target_rows = []
+    with _engine(
+        vllm_runner,
+        model_dir,
+        max_num_seqs=max(SPEC_BATCHES),
+        async_scheduling=False,
+        disable_custom_all_reduce=True,
+    ) as runner:
         llm = runner.llm
-        llm.collective_rpc(_randomize)
         for prompts, traces in zip(_spec_requests(), tokens):
             params = [
                 SamplingParams(
@@ -719,8 +531,8 @@ def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, cap
             ]
             for out in llm.generate(prompts, params, use_tqdm=False):
                 for step in out.outputs[0].logprobs[1:]:
-                    native_rows.append([step[v].logprob for v in range(VOCAB)])
-    cos, rows = _logit_errors(torch.tensor(mono_rows), torch.tensor(native_rows))
+                    target_rows.append([step[v].logprob for v in range(VOCAB)])
+    cos, rows = _logit_errors(torch.tensor(mono_rows), torch.tensor(target_rows))
     close = (rows < 3e-2).float().mean().item()
     print(
         f"EAGLE3 cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}"

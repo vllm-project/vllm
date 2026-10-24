@@ -5,17 +5,56 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
-from flydsl.expr.typing import Int32, Int64
+from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.triton_utils import tl, triton
 
-from ..sync import load64, release, store32, store64
 from .support.device.ops import ballot, load_ptr64, memrealtime
 
+ERROR_WORDS = 4
 ERROR_BYTES = 256
 FENCE_BYTES = 64
 WAIT_TICKS = 1_000_000_000
 _STREAM = fx.Stream(None)
+
+
+def _ptr(addr, i, bits=64):
+    """The global pointer to element i (of ``bits``) of address ``addr``."""
+    at = addr + fx.Int64(i) * (bits // 8)
+    return fx.inttoptr(
+        fx.PointerType.get(
+            T.i64 if bits == 64 else T.i32, fx.AddressSpace.Global, bits // 8
+        ),
+        at,
+    )
+
+
+def load64(addr, i, scope):
+    return fx.generic_load(
+        _ptr(addr, i),
+        dtype=fx.Int64,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=scope,
+    )
+
+
+def store32(addr, i, word, scope):
+    fx.generic_store(
+        _ptr(addr, i, 32),
+        fx.Int32(word),
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=scope,
+    )
+
+
+def store64(addr, i, word, scope):
+    fx.generic_store(
+        _ptr(addr, i), word, memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope
+    )
+
+
+def release(scope):
+    fx.memory_fence(syncscope=scope, ordering=fx.AtomicOrdering.Release)
 
 
 @fx.struct

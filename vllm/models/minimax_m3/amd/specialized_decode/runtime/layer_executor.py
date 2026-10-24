@@ -4,13 +4,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import flydsl.compiler as flyc
 import torch
 
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.amd.mono.common.peer_memory import PeerBuffer
+from vllm.models.deepseek_v41.amd.mono.common.peer_memory import (
+    PeerBuffer,
+    _DeviceBytes,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerMetadata
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
 from vllm.platforms import current_platform
@@ -22,23 +27,29 @@ from ..mono.layer.kernels.pre_attn import SCRATCH_BYTES as PRE_BYTES
 from ..mono.layer.layout import SCRATCH, SCRATCH_BYTES, sym_layout
 from ..mono.layer.step import (
     ERROR_BYTES,
+    ERROR_WORDS,
     FENCE_BYTES,
     begin_fence,
     check_diagnostics,
     expand_rows,
 )
 from ..mono.layer.weights import LayerWeights
-from ..mono.residency import active_workgroups_per_cu
-from ..mono.runner import _writable_flydsl_cache
-from .executor import MonoHealth, mark_peers_failed, tp_agree
+from .compile import _writable_flydsl_cache, active_workgroups_per_cu
+from .decode import tp_agree
 
 logger = init_logger(__name__)
 
 
-class LayerExecutor:
-    uses_caches = True
+@dataclass(frozen=True)
+class MonoHealth:
+    failed: bool
+    rank: int = -1
+    epoch: int = -1
+    site: int = 0
 
-    def __init__(self, layers, weights, widths, tp):
+
+class LayerExecutor:
+    def __init__(self, layers, widths, tp):
         _writable_flydsl_cache()
         group = get_tp_group()
         self.rank, self.tp = group.rank_in_group, tp
@@ -70,7 +81,7 @@ class LayerExecutor:
         self.peers = self.peer.addresses + ERROR_BYTES
         self.sym = self.peer.local + ERROR_BYTES
         self.peer_data = self.peer.bytes[ERROR_BYTES : ERROR_BYTES + self.peer_size]
-        self.fault_word = self.peer.bytes[:16].view(torch.int32)
+        self.fault_word = self.peer.bytes[: 4 * ERROR_WORDS].view(torch.int32)
         self.epoch = torch.zeros(1, dtype=torch.int64, device=self.device)
         self.pre = torch.zeros(PRE_BYTES, dtype=torch.uint8, device=self.device)
         self.scratch = torch.zeros(SCRATCH_BYTES, dtype=torch.uint8, device=self.device)
@@ -301,7 +312,18 @@ class LayerExecutor:
         return MonoHealth(bool(words[0]), *words[1:])
 
     def abort(self):
-        mark_peers_failed(self.peer, self.rank)
+        try:
+            words = torch.tensor(
+                [1, self.rank, -1, 0], dtype=torch.int32, device=self.device
+            )
+            for base in self.peer.addresses.tolist():
+                view = torch.as_tensor(
+                    _DeviceBytes(base, ERROR_BYTES), device=self.device
+                ).view(torch.int32)
+                view[:ERROR_WORDS].copy_(words)
+            torch.accelerator.synchronize()
+        except Exception:
+            logger.exception("MiniMax-M3 launch: marking peers failed")
 
     def after_step(self):
         self.steps += 1

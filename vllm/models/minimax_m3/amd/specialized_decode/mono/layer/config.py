@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# SPDX-License-Identifier: MIT
+# Adapted from ROCm/ATOM: atom/models/minimax_m3/mono/config.py
+# Original code is MIT-licensed; see mono/layer/LICENSE and the provenance in
+# specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Shapes the mono kernels are compiled for: one MiniMax-M3 TP4 rank.
 
@@ -25,7 +27,6 @@ Q_HEADS = 64
 KV_HEADS = 4
 INDEX_HEADS = 4
 EXPERT_INTER = 3072  # a routed expert's intermediate width
-DENSE_INTER_FULL = 12288  # the dense layers' MLP intermediate width
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,6 @@ class Dims:
         shard = Shard(self.tp)
         shard.split(Q_HEADS, "query heads")
         shard.split(EXPERT_INTER, "expert intermediate")
-        shard.split(DENSE_INTER_FULL, "dense intermediate")
         for full, what in ((KV_HEADS, "kv heads"), (INDEX_HEADS, "index heads")):
             if shard.split(full, what) != 1:
                 raise ShardError(
@@ -54,10 +54,6 @@ class Dims:
     @property
     def inter(self) -> int:
         return EXPERT_INTER // self.tp
-
-    @property
-    def dense_inter(self) -> int:
-        return DENSE_INTER_FULL // self.tp
 
 
 # the TP sizes the kernels are built for
@@ -83,7 +79,6 @@ TOP_K = 4
 SHARED_EXPERT = N_ROUTED  # the fused shared expert's id
 MOE_SLOTS = TOP_K + 1
 INTER = Dims(TP).inter  # expert intermediate per rank
-DENSE_INTER = Dims(TP).dense_inter  # dense MLP intermediate per rank
 
 SPARSE_BLOCK = 128
 TOPK_BLOCKS = 16

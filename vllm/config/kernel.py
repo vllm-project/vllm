@@ -299,12 +299,6 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 or MiniMax-M3 on MI355X). A deployment
     that cannot run it is refused at startup."""
 
-    monokernel_mode: Literal["ffn", "layer"] = "layer"
-    """MiniMax-M3 MonoKernel implementation. The default, ``layer``, fuses
-    sparse attention, FP8 projections and the MoE with group-of-32 MXFP8
-    expert activations. ``ffn`` selects the legacy BF16 FFN-only kernel.
-    Requires ``monokernel``; ignored by other models."""
-
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
