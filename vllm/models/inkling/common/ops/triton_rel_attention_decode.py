@@ -204,7 +204,7 @@ def _split_kv_stage1(
             old_scale = tl.exp(row_max - next_max)
             probs = tl.exp(scores - next_max[:, None])
             acc *= old_scale[:, None]
-            acc += tl.dot(probs.to(v.dtype), v)
+            acc += tl.dot(probs.to(q.dtype), v.to(q.dtype))
             row_sum = row_sum * old_scale + tl.sum(probs, axis=1)
             row_max = next_max
 

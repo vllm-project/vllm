@@ -119,7 +119,7 @@ def _inkling_rel_attention_kernel(
             mask=d_valid[:, None] & k_valid[None, :],
             other=0.0,
         )
-        scores = tl.dot(q, k) * (softmax_scale * log2e)
+        scores = tl.dot(q, k.to(q.dtype)) * (softmax_scale * log2e)
 
         dist = q_abs[:, None] - k_pos[None, :]
         score_valid = q_valid[:, None] & k_valid[None, :] & (dist >= 0)
@@ -175,7 +175,7 @@ def _inkling_rel_attention_kernel(
             mask=k_valid[:, None] & d_valid[None, :],
             other=0.0,
         )
-        acc += tl.dot(p.to(v.dtype), v)
+        acc += tl.dot(p.to(q.dtype), v.to(q.dtype))
         m_i = m_ij
 
     acc /= l_i[:, None]

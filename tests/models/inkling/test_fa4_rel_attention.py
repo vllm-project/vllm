@@ -368,7 +368,9 @@ def _ref_rel_attn(
     return out
 
 
-def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0):
+def _run_case(
+    seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0, kv_dtype=None
+):
     torch.manual_seed(seed)
     device = "cuda"
     q_lens = [s[0] for s in seq_lens]
@@ -393,6 +395,9 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     value_cache = torch.randn(
         num_blocks, BLOCK_SIZE, num_kv_heads, HEAD_DIM, device=device, dtype=DTYPE
     )
+    if kv_dtype is not None:
+        key_cache = key_cache.to(kv_dtype)
+        value_cache = value_cache.to(kv_dtype)
 
     # Distinct blocks per sequence (block 0 left as a never-referenced pad).
     block_table = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=device)
@@ -811,3 +816,25 @@ def test_sliding_window(seq_lens, num_heads, local_extent):
 def test_decode(seq_lens, num_heads, rel_extent):
     # q_len=1 with kv_len>q_len: the score-mod's seqlen_k - seqlen_q offset path.
     _run_case(seq_lens, num_heads[0], num_heads[1], rel_extent, window_left=None)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or _cap is None
+    or _cap.major not in _TRITON_ATTENTION_MAJORS,
+    reason="requires SM8x or SM12x",
+)
+@pytest.mark.parametrize("kv_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(64, 64), (17, 40)],  # prefill kernel
+        [(1, 8200), (1, 333)],  # split-KV decode kernel
+    ],
+)
+@torch.inference_mode()
+def test_triton_fp8_kv_cache(seq_lens, kv_dtype):
+    """--kv-cache-dtype fp8 must not cast probabilities or bf16 q to fp8."""
+    if kv_dtype == torch.float8_e4m3fn and _cap is not None and _cap < (8, 9):
+        pytest.skip("float8_e4m3fn requires SM89+")
+    _run_case(seq_lens, 8, 2, 128, window_left=None, kv_dtype=kv_dtype)
