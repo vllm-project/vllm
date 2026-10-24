@@ -787,6 +787,21 @@ def test_trtllm_fp8_swiglu_clamp_support(
         assert "SwiGLU" in reason
 
 
+def test_trtllm_fp8_experts_parallel_config() -> None:
+    """The FlashInfer TRT-LLM FP8 experts take deepep_v2 and nixl_ep_v2
+    dispatch, but not EPLB or other all2all backends."""
+    no_parallel = FusedMoEParallelConfig.make_no_parallel()
+    for backend in ("deepep_v2", "nixl_ep_v2"):
+        cfg = replace(no_parallel, use_ep=True, dp_size=2, all2all_backend=backend)
+        assert cfg.use_all2all_kernels
+        assert TrtLlmFp8ExpertsModular._supports_parallel_config(cfg)
+        assert not TrtLlmFp8ExpertsModular._supports_parallel_config(
+            replace(cfg, enable_eplb=True)
+        )
+    cfg = replace(cfg, all2all_backend="deepep_low_latency")
+    assert not TrtLlmFp8ExpertsModular._supports_parallel_config(cfg)
+
+
 def _make_mxfp8_moe_weights(
     e: int, n: int, k: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

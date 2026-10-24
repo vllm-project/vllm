@@ -135,6 +135,11 @@ def test_gsm8k_correctness(config_filename):
 
         if not has_moonep():
             pytest.skip("Skipping MoonEP config: the moonep package is not installed.")
+    if "--all2all-backend=nixl_ep_v2" in eval_config.get("server_args", ""):
+        from vllm.utils.import_utils import has_nixl_ep_v2
+
+        if not has_nixl_ep_v2():
+            pytest.skip("Skipping NIXL EP V2 config: nixl.runtime.ep is not installed.")
 
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")

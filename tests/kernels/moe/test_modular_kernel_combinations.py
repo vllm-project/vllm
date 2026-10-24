@@ -40,6 +40,7 @@ from .modular_kernel_tools.mk_objects import (
 )
 from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
+    destroy_nixl_ep_v2_buffer,
     parallel_launch_with_config,
 )
 from .utils import check_accuracy, make_test_weights
@@ -217,6 +218,10 @@ def rank_worker(
         except Exception as ex:
             format_result(verbose, config.describe(), ex)
             exceptions.append(ex)
+        finally:
+            if config.all2all_backend() == "nixl_ep_v2":
+                # One buffer per process; m and topk change its size.
+                destroy_nixl_ep_v2_buffer()
 
     if len(exceptions) > 0:
         raise RuntimeError(
@@ -264,6 +269,14 @@ def is_nyi_config(config: Config) -> bool:
         ) == 1
         if unsupported_quant_config:
             return True
+
+    # nixl_ep_v2 dispatches BF16 or block FP8, and quantizes NVFP4 after.
+    if (
+        config.all2all_backend() == "nixl_ep_v2"
+        and config.quant_dtype not in (None, "nvfp4")
+        and config.quant_block_shape is None
+    ):
+        return True
 
     if config.activation != MoEActivation.SILU:
         if config.fused_experts_type is not AiterExperts:

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from collections.abc import Callable
 
 import torch
@@ -88,6 +89,43 @@ def make_dummy_moe_config(
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=max_num_tokens,
     )
+
+
+def make_ep_prepare_finalize_with_fake_buffer(
+    all2all_backend: str, buffer: object, monkeypatch
+):
+    """The factory's prepare/finalize for rank 0 of 2 EP ranks under CUDA
+    graphs, with `buffer` in place of the all2all manager's handle."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe import all2all_utils
+
+    monkeypatch.setattr(
+        all2all_utils,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(enforce_eager=False)),
+    )
+    moe = make_dummy_moe_config(
+        num_experts=8, num_local_experts=4, experts_per_token=2, hidden_dim=256
+    )
+    moe = dataclasses.replace(
+        moe,
+        moe_parallel_config=dataclasses.replace(
+            moe.moe_parallel_config,
+            use_ep=True,
+            dp_size=2,
+            ep_size=2,
+            all2all_backend=all2all_backend,
+        ),
+    )
+    manager = SimpleNamespace(
+        world_size=2,
+        dp_world_size=2,
+        rank=0,
+        num_sms=26,
+        get_handle=lambda kwargs: buffer,
+    )
+    return maybe_make_prepare_finalize(moe, None, all2all_manager=manager)
 
 
 def triton_moe(

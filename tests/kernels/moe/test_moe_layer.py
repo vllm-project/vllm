@@ -24,6 +24,7 @@ import vllm.model_executor.layers.quantization.utils.w8a8_utils
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     _set_vllm_config,
+    destroy_nixl_ep_v2_buffer,
     parallel_launch_with_config,
 )
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
@@ -67,7 +68,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_mori,
+    has_nixl_ep,
+    has_nixl_ep_v2,
+)
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import (
@@ -126,6 +132,9 @@ if has_deep_ep():
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
+if has_nixl_ep_v2():
+    BACKENDS += ["nixl_ep_v2"]
+
 DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
 MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
 
@@ -148,6 +157,7 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
+    "nixl_ep_v2":                  {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
 }
 
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
@@ -160,6 +170,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
+    "nixl_ep_v2":                  (True, False, False,  True),
 }
 # fmt: on
 
@@ -507,6 +518,19 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             False,
             "routed_input_transform not supported with gate because of "
             "padding problems",
+        )
+
+    # The layer's hidden size is k // 2 here; nixl_ep_v2 pads it to a multiple
+    # of 256, which the experts' unpadded weights then reject.
+    if (
+        config.use_routed_input_transform
+        and config.backend == "nixl_ep_v2"
+        and (config.k // 2) % 256 != 0
+    ):
+        return (
+            False,
+            "routed_input_transform not supported with nixl_ep_v2 when the "
+            "latent size needs padding",
         )
 
     # TODO: disable for now
@@ -1804,6 +1828,9 @@ def _parallel_worker(
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
                     all2all_manager.destroy()
+            elif test_config.backend == "nixl_ep_v2":
+                # One buffer per process, sized for one config.
+                destroy_nixl_ep_v2_buffer()
             elif (
                 deep_ep_handle_keepalive is not None
                 and current_platform.is_rocm()

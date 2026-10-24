@@ -224,6 +224,7 @@ def _base_serve_args(
             id="cuda_graphs_heavy",
         ),
         pytest.param(False, "heavy", "nixl_ep", id="cuda_graphs_heavy_nixl_ep"),
+        pytest.param(False, "heavy", "nixl_ep_v2", id="cuda_graphs_heavy_nixl_ep_v2"),
     ],
 )
 @multi_gpu_test(num_gpus=4)
@@ -231,7 +232,7 @@ def test_elastic_ep_scaling(
     enforce_eager: bool, traffic_mode: str, all2all_backend: str
 ):
     from vllm.distributed.eplb.eplb_communicator import has_nixl
-    from vllm.utils.import_utils import has_nixl_ep
+    from vllm.utils.import_utils import has_nixl_ep, has_nixl_ep_v2
 
     if not has_nixl():
         pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
@@ -239,6 +240,8 @@ def test_elastic_ep_scaling(
         pytest.skip("Elastic EP with NIXL is not supported on XPU")
     if all2all_backend == "nixl_ep" and not has_nixl_ep():
         pytest.skip("NIXL EP is not installed")
+    if all2all_backend == "nixl_ep_v2" and not has_nixl_ep_v2():
+        pytest.skip("nixl.runtime.ep is not installed")
 
     initial_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INITIAL_DP", "2"))
     target_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_TARGET_DP", "4"))
