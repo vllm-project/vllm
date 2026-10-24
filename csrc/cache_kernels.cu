@@ -770,6 +770,151 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
   }
 }
 
+// Skew between LDS tile rows, in elements, so that reading a tile down a
+// column does not land every thread on one bank.
+#define VLLM_RAC_TILE_PAD 4
+
+// reshape_and_cache over a whole KV block of tokens at once.
+//
+// One token per block makes every store a column write -- for the value cache,
+// elements block_size apart -- so a cache line moves 2 bytes. Per KV block both
+// destinations are contiguous instead: key over (block_offset, i), value over
+// block_offset.
+//
+// Falls back to the per-token path unless the group's slots are one full,
+// block-aligned run. Both paths only copy, so they agree bit for bit.
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void reshape_and_cache_grouped_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    cache_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x,
+                                         // block_size, x]
+    cache_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size,
+                                         // block_size]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int key_stride, const int value_stride, const int num_heads,
+    const int head_size, const int block_size, const int x,
+    const int num_tokens, const float* k_scale, const float* v_scale) {
+  extern __shared__ char smem_raw[];
+  scalar_t* ktile = reinterpret_cast<scalar_t*>(smem_raw);
+  const int row = head_size + VLLM_RAC_TILE_PAD;
+  // 16-byte stores: one element per thread committed far less per instruction.
+  constexpr int VEC = 16 / sizeof(cache_t);
+  struct alignas(16) StoreVec {
+    cache_t v[VEC];
+  };
+
+  const int64_t tok0 = static_cast<int64_t>(blockIdx.x) * block_size;
+  const int head_idx = blockIdx.y;
+  const int h_block_count = head_size / x;
+  const int nthreads = blockDim.x;
+
+  // One full, block-aligned, contiguous run of slots? Threads test a slice
+  // each so the loads issue together, then the block agrees.
+  const bool full_group = (tok0 + block_size <= num_tokens);
+  const int64_t slot0 = full_group ? slot_mapping[tok0] : -1;
+  bool ok = full_group && slot0 >= 0 && (slot0 % block_size) == 0;
+  if (ok) {
+    for (int j = threadIdx.x; j < block_size; j += nthreads) {
+      ok = ok && (slot_mapping[tok0 + j] == slot0 + j);
+    }
+  }
+  const bool s_grouped = __syncthreads_and(ok);
+
+  const float k_scale_val =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  const float v_scale_val =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+
+  if (!s_grouped) {
+    // Same addressing as reshape_and_cache_kernel, but spread over the whole
+    // block: one thread per (token, h_block) rather than a serial walk over
+    // tokens, so this path keeps the parallelism the per-token kernel had.
+    const int fallback_work = block_size * h_block_count;
+    for (int w = threadIdx.x; w < fallback_work; w += nthreads) {
+      const int j = w / h_block_count;
+      const int hb = w - j * h_block_count;
+      const int64_t t = tok0 + j;
+      if (t >= num_tokens) continue;
+      const int64_t slot_idx = slot_mapping[t];
+      if (slot_idx < 0) continue;
+      const int64_t block_idx = slot_idx / block_size;
+      const int block_offset = slot_idx % block_size;
+
+      const scalar_t* key_src =
+          key + t * key_stride + head_idx * head_size + hb * x;
+      cache_t* key_dst =
+          key_cache + block_idx * num_heads * h_block_count * block_size * x +
+          head_idx * h_block_count * block_size * x + hb * block_size * x +
+          block_offset * x;
+      for (int i = 0; i < x; ++i) k_op(key_dst[i], key_src[i]);
+
+      const scalar_t* value_src =
+          value + t * value_stride + head_idx * head_size + hb * x;
+      cache_t* value_dst = value_cache +
+                           block_idx * num_heads * head_size * block_size +
+                           head_idx * head_size * block_size +
+                           hb * x * block_size + block_offset;
+      for (int i = 0; i < x; ++i) v_op(value_dst[i * block_size], value_src[i]);
+    }
+    return;
+  }
+
+  const int64_t block_idx = slot0 / block_size;
+
+  cache_t* key_base = key_cache +
+                      block_idx * num_heads * h_block_count * block_size * x +
+                      head_idx * h_block_count * block_size * x;
+  cache_t* value_base = value_cache +
+                        block_idx * num_heads * head_size * block_size +
+                        head_idx * head_size * block_size;
+  const int tile_elems = block_size * head_size;
+
+  scalar_t* vtile = ktile + block_size * row;
+
+  // Both halves load, then one barrier, then both store. A barrier each
+  // serialises two independent streams and costs ~20%.
+  for (int L = threadIdx.x; L < tile_elems; L += nthreads) {
+    const int bo = L / head_size;
+    const int d = L - bo * head_size;
+    const int64_t off = head_idx * head_size + d;
+    ktile[bo * row + d] = key[(tok0 + bo) * key_stride + off];
+    vtile[bo * row + d] = value[(tok0 + bo) * value_stride + off];
+  }
+  __syncthreads();
+
+  // key_cache is [h_block][block_offset][i]: element d of token bo lands at
+  // (d / x) * block_size * x + bo * x + (d % x).
+  for (int L = threadIdx.x * VEC; L < tile_elems; L += nthreads * VEC) {
+    StoreVec out;
+#pragma unroll
+    for (int e = 0; e < VEC; ++e) {
+      const int Le = L + e;
+      const int hb = Le / (block_size * x);
+      const int rem = Le - hb * block_size * x;
+      const int bo = rem / x;
+      const int i = rem - bo * x;
+      k_op(out.v[e], ktile[bo * row + hb * x + i]);
+    }
+    *reinterpret_cast<StoreVec*>(&key_base[L]) = out;
+  }
+
+  // value_cache is [d][block_offset].
+  for (int L = threadIdx.x * VEC; L < tile_elems; L += nthreads * VEC) {
+    StoreVec out;
+#pragma unroll
+    for (int e = 0; e < VEC; ++e) {
+      const int Le = L + e;
+      const int d = Le / block_size;
+      const int bo = Le - d * block_size;
+      v_op(out.v[e], vtile[bo * row + d]);
+    }
+    *reinterpret_cast<StoreVec*>(&value_base[L]) = out;
+  }
+}
+
 }  // namespace vllm
 
 // KV_T is the data type of key and value tensors.
@@ -786,6 +931,18 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
           num_heads, head_size, block_size, x,                              \
           reinterpret_cast<const float*>(k_scale.data_ptr()),               \
           reinterpret_cast<const float*>(v_scale.data_ptr()), interleaved_v);
+
+#define CALL_RESHAPE_AND_CACHE_GROUPED(KV_T, CACHE_T, KV_DTYPE)             \
+  vllm::reshape_and_cache_grouped_kernel<KV_T, CACHE_T, KV_DTYPE>           \
+      <<<grid, block, smem, stream>>>(                                      \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                          \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                        \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                 \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),               \
+          slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
+          num_heads, head_size, block_size, x, num_tokens,                  \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),               \
+          reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -809,14 +966,34 @@ void reshape_and_cache(
   int value_stride = value.stride(0);
   int head_div_x = head_size / x;
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_div_x, 512));
   const torch::stable::accelerator::DeviceGuard device_guard(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
-                             CALL_RESHAPE_AND_CACHE);
+  // One block per KV block's worth of tokens; the tiles hold one head's
+  // [block_size, head_size] keys and values.
+  const size_t smem = 2 * static_cast<size_t>(block_size) *
+                      (head_size + VLLM_RAC_TILE_PAD) * key.element_size();
+  const int num_groups = (num_tokens + block_size - 1) / block_size;
+  const int sm_count = get_device_prop()->multiProcessorCount;
+  // Needs enough blocks to pay for the staging (a small loss at one block per
+  // CU, a win from about two) and destination runs that divide into 16-byte
+  // stores.
+  const int vec = 16 / key_cache.element_size();
+  const bool vec_ok =
+      (block_size * x) % vec == 0 && (block_size * head_size) % vec == 0;
+  if (num_tokens >= block_size && smem <= 32 * 1024 && vec_ok &&
+      num_groups * num_heads >= 2 * sm_count) {
+    dim3 grid(num_groups, num_heads);
+    dim3 block(std::min(block_size * head_size, 256));
+    DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
+                               CALL_RESHAPE_AND_CACHE_GROUPED);
+  } else {
+    dim3 grid(num_tokens);
+    dim3 block(std::min(num_heads * head_div_x, 512));
+    DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
+                               CALL_RESHAPE_AND_CACHE);
+  }
 }
 
 // KV_T is the data type of key and value tensors.
