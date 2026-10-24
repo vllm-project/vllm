@@ -5978,3 +5978,4 @@ steps:
   - vllm/envs.py
   commands:
   - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300
+  - pytest -v -s tests/jit_monitor/test_flydsl_contract.py
