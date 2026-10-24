@@ -9,6 +9,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
+from types import SimpleNamespace
 from typing import Any, TypedDict
 
 import ray
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import refine_fp8_moe_block_shape
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -1002,6 +1004,24 @@ def main(args: argparse.Namespace):
         # For int4_w4a16, block_shape = [0, group_size]
         # block_shape[0]=0 means no block quantization on N dimension
         block_quant_shape = [0, group_size]
+    elif use_fp8_w8a8 and block_quant_shape is not None:
+        # Tune and save with the refined block shape that serving looks up when
+        # the TP shard is not a block multiple (1536 / TP8 = 192: [128, 128] ->
+        # [64, 64]).
+        refined = refine_fp8_moe_block_shape(
+            SimpleNamespace(
+                intermediate_size_per_partition=shard_intermediate_size // 2,
+                tp_size=1 if enable_ep else args.tp_size,
+                hidden_dim=hidden_size,
+            ),
+            block_quant_shape,
+        )
+        if refined is not None:
+            print(
+                f"Refining FP8 block shape {block_quant_shape} -> {refined} "
+                "to match the TP-sharded layout used at serving time."
+            )
+            block_quant_shape = refined
 
     if args.batch_size is None:
         batch_sizes = [
