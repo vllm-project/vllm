@@ -21,6 +21,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    connector_kv_events_enabled,
+    take_connector_kv_events,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -181,11 +183,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
+        self._publish_kv_events: list[bool] = []
         for connector_cls, temp_config in self._get_connector_classes_and_configs(
             vllm_config
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+            self._publish_kv_events.append(connector_kv_events_enabled(temp_config))
 
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
@@ -629,8 +633,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        for c in self._connectors:
-            yield from c.take_events()
+        for c, publish in zip(self._connectors, self._publish_kv_events, strict=True):
+            yield from take_connector_kv_events(c, publish)
 
     def has_pending_block_frees(self) -> bool:
         return any(c.has_pending_block_frees() for c in self._connectors)
