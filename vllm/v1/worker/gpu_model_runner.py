@@ -5422,7 +5422,7 @@ class GPUModelRunner(
     ) -> None:
         """Reload weights in place; see `reload_weights` in
         `vllm.model_executor.model_loader.reload.inplace` for details."""
-        if weights_iterator is None:
+        if weights_iterator is None and weights_path is None:
             # Draft first (L2 dropped its params). Target-owned aliases are
             # detached during that load. Unbound: MRV2 passes a V2 self.
             GPUModelRunner._reload_draft_weights_from_disk(self)
