@@ -54,6 +54,17 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+# Deterministic defaults for CUDA-platform greedy/temperature=0 decoding.
+# cuBLAS split-K GEMM kernels use atomicAdd reduction whose order depends
+# on GPU scheduler timing, producing subtly different floating-point sums
+# across repeated calls that can flip argmax boundaries in greedy decoding.
+# We use setdefault so explicit user-provided values are preserved.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+os.environ.setdefault("CUBLASLT_WORKSPACE_SIZE", "1")
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     """Get number of CUDA devices, caching based on the value of CUDA_VISIBLE_DEVICES
