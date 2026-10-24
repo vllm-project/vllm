@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, DeviceConfig, ModelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCaptureLayout,
     RoutedExpertsCapturer,
     RoutedExpertsSink,
     bind_routed_experts_capturer,
@@ -784,3 +785,233 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+@pytest.fixture
+def layout_capturer(tmp_path, monkeypatch):
+    from transformers import MixtralConfig
+
+    from vllm.platforms.cpu import CpuPlatform
+
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CpuPlatform())
+    model_path = tmp_path / "mixtral"
+    MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        num_hidden_layers=4,
+        hidden_size=32,
+        intermediate_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=16,
+        num_experts_per_tok=2,
+        vocab_size=64,
+        max_position_embeddings=32,
+    ).save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            dtype="float32",
+            max_model_len=32,
+            enforce_eager=True,
+            skip_tokenizer_init=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+    def make(max_tokens=8):
+        capturer = RoutedExpertsCapturer(max_tokens, config)
+        capturer.device_buffer.fill_(-1)
+        return capturer
+
+    return make
+
+
+def test_explicit_capture_layout_selects_padded_dp_block(layout_capturer):
+    capturer = layout_capturer()
+    ids = torch.arange(14, dtype=torch.int32).view(-1, 1).repeat(1, 2)
+    layout = RoutedExpertsCaptureLayout(((7, 7),))
+
+    capturer.capture(layer_id=0, topk_ids=ids, layout=layout)
+
+    torch.testing.assert_close(capturer.device_buffer[:7, 0], ids[7:14])
+
+
+def test_explicit_capture_layout_overwrites_previous_rows(layout_capturer):
+    capturer = layout_capturer()
+    ids = torch.arange(14, dtype=torch.int32).reshape(7, 2)
+    capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((0, 7),)))
+    previous = capturer.snapshot_routing_data(7)
+
+    capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((5, 2),)))
+    current = capturer.snapshot_routing_data(2)
+
+    assert current.shape == (2, 4, 2)
+    torch.testing.assert_close(current[:, 0], ids[5:].to(capturer.output_dtype))
+    torch.testing.assert_close(previous[:, 0], ids.to(capturer.output_dtype))
+    assert (capturer.device_buffer[:, 1:] == -1).all()
+
+
+@pytest.mark.parametrize(
+    ("shard_sizes", "ranges", "expected_rows"),
+    [
+        ((3, 2), ((0, 5),), [0, 1, 2, 3, 4]),
+        ((7, 7), ((0, 3), (7, 2)), [0, 1, 2, 7, 8]),
+        ((7, 7), ((7, 2), (0, 3)), [7, 8, 0, 1, 2]),
+    ],
+)
+def test_explicit_capture_layout_gathers_and_skips_internal_padding(
+    shard_sizes, ranges, expected_rows, layout_capturer
+):
+    capturer = layout_capturer()
+    gather_group = object()
+    rows = torch.arange(sum(shard_sizes), dtype=torch.int32)
+    ids = torch.stack((rows, (rows + 1) % 16))
+    peers = ids.T.split(shard_sizes)
+    local = peers[1]
+    assert not local.is_contiguous()
+    layout = RoutedExpertsCaptureLayout(ranges, gather_group, shard_sizes)
+
+    def gather(outputs, input_, group):
+        assert group is gather_group
+        assert [output.shape[0] for output in outputs] == list(shard_sizes)
+        assert input_.is_contiguous()
+        torch.testing.assert_close(input_, local)
+        for rank, output in enumerate(outputs):
+            output.copy_(input_ if rank == 1 else peers[rank])
+
+    with (
+        patch(f"{_REC_MODULE}.dist.get_world_size", return_value=2),
+        patch(f"{_REC_MODULE}.dist.get_rank", return_value=1),
+        patch(f"{_REC_MODULE}.dist.all_gather", side_effect=gather),
+    ):
+        capturer.capture(layer_id=0, topk_ids=local, layout=layout)
+
+    expected = ids.T[expected_rows]
+    torch.testing.assert_close(capturer.device_buffer[: len(expected), 0], expected)
+    assert (capturer.device_buffer[len(expected) :, 0] == -1).all()
+    assert (capturer.device_buffer[:, 1:] == -1).all()
+
+
+def test_explicit_capture_layout_rejects_invalid_source_rows(layout_capturer):
+    capturer = layout_capturer()
+    with pytest.raises(ValueError, match="source range"):
+        capturer.capture(
+            0,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((1, 2),)),
+        )
+
+
+def test_router_forwards_layout_before_eplb_mapping():
+    router = _make_router()
+    recorded = []
+    layout = RoutedExpertsCaptureLayout(((0, 2),))
+    router.set_capture_fn(lambda ids, *, layout: recorded.append((ids.clone(), layout)))
+
+    _, routed_ids = router.select_experts(
+        torch.ones((2, 4)), torch.ones((2, 4)), capture_layout=layout
+    )
+
+    torch.testing.assert_close(recorded[0][0], routed_ids - 10)
+    assert recorded[0][1] is layout
+
+
+def test_capture_layout_keeps_empty_rank_in_collective(layout_capturer):
+    capturer = layout_capturer()
+    layout = RoutedExpertsCaptureLayout((), object(), (2, 0))
+    with (
+        patch(f"{_REC_MODULE}.dist.get_world_size", return_value=2),
+        patch(f"{_REC_MODULE}.dist.get_rank", return_value=1),
+        patch(f"{_REC_MODULE}.dist.all_gather") as gather,
+    ):
+        capturer.capture(0, torch.empty((0, 2), dtype=torch.int32), layout=layout)
+    gather.assert_called_once()
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize(
+    ("sizes", "group", "message"),
+    [
+        ((2,), object(), "group size"),
+        ((2, -1), object(), "non-negative"),
+        ((2, 3), object(), "local rows"),
+        ((2, 2), None, "require a gather group"),
+    ],
+)
+def test_capture_rejects_invalid_collective_layout_before_gather(
+    sizes, group, message, layout_capturer
+):
+    capturer = layout_capturer()
+    with (
+        patch(f"{_REC_MODULE}.dist.get_world_size", return_value=2),
+        patch(f"{_REC_MODULE}.dist.get_rank", return_value=1),
+        patch(f"{_REC_MODULE}.dist.all_gather") as gather,
+        pytest.raises(ValueError, match=message),
+    ):
+        capturer.capture(
+            0,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, 2),), group, sizes),
+        )
+    gather.assert_not_called()
+    assert (capturer.device_buffer == -1).all()
+
+
+def test_capture_layout_rejects_invalid_layer_before_collective(layout_capturer):
+    capturer = layout_capturer()
+    with (
+        patch(f"{_REC_MODULE}.dist.all_gather") as gather,
+        pytest.raises(IndexError, match="layer"),
+    ):
+        capturer.capture(
+            -1,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, 4),), object(), (2, 2)),
+        )
+    gather.assert_not_called()
+
+
+def test_capture_layout_does_not_write_past_buffer_capacity(layout_capturer):
+    capturer = layout_capturer(max_tokens=2)
+    with pytest.raises(ValueError, match="capacity"):
+        capturer.capture(
+            0,
+            torch.ones((3, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, 3),)),
+        )
+    assert (capturer.device_buffer == -1).all()
+
+
+def test_default_router_keeps_legacy_selection_signature():
+    class LegacyRouter(DummyRouter):
+        # Deliberately model a plugin implementing the pre-layout signature.
+        def _select_experts(  # type: ignore[override]
+            self,
+            hidden_states,
+            router_logits,
+            topk_indices_dtype=None,
+            *,
+            input_ids=None,
+        ):
+            return super()._select_experts(
+                hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
+            )
+
+    router = LegacyRouter(top_k=2, global_num_experts=16, eplb_state=None)
+    weights, ids = router.select_experts(torch.ones((2, 4)), torch.ones((2, 4)))
+    torch.testing.assert_close(weights, torch.ones((2, 2)))
+    torch.testing.assert_close(ids, torch.tensor([[11, 12], [13, 14]]))
+
+
+def test_explicit_layout_does_not_require_forward_context(monkeypatch, layout_capturer):
+    capturer = layout_capturer()
+    monkeypatch.setattr(
+        f"{_REC_MODULE}.get_forward_context",
+        Mock(side_effect=AssertionError("Explicit layouts must not infer rows")),
+    )
+    ids = torch.arange(28, dtype=torch.int32).reshape(14, 2)
+    capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((0, 3), (7, 2))))
+    torch.testing.assert_close(
+        capturer.device_buffer[:5, 0], torch.cat((ids[:3], ids[7:9]))
+    )
+    assert (capturer.device_buffer[5:, 0] == -1).all()

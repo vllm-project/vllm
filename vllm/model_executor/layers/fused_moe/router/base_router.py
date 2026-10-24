@@ -6,6 +6,9 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCaptureLayout,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -179,9 +182,9 @@ class BaseRouter(FusedMoERouter):
         super().__init__(eplb_state=eplb_state)
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        self.capture_fn: Callable[..., None] | None = None
 
-    def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
+    def set_capture_fn(self, capture_fn: Callable[..., None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
         self.capture_fn = capture_fn
 
@@ -264,6 +267,7 @@ class BaseRouter(FusedMoERouter):
         topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
+        capture_layout: RoutedExpertsCaptureLayout | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Route the input hidden states to the top-k experts based on the
         router logits.
@@ -294,7 +298,10 @@ class BaseRouter(FusedMoERouter):
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
-            self.capture_fn(topk_ids)
+            if capture_layout is None:
+                self.capture_fn(topk_ids)
+            else:
+                self.capture_fn(topk_ids, layout=capture_layout)
 
         # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
