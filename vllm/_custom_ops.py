@@ -2915,9 +2915,10 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
     )
 
 
