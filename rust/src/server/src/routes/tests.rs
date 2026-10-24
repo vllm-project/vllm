@@ -40,6 +40,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -86,6 +87,25 @@ fn request_output_with_stop_reason(
         stop_reason,
         ..Default::default()
     }
+}
+
+fn request_output_with_routed_experts(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<EngineCoreFinishReason>,
+    routed_experts: WireNdArray,
+) -> EngineCoreOutput {
+    EngineCoreOutput {
+        request_id: request_id.to_string(),
+        new_token_ids,
+        finish_reason,
+        routed_experts: Some(Box::new(routed_experts)),
+        ..Default::default()
+    }
+}
+
+fn routed_rows(dtype: TensorDtype, num_rows: usize, data: Vec<u8>) -> WireNdArray {
+    WireNdArray::from_raw(dtype, vec![num_rows, 1, 2], data)
 }
 
 fn request_output_with_logprobs(
@@ -270,6 +290,14 @@ fn engine_outputs_for_request(
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
+        ..Default::default()
+    }
+    .into()
+}
+
+fn engine_outputs(outputs: Vec<EngineCoreOutput>) -> EngineCoreOutputs {
+    RequestBatchOutputs {
+        outputs,
         ..Default::default()
     }
     .into()
@@ -1438,6 +1466,25 @@ where
     .expect("connect client");
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
+async fn test_app_with_engine_outputs(
+    outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-openai-outputs",
+        outputs,
+        |_| {},
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -4605,6 +4652,7 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_logprobs"),
         (choice, "token_ids"),
         (choice, "prompt_token_ids"),
+        (choice, "routed_experts"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -8020,6 +8068,388 @@ async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
         json!({"weight_version": "step-0"})
     );
     engine_task.await.expect("mock engine task");
+}
+
+// ========================= Routed expert tests =========================
+
+// Expected values are Python `numpy2base64` of the same arrays.
+const ROUTED_U8_4X2X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsIDIsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBwgJCgsMDQ4P";
+const ROUTED_U8_4X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBw==";
+const ROUTED_U8_7X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDcsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBwgJCgsMDQ==";
+const ROUTED_U8_2X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQID";
+const ROUTED_U8_0X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDAsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo=";
+const ROUTED_U16_2X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoHAAgACQAKAA==";
+const ROUTED_I32_3X1X2: &str = "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoIAAAA/////wIAAAAAAAAAAwAAAAQAAAA=";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_routed_experts_prompt_start_reaches_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for (field, expected) in [(None, 0_u32), (Some(json!(0)), 0), (Some(json!(2)), 2)] {
+            let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                Arc::new(FakeChatBackend::new()),
+                move |request| {
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    assert_eq!(params.routed_experts_prompt_start, expected);
+                },
+            )
+            .await;
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "stream": false,
+                "max_tokens": 1,
+            });
+            if endpoint == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hi"}]);
+            } else {
+                body["prompt"] = json!("hi");
+            }
+            if let Some(field) = field {
+                body["routed_experts_prompt_start"] = field;
+            }
+            let (status, json) = post_json(&mut app, endpoint, body).await;
+            assert_eq!(status, StatusCode::OK, "{endpoint}: {json}");
+            engine_task.await.expect("mock engine task");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_routed_experts_prompt_start_rejects_invalid_values() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        // Python declares an `int` with `ge=0` and validates the upper bound
+        // against the final prompt length, so `null`, negative values, and
+        // values past the prompt are all rejected. Body-schema failures use
+        // FastAPI's "Bad Request" type; the engine-side upper-bound check is a
+        // `VLLMValidationError` and reports the parameter name.
+        for (value, expected_type) in [
+            (json!(null), "Bad Request"),
+            (json!(-1), "Bad Request"),
+            (json!(100_000), "BadRequestError"),
+        ] {
+            let mut app = test_app().await;
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "stream": false,
+                "max_tokens": 1,
+                "routed_experts_prompt_start": value,
+            });
+            if endpoint == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hi"}]);
+            } else {
+                body["prompt"] = json!("hi");
+            }
+            let (status, json) = post_json(&mut app, endpoint, body).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{endpoint} value {value}: {json}"
+            );
+            assert_eq!(json["error"]["type"], expected_type);
+            if expected_type == "BadRequestError" {
+                assert_eq!(json["error"]["param"], "routed_experts_prompt_start");
+                assert!(
+                    json["error"]["message"]
+                        .as_str()
+                        .expect("message string")
+                        .contains("routed_experts_prompt_start"),
+                    "{json}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_returns_routed_experts_npy() {
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            // Prompt rows (3) plus the row forwarded for the first token.
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'h' as u32],
+                None,
+                WireNdArray::from_raw(TensorDtype::U8, vec![3, 2, 2], (0..12).collect()),
+            ),
+            // The last sampled token is not forwarded, so only one row here.
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'i' as u32],
+                Some(EngineCoreFinishReason::Length),
+                WireNdArray::from_raw(TensorDtype::U8, vec![1, 2, 2], (12..16).collect()),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": false,
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_4X2X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_returns_routed_experts_npy() {
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'h' as u32],
+                None,
+                routed_rows(
+                    TensorDtype::I32,
+                    2,
+                    vec![8, 0, 0, 0, 255, 255, 255, 255, 2, 0, 0, 0, 0, 0, 0, 0],
+                ),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'i' as u32],
+                Some(EngineCoreFinishReason::Length),
+                routed_rows(TensorDtype::I32, 1, vec![3, 0, 0, 0, 4, 0, 0, 0]),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+        "stream": false,
+    });
+    let (status, json) = post_json(&mut app, "/v1/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["text"], "hi");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_I32_3X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_preserves_routed_experts_dtype_and_zero_rows() {
+    // uint16 keeps its descriptor and byte order; a zero-row array is a
+    // payload, not the `null` used when the engine returned nothing.
+    for (rows, expected) in [
+        (
+            routed_rows(TensorDtype::U16, 2, vec![7, 0, 8, 0, 9, 0, 10, 0]),
+            ROUTED_U16_2X1X2,
+        ),
+        (routed_rows(TensorDtype::U8, 0, Vec::new()), ROUTED_U8_0X1X2),
+    ] {
+        let (mut app, engine_task) = test_app_with_engine_outputs(move |request_id| {
+            engine_outputs(vec![request_output_with_routed_experts(
+                request_id,
+                vec![b'x' as u32],
+                Some(EngineCoreFinishReason::Length),
+                rows,
+            )])
+        })
+        .await;
+        let body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+        let (status, json) = post_json(&mut app, "/v1/chat/completions", body).await;
+        assert_eq!(status, StatusCode::OK);
+        engine_task.await.expect("mock engine task");
+        assert_eq!(json["choices"][0]["routed_experts"], expected, "{json}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_routed_experts_return_rows_before_frontend_stop() {
+    // The engine never terminates; the frontend matches "wor" at the start of
+    // " world". Python keeps the token that completes the stop string in
+    // `token_ids`, so seven of the nine routed rows survive while the text
+    // drops the stop bytes and ends at "say ".
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            request_output_with_routed_experts(
+                request_id,
+                bytes_to_token_ids(b"say"),
+                None,
+                routed_rows(TensorDtype::U8, 3, (0..6).collect()),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                bytes_to_token_ids(b" world"),
+                None,
+                routed_rows(TensorDtype::U8, 6, (6..18).collect()),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+        "stream": false,
+        "stop": ["wor"],
+    });
+    let (status, json) = post_json(&mut app, "/v1/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["text"], "say ");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_7X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_trims_routed_experts_after_stop_string_in_one_update() {
+    // "cx" completes at token 4 of the 6-token update, so the two trailing
+    // rows are dropped with the two surplus tokens.
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![request_output_with_routed_experts(
+            request_id,
+            bytes_to_token_ids(b"abcxyz"),
+            Some(EngineCoreFinishReason::Length),
+            routed_rows(TensorDtype::U8, 6, (0..12).collect()),
+        )])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": false,
+        "stop": ["cx"],
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["message"]["content"], "ab");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_4X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_routed_experts_survive_stop_token() {
+    // A stop token hides the last token's text, but it was still forwarded, so
+    // its row is not trimmed like a stop-string surplus.
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        let mut output = request_output_with_routed_experts(
+            request_id,
+            bytes_to_token_ids(b"a!"),
+            Some(EngineCoreFinishReason::Stop),
+            routed_rows(TensorDtype::U8, 2, (0..4).collect()),
+        );
+        output.stop_reason = Some(StopReason::TokenId(b'!' as u32));
+        engine_outputs(vec![output])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+        "stream": false,
+    });
+    let (status, json) = post_json(&mut app, "/v1/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["text"], "a");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_2X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_routed_experts_survive_stream_interval_merging() {
+    // One row per update; `stream_interval=3` coalesces "b" and "c" into one
+    // delivery. The merged output must keep every row once, in order.
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'a' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![0, 1]),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'b' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![2, 3]),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'c' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![4, 5]),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'd' as u32],
+                Some(EngineCoreFinishReason::Length),
+                routed_rows(TensorDtype::U8, 1, vec![6, 7]),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": false,
+        "stream_interval": 3,
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["message"]["content"], "abcd");
+    assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_4X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_sse_keeps_no_routed_experts_field() {
+    // Python's OpenAI stream choice has no `routed_experts` field, even when
+    // the engine returns rows.
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+            engine_outputs(vec![
+                request_output_with_routed_experts(
+                    request_id,
+                    vec![b'h' as u32],
+                    None,
+                    routed_rows(TensorDtype::U8, 1, vec![0, 1]),
+                ),
+                request_output_with_routed_experts(
+                    request_id,
+                    vec![b'i' as u32],
+                    Some(EngineCoreFinishReason::Length),
+                    routed_rows(TensorDtype::U8, 1, vec![2, 3]),
+                ),
+            ])
+        })
+        .await;
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+        if endpoint == "/v1/completions" {
+            body["prompt"] = json!("hello");
+            body.as_object_mut().unwrap().remove("messages");
+        }
+        let (status, json) = post_json(&mut app, endpoint, body).await;
+        assert_eq!(status, StatusCode::OK);
+        engine_task.await.expect("mock engine task");
+        let text = json["raw"].as_str().expect("raw SSE body").to_string();
+        let payloads = sse_json_payloads(&text);
+        assert!(!payloads.is_empty(), "{text}");
+        for payload in payloads {
+            let choice = &payload["choices"][0];
+            assert!(
+                choice.get("routed_experts").is_none(),
+                "{endpoint} streamed routed_experts: {payload}"
+            );
+        }
+    }
 }
 
 // ========================= Stop string tests =========================

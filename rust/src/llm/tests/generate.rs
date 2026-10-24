@@ -443,6 +443,23 @@ async fn generate_merges_outputs_by_stream_interval() {
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
+    let routed_experts_delta: Vec<_> =
+        outputs.iter().map(|output| output.routed_experts_delta.clone()).collect();
+    let delta = |num_rows: usize, data: Vec<u8>| {
+        WireNdArray::from_raw(TensorDtype::U8, vec![num_rows, 1, 2], data)
+    };
+    assert_eq!(
+        routed_experts_delta,
+        [
+            vec![delta(1, vec![1, 0])],
+            vec![
+                delta(1, vec![2, 0]),
+                delta(1, vec![3, 0]),
+                delta(2, vec![4, 0, 5, 0]),
+            ],
+            vec![delta(1, vec![6, 0]), delta(1, vec![7, 0])],
+        ]
+    );
     let routed_experts: Vec<_> =
         outputs.iter().map(|output| output.routed_experts.clone()).collect();
     assert_eq!(
@@ -580,6 +597,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
+        routed_experts_delta: Vec::new(),
         timestamps: Default::default(),
     };
 

@@ -15,7 +15,7 @@ use vllm_text::{Prompt, TruncationSide};
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
-    Usage, default_true, deserialize_request_top_k, validate_stop,
+    Usage, default_true, deserialize_optional_u32, deserialize_request_top_k, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -208,6 +208,11 @@ pub struct CompletionRequest {
     /// tokens. Not supported yet.
     pub return_weight_versions: Option<bool>,
 
+    /// Number of prompt tokens to skip from the returned routed-expert rows.
+    /// Defaults to 0, like the Python frontend.
+    #[serde(default, deserialize_with = "deserialize_optional_u32")]
+    pub routed_experts_prompt_start: Option<u32>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -268,6 +273,8 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Base64-encoded NumPy `.npy` of the request's routed-expert rows.
+    pub routed_experts: Option<String>,
 }
 
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
