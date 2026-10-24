@@ -51,6 +51,8 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
+    record_external_weight_charge,
+    record_external_weight_fallback,
 )
 from vllm.model_executor.utils import weights_already_processed
 from vllm.tracing import instrument
@@ -171,7 +173,11 @@ class IpcModelLoader(BaseModelLoader):
                 "Weight cache daemon rejected the memory query: "
                 f"{response.get('message')}"
             )
-        return int(response.get("memory_bytes", 0))
+        memory_bytes = int(response.get("memory_bytes", 0))
+        record_external_weight_charge(
+            self._resolve_socket_path(), self.is_draft, memory_bytes
+        )
+        return memory_bytes
 
     def download_model(self, model_config: ModelConfig) -> None:
         DefaultModelLoader(self._fallback_load_config()).download_model(model_config)
@@ -257,7 +263,10 @@ class IpcModelLoader(BaseModelLoader):
             if state_fetched and self.mode == "copy":
                 self._send_release()
             torch.accelerator.empty_cache()
-        return self._fallback_load(vllm_config, model_config, prefix)
+        model = self._fallback_load(vllm_config, model_config, prefix)
+        if self.mode == "zero_copy":
+            record_external_weight_fallback(self._resolve_socket_path(), self.is_draft)
+        return model
 
     def _build_model(
         self,

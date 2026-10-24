@@ -261,6 +261,49 @@ def test_ipc_cache_cold_start_and_warm_restart(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -684,6 +727,49 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+@pytest.mark.parametrize("is_draft,remaining", [(False, 4), (True, 8)])
+def test_external_weight_fallback_preserves_other_role(is_draft, remaining):
+    """Only the failed role's charge is restored, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightMemory,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightMemory(bytes=12)
+    with accounting.track_load():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.bytes == remaining
+    assert accounting.changed
+
+
+def test_external_weight_accounting_restores_context_after_failure():
+    """A failed nested load must not redirect the outer worker's accounting."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightMemory,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    outer = ExternalWeightMemory(bytes=8)
+    inner = ExternalWeightMemory(bytes=4)
+    with outer.track_load():
+        record_external_weight_charge("weights.sock", False, 8)
+        with pytest.raises(ValueError, match="load failed"), inner.track_load():
+            record_external_weight_charge("weights.sock", False, 4)
+            raise ValueError("load failed")
+        record_external_weight_fallback("weights.sock", False)
+    record_external_weight_fallback("weights.sock", False)
+    assert outer.bytes == 0
+    assert inner.bytes == 4
+    assert not inner.changed
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

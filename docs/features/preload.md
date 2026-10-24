@@ -92,6 +92,12 @@ Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
 
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
+
 ## Multi-node and data parallelism
 
 CUDA IPC handles are node-local, so each node serves only its local GPUs'
