@@ -112,7 +112,9 @@ def test_rejects_image_placeholder_in_reasoning():
     ("effort", "budget"),
     [
         (None, 75),
+        ("minimal", 50),
         ("low", 50),
+        ("medium", 75),
         ("high", 75),
         ("xhigh", 75),
         ("max", 100),
@@ -132,7 +134,7 @@ def test_numeric_reasoning_effort(effort, budget):
     )
 
 
-@pytest.mark.parametrize("effort", ["medium", "minimal", -1, 0, 101, True, 1.5, []])
+@pytest.mark.parametrize("effort", [-1, 0, 101, True, 1.5, []])
 def test_invalid_effort_is_a_request_error(effort):
     with pytest.raises(ValueError, match="reasoning_effort"):
         render([{"role": "user", "content": "question"}], reasoning_effort=effort)
