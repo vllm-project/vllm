@@ -298,6 +298,10 @@ kInt8DynamicTokenAsym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=False
 kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False)
 kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
 
+# LUT-B: 3-bit indices into an E4M3 codebook per 8x64 weight tile (Rubin).
+kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
+kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
+
 # INT4 W4A8 quantization keys
 
 # For group-wise quantization (e.g., group_size=128)
