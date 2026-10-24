@@ -372,6 +372,13 @@ def stock_attention(ns) -> torch.Tensor:
     q = ns.qkvo[:, : spec.CORE].reshape(S, spec.HEADS, 64).contiguous()
     out = torch.empty_like(q)
     one = torch.ones(1, dtype=F32, device=dev)
+    ks = vs = one
+    kv_dtype = "auto"
+    if ns.kv.dtype == torch.uint8:  # an fp8 cache, as rocm_aiter_fa reads it
+        e4m3 = torch.float8_e4m3fn
+        key_cache, value_cache = key_cache.view(e4m3), value_cache.view(e4m3)
+        ks, vs = ns.scales
+        kv_dtype = "fp8"
     # the kernel reads cu_query_lens[t + 1] (query_len = its difference): decode
     # passes ``query_start_loc[:num_decodes]``, a view of the [S + 1] offsets,
     # so the row past the end is real; a bare arange(S) reads past its end and
@@ -380,9 +387,29 @@ def stock_attention(ns) -> torch.Tensor:
     torch.ops.aiter.paged_attention_v1(
         out, work, q, key_cache, value_cache, spec.QK_SCALE, table,
         qsl, lens, max_len, None,
-        "auto", "NHD", 0.0, one, one, None, _PARTITION_SIZE_ROCM, 1, sliding,
+        kv_dtype, "NHD", 0.0, ks, vs, None, _PARTITION_SIZE_ROCM, 1, sliding,
     )  # fmt: skip
     return out
+
+
+def kv_to_fp8(kv: torch.Tensor, k_scale: float, v_scale: float) -> torch.Tensor:
+    """A bf16 cache quantized as the stock insert stores it: K / V times RN(1 /
+    scale), e4m3fn (RNE), as uint8 (vLLM's fp8 cache storage). NaN stays NaN."""
+    out = torch.empty(kv.shape, dtype=torch.uint8, device=kv.device)
+    e4m3 = torch.float8_e4m3fn
+    for sl, s in ((slice(0, spec.V_OFF), k_scale), (slice(spec.V_OFF, None), v_scale)):
+        inv = torch.tensor(1.0, dtype=F32) / torch.tensor(s, dtype=F32)
+        q = kv[..., sl].float() * inv.to(kv.device)
+        out[..., sl] = q.to(e4m3).view(torch.uint8)
+    return out
+
+
+def kv_from_fp8(kv: torch.Tensor, k_scale: float, v_scale: float) -> torch.Tensor:
+    """An fp8 (uint8) cache dequantized to fp32: K / V times their scales."""
+    f = kv.view(torch.float8_e4m3fn).float()
+    f[..., : spec.V_OFF] *= k_scale
+    f[..., spec.V_OFF :] *= v_scale
+    return f
 
 
 def row_ulps(got, ref) -> torch.Tensor:

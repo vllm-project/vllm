@@ -366,8 +366,6 @@ def refuse_caches(
             continue
         if kv.dtype not in dtypes:
             reasons.append(f"layer {i}: KV cache {kv.dtype} ({want} only)")
-        elif fp8 and reads_kv:
-            reasons.append(f"layer {i}: fp8 KV cache read by K1 / the split core")
         if kv.ndim != 4 or kv.shape[1] != 2 or kv.shape[3] != 2 * spec.HEAD_DIM:
             reasons.append(
                 f"layer {i}: KV cache shape {tuple(kv.shape)} "

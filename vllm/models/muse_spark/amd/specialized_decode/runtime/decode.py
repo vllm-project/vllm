@@ -41,6 +41,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import K2Build
 from vllm.models.muse_spark.amd.specialized_decode.runtime import (
     HINT,
     DecodeConfig,
+    kv_fp8,
     moe_mode,
 )
 from vllm.models.muse_spark.amd.specialized_decode.runtime.guards import (
@@ -137,6 +138,7 @@ class SpecializedDecode:
         tp = get_tp_group()
         core = phases.k2_core(config.q)
         moe = self.moe = moe_mode(vllm_config)
+        fp8 = self.kv_fp8 = kv_fp8(vllm_config)
         layers = kernel_layers(backbone)
         agree(
             refuse_model(
@@ -168,7 +170,7 @@ class SpecializedDecode:
         self.kernels: dict[int, dict[int, KernelLayer]] = {
             w: {
                 i: KernelLayer(
-                    L[i], L[i - 1], runner, w, layers[i], config.q, phases, moe
+                    L[i], L[i - 1], runner, w, layers[i], config.q, phases, moe, fp8
                 )
                 for i in sorted(layers)
             }
@@ -212,7 +214,7 @@ class SpecializedDecode:
         self._step_ptrs: tuple[int, int, int] | None = None
         logger.info(
             "Muse Spark specialized decode: %d kernel layers (%d..%d), widths %s, "
-            "%d builds (front %s, K2 core %s); other steps run vLLM's decode",
+            "%d builds (front %s, K2 core %s, %s KV); other steps run vLLM's decode",
             len(layers),
             min(layers),
             max(layers),
@@ -220,6 +222,7 @@ class SpecializedDecode:
             len(builds),
             phases.front,
             core,
+            "fp8" if fp8 else "bf16",
         )
 
     def _kv_key(self) -> tuple | None:

@@ -379,12 +379,13 @@ class K2Build:
     # The experts' parallelism (K2_MOES): "tp" every expert's 512 columns a
     # rank, "ep" (TEP8) this rank's 32 experts whole.
     moe: str = "tp"
+    kv_fp8: bool = False  # split only: e4m3 KV pages (else bf16)
 
     def __post_init__(self):
         _check_key(
             self,
             ("tokens", "fault_rank", "fault_epoch", "fault_slot", "fault_ticks"),
-            ("window",),
+            ("window", "kv_fp8"),
         )
         if type(self.core) is not str:
             raise TypeError(f"K2Build.core = {self.core!r}: a str")
@@ -392,6 +393,8 @@ class K2Build:
             raise ValueError(f"K2Build.core {self.core!r} (one of {K2_CORES})")
         if self.window and self.core != "split":
             raise ValueError(f"K2Build.window with core {self.core!r} (split only)")
+        if self.kv_fp8 and self.core != "split":
+            raise ValueError(f"K2Build.kv_fp8 with core {self.core!r} (split only)")
         if type(self.moe) is not str or self.moe not in K2_MOES:
             raise ValueError(f"K2Build.moe {self.moe!r} (one of {K2_MOES})")
         if self.moe == "ep" and self.core != "tensor":
@@ -422,7 +425,8 @@ class K2Build:
         else:
             core = _CORE_SUFFIX[self.core]
         moe = "_ep" if self.moe == "ep" else ""
-        return f"muse_mono_k2_s{self.tokens}{core}{moe}" + _fault_suffix(self)
+        kv = "_kv8" if self.kv_fp8 else ""
+        return f"muse_mono_k2_s{self.tokens}{core}{moe}{kv}" + _fault_suffix(self)
 
 
 @dataclass(frozen=True)
@@ -433,14 +437,16 @@ class K1Build:
 
     tokens: int  # S, the launch's rows: 1 .. MAX_ROWS
     rope: bool  # a sliding layer's GPT-J RoPE (full layers: NoPE)
+    kv_fp8: bool = False  # the insert stores e4m3 (else bf16)
 
     def __post_init__(self):
-        _check_key(self, ("tokens",), ("rope",))
+        _check_key(self, ("tokens",), ("rope", "kv_fp8"))
 
     def kernel_name(self) -> str:
         """The kernel symbol: one per build."""
         kind = "rope" if self.rope else "nope"
-        return f"muse_mono_k1_s{self.tokens}_{kind}"
+        kv = "_kv8" if self.kv_fp8 else ""
+        return f"muse_mono_k1_s{self.tokens}_{kind}{kv}"
 
 
 K2_ARGS = (
@@ -477,12 +483,15 @@ K2_ARGS = (
 # layer's KV cache and its KV group's block table and sequence lengths. The
 # launch state (the last 7) is every core's.
 K2_KV_ARGS = (
-    "kv",  # bf16 [blocks, KV_HEADS, KV_BLOCK, KV_C]: the layer's cache
+    "kv",  # bf16 or e4m3 [blocks, KV_HEADS, KV_BLOCK, KV_C]: the layer's cache
     "kv_sb",  # byte strides of a block, a head, a token (Int64)
     "kv_sh",
     "kv_st",
     "kv_blocks",  # Int32: the cache's blocks (block ids are clamped below it)
+    "k_scale",  # fp32 [1]: the layer's K / V dequant scales (read by kv_fp8)
+    "v_scale",
 )
+KV_FP8_MAX = 448.0  # e4m3fn's largest finite: the insert saturates to it
 K2_ARGS_BY_CORE = {
     "tensor": K2_ARGS,
     "gated": (

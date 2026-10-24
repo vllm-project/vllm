@@ -87,23 +87,12 @@ def kv_fp8(vllm_config) -> bool:
 
 def kv_dtype_reason(vllm_config) -> str | None:
     """Why the KV cache dtype cannot be served, None when it can: bf16, or fp8
-    (e4m3) while vLLM both writes and reads the cache (the stock front and the
-    tensor / gated cores: no kernel touches it)."""
+    e4m3 (K1 inserts and the split core reads e4m3 pages with the layer's K / V
+    scales; the other phases leave the cache to vLLM)."""
     dtype = vllm_config.cache_config.cache_dtype
-    if dtype in BF16_KV:
+    if dtype in BF16_KV or dtype in FP8_KV:
         return None
-    if dtype not in FP8_KV:
-        return f"KV cache dtype {dtype!r} (bf16 or fp8 e4m3 KV only)"
-    extra = vllm_config.additional_config
-    extra = extra if isinstance(extra, dict) else {}
-    front, core = extra.get("mono_front", "stock"), extra.get("mono_core", "tensor")
-    if front == "k1" or core == "split":
-        return (
-            f"KV cache dtype {dtype!r} with mono_front {front!r} / mono_core "
-            f"{core!r} (fp8 KV with the stock front and the tensor / gated "
-            "cores only)"
-        )
-    return None
+    return f"KV cache dtype {dtype!r} (bf16 or fp8 e4m3 KV only)"
 
 
 def _refuse(reasons: list[str]) -> None:

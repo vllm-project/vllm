@@ -49,9 +49,9 @@ The stage uses no LDS (registers and DPP only) and no barrier.
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import const_expr
+from flydsl.expr import const_expr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, as_ir_value
 
 from vllm.models.muse_spark.amd.specialized_decode.mono.abi import FAILED
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
@@ -73,6 +73,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
     E_UNITS,
     HEAD_DIM,
     KV_BLOCK,
+    KV_FP8_MAX,
     KV_HEADS,
     QKV_ROWS,
     RMS_EPS,
@@ -171,11 +172,12 @@ def stage_epilogue(c, u, inputs) -> None:
     into the cache. RoPE iff the context's build key is a ``K1Build`` with
     ``rope``."""
     rope_on = bool(getattr(c["key"], "rope", False))
-    _stage(c, u, inputs, rope_on)
+    fp8 = bool(getattr(c["key"], "kv_fp8", False))
+    _stage(c, u, inputs, rope_on, fp8)
 
 
 @traced
-def _stage(c, u, inputs, rope_on):
+def _stage(c, u, inputs, rope_on, fp8):
     lane = c["lane"]
     a = c["args"]
     t = u // E_UNITS
@@ -191,6 +193,9 @@ def _stage(c, u, inputs, rope_on):
         top = fx.Int64(fx.Int32(a["max_pos"])) - 1
         pos = fx.Int64(fx.max(fx.min(pos, top), fx.Int64(0)))
         cs, sn = rope_loads(c, fx.Int32(pos), lane)
+    inv = None
+    if const_expr(fp8):
+        inv = kv_inv_scale(c, w)
     if live:
         tile = row // ROWS
         r16 = row % ROWS
@@ -202,18 +207,52 @@ def _stage(c, u, inputs, rope_on):
         out = fx.Float32(dead.select(fx.Float32(0.0), yb))
         bo.buffer_store(out.to(fx.BFloat16), rsrc(a["qkvo"]), t * QKV_ROWS + row)
         if kv:
-            _insert(c, sl, w, yb.to(fx.BFloat16), lane)
+            if const_expr(fp8):
+                _insert(c, sl, w, yb, lane, inv)
+            else:
+                _insert(c, sl, w, yb.to(fx.BFloat16), lane)
+
+
+def kv_inv_scale(c, w):
+    """1 / the layer's K (w < 2) or V scale, wave-uniform, for an fp8 insert:
+    the stock insert's ``1.0f / *k_scale`` (one IEEE division)."""
+    a = c["args"]
+    ptr = fx.Int64(sel(w < KV_HEADS, fx.Int64(a["k_scale"]), fx.Int64(a["v_scale"])))
+    s = fx.Float32(bo.buffer_load(rsrc(ptr), 0, vec_width=1, dtype=T.f32))
+    return fx.Float32(1.0) / uniform(s.bitcast(fx.Int32)).bitcast(fx.Float32)
+
+
+def fp8_dword(y, inv, lane):
+    """Lanes 4 i .. 4 i + 3's ``y * inv`` saturated to +-448 and rounded (RNE)
+    to e4m3, the stock ROCm ``scaled_convert``; lane 4 i holds the dword of
+    the four bytes (lane order), the other lanes garbage."""
+    top = fx.Float32(KV_FP8_MAX)
+    v = fx.Float32(fx.max(fx.min(fx.Float32(y) * inv, top), -top))
+    v1, v2 = xshfl(v, 1), xshfl(v, 2)
+    v3 = xshfl(v1, 2)
+    lo = rocdl.cvt_pk_fp8_f32(
+        T.i32, as_ir_value(v), as_ir_value(v1), as_ir_value(fx.Int32(0)), False
+    )
+    return fx.Int32(
+        rocdl.cvt_pk_fp8_f32(
+            T.i32, as_ir_value(v2), as_ir_value(v3), as_ir_value(fx.Int32(lo)), True
+        )
+    )
 
 
 @traced
-def _insert(c, sl, w, y, lane):
+def _insert(c, sl, w, y, lane, inv=None):
     """K / V head w % 2 (w < 2: K, else V) of slot ``sl`` := ``y`` (lane =
     dim), skipped for a negative slot, a block past ``kv_blocks`` or a FAILED
-    rank. The page base (block, head) is 64-bit and wave-uniform."""
+    rank. The page base (block, head) is 64-bit and wave-uniform. ``inv``
+    given: an e4m3 cache, ``y * inv`` a byte, stored a dword by every fourth
+    lane."""
     a = c["args"]
     failed = uniform(ld_health(a["health"], FAILED))
     blk = sl // KV_BLOCK
     ok = (sl >= 0) & (blk < fx.Int64(fx.Int32(a["kv_blocks"]))) & (failed == 0)
+    if const_expr(inv is not None):
+        y = fp8_dword(y, inv, lane)
     if ok:
         head = w % KV_HEADS
         page = (
@@ -221,10 +260,10 @@ def _insert(c, sl, w, y, lane):
         )
         st = fx.Int32(a["kv_st"])
         n = fx.Int32(sl % KV_BLOCK)
-        off = n * st + 2 * (lane + (w // KV_HEADS) * V_OFF)
-        bo.buffer_store(
-            y,
-            rsrc(page, fx.Int64(KV_BLOCK * st)),
-            off,
-            offset_is_bytes=True,
-        )
+        r = rsrc(page, fx.Int64(KV_BLOCK * st))
+        if const_expr(inv is None):
+            off = n * st + 2 * (lane + (w // KV_HEADS) * V_OFF)
+            bo.buffer_store(y, r, off, offset_is_bytes=True)
+        else:
+            off = n * st + lane + (w // KV_HEADS) * V_OFF
+            bo.buffer_store(y, r, off, mask=(lane % 4) == 0, offset_is_bytes=True)

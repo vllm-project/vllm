@@ -146,10 +146,16 @@ def k1_tensors(layer, prev) -> dict[str, torch.Tensor | int]:
     }
 
 
-def kv_args(kv: torch.Tensor) -> dict[str, torch.Tensor | int]:
+def kv_args(
+    kv: torch.Tensor, k_scale: torch.Tensor, v_scale: torch.Tensor
+) -> dict[str, torch.Tensor | int]:
     """A KV cache [blocks, KV_HEADS, KV_BLOCK, KV_C] as K1 and the split core
     address it: block, head and token strides in bytes (a head stride may pass
-    4 GiB: Int64), and the block count block ids are clamped below."""
+    4 GiB: Int64), the block count block ids are clamped below, and the
+    layer's fp32 K / V scales (an fp8 build reads them at every launch)."""
+    for name, s in (("k_scale", k_scale), ("v_scale", v_scale)):
+        assert s.dtype == torch.float32 and s.numel() == 1, (name, s.dtype, s.shape)
+        assert s.device == kv.device, (name, s.device, kv.device)
     n = kv.element_size()
     return {
         "kv": kv,
@@ -157,6 +163,8 @@ def kv_args(kv: torch.Tensor) -> dict[str, torch.Tensor | int]:
         "kv_sh": kv.stride(1) * n,
         "kv_st": kv.stride(2) * n,
         "kv_blocks": int(kv.shape[0]),
+        "k_scale": k_scale,
+        "v_scale": v_scale,
     }
 
 
@@ -294,6 +302,7 @@ class KernelLayer:
         q: int = 1,
         phases: Phases = PHASE_A,
         moe: str = "tp",
+        kv_fp8: bool = False,
     ):
         if kind not in (FULL, SLIDING):
             raise ValueError(f"attention kind {kind!r} ({FULL!r} or {SLIDING!r})")
@@ -301,6 +310,7 @@ class KernelLayer:
         self.kind, self.q, self.phases = kind, q, phases
         self.core = phases.k2_core(q)  # K2's core at this width
         self.moe = moe  # the experts' parallelism ("tp" | "ep", TEP8)
+        self.kv_fp8 = kv_fp8  # e4m3 KV pages (K1 and the split core)
         self.name = layer.self_attn.attn.layer_name  # its metadata's key
         # the step's first kernel layer bumps the epoch (a graph captures it)
         self.first = layer.layer_idx == runner.first_layer
@@ -328,7 +338,7 @@ class KernelLayer:
         """The K1 build this layer launches, None on vLLM's front."""
         if self.static_k1 is None:
             return None
-        return K1Build(tokens=self.width, rope=self.kind == SLIDING)
+        return K1Build(tokens=self.width, rope=self.kind == SLIDING, kv_fp8=self.kv_fp8)
 
     def key(self) -> K2Build:
         """The K2 build this layer launches (the fault hook from the runner:
@@ -338,6 +348,7 @@ class KernelLayer:
             core=self.core,
             window=self.core == SPLIT and self.kind == SLIDING,
             moe=self.moe,
+            kv_fp8=self.kv_fp8 and self.core == SPLIT,
             **self.runner.fault,
         )
 
@@ -354,7 +365,8 @@ class KernelLayer:
         forward runs on another dtype or device)."""
         if not self.phases.reads_kv(self.q):
             return
-        self.kv_args = kv_args(self.layer.self_attn.attn.kv_cache)
+        attn = self.layer.self_attn.attn
+        self.kv_args = kv_args(attn.kv_cache, attn._k_scale, attn._v_scale)
         if self.static_k1 is None:
             return
         rope = self.layer.self_attn.rotary_emb
@@ -499,8 +511,14 @@ def self_test_step(kernel, pad: torch.Tensor, live: bool) -> list[torch.Tensor]:
     bf, f32 = torch.bfloat16, torch.float32
     stream = torch.zeros(s, spec.HIDDEN, dtype=f32, device=dev)
     qkvo = torch.zeros(s, spec.QKV_ROWS, dtype=bf, device=dev)
+    kv_dtype = torch.uint8 if getattr(kernel, "kv_fp8", False) else bf
+    one = torch.ones((), dtype=f32, device=dev)
     local_kv = kv_args(
-        torch.zeros(1, spec.KV_HEADS, spec.KV_BLOCK, spec.KV_C, dtype=bf, device=dev)
+        torch.zeros(
+            1, spec.KV_HEADS, spec.KV_BLOCK, spec.KV_C, dtype=kv_dtype, device=dev
+        ),
+        one,
+        one,
     )
     outputs = []
     for key in k1:

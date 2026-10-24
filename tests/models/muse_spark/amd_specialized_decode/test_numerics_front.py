@@ -174,9 +174,10 @@ def _k1_args(runner, fw, kv, case, dev, branch, stream, slot):
     S = case.S
     stream_out = torch.empty_like(stream)
     qkvo = torch.empty(S, QKV, dtype=bf, device=dev)
+    one = torch.ones((), dtype=f32, device=dev)
     args = {
         **{n: fw[n] for n in K1_WEIGHTS},
-        **kv_args(kv),
+        **kv_args(kv, one, one),
         "branch": branch,
         "stream": stream,
         "pad": tn._pad(dev, case.pad_rows),

@@ -57,11 +57,17 @@ BUILDS = [
     ),
     *(spec.K2Build(tokens=s, core="gated") for s in _W),
     *(
-        spec.K2Build(tokens=s, core="split", window=w)
+        spec.K2Build(tokens=s, core="split", window=w, kv_fp8=f)
         for s in _W
         for w in (False, True)
+        for f in (False, True)
     ),
-    *(spec.K1Build(tokens=s, rope=r) for s in _W for r in (False, True)),
+    *(
+        spec.K1Build(tokens=s, rope=r, kv_fp8=f)
+        for s in _W
+        for r in (False, True)
+        for f in (False, True)
+    ),
 ]
 
 # a 64-bit compare of a VGPR buffer resource against its first lane's: a

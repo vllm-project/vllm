@@ -230,19 +230,6 @@ _REFUSALS = [
     # 24-28 dtypes, KV cache, attention
     ({"model_config.dtype": torch.float16}, {}, "model dtype torch.float16"),
     ({"cache_config.cache_dtype": "fp8_e5m2"}, {}, "KV cache dtype 'fp8_e5m2'"),
-    (
-        {"cache_config.cache_dtype": "fp8", "additional_config": {"mono_front": "k1"}},
-        {},
-        "KV cache dtype 'fp8' with mono_front 'k1'",
-    ),
-    (
-        {
-            "cache_config.cache_dtype": "fp8",
-            "additional_config": {"mono_core": "split"},
-        },
-        {},
-        "mono_core 'split' (fp8 KV with the stock front",
-    ),
     ({"cache_config.block_size": 32}, {}, "KV block size 32"),
     (
         {"attention_config.backend": AttentionBackendEnum.TRITON_ATTN},
@@ -325,11 +312,11 @@ def test_refusals(on_mi355x, monkeypatch, over, env, reason):
 
 
 @pytest.mark.parametrize("dtype", ["fp8", "fp8_e4m3"])
-@pytest.mark.parametrize("core", ["tensor", "gated"])
-def test_fp8_kv_accepted_when_vllm_owns_the_cache(on_mi355x, dtype, core):
-    cfg = vllm_config(
-        **{"cache_config.cache_dtype": dtype, "additional_config": {"mono_core": core}}
-    )
+@pytest.mark.parametrize("front", ["stock", "k1"])
+@pytest.mark.parametrize("core", spec.K2_CORES)
+def test_fp8_kv_accepted(on_mi355x, dtype, front, core):
+    extra = {"mono_front": front, "mono_core": core}
+    cfg = vllm_config(**{"cache_config.cache_dtype": dtype, "additional_config": extra})
     assert runtime.refuse_config(cfg) == []
     assert runtime.kv_fp8(cfg)
 
@@ -479,6 +466,8 @@ class _Attn:
             impl=_impl(kind),
             layer_name=f"model.layers.{i}.self_attn.attn",
             kv_cache=torch.tensor([]) if kv is None else kv,
+            _k_scale=torch.tensor(1.0),
+            _v_scale=torch.tensor(1.0),
         )
         self.calls: list = []
 
@@ -755,8 +744,7 @@ def test_refuse_caches_fp8(dtype):
     for i in layers:
         bb.layers[i].self_attn.attn.kv_cache = _kv(dtype=dtype)
     assert refuse_caches(bb, layers, _cfg_fp8()) == []
-    reasons = refuse_caches(bb, layers, _cfg_fp8(), reads_kv=True)
-    assert reasons and all("read by K1 / the split core" in r for r in reasons)
+    assert refuse_caches(bb, layers, _cfg_fp8(), reads_kv=True) == []
     bb.layers[2].self_attn.attn.kv_cache = _kv()
     reasons = refuse_caches(bb, layers, _cfg_fp8())
     assert reasons == ["layer 2: KV cache torch.bfloat16 (fp8 e4m3 only)"]
@@ -1011,12 +999,12 @@ class _ExecRunner:
     peer_args = runner_mod.MonoRunner.peer_args
 
 
-def _executor(monkeypatch, fill=0.0, compile_error=None, extra=None, q=1):
+def _executor(monkeypatch, fill=0.0, compile_error=None, extra=None, q=1, over=None):
     """A ``SpecializedDecode`` over a 4-layer fake backbone (kernel layers 1..3)
     at widths 1..3 (8 under DSpark), with the kernel modules, the TP group and
     the fail-stop stubbed. ``fill``: what the stub launches write into
     ``branch_out`` (and K1's ``qkvo``); ``extra``: more ``additional_config``
-    (the phases)."""
+    (the phases); ``over``: ``vllm_config`` overrides."""
     from vllm.models.muse_spark.amd.specialized_decode.mono.abi import FAILED
 
     bb = _backbone()
@@ -1054,7 +1042,7 @@ def _executor(monkeypatch, fill=0.0, compile_error=None, extra=None, q=1):
     )
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda *a: None)
     monkeypatch.setattr(decode_mod.logger, "info", lambda msg, *a: logs.append(a))
-    cfg = vllm_config()
+    cfg = vllm_config(**(over or {}))
     cfg.additional_config.update(extra or {})
     widths = (1, 2, 3) if q == 1 else (8,)
     decode = SpecializedDecode(bb, DecodeConfig(q, widths), cfg)
@@ -1530,6 +1518,27 @@ def test_executor_dspark_split_runs_gated(monkeypatch):
     decode.prepare_kv()
     # the kinds share K2(gated) but not K1: both kinds' first layers run
     assert [type(k).__name__ for k, *_ in launches] == ["K1Build", "K2Build"] * 4
+
+
+def test_executor_fp8_kv_builds_and_scales(monkeypatch):
+    """An fp8 cache: K1 and the split core build their e4m3 variants (the gated
+    and tensor cores never read KV: unchanged) and bind each layer's scales."""
+    decode, bb, compiled, launches, _ = _executor(
+        monkeypatch, extra=K1_SPLIT, over={"cache_config.cache_dtype": "fp8"}
+    )
+    assert decode.kv_fp8
+    assert {k.kv_fp8 for k in compiled} == {True}
+    assert {k.kernel_name()[-4:] for k in compiled} == {"_kv8"}
+    full = torch.zeros(2, 2, 16, 128, dtype=U8)
+    sliding = torch.zeros(3, 2, 16, 128, dtype=U8)
+    for i in (1, 2, 3):
+        attn = bb.layers[i].self_attn.attn
+        attn.kv_cache = full if i == 1 else sliding
+        attn._k_scale = torch.tensor(0.5 * i)
+    decode.prepare_kv()
+    for key, *_, args in launches:
+        assert args["kv"].dtype == U8 and args["kv_st"] == 128
+        assert args["k_scale"].numel() == 1 and args["v_scale"].numel() == 1
 
 
 # --------------------------------------------------------------------------

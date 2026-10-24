@@ -24,6 +24,8 @@ Pages outside [b0, b0 + nb) are never read: a sliding group's table nulls only
 entries below b0 (DESIGN_BC 1.5). A page is one (block, KV head) of the cache
 ``kv`` [blocks, 2, 16, 128] bf16 at byte strides ``kv_sb, kv_sh, kv_st``: its
 base is 64-bit (a layer's cache passes 4 GiB), a buffer resource of 16 rows.
+Under ``K2Build.kv_fp8`` the pages are e4m3, widened to bf16 times the layer's
+K / V scale before the MFMAs (exact for a power-of-two scale).
 
 Within a unit wave w takes pages w, w + 8, ... (``uniform``: the loop count is
 wave-uniform), two in flight (the next page's K and V issued before this one's
@@ -56,14 +58,15 @@ import functools
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr.typing import T, as_ir_value
 
 from vllm.models.muse_spark.amd.specialized_decode.mono.attention.combine import (
     unit_plan,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
     CM_DEV,
+    bf16_pair,
     bf16_round,
     hw_exp2,
     ld_dev,
@@ -231,6 +234,24 @@ def _page_loads(c, kvh, blk):
         + fx.Int64(kvh) * fx.Int64(a["kv_sh"])
     )
     rp = rsrc(page, st * KV_BLOCK)
+    if const_expr(key_of(c).kv_fp8):
+        # e4m3: K dims 16 g .. + 16 one dwordx4, V dims 4 (lane % 16) .. + 4 a
+        # dword of each key 4 g + e; widened by ``_widen``
+        k8 = fx.Vector(
+            bo.buffer_load(rp, (r16 * st + 16 * g) // 4, vec_width=4, dtype=T.i32)
+        )
+        v8 = [
+            fx.Int32(
+                bo.buffer_load(
+                    rp,
+                    ((4 * g + e) * st + V_OFF + 4 * r16) // 4,
+                    vec_width=1,
+                    dtype=T.i32,
+                )
+            )
+            for e in range(4)
+        ]
+        return [k8] + v8
     kk = [
         fx.Vector(
             bo.buffer_load(
@@ -253,6 +274,35 @@ def _page_loads(c, kvh, blk):
     return kk + vv
 
 
+def scales(c):
+    """The layer's K and V dequant scales (fp32), raw: one of the entry loads."""
+    a = c["args"]
+    return [
+        fx.Float32(bo.buffer_load(rsrc(a[name]), 0, vec_width=1, dtype=T.f32))
+        for name in ("k_scale", "v_scale")
+    ]
+
+
+def _bf16_words(w, sc):
+    """An e4m3 dword's 4 values times ``sc``, as 2 packed bf16 pair words (byte
+    order: low half first). Exact for a power-of-two scale (e4m3 fits bf16)."""
+    out = []
+    for hi in (False, True):
+        f = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), as_ir_value(w), hi))
+        out.append(bf16_pair(f[0] * sc, f[1] * sc).bitcast(fx.Int32))
+    return out
+
+
+def _widen(ops, ks, vs):
+    """``_page_loads``' e4m3 operands -> its bf16 ones (2 dwordx4 of K, 4
+    dwordx2 of V), dequantized by the K / V scales."""
+    k8 = ops[0]
+    kw = [x for i in range(4) for x in _bf16_words(k8[i], ks)]
+    kk = [fx.Vector.from_elements(kw[4 * s : 4 * s + 4], fx.Int32) for s in range(2)]
+    vv = [fx.Vector.from_elements(_bf16_words(w, vs), fx.Int32) for w in ops[1:]]
+    return kk + vv
+
+
 def _v_operand(vv, dt):
     """The PV A operand of MFMA dt: V^T row i (lane % 16) = dim 4 i + dt, keys
     4 g + e (e = 0 .. 3): bf16 dt of each key's 4 dims, as i16 x 4."""
@@ -272,12 +322,14 @@ def _scale(v, al):
     return fx.Vector.from_elements([v[i] * al for i in range(4)], fx.Float32)
 
 
-def _attend(c, ops, qa, i, base, lo, L, live, m, den, acc):
+def _attend(c, ops, qa, i, base, lo, L, live, m, den, acc, kvs=None):
     """Page i of the wave's (page ``base + 8 i``; ``ops``: its
     ``_page_loads``) into this lane's running max ``m``, sum ``den`` (7.3's
     l) and ``acc`` of head j: QK, the masked base-2 scores, the rescale, PV.
     ``live``: whether the page is the wave's (False: every key masked, the
-    state unchanged). -> (m, den, acc)."""
+    state unchanged). ``kvs``: an e4m3 page's (K, V) scales. -> (m, den, acc)."""
+    if const_expr(kvs is not None):
+        ops = _widen(ops, *kvs)
     g = c["lane"] // LANE_HEADS
     zero4 = fx.Vector.filled(4, 0.0, fx.Float32)
     # keys 16 pg + 4 g + e of this lane: in [lo, L)?
@@ -342,6 +394,9 @@ def stage_split(c, u):
     # FIRST: the pad word, the length and q, all in flight before any wait
     rocdl.sched_barrier(0)
     pre = entry_loads(c, t, kvh)
+    kvs = None
+    if const_expr(key.kv_fp8):
+        kvs = scales(c)
     rocdl.sched_barrier(0)
     L = row_len(c, t, pre)
     lo, pa, pe = pages(L, window, n, p)
@@ -372,7 +427,7 @@ def stage_split(c, u):
         i2 = i + 2
         cb = _page_loads(c, kvh, _block(bid, fx.min(i1, nw - 1), kv_last))
         rocdl.sched_barrier(0)
-        m, den, acc = _attend(c, ca, qa, i, base, lo, L, i < nw, m, den, acc)
+        m, den, acc = _attend(c, ca, qa, i, base, lo, L, i < nw, m, den, acc, kvs)
         # i is even: pages i, i + 1 share a chunk of ids; i + 2 may start one.
         # The id is read in both branches: only a reload waits for its load
         # (a read after the join would wait there on every path, draining
@@ -385,7 +440,7 @@ def stage_split(c, u):
             blk2 = _block(bid, fx.min(i2, nw - 1), kv_last)
         ca = _page_loads(c, kvh, blk2)
         rocdl.sched_barrier(0)
-        m, den, acc = _attend(c, cb, qa, i1, base, lo, L, i1 < nw, m, den, acc)
+        m, den, acc = _attend(c, cb, qa, i1, base, lo, L, i1 < nw, m, den, acc, kvs)
         i = i2
     den = den + xshfl(den, 16)
     den = den + xshfl(den, 32)

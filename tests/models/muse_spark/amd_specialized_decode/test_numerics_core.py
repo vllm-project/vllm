@@ -87,6 +87,8 @@ CASES = (
 # the replay graph's two requests: request 0 crosses the window (and a page
 # every 16 steps), request 1 is past it from the start
 REPLAY_START = (2030, 4090)
+# an fp8 cache's K / V scales: not 1, and e4m3 times either is exact in bf16
+KV8_SCALES = (0.75, 1.25)
 
 
 def _on_gfx950() -> bool:
@@ -132,6 +134,16 @@ def _fake_mrv2(device) -> ref.FakeMrv2:
 def _schedule(steps: int = REPLAYS) -> list[tuple[int, ...]]:
     """The replay graph's per-step context lengths."""
     return [tuple(L + i for L in REPLAY_START) for i in range(steps)]
+
+
+def _scales(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The layer's K / V scales as vLLM holds them (fp32 0-d, the cache's
+    device): ``KV8_SCALES`` for an fp8 cache, else 1."""
+    ks, vs = KV8_SCALES if kv.dtype == torch.uint8 else (1.0, 1.0)
+    return (
+        torch.tensor(ks, dtype=f32, device=kv.device),
+        torch.tensor(vs, dtype=f32, device=kv.device),
+    )
 
 
 def _pages(lens, nblocks: int, seed: int) -> list[list[int]]:
@@ -213,6 +225,8 @@ def _stock_front(fw, kind, branch, stream, positions, slots, kv):
         slots,
         kv,
         spec.KV_BLOCK,
+        "fp8" if kv.dtype == torch.uint8 else "auto",
+        *_scales(kv),
     )
     return stream_out, qkvo
 
@@ -227,13 +241,13 @@ def _k1_front(runner, fw, kind, branch, stream, positions, slots, pad, kv):
     stream_out = torch.empty_like(stream)
     qkvo = torch.empty(S, QKV, dtype=bf, device=stream.device)
     layers.k1_launch(
-        spec.K1Build(tokens=S, rope=rope),
+        spec.K1Build(tokens=S, rope=rope, kv_fp8=kv.dtype == torch.uint8),
         {
             **{n: fw[n] for n in ("w_postffn", "ffn_alpha", "ffn_beta", "w_preqkv")},
             "w_qkv": fw["w_qkv"],
             "cos_sin": fw["cos_sin"] if rope else 0,
             "max_pos": MAX_POS if rope else 0,
-            **layers.kv_args(kv),
+            **layers.kv_args(kv, *_scales(kv)),
             "branch": branch,
             "stream": stream,
             "pad": pad,
@@ -280,6 +294,7 @@ def _stock_attention(qkvo, kv, md, kind, max_len=None):
         bt=md.block_table,
         seq_lens=md.seq_lens,
         qkvo=qkvo,
+        scales=_scales(kv),
     )
     return ref.stock_attention(ns).reshape(S, CORE)
 
@@ -308,7 +323,7 @@ def _split_args(qkvo, kv, md) -> dict:
     bt = md.block_table
     return {
         "qkvo": qkvo,
-        **layers.kv_args(kv),
+        **layers.kv_args(kv, *_scales(kv)),
         "block_table": bt,
         "bt_rows": layers.table_rows(bt),
         "bt_stride": bt.stride(0),
@@ -341,9 +356,9 @@ def _k2(runner, w, key, core_args, stream, pad, kind):
     return stream_out, branch_out
 
 
-def _split_key(S: int, kind: str) -> spec.K2Build:
-    """The split build of width S and ``kind``."""
-    return spec.K2Build(tokens=S, core="split", window=kind == SLIDING)
+def _split_key(S: int, kind: str, kv8: bool = False) -> spec.K2Build:
+    """The split build of width S and ``kind`` (``kv8``: an fp8 cache)."""
+    return spec.K2Build(tokens=S, core="split", window=kind == SLIDING, kv_fp8=kv8)
 
 
 def _split_step(
@@ -366,7 +381,7 @@ def _split_step(
         runner.step_begin()
     s1, qkvo = _front(front, runner, fw, kind, branch, stream, step, kv)
     md = step.attn_metadata[NAME[kind]]
-    key = _split_key(S, kind)
+    key = _split_key(S, kind, kv.dtype == torch.uint8)
     out = _k2(runner, w, key, _split_args(qkvo, kv, md), s1, step.pad, kind)
     return (*out, qkvo)
 
@@ -394,6 +409,29 @@ def _xo(runner, S: int) -> torch.Tensor:
 
 def _bytes(kv: torch.Tensor) -> torch.Tensor:
     return kv.view(torch.int16)
+
+
+def _check_fp8_insert(qkvo, kv, slots, pad) -> None:
+    """Every live row's K / V heads in an fp8 cache are the e4m3 of the bf16
+    rows the front left in ``qkvo`` times RN(1 / scale), bit for bit (the
+    stock insert's and K1's rule alike)."""
+    ks, vs = KV8_SCALES
+    want = ref.kv_to_fp8(
+        torch.cat(
+            [
+                qkvo[:, spec.ROW_K : spec.ROW_V].reshape(-1, spec.KV_HEADS, 64),
+                qkvo[:, spec.ROW_V : spec.ROW_G].reshape(-1, spec.KV_HEADS, 64),
+            ],
+            -1,
+        ),
+        ks,
+        vs,
+    ).cpu()
+    for t, sl in enumerate(slots.tolist()):
+        if bool(pad[t]) or sl < 0:
+            continue
+        got = kv[sl // spec.KV_BLOCK, :, sl % spec.KV_BLOCK].cpu()
+        assert torch.equal(got, want[t]), (t, sl)
 
 
 # ---------------------------------------------------------------- [TP8]
@@ -434,8 +472,12 @@ def _check_chain(runner, w, kind, case, gated, split, s_front, step, kvs):
         # the gated rows: vs vLLM's gated core on the stock attention, and
         # never further from the fp64 gated attention than stock (E9)
         q = qkvo_g[:, :CORE].reshape(S, spec.HEADS, 64)
+        kv_ref = kvs[1]
+        if kv_ref.dtype == torch.uint8:
+            kv_ref = ref.kv_from_fp8(kv_ref, *KV8_SCALES)
+            _check_fp8_insert(qkvo_g, kvs[1], step.slot_mapping[NAME[kind]], pad)
         a64 = ref.gqa_decode(
-            q, kvs[1], md.block_table, md.seq_lens, window=kind == SLIDING, pad=pad
+            q, kv_ref, md.block_table, md.seq_lens, window=kind == SLIDING, pad=pad
         )
         g64 = gate64(a64, qkvo_g[:, spec.ROW_G :].cpu())[live.cpu()]
         got = xo.cpu().reshape(S, spec.HEADS, 64)[live]
@@ -480,6 +522,7 @@ def _check_chain(runner, w, kind, case, gated, split, s_front, step, kvs):
 
 def _chain(
     front,
+    kv8,
     monkeypatch,
     tp_size,
     pp_size,
@@ -505,6 +548,8 @@ def _chain(
         for kind in KINDS:
             g = torch.Generator().manual_seed(1000 * ci + 7 * rank + LAYER[kind])
             kv = ref.kv_cache(nblocks, device=device, generator=g)
+            if kv8:
+                kv = ref.kv_to_fp8(kv, *KV8_SCALES)
             kvs = (kv, kv.clone())
             gated = _gated_step(
                 front, runner, w, fw, kind, branch, stream, step, kvs[0]
@@ -529,7 +574,7 @@ def _chain(
             # NaN in the pad rows' qkv rows: nothing else moves
             dirty = qkvo_s.clone()
             dirty[step.pad] = float("nan")
-            key = _split_key(S, kind)
+            key = _split_key(S, kind, kv8)
             runner.step_begin()
             again = _k2(
                 runner, w, key, _split_args(dirty, kvs[1], md), gated[4], step.pad, kind
@@ -542,20 +587,40 @@ def _chain(
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _chain_stock_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
-    _chain("stock", monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+    _chain("stock", False, monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _chain_k1_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
-    _chain("k1", monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+    _chain("k1", False, monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _chain_stock_kv8_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _chain("stock", True, monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _chain_k1_kv8_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _chain("k1", True, monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+
+_CHAIN_WORKERS = {
+    ("stock", "bf16"): _chain_stock_worker,
+    ("k1", "bf16"): _chain_k1_worker,
+    ("stock", "fp8"): _chain_stock_kv8_worker,
+    ("k1", "fp8"): _chain_k1_kv8_worker,
+}
 
 
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
+@pytest.mark.parametrize("kv", ["bf16", "fp8"])
 @pytest.mark.parametrize("front", ["stock", "k1"])
-def test_layer_chain_split(front: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    worker = _chain_k1_worker if front == "k1" else _chain_stock_worker
-    multi_process_parallel(monkeypatch, 8, 1, worker)
+def test_layer_chain_split(
+    front: str, kv: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    multi_process_parallel(monkeypatch, 8, 1, _CHAIN_WORKERS[front, kv])
 
 
 def _replay(
