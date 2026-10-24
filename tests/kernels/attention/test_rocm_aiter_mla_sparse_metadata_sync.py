@@ -180,6 +180,10 @@ def _make_builder():
     builder._prev_req_extent = 0
     builder._prev_indices_extent = 0
     builder._prev_metadata_key = None
+    builder._host_decode_indptr = False
+    builder._host_indptr = torch.zeros(max_num_batched_tokens + 1, dtype=torch.int32)
+    builder._host_upload_done = None
+    builder._decode_req_id_extent = 0
     return builder
 
 
@@ -257,6 +261,34 @@ def test_build_populates_decode_only_split_fields(monkeypatch):
     assert md.num_decode_tokens == 2
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def test_pure_decode_builds_indptr_on_the_host(monkeypatch):
+    """Pure decode skips the device seqlen kernel: indptr is the host cumsum of
+    min(seq_len, topk), and req_id_per_token is 0..n-1."""
+    builder = _make_builder()
+    builder._host_decode_indptr = True
+    builder._host_upload_done = SimpleNamespace(
+        synchronize=lambda: None, record=lambda: None
+    )
+    _patch_build_deps(monkeypatch)
+
+    def device_seqlen_must_not_run(*args, **kwargs):
+        raise AssertionError("pure decode launched the device seqlen kernel")
+
+    monkeypatch.setattr(
+        sparse_mod, "generate_sparse_seqlen_triton", device_seqlen_must_not_run
+    )
+    builder.req_id_per_token_buffer.fill_(7)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    # seq_lens [16, 8] against topk 4: each decode token attends 4 keys.
+    assert builder.paged_kv_indptr.tolist() == [0, 4, 8, 8, 8, 8, 8, 8, 8]
+    assert md.paged_kv_indptr.tolist() == [0, 4, 8]
+    assert md.req_id_per_token.tolist() == [0, 1]
 
 
 def test_build_populates_mixed_split_fields(monkeypatch):
@@ -375,6 +407,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=4,
         max_seq_len=16,
     )
@@ -461,6 +494,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=5,
         max_seq_len=16,
     )
@@ -685,6 +719,7 @@ def test_sparse_metadata_workload_length_dtype_matrix(
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=max(query_lens),
         max_seq_len=max(seq_lens_list),
     )

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -499,6 +500,20 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.paged_kv_indptr = torch.zeros(
             [max_num_batched_tokens + 1], dtype=torch.int32, device=device
         )
+        # Pure-decode steps build paged_kv_indptr on the host in these pinned
+        # pages and upload it, instead of launching the seqlen kernel, a cumsum
+        # and a fill on the device. seq_lens_cpu_upper_bound is only exact
+        # outside async speculative decoding, so the fast path needs it off.
+        pin = is_pin_memory_available()
+        self._host_decode_indptr = vllm_config.speculative_config is None and pin
+        self._host_indptr = torch.zeros(
+            max_num_batched_tokens + 1, dtype=torch.int32, pin_memory=pin
+        )
+        # The upload is non_blocking; wait for the previous one before the host
+        # pages are rewritten.
+        self._host_upload_done = torch.Event() if pin else None
+        # Length of the req_id_per_token prefix that already holds 0..n-1.
+        self._decode_req_id_extent = 0
 
         # ----- Persistent MLA metadata buffers -----
         # The aiter sparse decode kernel supports a "persistent" path that
@@ -603,42 +618,75 @@ class ROCMAiterMLASparseMetadataBuilder(
         num_decode_tokens = metadata.num_decode_tokens
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts[: num_reqs + 1])
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+        seq_lens_upper = common_attn_metadata.seq_lens_cpu_upper_bound
+        pure_decode = (
+            self._host_decode_indptr
+            and seq_lens_upper is not None
+            and num_prefills == 0
+            and num_decode_tokens == num_tokens
+            and int(common_attn_metadata.max_query_len) == 1
         )
         # Only re-zero the shrink-tail. paged_kv_indptr is fully rewritten
-        # by the cumsum below. paged_kv_indices entries past new_indices_extent
-        # are never read (the attention kernel only touches the ranges
-        # defined by paged_kv_indptr).
-        new_req_extent = int(req_id_per_token.shape[0])
+        # below. paged_kv_indices entries past new_indices_extent are never
+        # read (the attention kernel only touches the ranges defined by
+        # paged_kv_indptr).
+        new_req_extent = num_tokens
         new_indices_extent = num_tokens * self.topk_tokens
         if self._prev_req_extent > new_req_extent:
             self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
                 0
             )
+            self._decode_req_id_extent = min(self._decode_req_id_extent, new_req_extent)
         if self._prev_indices_extent > new_indices_extent:
             self.paged_kv_indices[new_indices_extent : self._prev_indices_extent].fill_(
                 0
             )
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
-        self.req_id_per_token_buffer[:new_req_extent].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
-        )
-        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        sparse_seqlen = generate_sparse_seqlen_triton(
-            seq_lens,
-            query_start_loc,
-            self.topk_tokens,
-            num_tokens,
-            common_attn_metadata.max_query_len,
-        )
-
-        torch.cumsum(sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1])
-        # fill_() with a value that aliases the destination clones it first.
-        indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
-        indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
+        if pure_decode:
+            # One token per request, so req_id is 0..n-1: what qo_indptr holds.
+            if num_tokens > self._decode_req_id_extent:
+                self.req_id_per_token_buffer[:num_tokens].copy_(
+                    self.qo_indptr[:num_tokens]
+                )
+                self._decode_req_id_extent = num_tokens
+            # Decode token i attends min(seq_len_i, topk) keys, which is what
+            # generate_sparse_seqlen_kernel yields for query_len == 1.
+            assert self._host_upload_done is not None and seq_lens_upper is not None
+            self._host_upload_done.synchronize()
+            host_indptr = self._host_indptr.numpy()
+            np.cumsum(
+                np.minimum(seq_lens_upper[:num_tokens].numpy(), self.topk_tokens),
+                out=host_indptr[1 : num_tokens + 1],
+            )
+            host_indptr[num_tokens + 1 :] = host_indptr[num_tokens]
+            self.paged_kv_indptr.copy_(self._host_indptr, non_blocking=True)
+            self._host_upload_done.record()
+        else:
+            self._decode_req_id_extent = 0
+            req_id_per_token = np.repeat(
+                np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+            )
+            self.req_id_per_token_buffer[:new_req_extent].copy_(
+                np_to_pinned_tensor(req_id_per_token), non_blocking=True
+            )
+            query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            sparse_seqlen = generate_sparse_seqlen_triton(
+                seq_lens,
+                query_start_loc,
+                self.topk_tokens,
+                num_tokens,
+                common_attn_metadata.max_query_len,
+            )
+            torch.cumsum(
+                sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
+            )
+            # fill_() with a value that aliases the destination clones it first.
+            indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+            indptr_tail.copy_(
+                self.paged_kv_indptr[num_tokens].expand_as(indptr_tail)
+            )
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
         qo_indptr = self.qo_indptr[: num_tokens + 1]
@@ -1170,6 +1218,14 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
+            elif (
+                q_pe.shape[-1] == 0
+                and ql_nope.is_contiguous()
+                and ql_nope.dtype == self.q_concat_buffer.dtype
+            ):
+                # The MQA bmm already writes a token-major query, so a NoPE
+                # model needs no copy into the concat buffer.
+                q = ql_nope
             else:
                 q = self.q_concat_buffer[: ql_nope.shape[0]]
                 if q_pe.shape[-1] == 0:
