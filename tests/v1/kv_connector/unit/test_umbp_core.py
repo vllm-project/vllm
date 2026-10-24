@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
     BlockLoadBatch,
+    BlockStoreBatch,
     BlockTransferPlan,
     KVLayoutDescriptor,
     KVLayoutPlanner,
@@ -1605,6 +1606,97 @@ def test_batched_load_localizes_rank_without_changing_request_or_destination(
     job = worker._load_jobs["request"][None]
     assert job.failed_block_ids == {9}
     assert batch.keys == [scheduler_codec.key(b"a", 0), scheduler_codec.key(b"b", 1)]
+
+
+@pytest.mark.parametrize("fail_store", [False, True])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("fast_path", [False, True])
+def test_batched_store_localizes_rank_without_changing_scheduler_batch(
+    fail_store, tp_rank, fast_path
+):
+    """Fast and fallback stores target the same rank and publish alike."""
+    codec = BlockIdentityCodec(UMBPNamespace("rank-local"), tp_rank=tp_rank)
+    scheduler_codec = replace(codec, tp_rank=0)
+    handle = _StoreRecordingWorkerHandle()
+    calls = []
+
+    def store(plans):
+        calls.append(plans)
+        job = TransferJobState(plans if fast_path else tuple(plans))
+        job.start()
+        if fail_store:
+            # Only the second object fails; the whole job stays unpublished.
+            job.complete([codec.key(b"a", 0)])
+            job.fail([codec.key(b"b", 0)], "injected store failure")
+        else:
+            job.complete()
+        return job
+
+    handle.store = store
+    if fast_path:
+        handle.store_blocks = store
+    layout = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
+    layout.register_kv_caches(make_kv_caches())
+    worker = UMBPStoreConnectorWorker(handle, layout, codec=codec)
+    scheduler_keys = [scheduler_codec.key(b"a", 0), scheduler_codec.key(b"b", 0)]
+    batch = BlockStoreBatch(
+        keys=list(scheduler_keys),
+        block_ids=[1, 2],
+        group_ids=[0, 0],
+        block_hashes=[b"a", b"b"],
+        parent_block_hashes=[None, b"a"],
+        token_ids=[tuple(range(16)), tuple(range(16, 32))],
+        block_sizes=[16, 16],
+        request_id="request",
+    )
+    metadata = UMBPConnectorMetadata(store_event=11, store_requests={"request": batch})
+
+    worker.enqueue_stores(metadata)
+    worker.wait_for_save()
+
+    assert len(calls) == 1
+    if fast_path:
+        assert isinstance(calls[0], BlockStoreBatch)
+    else:
+        assert all(plan.ranges for plan in calls[0])
+    assert [
+        (
+            plan.key,
+            plan.block_id,
+            plan.group_id,
+            plan.request_id,
+            plan.block_hash,
+            plan.parent_block_hash,
+            plan.token_ids,
+            plan.block_size,
+        )
+        for plan in calls[0]
+    ] == [
+        (codec.key(b"a", 0), 1, 0, "request", b"a", None, tuple(range(16)), 16),
+        (
+            codec.key(b"b", 0),
+            2,
+            0,
+            "request",
+            b"b",
+            b"a",
+            tuple(range(16, 32)),
+            16,
+        ),
+    ]
+    # The scheduler's batch is shared metadata and must not be rewritten.
+    assert batch.keys == scheduler_keys
+    assert metadata.store_requests == {"request": batch}
+    assert worker.build_connector_worker_meta().store_events == {
+        11: StoreEventResult(1, {(0, b"a"), (0, b"b")} if fail_store else set())
+    }
+    if fail_store:
+        assert not hasattr(handle, "published")
+    else:
+        assert list(handle.published.keys) == [
+            codec.key(b"a", 0),
+            codec.key(b"b", 0),
+        ]
 
 
 @pytest.mark.parametrize("empty_group", [False, True])
