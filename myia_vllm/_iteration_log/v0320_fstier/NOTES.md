@@ -1324,3 +1324,33 @@ que les 750 747 tokens de KV n'en tiennent.
 2. Compteur d'abandons toujours à 0, alors que 4 corps ont été renvoyés à l'identique
    après 12:32Z. Deux hypothèses restent ouvertes : les originaux ont abouti, ou la
    déconnexion n'est pas détectée pendant le prefill.
+
+### 24/10 14:13Z — le compteur d'abandons ne voit pas les déconnexions client
+
+**Question** : quand un client se déconnecte, vLLM annule-t-il la requête, y compris si
+elle attend encore une place dans le KV ? claudish voyait des « fantômes ». Les clients
+renvoient le même corps toutes les ~287 s, alors que les entrées de fin côté moteur sont
+espacées de 402 à 414 s, et `request_success_total{finished_reason="abort"}` reste à 0.
+
+**Sonde** (`.tmp/abort_probe.sh`) : deux requêtes à prompt court (stream puis non-stream)
+envoyées sur un moteur saturé (Waiting 6-7), avec un client qui abandonne au bout de 6 s.
+- Le middleware enregistre la fin de chaque échange à 14:13:13Z et 14:13:19Z,
+  c'est-à-dire **à la seconde même de la déconnexion**. Le handler HTTP rend la main
+  immédiatement, même pour une requête encore en file.
+- Le compteur `abort` reste à 0 après ces deux abandons.
+
+**Source v0.32.0** :
+- `async_llm.py:779-781` et `:1045-1047` : sur `CancelledError`, appel de
+  `self.abort(request_id, internal=True)`.
+- `output_processor.py:552` (`abort_requests`) : retire l'état de la requête et émet une
+  sortie `FinishReason.ABORT`, sans passer par l'enregistrement des stats de fin. Ce
+  chemin n'alimente donc pas `request_success_total`.
+
+**Conclusion** :
+- Le compteur `abort` est **aveugle aux déconnexions client**. Le « abort=0 » du cycle de
+  12:41Z ne mesurait rien.
+- vLLM annule bien à la déconnexion, y compris une requête qui attend une place dans le
+  KV.
+- Si des requêtes restent ~2 min dans le moteur après le départ du client, c'est que la
+  connexion **hub → vLLM** est restée ouverte. La question passe donc côté hub : une
+  déconnexion client y annule-t-elle la requête amont ?
