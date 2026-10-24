@@ -33,7 +33,13 @@ from vllm.platforms import current_platform
 from vllm.profiler.wrapper import WorkerProfiler
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+)
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -113,6 +119,56 @@ def _mock_vllm_config() -> MagicMock:
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     return vllm_config
+
+
+def test_output_handler_cancellation_propagates_to_active_requests(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = _mock_vllm_config()
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    monkeypatch.setattr(async_llm_module, "OutputProcessor", OutputProcessor)
+
+    async def run():
+        output_waiting = asyncio.Event()
+
+        async def wait_for_output():
+            output_waiting.set()
+            await asyncio.Future()
+
+        engine_core.get_output_async = AsyncMock(side_effect=wait_for_output)
+        engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+        try:
+            await asyncio.wait_for(output_waiting.wait(), timeout=5)
+            request = EngineCoreRequest(
+                request_id="request-id",
+                external_req_id="request-id",
+                prompt_token_ids=[1],
+                mm_features=None,
+                arrival_time=0,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+                sampling_params=SamplingParams(
+                    detokenize=False,
+                    output_kind=RequestOutputKind.FINAL_ONLY,
+                ),
+                pooling_params=None,
+            )
+            queue = RequestOutputCollector(
+                RequestOutputKind.FINAL_ONLY, request.request_id
+            )
+            engine.output_processor.add_request(request, prompt=None, queue=queue)
+
+            assert engine.output_handler is not None
+            engine.output_handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await engine.output_handler
+            with pytest.raises(EngineDeadError):
+                await queue.get()
+        finally:
+            engine.shutdown()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("method", ["generate", "encode"])
