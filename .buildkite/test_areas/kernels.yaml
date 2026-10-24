@@ -353,6 +353,20 @@ steps:
       commands:
       - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":nvidia: (H100) MM Encoder Attention Kernels"
+  key: kernels-mm-encoder-attention-test-h100
+  timeout_in_minutes: 20
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/attention/mm_encoder_attention.py
+  - vllm/v1/attention/backends/fa_utils.py
+  - vllm/v1/attention/ops/vit_attn_wrappers.py
+  - tests/kernels/attention/test_mha_attn.py
+  commands:
+    # The ViT FA3/FA4 dispatch cases need SM90, so they skip on the L4 shard.
+    - pytest -v -s kernels/attention/test_mha_attn.py
+
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
   timeout_in_minutes: 20

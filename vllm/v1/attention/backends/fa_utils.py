@@ -71,6 +71,40 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
+# Head sizes for which FA4 measured faster than FA3 on SM90 for long ViT
+# sequences. At 96 and 128 FA4 is slower at every length; 72 only breaks even.
+_VIT_LONG_SEQ_FA4_HEAD_SIZES = (80,)
+
+
+def get_vit_long_seq_fa_version(fa_version: int | None, head_size: int) -> int | None:
+    """FA version for long-sequence ViT attention, or None to keep `fa_version`.
+
+    On SM90 with head_size 80, FA4 is faster than FA3 for long sequences (e.g.
+    13k-16k image tokens) but slower for short and windowed ones, so the caller
+    only switches above `VIT_LONG_SEQ_MIN_SEQLEN`. An explicitly configured
+    `flash_attn_version` is respected.
+    """
+    if (
+        fa_version != 3
+        or head_size not in _VIT_LONG_SEQ_FA4_HEAD_SIZES
+        or not current_platform.is_device_capability(90)
+    ):
+        return None
+
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is not None
+        and vllm_config.attention_config.flash_attn_version is not None
+    ):
+        return None
+
+    from vllm.vllm_flash_attn.flash_attn_interface import is_fa_version_supported
+
+    return 4 if is_fa_version_supported(4) else None
+
+
 def get_flash_attn_version(
     requires_alibi: bool = False,
     head_size: int | None = None,
