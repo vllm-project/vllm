@@ -310,7 +310,13 @@ def FusedMoEFactory(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
+            skip_padding=(
+                skip_padding
+                and (
+                    moe_parallel_config.use_deepep_v2_kernels
+                    or moe_parallel_config.use_nixl_ep_v2_kernels
+                )
+            ),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net

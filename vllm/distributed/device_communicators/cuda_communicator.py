@@ -247,6 +247,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = NixlEPAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "nixl_ep_v2":
+                from .all2all import NixlEPV2All2AllManager
+
+                self.all2all_manager = NixlEPV2All2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif (
                 self.all2all_backend == "flashinfer_all2allv"
                 or self.all2all_backend == "flashinfer_nvlink_two_sided"

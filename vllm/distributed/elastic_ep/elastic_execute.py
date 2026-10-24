@@ -73,7 +73,7 @@ def can_reuse_fused_moe_kernel(parallel_config: ParallelConfig) -> bool:
     The EP backend must preserve its CUDA graph entries when ranks are connected,
     disconnected, masked, or unmasked.
     """
-    return parallel_config.all2all_backend == "nixl_ep"
+    return parallel_config.all2all_backend in ("nixl_ep", "nixl_ep_v2")
 
 
 def batch_transfer_weights(
@@ -625,6 +625,9 @@ class ElasticEPScalingExecutor:
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
+            # After the existing ranks commit the new world (switch_and_prepare)
+            # and before this rank's first forward: make it live here too.
+            get_ep_all2all_manager().commit_ep_size()
         if not self._can_reuse_fused_moe_kernel():
             # warm_and_capture's dummy run warms the deferred dp/ep groups.
             self.warm_and_capture()

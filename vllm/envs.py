@@ -289,6 +289,12 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
+    VLLM_NIXL_EP_V2_DOMAIN_SIZE: int = 0
+    VLLM_NIXL_EP_V2_NUM_SMS: int = 0
+    VLLM_NIXL_EP_V2_EXPAND: bool = False
+    VLLM_NIXL_EP_V2_NVFP4_DISPATCH: bool = False
+    VLLM_NIXL_EP_V2_PREFER_OVERLAP: bool = True
+    VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION: bool = True
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
@@ -2039,6 +2045,33 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DeepEP v2: trade precision for transfer size in combine
     "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
+    ),
+    # NIXL EP v2: GPUs per NVLink domain. 0 lets nixl_ep_v2 infer the domains
+    # (fixed EP size only); with elastic EP, 0 means one domain. Must not be
+    # smaller than the physical NVLink domain.
+    "VLLM_NIXL_EP_V2_DOMAIN_SIZE": lambda: int(
+        os.getenv("VLLM_NIXL_EP_V2_DOMAIN_SIZE", "0")
+    ),
+    # NIXL EP v2: under CUDA graphs, dispatch in the expanded layout sized for
+    # the worst case instead of the padded layout
+    "VLLM_NIXL_EP_V2_EXPAND": lambda: bool(
+        int(os.getenv("VLLM_NIXL_EP_V2_EXPAND", "0"))
+    ),
+    # NIXL EP v2: for NVFP4 layers that quantize their input in prepare,
+    # quantize before dispatch and send NVFP4 instead of BF16
+    "VLLM_NIXL_EP_V2_NVFP4_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_NIXL_EP_V2_NVFP4_DISPATCH", "0"))
+    ),
+    # NIXL EP v2: active SMs per dispatch/combine, even and at most the launch
+    # grid; 0 = the launch grid
+    "VLLM_NIXL_EP_V2_NUM_SMS": lambda: int(os.getenv("VLLM_NIXL_EP_V2_NUM_SMS", "0")),
+    # NIXL EP v2: the ElasticBuffer flags. The defaults are nixl_ep_v2's own,
+    # unlike the VLLM_DEEPEP_V2_* ones above.
+    "VLLM_NIXL_EP_V2_PREFER_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_NIXL_EP_V2_PREFER_OVERLAP", "1"))
+    ),
+    "VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
+        int(os.getenv("VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION", "1"))
     ),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.

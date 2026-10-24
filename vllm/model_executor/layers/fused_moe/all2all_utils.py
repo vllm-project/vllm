@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     GroupCoordinator,
@@ -41,6 +42,7 @@ from vllm.utils.import_utils import (
     has_moonep,
     has_mori,
     has_nixl_ep,
+    has_nixl_ep_v2,
 )
 
 
@@ -116,6 +118,8 @@ if current_platform.is_cuda_alike():
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
+    if has_nixl_ep_v2():
+        from .prepare_finalize.nixl_ep_v2 import NixlEPV2PrepareAndFinalize
     if has_moonep():
         from .prepare_finalize.moonep import (
             MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
@@ -173,6 +177,11 @@ def maybe_roundup_layer_hidden_size(
 
     if moe_parallel_config.use_nixl_ep_kernels:
         hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size
+        )
+
+    if moe_parallel_config.use_nixl_ep_v2_kernels:
+        hidden_size = NixlEPV2PrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
 
@@ -302,6 +311,35 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
             sp_size=moe.moe_parallel_config.sp_size,
+        )
+
+    elif moe.use_nixl_ep_v2_kernels:
+        if moe.num_experts % all2all_manager.world_size != 0:
+            raise ValueError(
+                "nixl_ep_v2 needs the same number of experts on every rank, got "
+                f"{moe.num_experts} experts over {all2all_manager.world_size} ranks"
+            )
+        all_to_all_args = dict(
+            num_max_tokens_per_rank=moe.max_num_tokens,
+            hidden=moe.hidden_dim,
+            num_topk=moe.experts_per_token,
+            use_fp8_dispatch=quant_config is not None
+            and quant_config.use_fp8_w8a8
+            and quant_config.is_block_quantized,
+            num_local_experts=moe.num_local_experts,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+        model_config = get_current_vllm_config().model_config
+        prepare_finalize = NixlEPV2PrepareAndFinalize(
+            buffer=handle,
+            num_dispatchers=all2all_manager.world_size,
+            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            num_sms=all2all_manager.num_sms,
+            # Tests build no model_config: they run eager.
+            use_cudagraph=model_config is not None and not model_config.enforce_eager,
+            sp_size=moe.moe_parallel_config.sp_size,
+            expand=envs.VLLM_NIXL_EP_V2_EXPAND,
+            nvfp4_dispatch=envs.VLLM_NIXL_EP_V2_NVFP4_DISPATCH,
         )
 
     elif moe.use_moonep_kernels:
