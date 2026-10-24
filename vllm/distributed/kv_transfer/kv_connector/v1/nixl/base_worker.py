@@ -457,6 +457,25 @@ class NixlBaseConnectorWorker:
             and not self._has_mamba
         )
 
+    def _is_separate_kv_head_slot_page(
+        self, layer_spec: KVCacheSpec, physical_page_size: int
+    ) -> bool:
+        """Whether a layer's page is an unquantized ``[K heads | V heads]`` page.
+
+        Set by ``AttentionConfig.flashinfer_separate_kv_head_slots``: the spec
+        has ``2 * num_kv_heads`` head slots of ``head_size`` elements, so under a
+        block-contiguous layout the first half of each page is K and the second
+        half is V.
+        """
+        return (
+            self.vllm_config.attention_config.flashinfer_separate_kv_head_slots
+            and isinstance(layer_spec, AttentionSpec)
+            and not isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            and layer_spec.has_separate_kv_head_slots
+            and KVCacheLayout[self.kv_cache_layout].is_block_contiguous
+            and physical_page_size == layer_spec.page_size_bytes
+        )
+
     def _requires_layer_name_routing(self) -> bool:
         """Whether PP push must match HMA/packed layers by name, not region index."""
         return self.pp_size > 1 and self._tracks_region_layers()
@@ -1741,6 +1760,18 @@ class NixlBaseConnectorWorker:
                         for segment_idx in range(num_segments)
                     ]
 
+            if self._is_separate_kv_head_slot_page(layer_spec, physical_page_size):
+                # [K heads | V heads] page: register K and V as two regions that
+                # step by the full page, so each region keeps its heads
+                # contiguous for head-sliced (heterogeneous TP) reads.
+                assert len(region_specs) == 1, region_specs
+                base_addr, block_len, block_stride = region_specs[0]
+                assert block_len == physical_page_size and block_len % 2 == 0
+                half = block_len // 2
+                region_specs = [
+                    (base_addr, half, block_stride),
+                    (base_addr + half, half, block_stride),
+                ]
             for base_addr, block_len, block_stride in region_specs:
                 # A packed PP producer keeps one region per layer, so aliases at
                 # one address (a layer and its SWA view) stay distinct.
