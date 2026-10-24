@@ -407,6 +407,42 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
         )
 
 
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_temp_collision_preserves_other_writer(tmp_path, monkeypatch, use_c_ext):
+    """A failed exclusive open must not unlink another writer's temp file."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+    monkeypatch.setattr(io_mod, "_get_tmp_suffix", lambda: "_collision.tmp")
+
+    dest = tmp_path / "block"
+    temp = tmp_path / "block_collision.tmp"
+    original = b"first writer's KV block"
+    competing = b"second writer's KV block"
+
+    # Keep the first writer's file open while another store uses the same name.
+    with temp.open("xb") as writer:
+        writer.write(original[:5])
+        writer.flush()
+        with pytest.raises(FileExistsError):
+            io_mod.batch_store_block(
+                [str(dest)],
+                memoryview(competing),
+                [0],
+                len(competing),
+                use_o_direct=False,
+            )
+        assert temp.read_bytes() == original[:5]
+        assert not dest.exists()
+        writer.write(original[5:])
+
+    # The original writer can still publish its complete block atomically.
+    temp.replace(dest)
+    assert dest.read_bytes() == original
+
+
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
     """Buffered fallback must round-trip data when O_DIRECT is unsupported.
 
