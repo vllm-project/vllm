@@ -140,6 +140,7 @@ fn media_order_excludes_dropped_historical_developer_content() {
     let renderer = DeepSeekV41ChatRenderer::default();
     let request = ChatRequest {
         messages: vec![
+            ChatMessage::user("old question"),
             ChatMessage::developer(vec![image_part("historical-image")], None),
             ChatMessage::user("question"),
         ],
@@ -351,7 +352,7 @@ fn leading_system_in_chat_mode_uses_system_token() {
 }
 
 #[test]
-fn system_after_dropped_developer_becomes_leading_system() {
+fn leading_developer_before_system_is_preserved() {
     let mut request = ChatRequest {
         messages: vec![
             ChatMessage::developer("old policy", None),
@@ -359,11 +360,11 @@ fn system_after_dropped_developer_becomes_leading_system() {
         ],
         ..ChatRequest::for_test()
     };
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nold policy<｜System｜>sys<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 
     request.messages.push(ChatMessage::user("question"));
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nold policy<｜System｜>sys<｜User｜>question<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 }
 

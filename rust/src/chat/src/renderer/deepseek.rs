@@ -108,16 +108,56 @@ pub(super) fn render_request_with_media_order(
     };
     let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
     let request_tools = request.initial_tools();
-    let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
-    if dialect == DsDialect::V41 {
-        reject_image_placeholder_text(&request.messages)?;
-    }
     let last_user_like_message_index = (0..request.messages.len())
         .rev()
         .find(|&index| starts_user_turn(&request.messages, index, index, dialect));
+    let mut normalized_request = Cow::Borrowed(request);
+    if drop_historical_developers {
+        let prefix_end = request
+            .messages
+            .iter()
+            .take_while(|message| {
+                matches!(
+                    message,
+                    ChatMessage::System { .. } | ChatMessage::Developer { .. }
+                )
+            })
+            .count();
+        for message_index in 0..prefix_end.min(last_user_like_message_index.unwrap_or(0)) {
+            if let ChatMessage::Developer { content, .. } = &request.messages[message_index] {
+                if content.is_empty() {
+                    continue;
+                }
+                let content = if dialect == DsDialect::V4 {
+                    ChatContent::Text(format!(
+                        "{}{}{}",
+                        if message_index > 0 { "\n\n" } else { "" },
+                        content.try_flatten_to_text()?,
+                        if matches!(
+                            request.messages.get(message_index + 1),
+                            Some(ChatMessage::System { .. })
+                        ) {
+                            "\n\n"
+                        } else {
+                            ""
+                        },
+                    ))
+                } else {
+                    content.clone()
+                };
+                normalized_request.to_mut().messages[message_index] =
+                    ChatMessage::System { content };
+            }
+        }
+    }
+    let request = normalized_request.as_ref();
+    let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
+    if dialect == DsDialect::V41 {
+        reject_image_placeholder_text(&request.messages)?;
+    }
     let last_user_render_index = find_last_user_render_index(
         request.messages.as_slice(),
         synthetic_tool_system,
