@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for JinaRankingIOProcessor request building."""
+"""Unit tests for JinaRankingIOProcessor request building and rendering."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,11 +11,25 @@ from transformers import TokenizersBackend
 
 from vllm import PoolingParams
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.embed.io_processor import JinaRankingTokenEmbedIOProcessor
+from vllm.entrypoints.pooling.pooling.protocol import PoolingCompletionRequest
 from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessor
-from vllm.entrypoints.pooling.scoring.protocol import RerankRequest
+from vllm.entrypoints.pooling.scoring.protocol import (
+    RerankRequest,
+    ScoreQueriesDocumentsRequest,
+)
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
+from vllm.entrypoints.pooling.typing import (
+    OfflineEncodeInputsContext,
+    OfflineScoringInputsContext,
+    PoolingServeContext,
+)
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.hf import HfRenderer
+from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -148,3 +162,115 @@ def test_offline_rejects_invalid_token_limits(
     ctx.pooling_params.extra_kwargs[name] = limit
     with pytest.raises(ValueError, match=name):
         proc.get_request_factory_offline(ctx)
+
+
+@pytest.fixture
+def ranking_renderer():
+    backend = Tokenizer(
+        models.WordLevel(
+            {"[UNK]": 0, "<|embed_token|>": 1, "<|rerank_token|>": 2},
+            unk_token="[UNK]",
+        )
+    )
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<|embed_token|>", "<|rerank_token|>"]}
+    )
+    model_config = SimpleNamespace(
+        architecture="JinaForRanking",
+        max_model_len=1024,
+        is_encoder_decoder=False,
+        is_multimodal_model=False,
+        supports_multimodal_inputs=False,
+        encoder_config={},
+        hf_config=SimpleNamespace(),
+        renderer_num_workers=1,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(_api_process_rank=0),
+    )
+    renderer = HfRenderer(config, get_cached_tokenizer(tokenizer))
+    yield renderer
+    renderer.shutdown()
+
+
+@pytest.mark.parametrize("api", ["score", "rerank", "pooling", "encode"])
+@pytest.mark.parametrize("truncation_side", ["left", "right"])
+@pytest.mark.parametrize("truncation", ["lost", "preserved", None])
+def test_rejects_truncation_only_when_ranking_markers_are_lost(
+    ranking_renderer, api, truncation_side, truncation
+):
+    """Every Jina entrypoint must retain all query/document vectors."""
+    renderer = ranking_renderer
+    processor_cls = (
+        JinaRankingIOProcessor
+        if api in ("score", "rerank")
+        else JinaRankingTokenEmbedIOProcessor
+    )
+    proc = processor_cls(
+        renderer.config, renderer, ChatTemplateConfig(chat_template=None)
+    )
+    query = "query <|rerank_token|>"
+    docs = ["first <|embed_token|>", "second"]
+    prompt = proc.format_docs_prompts_func(query=query, docs=docs)
+    token_ids = renderer.get_tokenizer().encode(prompt)
+    if truncation is None:
+        limit = None
+    elif truncation_side == "left":
+        limit = len(token_ids) - token_ids.index(1) - (truncation == "lost")
+    else:
+        limit = token_ids.index(2) + (truncation == "preserved")
+
+    if api == "encode":
+        ctx = OfflineEncodeInputsContext(
+            pooling_task="token_embed",
+            prompts=docs + [query],
+            pooling_params=PoolingParams(task="token_embed"),
+            tokenization_kwargs={
+                "truncate_prompt_tokens": limit,
+                "truncation_side": truncation_side,
+            },
+            lora_request=None,
+            priorities=None,
+        )
+        factory, _ = proc.get_request_factory_offline(ctx)
+        (render_params,) = list(factory())
+    else:
+        if api == "score":
+            request = ScoreQueriesDocumentsRequest(queries=query, documents=docs)
+        elif api == "rerank":
+            request = RerankRequest(query=query, documents=docs)
+        else:
+            request = PoolingCompletionRequest(input=docs + [query])
+        request.truncate_prompt_tokens = limit
+        request.truncation_side = truncation_side
+        ctx = PoolingServeContext(
+            request=request,
+            model_name="jina",
+            request_id="test",
+            pooling_params=PoolingParams(task="token_embed"),
+            lora_request=None,
+            priorities=None,
+            prompt_extras=None,
+        )
+        (render_params,) = proc.get_request_factory_online(ctx)
+
+    if truncation == "lost":
+        with pytest.raises(
+            VLLMValidationError, match="removed query or document"
+        ) as exc_info:
+            proc.render(render_params)
+        assert exc_info.value.parameter == "truncate_prompt_tokens"
+    else:
+        result = proc.render(render_params)
+        expected = token_ids
+        if limit is not None:
+            expected = (
+                token_ids[-limit:] if truncation_side == "left" else token_ids[:limit]
+            )
+        prompt_token_ids = extract_prompt_components(
+            proc.model_config, result["prompts"]
+        ).token_ids
+        assert prompt_token_ids == expected

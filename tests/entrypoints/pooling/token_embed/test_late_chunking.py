@@ -122,6 +122,11 @@ def test_jina_ranking_rejects_chunking_before_tokenization(
 ):
     processor = object.__new__(JinaRankingTokenEmbedIOProcessor)
     processor.__dict__.update(late_chunk_processor.__dict__)
+    tokenizer = late_chunk_processor.renderer.get_tokenizer.return_value
+    tokenizer.convert_tokens_to_ids.side_effect = {
+        "<|embed_token|>": 1,
+        "<|rerank_token|>": 2,
+    }.__getitem__
     ctx = _late_chunk_context(prompts=["document", "query"])
     params = PoolingParams(
         late_chunking_params=LateChunkingParams(chunk_size) if chunk_size else None

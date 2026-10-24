@@ -82,6 +82,15 @@ If your model is not in the above list, we will try to automatically convert the
 
 jina-reranker-v3 is a listwise document reranker model with a novel `last but not late interaction` architecture. More information can be found at: [examples/pooling/token_embed/jina_reranker_v3_offline.py](../../../examples/pooling/token_embed/jina_reranker_v3_offline.py)
 
+For `jinaai/jina-reranker-v3`, `truncate_prompt_tokens` must retain every document's
+`<|embed_token|>` marker and the query's `<|rerank_token|>` marker. This applies to
+`LLM.encode(..., pooling_task="token_embed")`, `LLM.score`, `/pooling`, `/score`, and
+`/rerank`. Both left and right truncation remain supported when all markers are
+retained; untruncated inputs are unchanged. If truncation removes a marker, vLLM
+rejects the request before inference with a validation error. HTTP APIs return
+status 400 with `param="truncate_prompt_tokens"`. Increase `truncate_prompt_tokens`
+or shorten the query and documents to retain the markers.
+
 --8<-- [end:supported-token-embed-models]
 
 ## Offline Inference

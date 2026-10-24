@@ -8,7 +8,7 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.exceptions import ChatTemplateResolutionError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
@@ -833,7 +833,41 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaRankingIOProcessorMixin:
+class JinaRankingIOProcessorMixin(PoolingIOProcessor):
+    def render(
+        self,
+        render_params: EncodeCMPLRenderParams
+        | EncodeChatRenderParams
+        | ScoringRenderParams,
+    ) -> PoolingEngineInput:
+        render_params = cast(EncodeCMPLRenderParams, render_params)
+        prompt = render_params["prompts"].get("prompt")
+        assert isinstance(prompt, str)
+        # Count before rendering, which can also truncate the prompt text in place.
+        num_docs = prompt.count("<|embed_token|>")
+        engine_input = super().render(render_params)
+        target_prompt = extract_target_prompt(
+            self.model_config, engine_input["prompts"]
+        )
+        token_ids = target_prompt.get("prompt_token_ids")
+        assert token_ids is not None
+
+        tokenizer = self.renderer.get_tokenizer()
+        doc_token_id = tokenizer.convert_tokens_to_ids("<|embed_token|>")
+        query_token_id = tokenizer.convert_tokens_to_ids("<|rerank_token|>")
+        if (
+            token_ids.count(doc_token_id) != num_docs
+            or token_ids.count(query_token_id) != 1
+        ):
+            raise VLLMValidationError(
+                "Truncation removed query or document markers required for Jina "
+                "ranking. Increase truncate_prompt_tokens or shorten the query "
+                "and documents before ranking.",
+                parameter="truncate_prompt_tokens",
+            )
+
+        return engine_input
+
     @staticmethod
     def format_docs_prompts_func(
         query: str,
