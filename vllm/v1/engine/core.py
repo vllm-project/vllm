@@ -104,7 +104,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -605,7 +604,8 @@ class EngineCore:
                 is_dummy=True,
             )
         else:
-            details = compute_iteration_details(scheduler_output)
+            details = scheduler_output.iteration_details
+            assert details is not None
             iteration_details = SchedulerIterationDetails(
                 iteration_index=iteration_index,
                 num_ctx_requests=details.num_ctx_requests,
