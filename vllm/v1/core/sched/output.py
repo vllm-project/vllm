@@ -79,6 +79,12 @@ class NewRequestData:
                     if id(ids) not in packed:
                         packed[id(ids)] = array("i", ids)
                     state[key] = packed[id(ids)]
+            # Block ids grow with the prompt (one list per KV cache group): ship
+            # them as int32 buffers too, which the block tables stage as-is.
+            state["block_ids"] = tuple(
+                array("i", ids) if isinstance(ids, list) else ids
+                for ids in state["block_ids"]
+            )
         return state
 
     @classmethod

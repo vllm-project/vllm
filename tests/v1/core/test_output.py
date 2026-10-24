@@ -178,12 +178,15 @@ def test_new_request_data_packs_token_ids(aliased: bool) -> None:
     assert out.prefill_token_ids.tolist() == prefill
     assert (out.prompt_token_ids is out.prefill_token_ids) == aliased
     assert out.prompt_len == len(prompt)
-    assert out.block_ids == ([1, 2, 3],) and out.num_computed_tokens == 128
+    assert all(isinstance(ids, array) for ids in out.block_ids)
+    assert [ids.tolist() for ids in out.block_ids] == [[1, 2, 3]]
+    assert data.block_ids == ([1, 2, 3],) and out.num_computed_tokens == 128
 
     data.pack_token_ids = False
     out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
     assert out.prompt_token_ids == prompt and out.prefill_token_ids == prefill
     assert isinstance(out.prompt_token_ids, list)
+    assert out.block_ids == ([1, 2, 3],)
 
 
 def test_new_request_data_uses_prepacked_prompt() -> None:

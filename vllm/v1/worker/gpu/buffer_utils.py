@@ -208,7 +208,6 @@ class StagedWriteTensor:
             and x.typecode == "i"
             and x.itemsize == 4
             and self.dtype == torch.int32
-            and self.write_contents is not None
         ):
             self._staged_write_chunks.append(self._staged_write_contents)
             # A view: `x` must stay unchanged until apply_write copies it.
@@ -239,8 +238,16 @@ class StagedWriteTensor:
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
         if self.write_contents is None:
+            contents = self._staged_write_contents
+            if self._staged_write_chunks:
+                contents = np.concatenate(
+                    [
+                        np.asarray(c, dtype=np.int32)
+                        for c in (*self._staged_write_chunks, contents)
+                    ]
+                )
             write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
+                contents, device=self.device, dtype=self.dtype
             )
         elif self._staged_write_chunks:
             write_contents = self.write_contents.copy_chunks_to_uva(
@@ -301,8 +308,10 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int | float] = []
+        # Each tensor's contents in staging order: its chunks, then its list.
+        chunks: list[np.ndarray | list[int | float]] = []
         cu_lens: list[int] = []
+        num_contents = 0
 
         for group_id, t in enumerate(tensors):
             n = len(t._staged_write_indices)
@@ -312,8 +321,10 @@ class FusedStagedWriter:
             group_ids.extend([group_id] * n)
             indices.extend(t._staged_write_indices)
             starts.extend(t._staged_write_starts)
-            content_base = len(contents)
-            contents.extend(t._staged_write_contents)
+            content_base = num_contents
+            chunks.extend(t._staged_write_chunks)
+            chunks.append(t._staged_write_contents)
+            num_contents += t._staged_write_len
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
 
         if not group_ids:
@@ -323,7 +334,11 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
-        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+        contents_gpu = async_tensor_h2d(
+            np.concatenate([np.asarray(c, dtype=np.int32) for c in chunks]),
+            device=self.device,
+            dtype=torch.int32,
+        )
 
         _apply_write_kernel[(len(group_ids),)](
             output_ptrs,

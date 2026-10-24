@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from array import array
+
 import pytest
 import torch
 
@@ -14,7 +16,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
+# Pickled NewRequestData carries block ids as int32 arrays; the scheduler's are lists.
+@pytest.mark.parametrize("ids", [list, lambda x: array("i", x)], ids=["list", "array"])
+def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch, ids):
     device = torch.device("cuda")
     block_tables = BlockTables(
         block_sizes=[16, 32, 8],
@@ -32,12 +36,12 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
 
     block_tables.append_block_ids(
         req_index=0,
-        new_block_ids=([1, 2], [10, 11], []),
+        new_block_ids=(ids([1, 2]), ids([10, 11]), ids([])),
         overwrite=True,
     )
     block_tables.append_block_ids(
         req_index=1,
-        new_block_ids=([3], [12], [5, 6]),
+        new_block_ids=(ids([3]), ids([12]), ids([5, 6])),
         overwrite=True,
     )
     block_tables.apply_staged_writes()
@@ -78,6 +82,7 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         assert not block_table._staged_write_indices
         assert not block_table._staged_write_starts
         assert not block_table._staged_write_contents
+        assert not block_table._staged_write_chunks
         assert not block_table._staged_write_cu_lens
 
     block_tables.append_block_ids(
@@ -105,7 +110,8 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
     assert block_tables.num_blocks.np[2, 0] == 1
 
 
-def test_block_tables_apply_staged_writes_single_group():
+@pytest.mark.parametrize("ids", [list, lambda x: array("i", x)], ids=["list", "array"])
+def test_block_tables_apply_staged_writes_single_group(ids):
     device = torch.device("cuda")
     block_tables = BlockTables(
         block_sizes=[16],
@@ -117,15 +123,20 @@ def test_block_tables_apply_staged_writes_single_group():
 
     block_tables.append_block_ids(
         req_index=0,
-        new_block_ids=([1, 2],),
+        new_block_ids=(ids([1, 2]),),
+        overwrite=True,
+    )
+    block_tables.append_block_ids(
+        req_index=1,
+        new_block_ids=([3],),
         overwrite=True,
     )
     block_tables.apply_staged_writes()
     torch.accelerator.synchronize()
 
     assert torch.equal(
-        block_tables.block_tables[0].gpu[0, :2],
-        torch.tensor([1, 2], dtype=torch.int32, device=device),
+        block_tables.block_tables[0].gpu[:2, :2],
+        torch.tensor([[1, 2], [3, 0]], dtype=torch.int32, device=device),
     )
 
 
