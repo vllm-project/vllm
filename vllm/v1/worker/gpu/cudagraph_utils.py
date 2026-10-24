@@ -253,22 +253,17 @@ class CudaGraphManager:
             desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
         )
 
-    def _init_candidates(self) -> None:
-        """Build priority-ordered candidate lists for each token count."""
-        capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        if not (self.cudagraph_mode and capture_sizes):
-            return
-
-        capture_sizes = sorted(capture_sizes)
-        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+    def _get_decode_capture_descs(
+        self, capture_sizes: list[int]
+    ) -> list[BatchExecutionDescriptor]:
+        """Build decode-only descriptors from the requested token sizes."""
         decode_mode = self.cudagraph_mode.decode_mode()
-        mixed_mode = self.cudagraph_mode.mixed_mode()
-        separate_decode_routine = self.cudagraph_mode.separate_routine()
-        max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
+        if not self.cudagraph_mode.separate_routine() or not decode_mode:
+            return []
 
-        descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
+        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
+        descs: list[BatchExecutionDescriptor] = []
 
         # When using Dynamic SD, num_speculative_tokens is the max number of
         # draft tokens. The scheduler might use a smaller number so we need
@@ -299,15 +294,12 @@ class CudaGraphManager:
         else:
             decode_query_lens = [self.decode_query_len]
 
-        capture_varlen_decode = (
-            separate_decode_routine and bool(decode_mode) and self.varlen_decode
-        )
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
             # Varlen decode graphs take any mix of 1..decode_query_len tokens per
             # request, worst case 1 token per request (or max_num_reqs)
-            if capture_varlen_decode and num_tokens <= max_decode_tokens:
+            if self.varlen_decode and num_tokens <= max_decode_tokens:
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
                     num_tokens=num_tokens,
@@ -315,10 +307,9 @@ class CudaGraphManager:
                     max_query_len=self.decode_query_len,
                     num_active_loras=num_active_loras,
                 )
-                descs_by_mode[decode_mode].append(desc)
-            # Capture uniform decode specfifc graphs if required
-            #  (i.e. separate decode routine)
-            elif separate_decode_routine and decode_mode and not self.varlen_decode:
+                descs.append(desc)
+            # Capture uniform decode graphs.
+            elif not self.varlen_decode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
@@ -339,17 +330,30 @@ class CudaGraphManager:
                     )
 
                     # avoid duplicate graphs
-                    if desc not in descs_by_mode[decode_mode]:
-                        descs_by_mode[decode_mode].append(desc)
+                    if desc not in descs:
+                        descs.append(desc)
 
                     ubatch_desc = self._maybe_ubatch_twin(desc)
-                    if ubatch_desc is not None and (
-                        ubatch_desc not in descs_by_mode[decode_mode]
-                    ):
-                        descs_by_mode[decode_mode].append(ubatch_desc)
+                    if ubatch_desc is not None and ubatch_desc not in descs:
+                        descs.append(ubatch_desc)
 
+        return descs
+
+    def _get_mixed_capture_descs(
+        self, capture_sizes: list[int]
+    ) -> list[BatchExecutionDescriptor]:
+        """Build descriptors for prefill and mixed prefill/decode batches."""
+        mixed_mode = self.cudagraph_mode.mixed_mode()
+        if not mixed_mode:
+            return []
+
+        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        descs: list[BatchExecutionDescriptor] = []
+        for num_tokens, num_active_loras in product(
+            capture_sizes, self.lora_capture_cases
+        ):
             # recoverSSM cannot capture a dummy query wider than its workspace.
-            if mixed_mode and (
+            if (
                 not self.vllm_config.cache_config.use_kda_recoverssm
                 or num_tokens <= max_decode_tokens
             ):
@@ -367,11 +371,30 @@ class CudaGraphManager:
                     num_reqs=num_reqs,
                     num_active_loras=num_active_loras,
                 )
-                descs_by_mode[mixed_mode].append(desc)
+                descs.append(desc)
 
                 ubatch_desc = self._maybe_ubatch_twin(desc)
                 if ubatch_desc is not None:
-                    descs_by_mode[mixed_mode].append(ubatch_desc)
+                    descs.append(ubatch_desc)
+
+        return descs
+
+    def _init_candidates(self) -> None:
+        """Build priority-ordered candidate lists for each token count."""
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        if not (self.cudagraph_mode and capture_sizes):
+            return
+
+        capture_sizes = sorted(capture_sizes)
+        descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
+        decode_descs = self._get_decode_capture_descs(capture_sizes)
+        if decode_descs:
+            descs_by_mode[self.cudagraph_mode.decode_mode()].extend(decode_descs)
+        mixed_descs = self._get_mixed_capture_descs(capture_sizes)
+        if mixed_descs:
+            descs_by_mode[self.cudagraph_mode.mixed_mode()].extend(mixed_descs)
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
