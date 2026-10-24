@@ -259,8 +259,6 @@ class KDARecoverSSMCommitMetadata:
 
 @dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
-    spec_token_start: int | None = None
-    non_spec_token_start: int | None = None
     flashinfer_prefill_query_start_loc: torch.Tensor | None = None
     flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None

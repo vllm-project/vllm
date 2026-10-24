@@ -123,12 +123,21 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    # int64 copy of prefill_state_indices (ATen indexing casts int32 indices on
+    # every call) and the inverted prefill_has_initial_state, built once per
+    # step instead of in every layer.
+    prefill_state_indices_i64: torch.Tensor | None = None
+    prefill_no_initial_state: torch.Tensor | None = None
     aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    # Start rows of the spec and non-spec tokens when they form two contiguous
+    # blocks in a mixed batch; the forward then slices instead of gathering.
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -335,6 +344,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
 
         uniform_spec_sequence_length = None
+        spec_token_start: int | None = None
+        non_spec_token_start: int | None = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
@@ -465,6 +476,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
+                # The tokens form two contiguous blocks iff the spec mask of
+                # the non-empty requests flips exactly once. The V2 runner puts
+                # the requests with drafts first, so this normally holds.
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum() == 1:
+                    spec_first = bool(active_spec_mask[0])
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
+
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks_cpu, : self.num_spec + 1
                 ]
@@ -513,6 +533,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        prefill_state_indices_i64: torch.Tensor | None = None
+        prefill_no_initial_state: torch.Tensor | None = None
         aiter_prefill_metadata: object | None = None
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
@@ -572,6 +594,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            prefill_no_initial_state = ~prefill_has_initial_state
+            assert prefill_state_indices is not None
+            prefill_state_indices_i64 = prefill_state_indices.to(torch.int64)
         else:
             has_initial_state = None
 
@@ -686,6 +711,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            prefill_state_indices_i64=prefill_state_indices_i64,
+            prefill_no_initial_state=prefill_no_initial_state,
             aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
@@ -700,6 +727,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
         )
         return attn_metadata
 
@@ -785,6 +814,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
+            prefill_state_indices_i64=(
+                None if prefill_indices is None else prefill_indices.to(torch.int64)
+            ),
             checkpoint=checkpoint,
         )
 
