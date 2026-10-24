@@ -23,7 +23,7 @@ from tests.utils import (
     init_test_distributed_environment,
 )
 
-from ._ffn import _dequant, _rel, _vllm_seam
+from ._ffn import POLL_TIMEOUT_US, _dequant, _rel, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 PREFIX = "language_model.model.layers.7.mlp"
@@ -199,7 +199,7 @@ def _check(rank: int, tp: int, device) -> None:
     )
     group = get_tp_group().cpu_group
     for S in ROWS:
-        rt = FlashFfnRuntime(S, rank, tp, group, inter, 1, 20_000_000, False)
+        rt = FlashFfnRuntime(S, rank, tp, group, inter, 1, POLL_TIMEOUT_US, False)
         op = FlashFfnOp(rt, weights, 0)
         parts = [
             torch.randn(S, HIDDEN, generator=g, device=device).bfloat16()

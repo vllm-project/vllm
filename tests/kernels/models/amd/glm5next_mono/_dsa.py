@@ -13,6 +13,7 @@ completing and padding rows."""
 import torch
 
 from ._ffn import (
+    POLL_TIMEOUT_US,
     REPLAYS,
     _Layer,
     _moe_reference,
@@ -164,7 +165,15 @@ class _Caches:
     """Random caches for S requests of up to MAX_LEN tokens, the block table, and
     the step's row table."""
 
-    def __init__(self, S: int, device, seed: int, kv_fp8: bool = False) -> None:
+    def __init__(
+        self,
+        S: int,
+        device,
+        seed: int,
+        kv_fp8: bool = False,
+        max_len: int = MAX_LEN,
+        lens: tuple[int, ...] = LENS,
+    ) -> None:
         from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             INDEX_DIM,
             KV_LORA,
@@ -174,7 +183,7 @@ class _Caches:
         )
 
         g = torch.Generator(device=device).manual_seed(seed)
-        per = MAX_LEN // BLOCK
+        per = max_len // BLOCK
         nb = 1 + S * per
         ipb = BLOCK // 4
         self.ipb = ipb
@@ -203,7 +212,7 @@ class _Caches:
         ).bfloat16()
         perm = torch.randperm(nb - 1, generator=g, device=device) + 1
         self.bt = perm[: S * per].view(S, per).int().contiguous()
-        lens = list(LENS[: S - 1]) + [0]
+        lens = list(lens[: S - 1]) + [0]
         self.lens = lens
         rows = torch.full((S, ROW_WORDS), -1, dtype=torch.int32, device=device)
         for r, n in enumerate(lens):
@@ -301,7 +310,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
             group,
             2048 // tp,
             1,
-            20_000_000,
+            POLL_TIMEOUT_US,
             False,
             dsa=True,
             max_pools=max_pools,
@@ -550,6 +559,153 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
 
 
 # q_a | kv_a, q_b, o_proj: FP8 block-128, or bf16 (vLLM dequantizes some on load)
+def _check_fault(rank: int, tp: int, device) -> None:
+    """A stalled rank in a whole sparse-attention launch at the serving settings
+    (early-out polls, rows past the indexer's 2048 tokens): the waiting ranks
+    expire, report it, and finish the launch without a memory fault."""
+    import os
+    import tempfile
+
+    import torch.distributed as dist
+
+    # read at kernel build time; a private cache keeps the stalling build apart
+    os.environ["VLLM_MONO_FAULT_INJECT"] = "rank=1,step=0,us=2000000"
+    os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_fault_")
+
+    from vllm.distributed import get_tp_group
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+        FlashFfnOp,
+        FlashFfnRuntime,
+    )
+
+    from ._ffn import FAULT_POLL_TIMEOUT_US
+
+    S = 8
+    lay, dsa = _Layer(rank, tp, device), _Dsa(rank, tp, device, FORMATS["mixed"])
+    group = get_tp_group().cpu_group
+    rt = FlashFfnRuntime(
+        S,
+        rank,
+        tp,
+        group,
+        2048 // tp,
+        1,
+        FAULT_POLL_TIMEOUT_US,
+        True,
+        dsa=True,
+        max_pools=MAX_LEN // 4,
+        dsa_fp8=FORMATS["mixed"],
+    )
+    op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
+    g = lay.g
+    x = torch.randn(S, HIDDEN, generator=g, device=device).bfloat16()
+    res = torch.randn(S, HC_MULT, HIDDEN, generator=g, device=device).bfloat16()
+    post = torch.rand(S, HC_MULT, 1, generator=g, device=device) * 2
+    comb = torch.softmax(
+        torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
+    )
+    cache = _Caches(S, device, seed=10 + S)
+    dist.barrier(group)
+    op.launch(
+        x, res, post, comb, caches=cache.caches(), rows=cache.rows, block_table=cache.bt
+    )
+    torch.accelerator.synchronize()
+    dist.barrier(group)
+    report = [None] * tp
+    dist.all_gather_object(report, rt.words.tolist(), group=group)
+    if rank == 0:
+        waiting = [r for r in range(tp) if r != 1]
+        assert rt.flags is not None
+        flags = rt.flags.tolist()
+        assert all(any(report[r]) for r in waiting), report
+        assert all(flags[r] for r in waiting), flags
+    rt.close()
+
+
+TIE_LENS = (62593, 65536, 40000, 2050, 64, 16001, 62592)
+
+
+def _check_ties(rank: int, tp: int, device, live: float) -> None:
+    """Rows up to the model length on an index cache whose pools mostly score
+    exactly 0 (``live``: the share of pools with nonzero keys), so the top-512
+    threshold falls in a bin of thousands of tied pools: every row still
+    attends 2048 distinct tokens of its own, and the launch completes."""
+    import torch.distributed as dist
+
+    from vllm.distributed import get_tp_group
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        HC_MULT,
+        HIDDEN,
+        INDEX_DIM,
+        TOPK_TOKENS,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+        FlashFfnOp,
+        FlashFfnRuntime,
+    )
+
+    S, max_len = 8, 65536
+    lay, dsa = _Layer(rank, tp, device), _Dsa(rank, tp, device, FORMATS["mixed"])
+    group = get_tp_group().cpu_group
+    rt = FlashFfnRuntime(
+        S,
+        rank,
+        tp,
+        group,
+        2048 // tp,
+        1,
+        POLL_TIMEOUT_US,
+        True,
+        dsa=True,
+        max_pools=max_len // 4,
+        dsa_fp8=FORMATS["mixed"],
+    )
+    op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
+    g = lay.g
+    x = torch.randn(S, HIDDEN, generator=g, device=device).bfloat16()
+    res = torch.randn(S, HC_MULT, HIDDEN, generator=g, device=device).bfloat16()
+    post = torch.rand(S, HC_MULT, 1, generator=g, device=device) * 2
+    comb = torch.softmax(
+        torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
+    )
+    cache = _Caches(S, device, seed=10 + S, max_len=max_len, lens=TIE_LENS)
+    # zero the FP8 keys of all but a ``live`` share of the pools (alike on every
+    # rank: the index is replicated)
+    nb, ipb = cache.idx.shape[:2]
+    keep = torch.rand(nb, ipb, generator=torch.Generator().manual_seed(7)) < live
+    vals = cache.idx.view(nb, -1)[:, _icache_perm(ipb, device)].view(nb, ipb, INDEX_DIM)
+    vals[~keep.to(device)] = 0
+    cache.idx.view(nb, -1)[:, _icache_perm(ipb, device)] = vals.view(nb, -1)
+    dist.barrier(group)
+    outs = [
+        t.clone()
+        for t in op.launch(
+            x,
+            res,
+            post,
+            comb,
+            caches=cache.caches(),
+            rows=cache.rows,
+            block_table=cache.bt,
+        )
+    ]
+    torch.accelerator.synchronize()
+    assert not rt.words.any(), f"expired waits {rt.words.tolist()}"
+    assert all(torch.isfinite(o.float()).all() for o in outs)
+    sel = rt.scratch[rt.sc["tok_sel"] :].view(torch.int32)[: S * TOPK_TOKENS]
+    sel = sel.view(S, TOPK_TOKENS).cpu()
+    for r, n in enumerate(cache.lens):
+        if n <= TOPK_TOKENS:
+            continue
+        t = sel[r]
+        assert int(t.min()) >= 0 and int(t.max()) < n, (r, n, t.min(), t.max())
+        assert t.unique().numel() == TOPK_TOKENS, (r, n, t.unique().numel())
+        tail = n % 4
+        assert set(range(n - tail, n)) <= set(t.tolist()), (r, n, "tail")
+    rt.close()
+
+
 FORMATS = {
     "fp8": (True, True, True),
     "bf16": (False, False, False),

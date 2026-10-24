@@ -72,6 +72,10 @@ def bpermute_i32(byte_offset, value):
     return fx.Int32(rocdl.ds_bpermute(T.i32, fx.Int32(byte_offset), fx.Int32(value)))
 
 
+# ticks of ``mem_realtime`` a microsecond (its constant 100 MHz clock)
+REALTIME_PER_US = 100
+
+
 def mem_realtime():
     """Read the device-wide 64-bit realtime counter."""
     return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))

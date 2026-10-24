@@ -121,6 +121,7 @@ from vllm.models.glm5next.amd.specialized_decode.mono.layout import (
     atom_mxfp4_scale_index,
 )
 from vllm.models.glm5next.amd.specialized_decode.mono.ops import (
+    REALTIME_PER_US,
     bpermute_i32,
     div_rn,
     fp8_pack4,
@@ -157,7 +158,7 @@ def build_flash_ffn_kernel(
     npes: int = 4,
     launches_per_step: int = 1,
     inter: int = 512,
-    poll_limit: int | None = None,
+    poll_timeout_us: int | None = None,
     poll_early_out: bool = False,
     kda: bool = False,
     conv_dim_first: bool = True,
@@ -177,7 +178,7 @@ def build_flash_ffn_kernel(
     ``k_scale`` (written as vLLM's ``concat_and_cache_mla`` does, read back
     dequantized to bf16 for the attention).
 
-    ``poll_limit`` bounds the re-polls of every mailbox wait. An expired wait
+    ``poll_timeout_us`` bounds every mailbox wait in time. An expired wait
     stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
     into this rank's flag on rank 0 (``poll_xrank_addr``), then continues, so a
     stalled peer finishes the launch with wrong values instead of hanging. With
@@ -186,7 +187,7 @@ def build_flash_ffn_kernel(
     tensors, so it may be fused into them or stored apart.
     """
     assert 2 <= S <= 16 and 1 <= launches_per_step <= LAYER_SLOTS
-    assert poll_limit is None or poll_limit > 0
+    assert poll_timeout_us is None or poll_timeout_us > 0
     assert inter % 128 == 0
     assert not kda or S <= 8
     assert not (kda and dsa)
@@ -199,6 +200,7 @@ def build_flash_ffn_kernel(
     QB_ROWS = MH * NOPE_DIM
     QKV8, QB8, O8 = dsa_fp8
     whole = kda or dsa
+    POLL_TICKS = 0 if poll_timeout_us is None else poll_timeout_us * REALTIME_PER_US
     FAULT = abi.fault_spec()
     F_RANK, F_STEP, F_US = (
         (FAULT.rank, FAULT.step, FAULT.us) if FAULT is not None else (0, 0, 0)
@@ -341,7 +343,7 @@ def build_flash_ffn_kernel(
         if const_expr(FAULT is not None):
             if (rank == F_RANK) & (step_value == F_STEP) & (layer == 0):
                 t_fault = mem_realtime()
-                while mem_realtime() - t_fault < fx.Int64(F_US * 100):
+                while mem_realtime() - t_fault < fx.Int64(F_US * REALTIME_PER_US):
                     spin_pause()
 
         # ------------------------------------------------------------ helpers
@@ -487,20 +489,26 @@ def build_flash_ffn_kernel(
                 return bad
 
             v = load_all()
-            if const_expr(poll_limit is None):
+            if const_expr(poll_timeout_us is None):
                 while pending(v):
                     spin_pause()
                     v = load_all()
             else:
-                retries = fx.Int32(0)
+                # the clock starts at the first re-poll, so a wait that is
+                # already satisfied reads no timer
+                timeout = fx.Int64(POLL_TICKS)
+                t0 = fx.Int64(0)
+                waited = fx.Int64(0)
                 if const_expr(poll_early_out):
                     abort_mark = step_value + 1
                     r_abort = _rsrc(mb("poll_abort"))
                     ab = fx.Int32(0)
-                    while pending(v) & (retries < poll_limit) & (ab != abort_mark):
+                    while pending(v) & (waited < timeout) & (ab != abort_mark):
                         spin_pause()
                         v = load_all()
-                        retries = retries + 1
+                        now = mem_realtime()
+                        t0 = (t0 == fx.Int64(0)).select(now, t0)
+                        waited = now - t0
                         ab = fx.Int32(
                             bo.buffer_load(
                                 r_abort,
@@ -511,10 +519,12 @@ def build_flash_ffn_kernel(
                             )
                         )
                 else:
-                    while pending(v) & (retries < poll_limit):
+                    while pending(v) & (waited < timeout):
                         spin_pause()
                         v = load_all()
-                        retries = retries + 1
+                        now = mem_realtime()
+                        t0 = (t0 == fx.Int64(0)).select(now, t0)
+                        waited = now - t0
                 if pending(v):
                     poll_expired()
                     if const_expr(poll_early_out):

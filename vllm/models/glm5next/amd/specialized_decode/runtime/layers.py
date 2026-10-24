@@ -318,10 +318,10 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
             ctx.cpu_group,
             GLOBAL_INTER // ctx.tp_size,
             launches,
-            ctx.state["poll_limit"],
+            ctx.state["poll_timeout_us"],
             # after one expired wait the step's later waits return at once, so a
-            # stalled peer costs one poll limit a launch kind, well inside vLLM's
-            # execute timeout, and the health check stops the engine
+            # stalled peer costs one timeout a launch kind, inside vLLM's execute
+            # timeout, and the health check stops the engine
             poll_early_out=True,
             flag_addr=None if first is None else first.rt.flag_addr,
             kda=kind == "kda",

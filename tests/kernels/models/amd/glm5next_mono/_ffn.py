@@ -20,7 +20,9 @@ from vllm.platforms import current_platform
 
 REPLAYS = 300
 ROWS = (2, 4, 8, 16)
-FAULT_POLL_LIMIT = 1_000_000
+# serving waits time out after a minute; the stalled-rank checks after 0.5 s
+POLL_TIMEOUT_US = 60_000_000
+FAULT_POLL_TIMEOUT_US = 500_000
 
 
 def _on_cdna4() -> bool:
@@ -204,7 +206,7 @@ def _vllm_seam(lay, x_attn, res, post, comb):
         return r, p, c, _apply_mhc_norm(li, lay.gamma, EPS)
 
 
-def _runtime(width, rank, tp, poll_limit, launches=1):
+def _runtime(width, rank, tp, poll_timeout_us, launches=1, early_out=False):
     from vllm.distributed import get_tp_group
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnRuntime
 
@@ -215,8 +217,8 @@ def _runtime(width, rank, tp, poll_limit, launches=1):
         get_tp_group().cpu_group,
         2048 // tp,
         launches,
-        poll_limit,
-        poll_early_out=False,
+        poll_timeout_us,
+        poll_early_out=early_out,
     )
 
 
@@ -235,7 +237,7 @@ def _check(rank: int, tp: int, device, separate: bool) -> None:
     group = get_tp_group().cpu_group
     # 16 TP2 rows overflow the down stage's LDS
     for S in ROWS if tp > 2 else ROWS[:-1]:
-        rt = _runtime(S, rank, tp, 20_000_000)
+        rt = _runtime(S, rank, tp, POLL_TIMEOUT_US)
         op = FlashFfnOp(rt, lay.weights(separate), 0)
         g = lay.g
         parts = [
@@ -320,7 +322,7 @@ def _check(rank: int, tp: int, device, separate: bool) -> None:
         rt.close()
 
 
-def _check_fault(rank: int, tp: int, device) -> None:
+def _check_fault(rank: int, tp: int, device, early_out: bool = False) -> None:
     import tempfile
 
     import torch.distributed as dist
@@ -334,7 +336,7 @@ def _check_fault(rank: int, tp: int, device) -> None:
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
 
     lay = _Layer(rank, tp, device)
-    rt = _runtime(2, rank, tp, FAULT_POLL_LIMIT)
+    rt = _runtime(2, rank, tp, FAULT_POLL_TIMEOUT_US, early_out=early_out)
     op = FlashFfnOp(rt, lay.weights(), 0)
     x = torch.randn(2, HIDDEN, device=device).bfloat16()
     res = torch.randn(2, HC_MULT, HIDDEN, device=device).bfloat16()
@@ -352,6 +354,48 @@ def _check_fault(rank: int, tp: int, device) -> None:
         flags = rt.flags.tolist()
         assert all(any(report[r]) for r in waiting), report
         assert all(flags[r] for r in waiting), flags
+    rt.close()
+
+
+def _check_slow_rank(rank: int, tp: int, device) -> None:
+    """A rank 10 s late into a launch (as a host stall on one rank makes it) at
+    the serving poll settings: the others wait it out, nothing expires, and the
+    launch computes what an on-time one does."""
+    import tempfile
+
+    import torch.distributed as dist
+
+    # read at kernel build time; a private cache keeps the stalling build apart
+    os.environ["VLLM_MONO_FAULT_INJECT"] = "rank=1,step=0,us=10000000"
+    os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_slow_")
+
+    from vllm.distributed import get_tp_group
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
+    from vllm.models.glm5next.amd.specialized_decode.runtime.spec import DecodeConfig
+
+    lay = _Layer(rank, tp, device)
+    rt = _runtime(2, rank, tp, DecodeConfig(tp_size=tp).poll_timeout_us, early_out=True)
+    op = FlashFfnOp(rt, lay.weights(), 0)
+    x = torch.randn(2, HIDDEN, device=device).bfloat16()
+    res = torch.randn(2, HC_MULT, HIDDEN, device=device).bfloat16()
+    post = torch.ones(2, HC_MULT, 1, device=device)
+    comb = torch.full((2, HC_MULT, HC_MULT), 1.0 / HC_MULT, device=device)
+    group = get_tp_group().cpu_group
+    dist.barrier(group)
+    late = [t.clone() for t in op.launch(x, res, post, comb)]
+    torch.accelerator.synchronize()
+    dist.barrier(group)
+    rt.advance_step()
+    on_time = [t.clone() for t in op.launch(x, res, post, comb)]
+    torch.accelerator.synchronize()
+    dist.barrier(group)
+    report = [None] * tp
+    dist.all_gather_object(report, rt.words.tolist(), group=group)
+    if rank == 0:
+        assert not any(any(w) for w in report), report
+        assert not any(rt.flags.tolist()), rt.flags.tolist()
+    assert all(torch.equal(a, b) for a, b in zip(late, on_time))
     rt.close()
 
 

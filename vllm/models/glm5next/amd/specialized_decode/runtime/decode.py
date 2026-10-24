@@ -112,7 +112,7 @@ class SpecializedDecode:
             if torch.cuda.is_available()
             else torch.device("cpu"),
         )
-        self.ctx.state["poll_limit"] = cfg.poll_limit
+        self.ctx.state["poll_timeout_us"] = cfg.poll_timeout_us
         self.packed = layers.pack(backbone, self.ctx)
         self.metadata_names = layers.metadata_names(self.layers)
         self.kernels = {

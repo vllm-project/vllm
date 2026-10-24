@@ -10,6 +10,7 @@ TP sum of the o_proj partials and the MoE."""
 import torch
 
 from ._ffn import (
+    POLL_TIMEOUT_US,
     REPLAYS,
     _Layer,
     _moe_reference,
@@ -188,7 +189,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
             group,
             2048 // tp,
             1,
-            20_000_000,
+            POLL_TIMEOUT_US,
             False,
             kda=True,
             conv_dim_first=dim_first,
