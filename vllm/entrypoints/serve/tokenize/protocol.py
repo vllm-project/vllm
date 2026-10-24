@@ -17,6 +17,7 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    normalize_reasoning_content,
 )
 
 
@@ -115,6 +116,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
         default=None,
         description="A list of tools the model may call.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_reasoning_before(cls, data: Any) -> Any:
+        return normalize_reasoning_content(data)
 
     @model_validator(mode="before")
     @classmethod
