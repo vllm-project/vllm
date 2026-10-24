@@ -312,6 +312,12 @@ class SchedulerOutput:
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)
 
+    # True when the lone-request exemption let a chunk exceed the configured
+    # long_prefill_token_threshold. The engine must not schedule the next
+    # batch behind this one, so a newly arrived request is seen before more
+    # uncapped work is committed.
+    has_uncapped_lone_prefill: bool = False
+
     # Whether no scheduled request can use the drafts proposed after this step
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
