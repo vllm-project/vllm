@@ -95,7 +95,14 @@ class RequestState:
         all_token_ids: list[int],
         num_computed_tokens: int,
         max_tokens: int,
+        staging_start: int = 0,
     ) -> None:
+        """Add a new request.
+
+        ``staging_start > 0`` stages only ``all_token_ids[staging_start:]``;
+        positions below it keep stale data and must not be read (see
+        ``suffix_staging.py``).
+        """
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
@@ -109,7 +116,9 @@ class RequestState:
         )
         self.prefill_len.np[req_idx] = prefill_len
         self.total_len.stage_write_elem(req_idx, prefill_len)
-        self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
+        if staging_start > 0:
+            all_token_ids = all_token_ids[staging_start:]
+        self.all_token_ids.stage_write(req_idx, staging_start, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)

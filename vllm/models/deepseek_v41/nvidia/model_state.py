@@ -202,7 +202,7 @@ class DeepseekV41ModelState(DefaultModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         max_local_reqs = self.max_num_reqs * (2 if self.pcp_size > 1 else 1)
-        depth = model.token_lookback_depth
+        depth = self.token_lookback_depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
             # Persistent so a captured graph can read it on replay.
