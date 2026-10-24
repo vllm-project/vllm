@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from typing_extensions import override
 
@@ -63,6 +63,7 @@ class CPUOffloadingManager(OffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        self_describing_kv_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
@@ -74,6 +75,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
+        self._self_describing_kv_events = self_describing_kv_events
         policy_cls = CachePolicyFactory.get_cache_policy_cls(
             cache_policy, cache_policy_module_path
         )
@@ -374,7 +376,6 @@ class CPUOffloadingManager(OffloadingManager):
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
-        removed_keys: list[OffloadKey] = []
 
         if success:
             for key in keys:
@@ -392,17 +393,6 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
                     self._free_chunk(chunk)
-                    removed_keys.append(key)
-
-        if removed_keys and self.events is not None:
-            self.events.append(
-                OffloadingEvent(
-                    keys=removed_keys,
-                    medium=self.medium,
-                    removed=True,
-                    metadata_only=True,
-                )
-            )
 
         if stored_keys and self.events is not None:
             self.events.append(
@@ -410,6 +400,9 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    req_context=(
+                        req_context if self._self_describing_kv_events else None
+                    ),
                 )
             )
 
@@ -456,22 +449,17 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
+        if self.events is not None:
+            # Stores queued before the reset no longer describe residency.
+            # Keep removals so consumers can invalidate prior announcements.
+            self.events = [event for event in self.events if event.removed]
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is None:
             return
-        # Detach the batch up front so a partially consumed drain cannot
-        # replay cleanup against a key a retry has since re-allocated.
         events, self.events = self.events, []
-        for event in events:
-            if event.metadata_only:
-                # A retry may already own this key before cleanup is drained.
-                keys = [key for key in event.keys if self._policy.get(key) is None]
-                if not keys:
-                    continue
-                event = replace(event, keys=keys)
-            yield event
+        yield from events
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:

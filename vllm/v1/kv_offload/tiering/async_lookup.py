@@ -64,7 +64,7 @@ class LookupState:
     # None while pending/in flight; True if the key exists; False if absent or
     # explicitly marked missing after a failed load.
     result: bool | None = None
-    request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
+    request_context_ids: set[int] = field(default_factory=set)
 
 
 class AsyncLookupManager(ABC):
@@ -93,8 +93,8 @@ class AsyncLookupManager(ABC):
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
-        # req_id → keys looked up by that request (reverse index for cleanup).
-        self._req_keys: dict[str, set[OffloadKey]] = {}
+        # ReqContext identity → keys looked up by that request incarnation.
+        self._req_keys: dict[int, set[OffloadKey]] = {}
         # Results from an older state must not be applied after cleanup removes
         # and recreates a key.
         self._next_generation = 0
@@ -153,15 +153,15 @@ class AsyncLookupManager(ABC):
         if self._need_to_drain:
             self.drain_results()
             self._need_to_drain = False
-        req_id = req_context.req_id
+        context_id = id(req_context)
         state = self._lookup_state.get(key)
         if state is None:
             state = LookupState(generation=self._next_generation)
             self._next_generation += 1
             self._lookup_state[key] = state
             self._lookup_batch.append((key, req_context, state.generation))
-        state.request_ids.add(req_id)
-        self._req_keys.setdefault(req_id, set()).add(key)
+        state.request_context_ids.add(context_id)
+        self._req_keys.setdefault(context_id, set()).add(key)
         return state.result
 
     def flush(self) -> None:
@@ -202,7 +202,7 @@ class AsyncLookupManager(ABC):
                 state = self._lookup_state.get(key)
                 if state is None or state.generation != generation:
                     continue
-                if not state.request_ids:
+                if not state.request_context_ids:
                     del self._lookup_state[key]
                     continue
                 assert state.phase is LookupPhase.IN_FLIGHT
@@ -229,16 +229,20 @@ class AsyncLookupManager(ABC):
             if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
 
-    def cleanup(self, req_id: str) -> None:
+    def cleanup(self, req_context: ReqContext) -> None:
         """Release request references, retaining in-flight lookups.
 
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
-        for key in self._req_keys.pop(req_id, ()):
+        context_id = id(req_context)
+        for key in self._req_keys.pop(context_id, ()):
             state = self._lookup_state[key]
-            state.request_ids.discard(req_id)
-            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+            state.request_context_ids.discard(context_id)
+            if (
+                not state.request_context_ids
+                and state.phase is not LookupPhase.IN_FLIGHT
+            ):
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:
