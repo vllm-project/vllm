@@ -1938,6 +1938,17 @@ class OffloadingConnectorScheduler:
                         for b in range(blocks_per_chunk)
                     ):
                         continue
+                    # A reachable null block would leave part of the chunk unwritten.
+                    chunk_start = abs_chunk_idx * blocks_per_chunk
+                    if any(
+                        group_state.block_ids[chunk_start + b] == 0
+                        and (
+                            block_mask is None
+                            or block_mask[key_idx * blocks_per_chunk + b]
+                        )
+                        for b in range(blocks_per_chunk)
+                    ):
+                        continue
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:

@@ -70,6 +70,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -2250,6 +2251,58 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         # Group 1 (sliding window, window=2): only the last 2 blocks
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 3), (1, 3)),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_sliding_window_chunk_with_null_block_is_not_stored(
+    request_runner, async_scheduling: bool
+):
+    block_size = 4
+    spec_kwargs: dict[str, Any] = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(["layer0"], FullAttentionSpec(**spec_kwargs)),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(**spec_kwargs, sliding_window=2 * block_size),
+        ),
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=2,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+    stored_keys: set[OffloadKey] = set()
+
+    def store(keys, req_context):
+        stored_keys.update(keys)
+        return generate_store_output(keys)
+
+    runner.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT if key in stored_keys else LookupResult.MISS
+    )
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=[0] * (3 * block_size))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    # B's GPU hit leaves sliding-window block 0 null, inside chunk 0.
+    runner.manager.prepare_store.side_effect = store
+    runner.new_request(token_ids=[0] * (3 * block_size) + [1])
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0), (0, 1)))
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * (2 * block_size) + [2] * (block_size + 1))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=((0, 0), (0, 1), (1, 0), (1, 1)),
     )
 
 
