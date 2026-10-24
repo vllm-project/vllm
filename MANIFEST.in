@@ -5,6 +5,8 @@ include requirements/rocm.txt
 include requirements/cpu.txt
 include CMakeLists.txt
 include tools/build_rust.py
+include vllm/v1/attention/ops/fp8e4nv_helper.cu
+include vllm/v1/attention/ops/fp8e4nv_helper_sm75.bc
 
 recursive-include cmake *
 recursive-include csrc *
