@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pybase64 as base64
 import pytest
 
 import vllm.envs as envs
@@ -1013,6 +1014,18 @@ async def test_transcription_wrapper_rejects_oversized_data_url_before_decode(
     assert "Maximum file size exceeded" in response.error.message
     decode.assert_not_called()
     handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_zero_limit_disables_data_url_check(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=0 disables the data-URL size check."""
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 0)
+    payload = b"\x00" * 1024
+    data_url = "data:audio/wav;base64," + base64.b64encode(payload).decode("utf-8")
+
+    assert await download_bytes_from_url(data_url) == payload
 
 
 @pytest.mark.asyncio

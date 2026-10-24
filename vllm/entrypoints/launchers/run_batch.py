@@ -78,8 +78,15 @@ from .api_server.entry import init_app_state
 logger = init_logger(__name__)
 
 
-def _get_audio_download_limit_bytes() -> int:
-    return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
+def _get_audio_download_limit_bytes() -> int | None:
+    max_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+    if max_mb <= 0:
+        # A limit of 0 disables the filesize check, per
+        # docs/usage/security.md. None means "no limit"; the global
+        # media download cap in vllm.connections still applies to
+        # remote fetches.
+        return None
+    return int(max_mb * MiB_bytes)
 
 
 def _raise_audio_filesize_limit(size_bytes: int) -> NoReturn:
@@ -537,7 +544,8 @@ async def download_bytes_from_url(
             header, data = url.split(",", 1)
             if "base64" in header:
                 decoded_size_bytes = len(data.rstrip("=")) * 3 // 4
-                if decoded_size_bytes > _get_audio_download_limit_bytes():
+                download_limit = _get_audio_download_limit_bytes()
+                if download_limit is not None and (decoded_size_bytes > download_limit):
                     _raise_audio_filesize_limit(decoded_size_bytes)
                 return base64.b64decode(data)
             else:
