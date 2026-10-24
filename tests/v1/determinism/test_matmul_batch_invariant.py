@@ -179,3 +179,84 @@ def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
         assert torch.equal(out, fn(xs)), f"compiled {op} bypassed the BI kernel (M={m})"
         row = out[..., needle, :] if row is None else row
         assert torch.equal(out[..., needle, :], row)
+
+
+def _persistent_operands(m, k, n, dtype, seed=0):
+    g = torch.Generator(device=DEVICE_TYPE).manual_seed(seed)
+    x = torch.randn(m, k, device=DEVICE_TYPE, generator=g).to(dtype)
+    w = (torch.randn(n, k, device=DEVICE_TYPE, generator=g) * 0.02).to(dtype)
+    return x, w.t()
+
+
+def test_matmul_persistent_split_k_plan_depends_only_on_k_and_n():
+    assert bi._split_k_plan(4096, 64) == (8, 512)
+    assert bi._split_k_plan(65536, 64) == (16, 4096)
+    assert bi._split_k_plan(1024, 64) == (2, 512)
+    assert bi._split_k_plan(1023, 64)[0] == 1
+    assert bi._split_k_plan(4096, 65)[0] == 1
+    assert bi._split_k_plan(4096, 4096)[0] == 1
+    assert bi._block_size_k(torch.float32) == 32
+    assert bi._block_size_k(torch.bfloat16) == bi._block_size_k(torch.float16) == 64
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    ("m", "k", "n"),
+    [
+        (1, 4096, 64),
+        (64, 4096, 64),
+        (4096, 4096, 64),
+        (17, 4104, 64),
+        (33, 4096, 63),
+        (3, 1000, 129),
+        (5, 4096, 129280),
+        (16, 1, 1),
+        (0, 4096, 64),
+        (7, 0, 9),
+    ],
+)
+def test_matmul_persistent_matches_fp64_reference(m, k, n, dtype):
+    x, b = _persistent_operands(m, k, n, dtype)
+    g = torch.Generator(device=DEVICE_TYPE).manual_seed(1)
+    bias = torch.randn(n, device=DEVICE_TYPE, generator=g).to(dtype)
+    ref = (x.double() @ b.double()).float()
+    tol = {"rtol": 2e-2, "atol": 2e-2}
+    torch.testing.assert_close(bi.matmul_persistent(x, b).float(), ref, **tol)
+    torch.testing.assert_close(
+        bi.matmul_persistent(x, b, bias).float(), ref + bias.float(), **tol
+    )
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    ("m", "k", "n"), [(1, 4096, 64), (1024, 4096, 64), (7, 512, 129)]
+)
+def test_matmul_persistent_strided_bias(m, k, n):
+    x, b = _persistent_operands(m, k, n, torch.bfloat16)
+    bias = torch.randn(2 * n, device=DEVICE_TYPE, dtype=torch.bfloat16)[::2]
+    assert bias.stride(0) == 2
+    actual = bi.matmul_persistent(x, b, bias)
+    expected = bi.matmul_persistent(x, b, bias.contiguous())
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    ("k", "n"), [(4096, 64), (4096, 1024), (4104, 64), (512, 4096)]
+)
+@pytest.mark.parametrize("m", [1, 2, 7, 16, 17, 33, 64, 65, 129, 1000])
+def test_matmul_persistent_batch_invariant(m, k, n, dtype):
+    x, b = _persistent_operands(m, k, n, dtype)
+    bias = torch.randn(n, device=DEVICE_TYPE).to(dtype)
+    y = bi.matmul_persistent(x, b, bias)
+    per_row = torch.cat([bi.matmul_persistent(x[i : i + 1], b, bias) for i in range(m)])
+    assert torch.equal(y, per_row), f"batch dependence at m={m}"
+    perm = torch.randperm(m, device=DEVICE_TYPE)
+    assert torch.equal(bi.matmul_persistent(x[perm], b, bias), y[perm]), (
+        f"position dependence at m={m}"
+    )
+    assert torch.equal(y, bi.matmul_persistent(x, b, bias)), (
+        f"nondeterministic at m={m}"
+    )
