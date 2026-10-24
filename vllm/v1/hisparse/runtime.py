@@ -1143,13 +1143,13 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[state rows, resident groups, pages]``: the GPU block of
+    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
         return
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
-    num_groups = residency.shape[1]
+    num_groups = residency.shape[0]
     rows: list[int] = []
     pages: list[int] = []
     block_ids: list[list[int]] = [[] for _ in range(num_groups)]
@@ -1170,7 +1170,7 @@ def update_hisparse_residency(
         host_values, device=request_state_indices.device, dtype=torch.int32
     )
     state_rows = request_state_indices[values[:, 0]]
-    residency[state_rows, :, values[:, 1]] = values[:, 2:]
+    residency[:, state_rows, values[:, 1]] = values[:, 2:].T
 
 
 class HiSparseCacheHandle:
@@ -1195,7 +1195,6 @@ class HiSparseCacheHandle:
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
-        self._batch_block_table: torch.Tensor | None = None
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
         assert self.runtime.is_group_leader
@@ -1204,7 +1203,6 @@ class HiSparseCacheHandle:
 
     def _prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self.dummy_batch = attn_metadata is None
-        self._batch_block_table = None
         self.runtime.begin_forward()
         self.num_actual_tokens = (
             attn_metadata.num_actual_tokens if attn_metadata is not None else 0
@@ -1219,17 +1217,6 @@ class HiSparseCacheHandle:
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
-
-    def batch_block_table(self) -> torch.Tensor:
-        """Resident rows by this step's batch row, for the prefill paths."""
-        if self._batch_block_table is None:
-            assert self.block_table is not None
-            indices = self.runtime.request_state_indices
-            assert indices is not None
-            self._batch_block_table = self.block_table.index_select(
-                0, indices.clamp(min=0)
-            )
-        return self._batch_block_table
 
     def write_target(
         self, num_input_rows: int, num_slot_rows: int
