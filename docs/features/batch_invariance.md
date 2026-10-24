@@ -159,8 +159,8 @@ When batch invariance is enabled, vLLM:
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
-!!! warning
-    Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
+!!! note
+    The custom all-reduce kernel requires inputs whose size is a multiple of 16 bytes. In batch-invariant mode, smaller or unaligned inputs (for example an fp32 `[num_tokens, 2]` tensor for odd token counts) are padded so that they always use the custom kernel instead of switching between NCCL and custom all-reduce depending on the batch size.
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
