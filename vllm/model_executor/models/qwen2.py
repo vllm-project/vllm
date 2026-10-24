@@ -49,7 +49,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -204,6 +204,30 @@ class Qwen2Attention(nn.Module):
             prefix=f"{prefix}.attn",
             **attention_kwargs,
         )
+        self.int4_kv_key_bias = (
+            attn_type == AttentionType.DECODER
+            and getattr(self.attn, "kv_cache_dtype", None) == "int4_per_token_head"
+            and self.qkv_proj.bias is not None
+            and type(self.rotary_emb) is RotaryEmbedding
+            and self.rotary_emb.rotary_dim == self.head_dim
+            and not self.qk_norm
+            and not dual_chunk_attention_config
+        )
+        if self.int4_kv_key_bias:
+            self.attn.get_int4_kv_key_bias = self._get_int4_kv_key_bias
+
+    def _k_bias(self) -> torch.Tensor:
+        return self.qkv_proj.bias[self.q_size : self.q_size + self.kv_size]
+
+    def _get_int4_kv_key_bias(self):
+        from vllm.v1.attention.ops.int4_per_token_head import Int4KeyBias
+
+        return Int4KeyBias(
+            bias=self._k_bias().view(self.num_kv_heads, self.head_dim),
+            cos_sin_cache=self.rotary_emb.cos_sin_cache,
+            rotary_dim=self.rotary_emb.rotary_dim,
+            is_neox_style=self.rotary_emb.is_neox_style,
+        )
 
     def forward(
         self,
@@ -229,6 +253,8 @@ class Qwen2Attention(nn.Module):
             q = q.view(total_tokens, self.q_size)
             k = k.view(total_tokens, self.kv_size)
 
+        if self.int4_kv_key_bias:
+            k = k - self._k_bias()
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
