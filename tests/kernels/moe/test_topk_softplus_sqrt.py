@@ -361,7 +361,7 @@ def test_dsv4_fast_topk(
     if use_padding:
         monkeypatch.setattr(
             "vllm.model_executor.layers.fused_moe.router."
-            "fused_topk_bias_router._get_padding_mask",
+            "fused_topk_bias_router.get_moe_padding_mask",
             lambda _: is_padding,
         )
         gating_output[is_padding] = float("nan")
