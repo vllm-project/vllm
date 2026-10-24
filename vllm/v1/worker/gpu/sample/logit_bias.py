@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
@@ -17,8 +18,6 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-MAX_NUM_LOGIT_BIAS_TOKENS = 1024
 MAX_NUM_STOP_TOKEN_IDS = 128
 
 
@@ -28,18 +27,27 @@ class LogitBiasState(LogitsProcessor):
         max_num_reqs = req_states.max_num_reqs
         device = req_states.device
 
+        # Per-request buffer widths. Env-tunable because some models need
+        # more than the default (e.g. Whisper's suppress list is ~1.6K ids).
+        self.max_num_allowed_token_ids = envs.VLLM_MAX_NUM_ALLOWED_TOKEN_IDS
+        self.max_num_logit_bias_tokens = envs.VLLM_MAX_NUM_LOGIT_BIAS_TOKENS
+
         # Allowed token IDs.
         self.num_allowed_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.allowed_token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS), dtype=torch.int32, device=device
+            (max_num_reqs, self.max_num_allowed_token_ids),
+            dtype=torch.int32,
+            device=device,
         )
         # Logit bias.
         self.num_logit_bias = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.logit_bias_token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS), dtype=torch.int32, device=device
+            (max_num_reqs, self.max_num_logit_bias_tokens),
+            dtype=torch.int32,
+            device=device,
         )
         self.logit_bias = StagedWriteTensor(
-            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
+            (max_num_reqs, self.max_num_logit_bias_tokens),
             dtype=torch.float32,
             device=device,
         )
@@ -63,10 +71,11 @@ class LogitBiasState(LogitsProcessor):
         allowed_token_ids = sampling_params.allowed_token_ids
         if allowed_token_ids:
             num_allowed_token_ids = len(allowed_token_ids)
-            if num_allowed_token_ids > MAX_NUM_ALLOWED_TOKEN_IDS:
+            if num_allowed_token_ids > self.max_num_allowed_token_ids:
                 raise ValueError(
                     f"Too many allowed token IDs: {num_allowed_token_ids}. "
-                    f"The max size is {MAX_NUM_ALLOWED_TOKEN_IDS}."
+                    f"The max size is {self.max_num_allowed_token_ids} "
+                    "(VLLM_MAX_NUM_ALLOWED_TOKEN_IDS)."
                 )
             self.num_allowed_token_ids.np[req_idx] = num_allowed_token_ids
             self.allowed_token_ids.stage_write(req_idx, 0, allowed_token_ids)
@@ -78,10 +87,11 @@ class LogitBiasState(LogitsProcessor):
         logit_bias = sampling_params.logit_bias
         if logit_bias:
             num_logit_bias = len(logit_bias)
-            if num_logit_bias > MAX_NUM_LOGIT_BIAS_TOKENS:
+            if num_logit_bias > self.max_num_logit_bias_tokens:
                 raise ValueError(
                     f"Too many logit bias tokens: {num_logit_bias}. "
-                    f"The max size is {MAX_NUM_LOGIT_BIAS_TOKENS}."
+                    f"The max size is {self.max_num_logit_bias_tokens} "
+                    "(VLLM_MAX_NUM_LOGIT_BIAS_TOKENS)."
                 )
             self.num_logit_bias.np[req_idx] = num_logit_bias
             self.logit_bias_token_ids.stage_write(req_idx, 0, logit_bias.keys())
