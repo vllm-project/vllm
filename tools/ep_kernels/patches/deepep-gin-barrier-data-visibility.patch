@@ -1,0 +1,70 @@
+--- a/deep_ep/include/deep_ep/common/comm.cuh	2026-10-02 22:49:43
++++ b/deep_ep/include/deep_ep/common/comm.cuh	2026-10-03 10:00:00
+@@ -145,21 +145,50 @@
+         for (int i = global_warp_idx; i < num_qps; i += kNumSMs * kNumWarps) {
+             ncclGin(nccl_dev_comm, i, NCCL_GIN_RESOURCE_SHARING_CTA).flush(ncclCoopWarp());
+         }
++
++        // World-team barriers may mix direct NVLink writes with GIN signals, so a system-scope
++        // threadfence is required to make the NVLink writes visible before publishing the
++        // barrier (mirrors upstream DeepEP #715). In dispatch/combine, same-node (NVLink-
++        // accessible) peers receive their data via TMA stores to LSA symmetric memory, while
++        // the barrier completion signal is a GIN atomic on a different fabric with no ordering
++        // between them; without this fence the signal can be performed at the receiver while
++        // the NVLink data stores are still in flight.
++        if constexpr (std::is_same_v<team_t, ncclTeamTagWorld>)
++            ptx::fence_acq_rel_sys();
++
+         // NOTES: we can not use `kNumSMs` to judge, as maybe only part of the SMs will call this function
+         (gridDim.x > 1) ? cooperative_groups::this_grid().sync() : __syncthreads();
+     }
+ 
+     if (sm_idx == 0) {
+-        // Use QP 0 to do barrier
+         const auto team = (std::is_same_v<team_t, ncclTeamTagWorld>) ?
+             ncclTeamWorld(nccl_dev_comm) : ncclTeamRail(nccl_dev_comm);
+-        const ncclGin gin(nccl_dev_comm, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
+-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads)
+-            gin.signal(team, i, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
+ 
++        // Signal on every context, not just context 0. Signals and puts on different QPs are
++        // not ordered at the receiving NIC, so a context-0-only signal could become visible to
++        // the receiver while data puts issued on other contexts are still in flight (`flush`
++        // only guarantees local source-buffer reuse, not remote settlement). A signal posted
++        // on context `c` is SQ-FIFO-ordered behind all WQEs previously reserved on context
++        // `c`, so per-context signals cover the data puts. This mirrors NCCL's
++        // `ncclGinBarrierSession` with `ncclGinAllContexts` (nccl_device/impl/gin_barrier__funcs.h).
++        // NOTES: (1) each context has its own signal memory and shadow slot for the same
++        // signal id, so no extra slot allocation is needed; (2) always use the runtime
++        // context count (not the per-call-site `kNumQPs` or `num_qps`), so that every
++        // invocation of this barrier signals and waits on the same set of contexts and the
++        // per-(context, signal id) shadow counters stay consistent across call sites.
++        const int num_signal_qps = static_cast<int>(nccl_dev_comm.ginContextCount);
++        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
++            const int context_idx = i / kNumRanks;
++            const int peer_idx = i - context_idx * kNumRanks;
++            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
++            gin.signal(team, peer_idx, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
++        }
++
+         // TODO(NCCL): Using the official NCCL wait signal API, after they added timeout check.
+-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads) {
+-            const auto signal_idx = static_cast<ncclGinSignal_t>(i);
++        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
++            const int context_idx = i / kNumRanks;
++            const auto signal_idx = static_cast<ncclGinSignal_t>(i - context_idx * kNumRanks);
++            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
+             const auto shadow_ptr = gin.getSignalShadowPtr(signal_idx);
+             const auto target = ++(*shadow_ptr);
+ 
+@@ -171,8 +200,8 @@
+                     return true;
+ 
+                 if (is_last_check) {
+-                    printf("DeepEP Gin barrier timeout, tag: %d, scaleout: %d, scaleup: %d, thread: %d, "
+-                           "signal: %lu, target: %lu\n", kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, signal, target);
++                    printf("DeepEP Gin barrier timeout, tag: %d, scaleout: %d, scaleup: %d, thread: %d, context: %d, "
++                           "signal: %lu, target: %lu\n", kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, context_idx, signal, target);
+                 }
+                 return false;
+             });
