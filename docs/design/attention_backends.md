@@ -231,7 +231,7 @@ it uses group-of-32 MXFP8 activations for the MXFP4 experts, BF16 router
 weights and logits, and a BF16 rotary table, matching ATOM's precision choices.
 The fused-layer design and kernel implementation originate in ATOM. AMD's
 copyright notices and the original MIT license are retained; the
-[source provenance](https://github.com/vllm-project/vllm/blob/main/vllm/models/minimax_m3/amd/specialized_decode/README.md#atom-provenance)
+[source provenance](https://github.com/vllm-project/vllm/blob/7404351f7634cbb329fcda31b6b6902274968118/vllm/models/minimax_m3/amd/specialized_decode/README.md#atom-provenance)
 maps the ported files to their upstream sources. The kernels and their runtime
 live in vLLM; ATOM is not a runtime dependency.
 The existing FlyDSL and AITER packing utilities are still required. Prefill,
