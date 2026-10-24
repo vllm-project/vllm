@@ -28,6 +28,10 @@ pub struct TextDecodeOptions {
     /// in. Stop strings found within the first `min_tokens` tokens are
     /// ignored.
     pub min_tokens: u32,
+    /// Whether the caller reads decoded text. When false, logprob token
+    /// strings stay empty, and unless stop strings need matching, no text is
+    /// decoded at all.
+    pub output_text: bool,
 }
 
 impl Default for TextDecodeOptions {
@@ -37,6 +41,7 @@ impl Default for TextDecodeOptions {
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
+            output_text: true,
         }
     }
 }
@@ -109,6 +114,31 @@ pub enum DecodedTextEvent {
     },
 }
 
+/// Decoder for requests that read no text and match no stop strings. Like
+/// Python's base `IncrementalDetokenizer`, it never calls the tokenizer.
+struct TokenOnlyDecoder;
+
+impl IncrementalDecoder for TokenOnlyDecoder {
+    fn push_token(&mut self, _token_id: u32) -> vllm_tokenizer::Result<usize> {
+        Ok(0)
+    }
+
+    fn next_chunk(&mut self) -> Option<DecodedText> {
+        None
+    }
+
+    fn flush(
+        &mut self,
+        _truncate_output_to: Option<usize>,
+    ) -> vllm_tokenizer::Result<(Option<DecodedText>, DecodedText)> {
+        Ok((None, DecodedText::default()))
+    }
+
+    fn output(&self) -> &str {
+        ""
+    }
+}
+
 /// Convert the output token stream from the `vllm_llm` layer into incrementally
 /// decoded text.
 #[try_stream]
@@ -127,6 +157,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let logprob_tokenizer = decode_options.output_text.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -138,22 +169,26 @@ pub async fn decoded_text_event_stream(
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
 
-            let dec = tokenizer.create_decode_stream(
-                prompt_token_ids,
-                decode_options.skip_special_tokens,
-                // If we are excluding stop strings from output, we need to buffer
-                // the output so that we don't return the beginning of a stop string
-                // when streaming the outputs.
-                match decode_options.include_stop_str_in_output {
-                    true => 0,
-                    false => decode_options
-                        .stop_strings
-                        .as_ref()
-                        .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                        .unwrap_or(1)
-                        .saturating_sub(1),
-                },
-            );
+            let dec = if decode_options.output_text || decode_options.stop_strings.is_some() {
+                tokenizer.create_decode_stream(
+                    prompt_token_ids,
+                    decode_options.skip_special_tokens,
+                    // If we are excluding stop strings from output, we need to buffer
+                    // the output so that we don't return the beginning of a stop string
+                    // when streaming the outputs.
+                    match decode_options.include_stop_str_in_output {
+                        true => 0,
+                        false => decode_options
+                            .stop_strings
+                            .as_ref()
+                            .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                            .unwrap_or(1)
+                            .saturating_sub(1),
+                    },
+                )
+            } else {
+                Box::new(TokenOnlyDecoder)
+            };
             decoder = Some(dec);
 
             y.yield_ok(DecodedTextEvent::Start {
@@ -162,7 +197,7 @@ pub async fn decoded_text_event_stream(
                     .prompt_logprobs()
                     .map(|logprobs| {
                         decode_prompt_logprobs(
-                            tokenizer.as_ref(),
+                            logprob_tokenizer,
                             prompt_token_ids,
                             logprobs,
                             decode_options.skip_special_tokens,
@@ -242,7 +277,7 @@ pub async fn decoded_text_event_stream(
             .as_ref()
             .map(|logprobs| {
                 decode_logprobs(
-                    tokenizer.as_ref(),
+                    logprob_tokenizer,
                     logprobs,
                     decode_options.skip_special_tokens,
                 )
@@ -382,7 +417,8 @@ mod tests {
     use vllm_engine_core_client::AbortCause;
     use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
+    use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
+    use vllm_tokenizer::{TokenAnchor, TokenAttribution};
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
@@ -628,6 +664,146 @@ mod tests {
             let actual = run_intermediate(case.outputs, TextDecodeOptions::default()).await;
             assert_eq!(actual, case.expected, "{}", case.name);
         }
+    }
+
+    /// A caller that reads no text gets token IDs, logprob values, usage and
+    /// finish info without any tokenizer call.
+    #[tokio::test]
+    async fn output_text_false_keeps_sampled_metadata_without_tokenizer() {
+        let logprobs = |token_ids: &[u32]| Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.5,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        };
+        let prompt = ascii_tokens("hi");
+        let mut output = GenerateOutput::for_test(
+            Some(Arc::from(prompt.clone())),
+            ascii_tokens("a!"),
+            Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
+        );
+        output.prompt_info.as_mut().unwrap().prompt_logprobs = Some(logprobs(&prompt[1..]));
+        output.logprobs = Some(logprobs(&ascii_tokens("a!")));
+
+        let collected = decoded_text_event_stream(
+            "test".into(),
+            Arc::new(PanickingTokenizer),
+            stream::iter([Ok(output)]),
+            TextDecodeOptions {
+                output_text: false,
+                ..Default::default()
+            },
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        expect_test::expect![[r#"
+            CollectedTextOutput {
+                text: "",
+                prompt_token_ids: [
+                    104,
+                    105,
+                ],
+                prompt_logprobs: Some(
+                    DecodedPromptLogprobs {
+                        first_token_id: 104,
+                        first_token: "",
+                        scored_positions: [
+                            DecodedPositionLogprobs {
+                                entries: [
+                                    DecodedTokenLogprob {
+                                        token_id: 105,
+                                        token: "",
+                                        logprob: -0.5,
+                                        rank: 1,
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ),
+                logprobs: Some(
+                    DecodedLogprobs {
+                        positions: [
+                            DecodedPositionLogprobs {
+                                entries: [
+                                    DecodedTokenLogprob {
+                                        token_id: 97,
+                                        token: "",
+                                        logprob: -0.5,
+                                        rank: 1,
+                                    },
+                                ],
+                            },
+                            DecodedPositionLogprobs {
+                                entries: [
+                                    DecodedTokenLogprob {
+                                        token_id: 33,
+                                        token: "",
+                                        logprob: -0.5,
+                                        rank: 1,
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ),
+                token_ids: [
+                    97,
+                    33,
+                ],
+                finish_reason: Stop(
+                    Some(
+                        TokenId(
+                            33,
+                        ),
+                    ),
+                ),
+                usage: TokenUsage {
+                    prompt_token_count: 2,
+                    output_token_count: 2,
+                    cached_token_count: 0,
+                },
+                timestamps: RequestTimestamps {
+                    queued_ts: 0.0,
+                    scheduled_ts: 0.0,
+                    first_token_ts: 0.0,
+                    last_token_ts: 0.0,
+                },
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                sampling_mask: None,
+            }
+        "#]]
+        .assert_debug_eq(&collected);
+    }
+
+    /// Stop strings are matched on decoded text, so they keep the decoder even
+    /// when the caller reads no text.
+    #[tokio::test]
+    async fn output_text_false_still_matches_stop_strings() {
+        let output = run_to_completion(
+            ascii_tokens("hello"),
+            TextDecodeOptions {
+                output_text: false,
+                ..opts(&["ll"], 0)
+            },
+        )
+        .await;
+
+        assert_eq!(output.token_ids, ascii_tokens("hell"));
+        assert_eq!(
+            output.finish_reason,
+            FinishReason::Stop(Some(StopReason::Text("ll".to_string())))
+        );
     }
 
     struct DropRecordingStream {

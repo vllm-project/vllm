@@ -53,7 +53,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
-use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -258,6 +258,33 @@ impl ChatRenderer for FakeTextBackend {
             media_order: None,
             effective_template_kwargs: Default::default(),
         })
+    }
+}
+
+/// Backend whose tokenizer panics on any encode, decode or token lookup.
+struct PanickingTokenizerBackend;
+
+impl TextBackend for PanickingTokenizerBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(PanickingTokenizer)
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+}
+
+impl ChatBackend for PanickingTokenizerBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(FakeTextBackend)
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        _request: &mut ChatRequest,
+        _options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        unreachable!("gRPC Generate does not process chat output")
     }
 }
 
@@ -792,6 +819,88 @@ async fn unary_generate_with_token_ids_prompt() {
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+/// `output_text=false` without stop strings needs no text, so neither RPC may
+/// detokenize. Token IDs and finish info stay the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_without_output_text_skips_detokenization() {
+    for streaming in [false, true] {
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_backend(
+                b"engine-grpc-token-only",
+                default_stream_output_specs(),
+                Arc::new(PanickingTokenizerBackend),
+                |_| {},
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        let request = pb::GenerateRequest {
+            request_id: "test-token-only".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![1, 2, 3],
+            })),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_text: Some(false),
+                output_token_ids: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let outputs: Vec<_> = if streaming {
+            let mut stream =
+                client.generate_stream(request).await.expect("start stream").into_inner();
+            let mut outputs = Vec::new();
+            while let Some(response) = stream.message().await.expect("stream message") {
+                outputs.extend(response.outputs);
+            }
+            outputs
+        } else {
+            client
+                .generate(request)
+                .await
+                .expect("unary generate")
+                .into_inner()
+                .outputs
+                .into_iter()
+                .collect()
+        };
+
+        assert!(outputs.iter().all(|output| output.text.is_empty()));
+        assert_eq!(
+            outputs
+                .iter()
+                .flat_map(|output| output.token_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            [b'h' as u32, b'i' as u32, b'!' as u32]
+        );
+        let finish = outputs
+            .last()
+            .and_then(|output| output.finish_info.as_ref())
+            .expect("finish_info present");
+        assert_eq!(
+            finish.finish_reason,
+            pb::finish_info::FinishReason::Stop as i32
+        );
+        assert_eq!(finish.num_output_tokens, 3);
+
+        engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
