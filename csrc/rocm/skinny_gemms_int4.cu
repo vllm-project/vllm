@@ -102,7 +102,7 @@ struct scalar<c10::BFloat16> {
                                          *((bf16x2_t*)(&(V3))), V0, false); \
   }
 
-// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cu).
+// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cuh).
 // row_shr within 16-lane rows, then cross-row __shfl_xor.
 // Result accumulates in lane (THRDS - 1).
 #if defined(__HIP__GFX1X__)
@@ -1110,25 +1110,53 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                                    \
   }
 
+// Which N_in case this translation unit instantiates. 0 (the default) keeps
+// every case; the build compiles this file once per lane instead, each with
+// WVSPLITK_INT4_LANE = 1..5, so the device code of one N is generated per unit
+// instead of all five landing on one core.
+#ifndef WVSPLITK_INT4_LANE
+  #define WVSPLITK_INT4_LANE 0
+#endif
+
 // Inner dispatch: shared by both symmetric and asymmetric paths
-#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                    \
-  {                                                        \
-    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);    \
-    switch (N_in) {                                        \
-      case 1:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 1, _HAS_ZP) break;         \
-      case 2:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 2, _HAS_ZP) break;         \
-      case 3:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 3, _HAS_ZP) break;         \
-      case 4:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 4, _HAS_ZP) break;         \
-      case 5:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 5, _HAS_ZP) break;         \
-      default:                                             \
-        throw std::runtime_error("Unsupported N value: " + \
-                                 std::to_string(N_in));    \
-    }                                                      \
+#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                                   \
+  {                                                                       \
+    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);                   \
+    switch (N_in) {                                                       \
+      case 1:                                                             \
+        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 1) \
+          WVSPLIT_INT4G_TILE(sYT, 1, _HAS_ZP)                             \
+        else                                                              \
+          throw std::runtime_error("int4 lane 1 not compiled");           \
+        break;                                                            \
+      case 2:                                                             \
+        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 2) \
+          WVSPLIT_INT4G_TILE(sYT, 2, _HAS_ZP)                             \
+        else                                                              \
+          throw std::runtime_error("int4 lane 2 not compiled");           \
+        break;                                                            \
+      case 3:                                                             \
+        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 3) \
+          WVSPLIT_INT4G_TILE(sYT, 3, _HAS_ZP)                             \
+        else                                                              \
+          throw std::runtime_error("int4 lane 3 not compiled");           \
+        break;                                                            \
+      case 4:                                                             \
+        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 4) \
+          WVSPLIT_INT4G_TILE(sYT, 4, _HAS_ZP)                             \
+        else                                                              \
+          throw std::runtime_error("int4 lane 4 not compiled");           \
+        break;                                                            \
+      case 5:                                                             \
+        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 5) \
+          WVSPLIT_INT4G_TILE(sYT, 5, _HAS_ZP)                             \
+        else                                                              \
+          throw std::runtime_error("int4 lane 5 not compiled");           \
+        break;                                                            \
+      default:                                                            \
+        throw std::runtime_error("Unsupported N value: " +                \
+                                 std::to_string(N_in));                   \
+    }                                                                     \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
