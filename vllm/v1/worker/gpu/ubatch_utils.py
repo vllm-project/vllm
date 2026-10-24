@@ -20,6 +20,7 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -33,7 +34,11 @@ from vllm.v1.worker.ubatch_utils import (
     create_sm_control_context,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.ubatching import make_ubatch_contexts
+from vllm.v1.worker.ubatching import (
+    dbo_comm_stream_priority,
+    init_dbo_tp_comms,
+    make_ubatch_contexts,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -264,7 +269,8 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
     """Reassemble the full-batch model output from the per-microbatch ones.
 
     Models return hidden states, a tuple of those plus auxiliary hidden states
-    (EAGLE3), or IntermediateTensors on non-final pipeline ranks.
+    (EAGLE3; a list of them for DSpark), or IntermediateTensors on non-final
+    pipeline ranks.
     """
     first = outputs[0]
     if isinstance(first, IntermediateTensors):
@@ -274,8 +280,10 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
                 for key in first.tensors
             }
         )
-    if isinstance(first, tuple):
-        return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
+    if isinstance(first, (tuple, list)):
+        return type(first)(merge_ubatch_outputs(list(parts)) for parts in zip(*outputs))
+    if first is None:
+        return None
     return torch.cat(outputs, dim=0)
 
 
@@ -324,13 +332,41 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
-        self.comm_stream = torch.cuda.Stream(device=device)
+        self.comm_stream = torch.cuda.Stream(
+            device=device, priority=dbo_comm_stream_priority()
+        )
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
+        init_dbo_tp_comms(self.parallel_config)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
+        if current_platform.is_rocm():
+            self._warm_blas_lt_handles()
+
+    def _warm_blas_lt_handles(self) -> None:
+        """Fill torch's hipBLASLt handle pool for the microbatch threads.
+
+        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
+        hipMemset that can land after a GEMM on the comm stream has started, and
+        the GEMM then never finishes. Microbatch threads are new every step and
+        take their per-stream handles from the pool."""
+        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=self.device)
+        streams = (current_stream(), self.capture_stream, self.comm_stream)
+
+        def touch() -> None:
+            torch.accelerator.set_device_index(self.device.index)
+            for stream in streams:
+                with torch.cuda.stream(stream):
+                    torch.mm(a, a, out_dtype=torch.float32)
+
+        threads = [threading.Thread(target=touch) for _ in range(self.num_ubatches)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        torch.accelerator.synchronize(self.device)
 
     def prepare(
         self,
@@ -418,8 +454,12 @@ class UBatchRunner:
                     self.vllm_config,
                     dp_metadata=DPMetadata.make(
                         self.parallel_config, num_tokens, num_tokens_across_dp
-                    ),
+                    )
+                    if dp_size > 1
+                    else None,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    # A model picking a path per step sees the whole split.
+                    ubatch_slices=ubatch_slices,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
                 )
@@ -488,6 +528,8 @@ class UBatchRunner:
                 # changing the shared handoff protocol in ubatching.py, which
                 # is deliberately out of scope here.
                 errors[ubatch_context.id] = e
+                # The sibling may wait on a hand-off forever: log before the join.
+                logger.exception("Microbatch %d failed", ubatch_context.id)
 
         # Threads own the forward context; keep it cleared and SMs reserved
         # until finish joins them.
@@ -555,7 +597,9 @@ def maybe_build_ubatch_runner(
     available with more than one DP rank (as in the V1 runner).
     """
     parallel_config = vllm_config.parallel_config
-    if not parallel_config.use_ubatching or parallel_config.data_parallel_size <= 1:
+    if not parallel_config.use_ubatching:
+        return None
+    if parallel_config.data_parallel_size <= 1 and not parallel_config.dbo_tp_only:
         return None
 
     logger.info_once("Dual batch overlap is enabled.")
