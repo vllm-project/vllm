@@ -41,6 +41,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -121,6 +122,9 @@ BATCH_SPECS = {
     ),
     "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
+    "long_context_short_query": BatchSpec(
+        seq_lens=[8000, 512, 6000], query_lens=[4, 1, 9]
+    ),
     # encoder-only
     "small_encoder_prefill": BatchSpec(
         seq_lens=[32, 64, 128, 256], query_lens=[32, 64, 128, 256]
@@ -862,6 +866,42 @@ def test_causal_backend_correctness(
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or get_flash_attn_version() != 2,
+    reason="The packed-GQA context path is FA2-only.",
+)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4])
+def test_fa2_packed_gqa_context_backend_correctness(
+    default_vllm_config, monkeypatch, tensor_parallel_size: int
+):
+    """Short queries over a long cached context take the FA2 packed-GQA path
+    end to end (builder plan + forward) and must match the reference."""
+    from vllm.v1.attention.backends import flash_attn
+    from vllm.v1.attention.ops import fa2_packed_gqa_context
+
+    monkeypatch.setattr(fa2_packed_gqa_context, "MIN_CONTEXT_LEN", 1024)
+    calls = []
+    original = flash_attn.packed_gqa_context_attention
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(flash_attn, "packed_gqa_context_attention", counted)
+
+    def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BATCH_SPECS["long_context_short_query"],
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASH_ATTN],
+        causal_mask_mod,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+    assert calls, "the packed-GQA context path was not taken"
 
 
 @pytest.mark.skipif(

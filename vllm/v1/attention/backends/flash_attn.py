@@ -41,6 +41,12 @@ from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
 )
+from vllm.v1.attention.ops.fa2_packed_gqa_context import (
+    PackedGQAContextBuffers,
+    PackedGQAContextPlan,
+    build_packed_gqa_context_plan,
+    packed_gqa_context_attention,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -70,6 +76,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -562,6 +569,9 @@ class FlashAttentionMetadata:
     rswa_window: int | None = None
     rswa_window_tensor: torch.Tensor | None = None
 
+    # FA2 short-query/long-context plan; None when the batch takes one call.
+    packed_gqa_context: PackedGQAContextPlan | None = None
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -714,6 +724,25 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
             self.headdim, head_size_v
         )
+        self.max_decode_query_len = max_decode_query_len(vllm_config)
+        self.num_sms = 0
+        self.packed_gqa_buffers: PackedGQAContextBuffers | None = None
+        if (
+            fa_version == 2
+            and self.num_heads_q > self.num_heads_kv
+            and not is_quantized_kv_cache(self.cache_config.cache_dtype)
+            and not envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+        ):
+            self.num_sms = current_platform.num_compute_units(device.index or 0)
+            self.packed_gqa_buffers = PackedGQAContextBuffers(
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                group_size=self.num_heads_q // self.num_heads_kv,
+                num_kv_heads=self.num_heads_kv,
+                num_sms=self.num_sms,
+                device=device,
+            )
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
@@ -974,6 +1003,36 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             causal=causal,
         )
 
+        # Uniform decode batches replay a full CUDA graph without this path.
+        replays_full_graph = (
+            self.use_full_cuda_graph
+            and max_query_len <= self.max_decode_query_len
+            and self.max_cudagraph_size is not None
+            and num_actual_tokens <= self.max_cudagraph_size
+        )
+        if (
+            self.packed_gqa_buffers is not None
+            and not replays_full_graph
+            and self.dcp_world_size == 1
+            and max_query_len > 1
+            and causal is True
+            and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            and common_attn_metadata.mm_req_doc_ranges is None
+        ):
+            attn_metadata.packed_gqa_context = build_packed_gqa_context_plan(
+                buffers=self.packed_gqa_buffers,
+                query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu,
+                seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                block_table=block_table_tensor,
+                num_reqs=num_reqs,
+                num_kv_heads=self.num_heads_kv,
+                group_size=self.num_heads_q // self.num_heads_kv,
+                block_size=self.block_size,
+                num_sms=self.num_sms,
+            )
+
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.  Built for every FA
         # group; Gemma4 nulls the field for its non-sliding layers.
@@ -1141,6 +1200,17 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.sinks = sinks
+        self.supports_packed_gqa_context = (
+            self.vllm_flash_attn_version == 2
+            and attn_type == AttentionType.DECODER
+            and self.num_queries_per_kv > 1
+            and alibi_slopes is None
+            and self.sliding_window == (-1, -1)
+            and not logits_soft_cap
+            and sinks is None
+            and kv_sharing_target_layer_name is None
+            and not is_quantized_kv_cache(self.kv_cache_dtype)
+        )
         if self.sinks is not None:
             assert flash_attn_supports_sinks(), (
                 "Sinks are only supported in FlashAttention 3"
@@ -1305,6 +1375,26 @@ class FlashAttentionImpl(AttentionImpl):
                 q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
+            )
+            return output
+        elif (
+            attn_metadata.packed_gqa_context is not None
+            and self.supports_packed_gqa_context
+            and attn_metadata.rswa_prefix_lens is None
+        ):
+            packed_gqa_context_attention(
+                flash_attn_varlen_func,
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens],
+                value=value[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                output=output[:num_actual_tokens],
+                query_start_loc=cu_seqlens_q,
+                max_query_len=max_seqlen_q,
+                plan=attn_metadata.packed_gqa_context,
+                softmax_scale=self.scale,
+                fa_version=self.vllm_flash_attn_version,
             )
             return output
         else:
