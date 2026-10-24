@@ -10,6 +10,7 @@ import functools
 import importlib
 import importlib.metadata
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -517,6 +518,27 @@ def has_flashinfer_bf16_fp4() -> bool:
     return mod is not None and all(
         hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
     )
+
+
+@functools.cache
+def flashinfer_gdn_prefill_takes(parameter: str) -> bool:
+    """Return whether the GDN prefill accepts this keyword.
+
+    ``max_seqlen`` and ``cu_seqlens_cpu`` arrived after 0.7.0, separately, so a
+    build may take one and not the other. Passing an argument to a build
+    without it raises TypeError on every architecture, including the ones that
+    already worked.
+    """
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.gdn_prefill")
+    fn = getattr(mod, "chunk_gated_delta_rule", None) if mod is not None else None
+    if fn is None:
+        return False
+    try:
+        return parameter in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 @functools.cache
