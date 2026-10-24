@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -68,3 +69,42 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
     mhc_residual, mhc_pre_mix = mhc_pre_calls[0]
     torch.testing.assert_close(mhc_residual, hidden + 10)
     assert mhc_pre_mix is pre_mix
+
+
+@pytest.fixture
+def pipeline_config():
+    return DeepseekV41Config(
+        text_config={
+            "num_hidden_layers": 40,
+            "compress_ratios": [0, 0] + [2] * 18 + [1] * 20,
+            "kv_source_layer_ids": [2, 8, 14, 20],
+            "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+            "candidate_source_layer_id": 20,
+            "candidate_topk_blocks": 2048,
+        }
+    )
+
+
+def test_pp_layer_boundaries_keep_all_sharing_sources_local(pipeline_config):
+    assert pipeline_config.get_pp_layer_boundaries() == [1, 2, 8, 14, 20]
+
+
+@pytest.mark.parametrize(
+    "candidate_blocks,expected",
+    [
+        (0, [1, 2, 8, 14, 20, 24, 28, 32, 36]),
+        (2048, [1, 2, 8, 14, 20]),
+    ],
+)
+def test_pp_layer_boundaries_preserve_candidate_sharing(
+    pipeline_config, candidate_blocks, expected
+):
+    pipeline_config.kv_source_layer_ids = pipeline_config.index_source_layer_ids
+    pipeline_config.candidate_topk_blocks = candidate_blocks
+    assert pipeline_config.get_pp_layer_boundaries() == expected
+
+
+def test_pp_layer_boundaries_require_a_compressed_kv_source(pipeline_config):
+    pipeline_config.kv_source_layer_ids = [8, 14, 20]
+    with pytest.raises(ValueError, match="layer 2 has no preceding KV source"):
+        pipeline_config.get_pp_layer_boundaries()

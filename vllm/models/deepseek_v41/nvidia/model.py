@@ -20,6 +20,7 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import (
     get_forward_context,
     in_piecewise_cudagraph,
@@ -706,8 +707,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
         if self.parallel_config.prefill_context_parallel_size > 1 and (
-            self.parallel_config.pipeline_parallel_size != 1
-            or self.parallel_config.data_parallel_size != 1
+            self.parallel_config.data_parallel_size != 1
             or self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
             or vllm_config.speculative_config is not None
@@ -719,10 +719,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
-                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+                "DeepSeek-V4.1 PCP currently requires DP=DCP=1, with no "
                 "microbatching, speculative decoding, KV transfer, or MegaMoE. "
                 "Prefix caching requires SWA bounded replay."
             )
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size > 1:
+            boundaries = {
+                get_pp_indices(config.num_hidden_layers, rank, pp_size)[0]
+                for rank in range(1, pp_size)
+            }
+            invalid = boundaries.difference(config.get_pp_layer_boundaries())
+            if invalid:
+                raise NotImplementedError(
+                    f"DeepSeek V4.1 PP cuts at layers {sorted(invalid)} cross "
+                    "KV, index or candidate sharing groups. Keep each sharing "
+                    "group on one stage with VLLM_PP_LAYER_PARTITION."
+                )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )

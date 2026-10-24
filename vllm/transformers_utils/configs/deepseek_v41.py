@@ -60,3 +60,28 @@ class DeepseekV41Config(PreTrainedConfig):
         self.vision_max_n_token = vision_config.get("max_image_tokens", 1024)
         self.vision_min_pixels = vision_config.get("min_pixels", 295936)
         self.vision_max_wh_ratio = vision_config.get("max_wh_ratio")
+
+    def get_pp_layer_boundaries(self) -> list[int]:
+        """Layer boundaries that keep KV, index and candidate sharing local."""
+        boundaries = set(range(1, self.num_hidden_layers))
+        for layer, ratio in enumerate(self.compress_ratios[: self.num_hidden_layers]):
+            if ratio == 0:
+                continue
+            for kind, sources in (
+                ("KV", self.kv_source_layer_ids),
+                ("index", self.index_source_layer_ids),
+            ):
+                preceding = [source for source in sources if source <= layer]
+                if not preceding:
+                    raise ValueError(
+                        f"DeepSeek V4.1 layer {layer} has no preceding {kind} source"
+                    )
+                # An index source also reads its KV source's index-key cache.
+                boundaries.difference_update(range(max(preceding) + 1, layer + 1))
+
+        candidate = getattr(self, "candidate_source_layer_id", -1)
+        if candidate >= 0 and getattr(self, "candidate_topk_blocks", 0) > 0:
+            for layer in self.index_source_layer_ids:
+                if candidate < layer < self.num_hidden_layers:
+                    boundaries.difference_update(range(candidate + 1, layer + 1))
+        return sorted(boundaries)
