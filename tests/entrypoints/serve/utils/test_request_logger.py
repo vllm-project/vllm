@@ -274,6 +274,36 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[4] == "streaming_complete"
 
 
+@pytest.mark.parametrize(
+    "body_level, logger_level, should_log",
+    [
+        ("DEBUG", logging.INFO, False),
+        ("INFO", logging.INFO, True),
+        ("WARNING", logging.ERROR, False),
+    ],
+)
+def test_request_body_serialized_only_when_level_enabled(
+    monkeypatch, caplog, body_level, logger_level, should_log
+):
+    request = CompletionRequest(model="test-model", prompt="Hello, world!")
+    serialized_requests = []
+    original_dump = CompletionRequest.model_dump_json
+
+    def tracked_dump(self, **kwargs):
+        serialized_requests.append(self)
+        return original_dump(self, **kwargs)
+
+    monkeypatch.setattr(CompletionRequest, "model_dump_json", tracked_dump)
+    monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", body_level)
+    logger_name = "vllm.entrypoints.serve.utils.request_logger"
+    with caplog.at_level(logger_level, logger=logger_name):
+        RequestLogger(max_log_len=None).log_request_body(request)
+
+    assert len(serialized_requests) == int(should_log)
+    body_records = [r for r in caplog.records if "JSON body:" in r.getMessage()]
+    assert len(body_records) == int(should_log)
+
+
 @pytest.mark.parametrize("max_log_len", [None, 10])
 def test_request_logger_log_request_body_truncation(max_log_len):
     """The JSON body is logged in full unless max_log_len truncates it."""
