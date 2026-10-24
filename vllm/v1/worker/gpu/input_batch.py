@@ -10,6 +10,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
@@ -34,6 +35,11 @@ class InputBuffers:
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        # Persistent host staging for the per-step H2D copies, so a step does not
+        # allocate pinned memory.
+        self.idx_mapping_staging = UvaBufferPool(max_num_reqs, torch.int64)
+        self.cu_num_logits_staging = UvaBufferPool(max_num_reqs + 1, torch.int32)
+        self.query_start_loc_staging = UvaBufferPool(max_num_reqs + 1, torch.int32)
 
 
 @dataclass

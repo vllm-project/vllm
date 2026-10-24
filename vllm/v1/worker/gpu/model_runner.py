@@ -68,7 +68,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -1254,8 +1254,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
             self.model_state.apply_staged_writes()
-        if self.sampler is not None:
-            self.sampler.apply_staged_writes()
+            if self.sampler is not None:
+                self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
@@ -1393,9 +1393,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int64
-        )
+        idx_mapping = self.input_buffers.idx_mapping_staging.copy_to_gpu(idx_mapping_np)
         num_reqs = len(req_ids)
 
         # Get the number of draft tokens for each request.
@@ -1428,7 +1426,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
+            cu_num_logits = self.input_buffers.cu_num_logits_staging.copy_to_gpu(
+                cu_num_logits_np
+            )
 
         # The general branch also serves a no-draft batch with k != 1, and
         # compact_batch's budget is only primed when drafts are scheduled.
@@ -1456,7 +1456,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         query_start_loc = self.input_buffers.query_start_loc
-        async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+        self.input_buffers.query_start_loc_staging.copy_to_gpu(
+            query_start_loc_np, out=query_start_loc
+        )
         if adaptive_verification is not None:
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
