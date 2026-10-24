@@ -1604,6 +1604,59 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    activation: str,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """RMSNormGated (norm before gate, one group per norm_weight slice), then
+    the Triton MXFP4 dynamic-quant linear (``gemm_with_dynamic_quant`` without
+    the ASM GEMM). x and z are (M, K).
+
+    AITER's fused gated-RMSNorm + MXFP4 quant writes the per-1x32 scales
+    column-major, as ``dynamic_mxfp4_quant`` does, so the Triton GEMM reads
+    them as it would after the separate activation quant.
+    """
+    from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
+
+    x_q, x_s = fused_rms_gated_mxfp4_quant(
+        x,
+        norm_weight,
+        z,
+        epsilon,
+        norm_before_gate=True,
+        activation=activation,
+        group_size=norm_weight.numel(),
+        transpose_scale=True,
+    )
+    return torch.ops.vllm.gemm_with_dynamic_quant(
+        x_q,
+        weight,
+        weight_scale,
+        rocm_use_aiter_fp4_asm_gemm=False,
+        out_dtype=out_dtype,
+        x_scales=x_s,
+    )
+
+
+def _rocm_aiter_fused_rms_gated_mxfp4_gemm_fake(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    activation: str,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty((x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device)
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -3168,6 +3221,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_mxfp4_gemm",
+                op_func=_rocm_aiter_fused_rms_gated_mxfp4_gemm_impl,
+                fake_impl=_rocm_aiter_fused_rms_gated_mxfp4_gemm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
@@ -3304,6 +3363,11 @@ class rocm_aiter_ops:
     def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
         """Return the fused gated-RMSNorm + FP8 group quant custom op."""
         return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
+
+    @staticmethod
+    def get_fused_rms_gated_mxfp4_gemm_op() -> OpOverload:
+        """Return the fused gated-RMSNorm + MXFP4 linear custom op."""
+        return torch.ops.vllm.rocm_aiter_fused_rms_gated_mxfp4_gemm.default
 
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
