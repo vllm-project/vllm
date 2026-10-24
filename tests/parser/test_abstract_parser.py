@@ -16,7 +16,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.abstract_tool_parser import ToolParser, ToolStrictLevel
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import ToolChoice
 
@@ -191,8 +192,6 @@ class TestToolChoice_Plus_ResponseFormat:
         grammar when tool_choice="auto", no tool has strict=True, and the
         operator did not set --tool-strict-level.
         """
-        from vllm.tool_parsers.abstract_tool_parser import ToolStrictLevel
-        from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
         class TestGlm47Parser(DelegatingParser):
             tool_parser_cls = Glm47MoeModelToolParser
@@ -235,6 +234,54 @@ class TestToolChoice_Plus_ResponseFormat:
         strict_out = strict_parser.adjust_request(strict_request)
         assert strict_out.response_format is None
         assert strict_out.structured_outputs is not None
+
+    def test_auto_with_parser_default_parameter_strict_level(self):
+        """Once a strict tool opens the gate next to response_format, the
+        parser's default_tool_strict_level still constrains non-strict tools.
+        """
+
+        class ParamDefaultToolParser(Qwen3EngineToolParser):
+            default_tool_strict_level = ToolStrictLevel.PARAMETER
+
+        class ParamDefaultParser(DelegatingParser):
+            tool_parser_cls = ParamDefaultToolParser
+
+        tools = [
+            *self._tools(strict=True),
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "set_count",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"n": {"type": "integer", "minimum": 5}},
+                        "required": ["n"],
+                    },
+                },
+            ),
+        ]
+        request = self._setup_request(
+            tools=tools,
+            tool_choice="auto",
+            response_format=self._json_schema_response_format(),
+        )
+        parser = ParamDefaultParser(MagicMock(), tools=tools)
+        out = parser.adjust_request(request)
+
+        assert out.response_format is None
+        assert out.structured_outputs is not None
+        grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
+        assert _is_grammar_accept_string(grammar, '{"text": "hi"}')
+        assert _is_grammar_accept_string(
+            grammar,
+            "<tool_call>\n<function=set_count>\n<parameter=n>\n5\n"
+            "</parameter>\n</function>\n</tool_call>",
+        )
+        assert not _is_grammar_accept_string(
+            grammar,
+            "<tool_call>\n<function=set_count>\n<parameter=n>\n2\n"
+            "</parameter>\n</function>\n</tool_call>",
+        )
 
     def test_when_model_does_not_have_structural_tag(self):
         """Note(arpera):
