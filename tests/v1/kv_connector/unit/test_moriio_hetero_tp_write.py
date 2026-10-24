@@ -73,6 +73,8 @@ class Layer:
     name: str
     kind: str  # "full", "swa", "mla" or "mamba"
     group: str  # transfer group the layer's blocks come from
+    # KV heads of this layer when they differ from the model-wide count.
+    heads: int | None = None
 
 
 MODELS = {
@@ -85,7 +87,34 @@ MODELS = {
         [Layer("attn0", "full", "full"), Layer("gdn0", "mamba", "mamba")],
     ),
     "mla_hybrid": (1, [Layer("mla0", "mla", "full"), Layer("kda0", "mamba", "mamba")]),
+    # Gemma4-like: 4 KV heads in sliding layers, 8 in full attention, and a
+    # model-wide count of 8 (the maximum).
+    "mixed_heads": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+        ],
+    ),
 }
+
+
+def _layer_heads(layer: Layer, heads: int) -> int:
+    return heads if layer.heads is None else layer.heads
+
+
+class _ArchConfig:
+    """Per-layer KV-head counts, as ModelArchitectureConfig exposes them."""
+
+    def __init__(self, layers: list[Layer], heads: int):
+        counts = [_layer_heads(layer, heads) for layer in layers]
+        self.per_layer_overrides = (
+            None if len(set(counts)) == 1 else [{} for _ in layers]
+        )
+        self._counts = counts
+
+    def __getitem__(self, layer_idx: int) -> SimpleNamespace:
+        return SimpleNamespace(total_num_kv_heads=self._counts[layer_idx])
 
 
 def _groups(model: str, hma: bool) -> list[str]:
@@ -134,7 +163,9 @@ def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
             n = (2 * KEY_DIM + V_HEADS * V_DIM) * CONV_ROWS + V_HEADS * V_DIM * K_DIM
             shape: tuple[int, ...] = (NUM_BLOCKS, n)
         else:
-            spec = _spec(layer, 1 if layer.kind == "mla" else heads, 1)
+            spec = _spec(
+                layer, 1 if layer.kind == "mla" else _layer_heads(layer, heads), 1
+            )
             shape = (
                 NUM_BLOCKS,
                 spec.num_heads,
@@ -176,7 +207,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     groups = _groups(model, hma)
     caches, regions, specs, meta_counts = {}, [], {}, {}
     for layer in layers:
-        layer_heads = len(_rank_heads(tp_rank, tp_size, heads))
+        layer_heads = len(_rank_heads(tp_rank, tp_size, _layer_heads(layer, heads)))
         spec = _spec(layer, layer_heads, tp_size)
         specs[layer.name] = spec
         buffer = torch.zeros(spec.page_size_bytes * NUM_BLOCKS, dtype=torch.uint8)
@@ -206,7 +237,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
                 held = (
                     slice(None)
                     if layer.kind == "mla"
-                    else _rank_heads(tp_rank, tp_size, heads)
+                    else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
                 )
                 cache.copy_(state[layer.name][:, held])
             regions.append(buffer)
@@ -218,7 +249,10 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker.world_size = tp_size
     worker.use_mla = layers[0].kind == "mla"
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
-    worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: heads)
+    worker.model_config = SimpleNamespace(
+        get_total_num_kv_heads=lambda: heads,
+        model_arch_config=_ArchConfig(layers, heads),
+    )
     worker.kv_caches = caches
     worker.layer_to_spec = specs
     worker.layer_to_group = {
@@ -336,7 +370,11 @@ def _expected(
             conv, ssm = _mamba_shard(state[layer.name][src], tp_rank, tp_size)
             expected[dst, : conv.numel() + ssm.numel()] = torch.cat([conv, ssm])
         return expected
-    held = slice(None) if layer.kind == "mla" else _rank_heads(tp_rank, tp_size, heads)
+    held = (
+        slice(None)
+        if layer.kind == "mla"
+        else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
+    )
     for src, dst in pairs:
         expected[dst] = state[layer.name][src, held]
     return expected
@@ -349,6 +387,11 @@ SCENARIOS = [
     for hma in (True, False)
     # Recurrent state needs the hybrid KV cache manager.
     if hma or "hybrid" not in model
+] + [
+    # More ranks than the sliding layers have heads: those layers replicate.
+    ("mixed_heads", producer_tp, consumer_tp, hma)
+    for producer_tp, consumer_tp in [(4, 8), (8, 4)]
+    for hma in (True, False)
 ]
 
 

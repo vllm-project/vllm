@@ -99,6 +99,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -3416,13 +3417,26 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
-    def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
+    def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
+        """KV heads of a layer across all TP ranks.
+
+        Layers may differ (e.g. Gemma4 sliding vs full attention), and the
+        model-wide count is their maximum. Without a layer: the model-wide count.
+        """
+        arch = getattr(self.model_config, "model_arch_config", None)
+        if layer_name is None or arch is None or arch.per_layer_overrides is None:
+            return self.model_config.get_total_num_kv_heads()
+        return arch[extract_layer_index(layer_name)].total_num_kv_heads
+
+    def _write_tp_mapping(
+        self, remote_tp_size: int | None, layer_name: str | None = None
+    ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
+            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
             self.use_mla,
             self._has_mamba,
         )
@@ -3561,7 +3575,7 @@ class MoRIIOConnectorWorker:
                 if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=self._layer_total_num_kv_heads(layer_name),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
         local, remote, sizes = compute_block_transfer_offsets(
