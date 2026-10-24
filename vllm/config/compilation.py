@@ -516,7 +516,11 @@ class CompilationConfig:
         on the full graph while still excluding these ops from cudagraphs.
 
     If None, defaults to attention ops for piecewise cudagraphs.
-    If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    If empty list [], no ops are excluded (suitable for full cudagraphs).
+
+    `vllm::moe_forward` and `vllm::moe_forward_shared` are replaced with
+    `vllm::moe_forward_with_output` and `vllm::moe_forward_shared_with_output`,
+    which write into outputs allocated in the graph."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
     Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
@@ -786,6 +790,11 @@ class CompilationConfig:
         "vllm::deepseek_v4_attention",
         "vllm::hpc_rope_norm_forward",
     ]
+
+    _moe_ops_with_output: ClassVar[dict[str, str]] = {
+        "vllm::moe_forward": "vllm::moe_forward_with_output",
+        "vllm::moe_forward_shared": "vllm::moe_forward_shared_with_output",
+    }
 
     def compute_hash(self) -> str:
         """Provide a hash that uniquely identifies all the configs
@@ -1168,6 +1177,12 @@ class CompilationConfig:
             if self.splitting_ops is None:
                 self.splitting_ops = []
             return
+
+        if self.splitting_ops:
+            self.splitting_ops = [
+                self._moe_ops_with_output.get(op.removesuffix(".default"), op)
+                for op in self.splitting_ops
+            ]
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
