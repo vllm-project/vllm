@@ -95,7 +95,11 @@ class DecodeConfig:
     tp_size: int
     widths: tuple[int, ...] = WIDTHS
     tokens: tuple[int, ...] = STEP_TOKENS
-    poll_limit: int = 20_000_000
+    # a kernel wait expires (and the engine fail-stops) only when a peer is this
+    # late: a rank seconds behind (a host stall) is waited out, as vLLM's own
+    # collectives do, and a stalled peer still stops the engine inside vLLM's
+    # execute timeout
+    poll_timeout_us: int = 60_000_000
     numerics: tuple[str, ...] = NUMERICS
 
     def width_for(self, tokens: int) -> int | None:

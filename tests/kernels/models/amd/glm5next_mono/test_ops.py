@@ -8,7 +8,8 @@ stage, at every width; then every width is captured in one graph and replayed,
 bit for bit against the first run. The checks live beside this file:
 
 - ``_ffn``: the FFN half (mHC seam, RMSNorm, router, top-8, shared expert, MXFP4
-  experts, MoE TP reduce), and a stalled rank's expired waits;
+  experts, MoE TP reduce), a stalled rank's expired waits and a late rank waited
+  out;
 - ``_kda``: the whole KDA layer (in-projections, short conv, gated delta rule,
   gated norm, o_proj and its TP reduce), then the FFN half;
 - ``_dsa``: the whole sparse-attention layer (MLA and kpool index caches, the
@@ -43,9 +44,32 @@ def test_ffn_layer_matches_vllm_ops(
     multi_process_parallel(monkeypatch, tp, 1, _ffn._worker(_ffn._check, separate))
 
 
-def test_stalled_rank_reports_expiry(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("early_out", [False, True])
+def test_stalled_rank_reports_expiry(monkeypatch: pytest.MonkeyPatch, early_out: bool):
     _ready(4)
-    multi_process_parallel(monkeypatch, 4, 1, _ffn._worker(_ffn._check_fault))
+    multi_process_parallel(
+        monkeypatch, 4, 1, _ffn._worker(_ffn._check_fault, early_out)
+    )
+
+
+def test_late_rank_is_waited_for(monkeypatch: pytest.MonkeyPatch):
+    _ready(4)
+    multi_process_parallel(monkeypatch, 4, 1, _ffn._worker(_ffn._check_slow_rank))
+
+
+def test_stalled_rank_in_sparse_attention_reports_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _ready(4)
+    multi_process_parallel(monkeypatch, 4, 1, _ffn._worker(_dsa._check_fault))
+
+
+@pytest.mark.parametrize("live", [0.0, 0.02, 0.5])
+def test_sparse_attention_selects_through_tied_scores(
+    monkeypatch: pytest.MonkeyPatch, live: float
+):
+    _ready(4)
+    multi_process_parallel(monkeypatch, 4, 1, _ffn._worker(_dsa._check_ties, live))
 
 
 @pytest.mark.parametrize(
