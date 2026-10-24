@@ -243,6 +243,8 @@ thw = "thw"
 tpos = "tpos"
 subtile = "subtile"
 HSA = "HSA"
+# AMDGPU buffer addressing modifier (inline asm)
+offen = "offen"
 setp = "setp"
 CPY = "CPY"
 thr = "thr"

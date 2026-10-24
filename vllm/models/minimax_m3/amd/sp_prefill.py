@@ -39,7 +39,7 @@ def _run(issue) -> None:
 
     if dbo_tp_collective(issue):
         return
-    comm = get_tp_group().device_communicator.pynccl_comm
+    comm = get_tp_group().device_communicator.pynccl_comm  # type: ignore[union-attr]
     issue(comm, torch.cuda.current_stream())
 
 
@@ -194,6 +194,7 @@ class SeqShard:
         from vllm.models.minimax_m3.amd.ops import sp_coll
         from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+        assert _POOLS is not None
         return sp_coll.Collectives(_POOLS, dbo_current_ubatch_id())
 
     def begin_phase(self) -> None:
@@ -478,7 +479,7 @@ def _post_attention_phase(sp: SeqShard, layer, attn_output, residual):
     device = residual.device
     moe = layer.block_sparse_moe if layer.is_moe_layer else None
     mxfp4 = moe is not None and moe._sp_quant == "mxfp4"
-    need_fp8 = not mxfp4 or moe.shared_experts is not None
+    need_fp8 = not mxfp4 or (moe is not None and moe.shared_experts is not None)
     codes = scales = fp4 = None
     if need_fp8:
         codes = torch.empty((sp.padded, hidden), dtype=_FP8, device=device)
@@ -516,6 +517,7 @@ def _post_attention_phase(sp: SeqShard, layer, attn_output, residual):
             outs += [codes, scales]
             ins += [x_q, x_s]
         if mxfp4:
+            assert fp4 is not None
             outs += list(fp4)
             ins += mxfp4_quant(
                 x,

@@ -721,7 +721,7 @@ def compile_moe_gemm2(
                 """One 16x16 tile: 4 f32 -> bf16(v * w_row), 8 B into the staging
                 buffer"""
                 cv = Vec(_pin_vec4(cq[mfma.idx(ti, tj)]))
-                w = wA[h][ti]
+                w = wA[h][ti]  # type: ignore[index]
                 v = [fx.Float32(cv[k]) * w for k in range_constexpr(4)]
                 row = ti * 16 + r16
                 chunk = (
@@ -783,7 +783,7 @@ def compile_moe_gemm2(
                     else:
                         for tj in range_constexpr(NB):
                             ts.append(
-                                lambda ti=ti, tj=tj: _stage_bf16(cq, h, hb, ti, tj)
+                                lambda ti=ti, tj=tj: _stage_bf16(cq, h, hb, ti, tj)  # type: ignore[misc]
                             )
                 return ts
 
@@ -817,13 +817,13 @@ def compile_moe_gemm2(
                         buffer_ops.buffer_store(
                             scv,
                             osc_rsrc,
-                            sc_off[h] + sc_col,
+                            sc_off[h] + sc_col,  # type: ignore[index]
                             mask=mask,
                             offset_is_bytes=True,
                             cache_modifier=_STORE_CPOL_SC,
                         )
 
-                    ts.append(_st_sc)
+                    ts.append(_st_sc)  # type: ignore[arg-type]
                 return ts
 
             def _wb2(first, c_first, c_other):
@@ -1006,7 +1006,7 @@ def compile_moe_gemm2(
             init_state = _flat_state(
                 b0f, b1f, (_sc0[:2], _sc0[2:]), [zero_v4] * N_ACCUMS
             )
-            for np_, state in range(0, NT // 2, init=init_state):
+            for np_, state in range(0, NT // 2, init=init_state):  # type: ignore[call-overload]
                 b0f, b1f, sc, c11p = _unflat_state(state)
                 np_i = fx.Int32(np_)
                 first = np_i == fx.Int32(0)

@@ -294,7 +294,7 @@ class Mfma16x16x128Fp4:
         compiler inserts no MFMA -> v_accvgpr_read hazard waits; 8 MFMAs (128+ cycles)
         cover the last one's latency."""
         thunks = list(interleave) if interleave else []
-        lates = list(late) if late else []
+        late_ids = list(late) if late else []
         nth = [0]
         nlt = [0]
         mth = [0]
@@ -307,8 +307,11 @@ class Mfma16x16x128Fp4:
         )
         n_late_slots = max(n_mfma - late_start, 1)
         lslots = (
-            {late_start + (t * n_late_slots) // len(lates) for t in range(len(lates))}
-            if lates
+            {
+                late_start + (t * n_late_slots) // len(late_ids)
+                for t in range(len(late_ids))
+            }
+            if late_ids
             else set()
         )
         for ksub in range_constexpr(_FP4_PACK):
@@ -330,15 +333,15 @@ class Mfma16x16x128Fp4:
                 if nth[0] < len(thunks) and mth[0] in slots:
                     thunks[nth[0]]()
                     nth[0] += 1
-                if nlt[0] < len(lates) and mth[0] in lslots:
-                    lates[nlt[0]]()
+                if nlt[0] < len(late_ids) and mth[0] in lslots:
+                    late_ids[nlt[0]]()
                     nlt[0] += 1
                 mth[0] += 1
         while nth[0] < len(thunks):
             thunks[nth[0]]()
             nth[0] += 1
-        while nlt[0] < len(lates):
-            lates[nlt[0]]()
+        while nlt[0] < len(late_ids):
+            late_ids[nlt[0]]()
             nlt[0] += 1
         return c
 
@@ -980,7 +983,7 @@ def compile_moe_gemm1(
                 + [_R(x) for x in accs[2]]
                 + [_R(x) for x in accs[3]]
             )
-            for kk, state in range(2, K_ITERS - 2, UNROLL, init=init_state):
+            for kk, state in range(2, K_ITERS - 2, UNROLL, init=init_state):  # type: ignore[call-overload]
                 off = 0
                 a0f = _unflat_frag(state[off : off + n_a], N_TILES_A)
                 off += n_a

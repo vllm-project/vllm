@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This system currently only targets DP+EP deployments.
+The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. It targets DP+EP deployments, and pure tensor-parallel deployments, where it overlaps the TP all-reduces instead (see [DBO under pure tensor parallelism](#dbo-under-pure-tensor-parallelism)).
 
 ## Introduction
 
@@ -40,6 +40,17 @@ Below is a command that will spin up a two DP rank server with expert parallelis
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+
+### DBO under pure tensor parallelism
+
+With `--tensor-parallel-size N` (N > 1) and neither data nor expert parallelism, `--enable-dbo` overlaps the TP all-reduces instead: each microbatch issues its all-reduces on the comm stream, over its own NCCL communicator, while the other microbatch computes. This mode needs Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) and no all2all backend.
+
+* Each rank decides alone whether to split a step; there is no DP coordination.
+* A split step runs without CUDA graphs. Set `--dbo-decode-token-threshold` above the largest decode batch so that decode steps keep their graphs, and raise `--dbo-prefill-token-threshold` (e.g. to 8192) so that only long prefills split.
+* `fused_allreduce_gemma_rms_norm` skips its FlashInfer and AITER fused kernels under DBO, so that every all-reduce is a microbatch hand-off.
+* Speculative decoding and multimodal models are allowed in this mode.
+
+EX: `VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable-dbo --dbo-prefill-token-threshold 8192 --dbo-decode-token-threshold 32768`
 
 ## DBO Components
 

@@ -94,7 +94,8 @@ def _float_reference(x, raw, topk_ids, topk_weights, tokens, same_operands):
     w13_q, w13_s, w2_q, w2_s = raw
     xs = x[tokens]
     if same_operands:
-        xs = _dequant(*mxfp4_quant(xs, None, None), HIDDEN)
+        q, s = mxfp4_quant(xs, None, None)
+        xs = _dequant(q, s, HIDDEN)
     xs = xs.float()
     deq = {}
     out = torch.zeros((len(tokens), HIDDEN), dtype=torch.float32, device=x.device)
@@ -189,7 +190,7 @@ def test_moe_mxfp4_prefill(weights, m):
     out = _run(shuffled, x, topk_ids, topk_weights)
     out2 = _run(shuffled, x, topk_ids, topk_weights)
     ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert out.shape == (m, HIDDEN) and out.dtype == torch.bfloat16
     assert torch.equal(out, out2)  # no atomics: the same bits every call
     tokens = torch.randperm(m, device=x.device)[:CHECK_TOKENS].tolist()

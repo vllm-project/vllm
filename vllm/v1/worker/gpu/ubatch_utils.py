@@ -366,7 +366,7 @@ class UBatchRunner:
             t.start()
         for t in threads:
             t.join()
-        torch.cuda.synchronize(self.device)
+        torch.accelerator.synchronize(self.device)
 
     def prepare(
         self,

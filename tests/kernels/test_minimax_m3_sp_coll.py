@@ -55,7 +55,7 @@ def _worker(rank: int, init_file: str, errors):
 
 
 def _run(rank: int, init_file: str):
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     dev = torch.device("cuda", rank)
     dist.init_process_group(
         "gloo", init_method=f"file://{init_file}", rank=rank, world_size=WORLD
@@ -90,7 +90,7 @@ def _run(rank: int, init_file: str):
         g_scales = torch.empty((padded, HIDDEN // 32), dtype=torch.uint8, device=dev)
         g_routing = torch.empty((padded, 18), dtype=torch.int32, device=dev)
         coll.all_gather([g_codes, g_scales, g_routing], [codes, scales, routing])
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         sends = _gather_cpu(send)
         for p in range(WORLD):
             exp = sends[p][rank * ROWS : (rank + 1) * ROWS]
@@ -111,7 +111,7 @@ def _run(rank: int, init_file: str):
         g_aux = torch.empty((padded, HIDDEN), dtype=torch.bfloat16, device=dev)
         g_ctx = torch.empty((padded, HIDDEN), dtype=torch.bfloat16, device=dev)
         coll.all_gather([g_aux, g_ctx], [aux, ctx])
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         parts = _gather_cpu(part)
         acc = torch.zeros((ROWS, HIDDEN), dtype=torch.float32)
         for p in range(WORLD):
@@ -132,7 +132,7 @@ def _run(rank: int, init_file: str):
     part.copy_((torch.randn((padded, HIDDEN), generator=gen) * 3).bfloat16())
     h = torch.empty((ROWS, HIDDEN), dtype=torch.bfloat16, device=dev)
     coll.bind(stream, rccl).reduce_scatter(h, part)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     sends, parts = _gather_cpu(send), _gather_cpu(part)
     for p in range(WORLD):
         exp = sends[p][rank * ROWS : (rank + 1) * ROWS]
@@ -152,7 +152,7 @@ def _run(rank: int, init_file: str):
     coll.all_to_all(recv, send)
     coll = sp_coll.Collectives(pools, 0).bind(stream, rccl)
     codes, scales = coll.all_to_all_unpack(send, q)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     ref_codes, ref_scales = mxfp8_unpack(recv, WORLD, ROWS, q)
     assert torch.equal(codes.view(torch.uint8), ref_codes.view(torch.uint8))
     assert torch.equal(scales, ref_scales)
@@ -163,7 +163,7 @@ def _run(rank: int, init_file: str):
     big = rnd_u8(4 * padded, HIDDEN)
     g_big = torch.empty((WORLD, 4 * padded, HIDDEN), dtype=torch.uint8, device=dev)
     coll.all_gather([g_big], [big])
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert rccl.calls == ["all_gather"]
     assert torch.equal(g_big.view(-1, HIDDEN).cpu(), torch.cat(_gather_cpu(big)))
     dist.barrier()
@@ -171,7 +171,7 @@ def _run(rank: int, init_file: str):
 
 
 def test_sp_coll_four_gpus(tmp_path):
-    if torch.cuda.device_count() < WORLD:
+    if torch.accelerator.device_count() < WORLD:
         pytest.skip("needs four GPUs")
     from vllm.platforms.rocm import on_gfx950
 

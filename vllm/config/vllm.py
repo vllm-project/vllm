@@ -3090,6 +3090,11 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        if self.parallel_config.dbo_tp_only:
+            unsupported.append(
+                "dual batch overlap without DP/EP (set VLLM_USE_V2_MODEL_RUNNER=1)"
+            )
+
         return unsupported
 
     def _validate_adaptive_verification(self) -> None:

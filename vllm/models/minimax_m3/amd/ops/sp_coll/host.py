@@ -7,6 +7,7 @@ c + 2 only after every peer published c + 1, i.e. finished pulling phase c."""
 import ctypes
 import functools
 import math
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -68,9 +69,9 @@ def _alloc_pool(nbytes: int, device: torch.device) -> tuple[int, bytes, torch.Te
     """-> (pointer, IPC handle bytes, uint8 tensor); never freed."""
     hip = _hip()
     ptr = ctypes.c_void_p()
-    with torch.cuda.device(device):
+    with torch.accelerator.device_index(device.index):
         rc = hip.hipMalloc(ctypes.byref(ptr), nbytes)
-    assert rc == 0, f"hipMalloc({nbytes}) failed: {rc}"
+    assert rc == 0 and ptr.value is not None, f"hipMalloc({nbytes}) failed: {rc}"
     handle = _IpcHandle()
     rc = hip.hipIpcGetMemHandle(ctypes.byref(handle), ptr)
     assert rc == 0, f"hipIpcGetMemHandle failed: {rc}"
@@ -87,9 +88,9 @@ def _open_pool(handle: bytes, device: torch.device) -> int:
     h = _IpcHandle()
     assert len(handle) == ctypes.sizeof(h)
     ctypes.memmove(ctypes.addressof(h), handle, len(handle))
-    with torch.cuda.device(device):
+    with torch.accelerator.device_index(device.index):
         rc = hip.hipIpcOpenMemHandle(ctypes.byref(ptr), h, 1)  # lazy peer access
-    assert rc == 0, f"hipIpcOpenMemHandle failed: {rc}"
+    assert rc == 0 and ptr.value is not None, f"hipIpcOpenMemHandle failed: {rc}"
     return ptr.value
 
 
@@ -143,7 +144,7 @@ class Pools:
             base = self.flag_ptrs[rank] + _kernel.FLAG_STRIDE * s
             _run_compiled(publish, base, 0, stream)
             _run_compiled(publish, base + 4, 0, stream)
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
         dist.barrier(group=group)
         logger.info(
             "sp_coll: %d sets x %d slots x %.0f MB pools, FlyDSL collectives on",
@@ -174,7 +175,7 @@ class Collectives:
         self.base, self.flag_off = pools.slot(set_id)
         self.off = 0
         self.stream: torch.cuda.Stream | None = None
-        self.rccl = None
+        self.rccl: Any = None
 
     def bind(self, stream: torch.cuda.Stream, rccl) -> "Collectives":
         self.stream, self.rccl = stream, rccl
@@ -243,7 +244,7 @@ class Collectives:
             return
         self._publish_wait()
         for o, i, off in zip(outs, ins, offs):
-            assert o.is_contiguous() and o.dtype == i.dtype
+            assert off is not None and o.is_contiguous() and o.dtype == i.dtype
             block = i.numel() * i.element_size()
             assert o.numel() * o.element_size() == WORLD * block, (o.shape, i.shape)
             self._pull(o, off, block, 0)

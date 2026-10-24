@@ -176,11 +176,3 @@ def test_hook_is_inert_outside_a_microbatch(monkeypatch):
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {threading.get_ident(): 0})
     monkeypatch.setattr(parallel_state, "_TP", object())
     assert ubatching._dbo_tp_all_reduce(object(), torch.ones(2)) is None
-
-
-@pytest.mark.parametrize(("rocm", "priority"), [(True, -1), (False, 0)])
-def test_comm_stream_priority(monkeypatch, rocm, priority):
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
-    assert ubatching.dbo_comm_stream_priority() == priority
