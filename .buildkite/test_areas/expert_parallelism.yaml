@@ -62,6 +62,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Elastic EP Scaling"
   key: elastic-ep-scaling-test
+  automatic_shard: true
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
