@@ -5,7 +5,7 @@ import pytest
 
 from tests.models.utils import GenerateModelInfo
 
-from .ppl_utils import vqa_ppl_test
+from .ppl_utils import ppl_tol, vqa_ppl_test
 
 MODELS = [
     (
@@ -45,6 +45,7 @@ def test_ppl(
     factor: int,
     extra_kwargs: dict,
     mm_device_do_normalize: bool,
+    aiter_config: str,
 ):
     vqa_ppl_test(
         hf_runner,
@@ -55,4 +56,5 @@ def test_ppl(
             **extra_kwargs,
         },
         mm_processor_kwargs=_pixel_factor(factor),
+        tol=ppl_tol(aiter_config),
     )
