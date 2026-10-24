@@ -112,7 +112,7 @@ class DecoderReplayLayers:
         replay_batch = self.replay_batch
         if replay_batch is None:
             return self.run_layers(hidden_states, *states)
-        # Replay batch steps hold more than `window` tokens: no deferred MoE finalize.
+        # Replay batch steps hold more than `window` tokens: no unfinalized MoE output.
         assert isinstance(hidden_states, torch.Tensor)
         rows = replay_batch.rows
         inputs = (hidden_states, *states)

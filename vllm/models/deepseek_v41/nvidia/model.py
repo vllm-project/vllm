@@ -3,7 +3,7 @@
 import typing
 from collections.abc import Callable, Iterable
 from functools import partial
-from itertools import islice
+from itertools import islice, zip_longest
 
 import regex as re
 import torch
@@ -95,6 +95,7 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -126,6 +127,76 @@ if typing.TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@triton.jit
+def _finalize_shared_add_kernel(
+    perm_ptr,
+    w_ptr,
+    idx_ptr,
+    shared_ptr,
+    out_ptr,
+    H: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    t = tl.program_id(0).to(tl.int64)
+    hb = tl.program_id(1)
+    cols = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+    cmask = cols < H
+    acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+    for k in tl.static_range(TOPK):
+        p = tl.load(idx_ptr + t * TOPK + k)
+        w = tl.load(w_ptr + t * TOPK + k).to(tl.float32)
+        # A negative row is an expert of another rank.
+        valid = p >= 0
+        x = tl.load(
+            perm_ptr + p.to(tl.int64) * H + cols, mask=cmask & valid, other=0.0
+        ).to(tl.float32)
+        acc = tl.where(valid, tl.fma(x, w, acc), acc)
+    fin = acc.to(tl.bfloat16)
+    s = tl.load(shared_ptr + t * H + cols, mask=cmask, other=0.0)
+    y = (s.to(tl.float32) + fin.to(tl.float32)).to(tl.bfloat16)
+    tl.store(out_ptr + t * H + cols, y, mask=cmask)
+
+
+def _finalize_shared_add(output: MoEOutput) -> torch.Tensor:
+    """Top-k finalize of a deferred MoE output fused with the shared-expert add.
+
+    Takes ``gemm2_permuted`` [num_permuted_rows, hidden] bf16, the float routing
+    weights and int32 permute map [num_tokens, top_k] (a negative index skips
+    the route) and ``shared_output`` [num_tokens, hidden] bf16, all contiguous,
+    with no routed scale left to apply. Returns [num_tokens, hidden] bf16 computed
+    like the TRTLLM-Gen finalize followed by the runner's ``shared + routed``:
+    per token, an fp32 FMA over its top-k rows in slot order, rounded to bf16,
+    then an fp32 add of the shared output, rounded to bf16. Given the same
+    GEMM2 output it matches those two kernels bit for bit (NaN payloads aside).
+    """
+    routed, shared = output.routed, output.shared_output
+    assert isinstance(routed, UnfinalizedMoEOutput) and shared is not None
+    assert output.routed_scaling_factor == 1.0
+    perm = routed.gemm2_permuted
+    weights = routed.expert_weights
+    idx = routed.expanded_idx_to_permuted_idx
+    num_tokens, hidden_size = shared.shape
+    assert perm.dtype == shared.dtype == torch.bfloat16
+    assert perm.shape[1] == hidden_size
+    assert all(t.is_contiguous() for t in (perm, weights, idx, shared))
+    out = torch.empty_like(shared)
+    block_h = 1024
+    grid = (num_tokens, triton.cdiv(hidden_size, block_h))
+    _finalize_shared_add_kernel[grid](
+        perm,
+        weights,
+        idx,
+        shared,
+        out,
+        H=hidden_size,
+        TOPK=idx.shape[1],
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    return out
+
+
 class DeepseekV4MoE(DeepseekV4MoEBase):
     def __init__(
         self,
@@ -154,34 +225,71 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             reduce_results=reduce_results,
             image_sentinel_lo=IMAGE_SENTINEL_BASE_ID,
         )
+        self._defers_finalize = False
+        self._next_layer_finalize_max_tokens = 0
 
-    def defer_finalize(self) -> None:
-        """Leave the routed top-k reduction to the next fused all-reduce + mHC.
+    def defer_finalize(self, next_layer_max_tokens: int) -> None:
+        """Stop the routed experts after GEMM2 and finalize outside them.
 
-        Only the modular TRTLLM MXFP4 experts can stop after GEMM2; the fused
-        kernel takes as many tokens as the mHC overlap path.
+        Only for the modular TRTLLM-Gen MXFP4 experts, whose finalize
+        ``_finalize_shared_add`` reproduces, on a TP-only deployment. Deferred
+        calls of up to ``next_layer_max_tokens`` tokens are finalized by the next
+        layer's fused all-reduce + mHC; ``forward`` finalizes the others.
         """
-        moe_config = self.experts.moe_config
+        if self.use_native_mega_moe or self.shared_experts is None:
+            return
         experts_cls = getattr(
             self.experts.routed_experts.quant_method, "experts_cls", None
         )
         if (
-            experts_cls is TrtLlmMxfp4ExpertsModular
-            and self.experts.routed_scaling_factor == 1.0
+            experts_cls is not TrtLlmMxfp4ExpertsModular
+            or self.experts.routed_scaling_factor != 1.0
         ):
-            moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)
-            if moe_config.use_deferred_moe_finalize:
-                logger.info_once(
-                    "DSV4.1 mHC: MoE top-k finalize fused into the all-reduce for "
-                    "up to %d tokens.",
-                    MHC_OVERLAP_MAX_TOKENS,
-                )
+            return
+        moe_config = self.experts.moe_config
+        moe_config.defer_moe_finalize()
+        self._defers_finalize = moe_config.use_deferred_moe_finalize
+        if not self._defers_finalize:
+            return
+        self._next_layer_finalize_max_tokens = next_layer_max_tokens
+        logger.info_once("DSV4.1: MoE top-k finalize fused with the shared-expert add.")
+        if next_layer_max_tokens > 0:
+            logger.info_once(
+                "DSV4.1 mHC: MoE top-k finalize fused into the all-reduce for "
+                "up to %d tokens.",
+                next_layer_max_tokens,
+            )
 
     def defers_finalize(self, num_tokens: int) -> bool:
+        """Whether the routed experts stop after GEMM2 for this call."""
         return (
-            not self.use_native_mega_moe
+            self._defers_finalize
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
+
+    def finalizes_in_next_layer(self, num_tokens: int) -> bool:
+        """Whether the next layer's fused all-reduce + mHC finalizes this call."""
+        return (
+            num_tokens <= self._next_layer_finalize_max_tokens
+            and self.defers_finalize(num_tokens)
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+    ) -> torch.Tensor:
+        if not self.defers_finalize(hidden_states.shape[0]):
+            return super().forward(hidden_states, input_ids, mega_gate_metadata)
+        # Where the experts defer, the runner all-reduces exactly when
+        # reduce_results is set.
+        output = _finalize_shared_add(
+            self.forward_unfinalized(hidden_states, input_ids)
+        )
+        if self.reduce_results:
+            output = tensor_model_parallel_all_reduce(output)
+        return output
 
     def forward_unfinalized(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
@@ -652,7 +760,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
         )
-        if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
+        if self.fuse_mhc_all_reduce and self.ffn.finalizes_in_next_layer(x.shape[0]):
             # The next layer's first boundary finalizes it with the all-reduce.
             x = self.ffn.forward_unfinalized(x, input_ids)
         else:
@@ -841,16 +949,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ],
             vllm_config.scheduler_config.max_num_batched_tokens,
         )
-        if self.fuse_mhc_all_reduce:
-            # A MoE's top-k finalize folds into the next layer's first mHC
-            # boundary, which the last local layer lacks and an engram layer
-            # replaces with its own all-reduce.
-            local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
-            for layer, successor in zip(local_layers, local_layers[1:]):
-                assert isinstance(layer, DeepseekV4DecoderLayer)
-                assert isinstance(successor, DeepseekV4DecoderLayer)
-                if successor.engram is None:
-                    layer.ffn.defer_finalize()
+        # A MoE's top-k finalize folds into the next layer's first mHC
+        # boundary, which the last local layer lacks and an engram layer
+        # replaces with its own all-reduce. The MoE layer finalizes every other
+        # deferred call itself, together with the shared-expert add.
+        local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
+        for layer, successor in zip_longest(local_layers, local_layers[1:]):
+            assert isinstance(layer, DeepseekV4DecoderLayer)
+            folds = (
+                self.fuse_mhc_all_reduce
+                and isinstance(successor, DeepseekV4DecoderLayer)
+                and successor.engram is None
+            )
+            layer.ffn.defer_finalize(MHC_OVERLAP_MAX_TOKENS if folds else 0)
 
         # Decoder-side SWA bounded replay: in eager prefill steps the layers past
         # the last KV source run on each request's trailing window only
