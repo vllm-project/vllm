@@ -400,8 +400,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
             )
 
-        api_server_manager.shutdown(timeout=timeout)
         if local_engine_manager:
-            local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
+            local_engine_manager.shutdown(timeout=timeout)
+        api_server_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
