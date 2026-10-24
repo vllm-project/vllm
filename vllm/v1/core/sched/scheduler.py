@@ -1098,11 +1098,11 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
-                            )
-                        )
+                        if hit_diverged:
+                            lookup = self.connector.get_divergent_matched_tokens
+                        else:
+                            lookup = self.connector.get_num_new_matched_tokens
+                        ext_tokens, load_kv_async = lookup(request, block_aligned_local)
                         if request.skip_reading_prefix_cache:
                             ext_tokens, load_kv_async = 0, False
 

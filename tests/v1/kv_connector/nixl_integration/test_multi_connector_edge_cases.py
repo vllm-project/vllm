@@ -16,6 +16,7 @@ import time
 import urllib.request
 
 import openai
+import pytest
 import regex as re
 
 # ── Server configuration from environment ─────────────────────────────────
@@ -392,6 +393,42 @@ def test_partial_decode_gpu_cache_hit_metrics():
         f"expected nixl_bytes_transferred to increase (NIXL for uncached "
         f"tail), got delta={n1 - n0}"
     )
+
+
+def test_mixed_hybrid_decode_reuses_divergent_local_prefix():
+    """NIXL restores recurrent state while decode reuses local attention KV."""
+    if _get_model() != "Qwen/Qwen3.5-0.8B":
+        pytest.skip("Requires the Qwen3.5-0.8B hybrid model")
+
+    prompt = (
+        "In a distributed inference system, the decode node stores attention "
+        "cache blocks locally while the recurrent layer uses a single state "
+        "block. "
+    ) * 25
+    bytes_before = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
+
+    first_text, prompt_tokens = _complete(proxy_client, prompt, max_tokens=4)
+    metrics_middle = _fetch_decode_metrics()
+    bytes_middle = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
+    second_text, _ = _complete(proxy_client, prompt, max_tokens=4)
+    metrics_after = _fetch_decode_metrics()
+    bytes_after = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
+
+    first_bytes = bytes_middle - bytes_before
+    second_bytes = bytes_after - bytes_middle
+    second_local_hits = (
+        metrics_after["local_cache_hit"] - metrics_middle["local_cache_hit"]
+    )
+    print(
+        f"HYBRID MIXED: {prompt_tokens} tokens, "
+        f"local hits {second_local_hits}, "
+        f"NIXL bytes {first_bytes} -> {second_bytes}"
+    )
+    assert prompt_tokens > 576
+    assert first_text == second_text
+    assert first_bytes > 0
+    assert second_local_hits > 0
+    assert second_bytes < first_bytes
 
 
 def test_decode_direct_all_local_compute():

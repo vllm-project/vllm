@@ -547,6 +547,14 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_divergent_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        """Look up a hit that can restore state at a divergent local boundary."""
+        if not self.supports_divergent_local_hybrid_hits:
+            return 0, False
+        return self.get_num_new_matched_tokens(request, num_computed_tokens)
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

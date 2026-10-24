@@ -3,6 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -10,6 +11,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.v1.kv_connector.unit.utils import MockKVConnector
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -25,6 +27,8 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -80,6 +84,16 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+class MockHybridKVConnector(MockKVConnector, SupportsHMA):
+    def request_finished_all_groups(self, request, block_ids):
+        return False, None
+
+
+KVConnectorFactory.register_connector(
+    "MockHybridKVConnector", __name__, MockHybridKVConnector.__name__
+)
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -7678,8 +7692,32 @@ def _create_hybrid_mamba_connector_scheduler(
     block_size: int = 16,
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
+    multi_child_matches: tuple[int, int] | None = None,
 ) -> Scheduler:
     """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
+    connector_name = "MockKVConnector"
+    connector_config: dict[str, Any] = {
+        "matched_tokens": matched_tokens,
+        "is_async": False,
+        "supports_divergent_local_hybrid_hits": supports_divergent_hits,
+    }
+    if multi_child_matches is not None:
+        connector_name = "MultiConnector"
+        connector_config = {
+            "connectors": [
+                {
+                    "kv_connector": "MockHybridKVConnector",
+                    "kv_connector_module_path": __name__,
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "matched_tokens": child_match,
+                        "is_async": False,
+                        "supports_divergent_local_hybrid_hits": index == 1,
+                    },
+                }
+                for index, child_match in enumerate(multi_child_matches)
+            ]
+        }
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -7703,13 +7741,9 @@ def _create_hybrid_mamba_connector_scheduler(
             mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
-            kv_connector="MockKVConnector",
+            kv_connector=connector_name,
             kv_role="kv_both",
-            kv_connector_extra_config={
-                "matched_tokens": matched_tokens,
-                "is_async": False,
-                "supports_divergent_local_hybrid_hits": supports_divergent_hits,
-            },
+            kv_connector_extra_config=connector_config,
         ),
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
@@ -7908,6 +7942,46 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
         replay.block_hashes, replay.num_tokens - 1
     )
     assert per_group_hits == (4 * block_size, 1 * block_size)  # FA deeper
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
+
+
+@pytest.mark.parametrize(
+    "child_matches,expected_num_computed",
+    [
+        ((16, 16), 80),
+        ((16, 0), 16),
+    ],
+)
+def test_mixed_multi_connector_routes_divergent_hit_only_to_capable_child(
+    child_matches: tuple[int, int], expected_num_computed: int
+):
+    """A mixed connector keeps the FA hit only when a capable child restores Mamba."""
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens=0, multi_child_matches=child_matches
+    )
+    manager = scheduler.kv_cache_manager
+    assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
+
+    _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
+    manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=6 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (4 * block_size, block_size)
 
     scheduler.add_request(replay)
     output = scheduler.schedule()

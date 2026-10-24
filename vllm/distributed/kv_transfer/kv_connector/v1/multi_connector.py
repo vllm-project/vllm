@@ -212,9 +212,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
-        return bool(self._connectors) and all(
-            c.supports_divergent_local_hybrid_hits for c in self._connectors
-        )
+        return any(c.supports_divergent_local_hybrid_hits for c in self._connectors)
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -453,11 +451,28 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        return self._get_num_new_matched_tokens(request, num_computed_tokens, False)
+
+    def get_divergent_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        return self._get_num_new_matched_tokens(request, num_computed_tokens, True)
+
+    def _get_num_new_matched_tokens(
+        self, request: "Request", num_computed_tokens: int, hit_diverged: bool
+    ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
-            toks, load_async = c.get_num_new_matched_tokens(
-                request, num_computed_tokens
-            )
+            if hit_diverged:
+                if not c.supports_divergent_local_hybrid_hits:
+                    continue
+                toks, load_async = c.get_divergent_matched_tokens(
+                    request, num_computed_tokens
+                )
+            else:
+                toks, load_async = c.get_num_new_matched_tokens(
+                    request, num_computed_tokens
+                )
             # If there is a connector still looking up the matches,
             # we return None to indicate that we are not done yet.
             if toks is None:
