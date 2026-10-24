@@ -55,8 +55,8 @@ every step only with that setting.
 ## Supported deployments
 
 TP8 on MI355X with all 256 CUs, Model Runner V2, the Quark OCP-MXFP4
-checkpoint, bf16 model and KV cache (`ROCM_AITER_FA`, unshuffled layout, block
-size 16), no speculative decoding or DSpark with 7 speculative tokens (static
+checkpoint, bf16 model, a bf16 or fp8 (`--kv-cache-dtype fp8`, e4m3) KV cache
+(`ROCM_AITER_FA`, unshuffled layout, block size 16), no speculative decoding or DSpark with 7 speculative tokens (static
 K), FULL decode CUDA graphs or eager decode. Breakable CUDA graphs are fine.
 Multimodal inputs are not refused; `--language-model-only` is the tested
 configuration.
@@ -68,7 +68,8 @@ anything collective runs:
 - **Config** (the model's `__init__`): any parallelism but TP8 (and TEP8, below), EPLB, DBO, LoRA,
   KV connectors, sleep mode, CPU offload, prompt embeds, speculative methods
   other than static DSpark K = 7, the V1 model runner, PIECEWISE decode graphs,
-  a non-bf16 model, an fp8 KV cache, another block size, attention backend or
+  a non-bf16 model, an fp8 e5m2 KV cache, an fp8 KV cache with `k1` or `split`
+  (the kernels that read or write the cache), another block size, attention backend or
   quantization, another model's shapes or layer pattern, and the platform (not
   ROCm gfx950, FlyDSL missing, fewer than 256 CUs).
 - **Loaded weights** (when the model state builds the executor): each kernel

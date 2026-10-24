@@ -32,6 +32,9 @@ HINT = "decode_backend=auto without --monokernel runs vLLM's decode"
 KV_BLOCK = 16  # tokens a KV block (--block-size 16)
 REDUCE_DTYPES = ("fp32", "bf16")
 OFF_ROCM = "this platform (ROCm only)"
+BF16_KV = ("auto", "bfloat16")
+# e4m3 pages (uint8 storage), scaled by the layer's k / v scale
+FP8_KV = ("fp8", "fp8_e4m3")
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,33 @@ def requested(vllm_config) -> bool:
         )
     kernel_config = getattr(vllm_config, "kernel_config", None)
     return backend == SPECIALIZED or bool(getattr(kernel_config, "monokernel", False))
+
+
+def kv_fp8(vllm_config) -> bool:
+    """The KV cache holds fp8 (e4m3) pages."""
+    cc = getattr(vllm_config, "cache_config", None)
+    return getattr(cc, "cache_dtype", None) in FP8_KV
+
+
+def kv_dtype_reason(vllm_config) -> str | None:
+    """Why the KV cache dtype cannot be served, None when it can: bf16, or fp8
+    (e4m3) while vLLM both writes and reads the cache (the stock front and the
+    tensor / gated cores: no kernel touches it)."""
+    dtype = vllm_config.cache_config.cache_dtype
+    if dtype in BF16_KV:
+        return None
+    if dtype not in FP8_KV:
+        return f"KV cache dtype {dtype!r} (bf16 or fp8 e4m3 KV only)"
+    extra = vllm_config.additional_config
+    extra = extra if isinstance(extra, dict) else {}
+    front, core = extra.get("mono_front", "stock"), extra.get("mono_core", "tensor")
+    if front == "k1" or core == "split":
+        return (
+            f"KV cache dtype {dtype!r} with mono_front {front!r} / mono_core "
+            f"{core!r} (fp8 KV with the stock front and the tensor / gated "
+            "cores only)"
+        )
+    return None
 
 
 def _refuse(reasons: list[str]) -> None:
@@ -198,10 +228,6 @@ def refuse_config(vllm_config) -> list[str]:
         ),
         (mc.dtype != torch.bfloat16, f"model dtype {mc.dtype} (bfloat16 only)"),
         (
-            cc.cache_dtype not in ("auto", "bfloat16"),
-            f"KV cache dtype {cc.cache_dtype!r} (bf16 KV only)",
-        ),
-        (
             cc.block_size is not None and cc.block_size != KV_BLOCK,
             f"KV block size {cc.block_size} (--block-size {KV_BLOCK} only)",
         ),
@@ -234,6 +260,9 @@ def refuse_config(vllm_config) -> list[str]:
         ),
     )
     reasons = [why for bad, why in checks if bad]
+    kv_reason = kv_dtype_reason(vllm_config)
+    if kv_reason is not None:
+        reasons.append(kv_reason)
     reasons += _attention_reasons(vllm_config.attention_config, AttentionBackendEnum)
     shapes = text_shapes(text)
     if shapes != MUSE_SHAPES:

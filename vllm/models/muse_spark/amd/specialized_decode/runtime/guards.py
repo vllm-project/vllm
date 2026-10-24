@@ -15,6 +15,8 @@ from vllm.models.muse_spark.amd.specialized_decode.mono import spec
 
 SLIDING, FULL = "sliding", "full"
 _MISSING = object()
+# vLLM allocates an fp8 KV cache as uint8 and views it as the platform's e4m3
+FP8_KV_DTYPES = (torch.uint8, torch.float8_e4m3fn)
 
 
 def _get(obj: Any, path: str) -> Any:
@@ -340,7 +342,8 @@ def refuse_caches(
     backbone, layers: Mapping[int, str], vllm_config, reads_kv: bool = False
 ) -> list[str]:
     """Stage 3, at every KV bind: every kernel layer's KV cache as the Phase B/C
-    kernels address it ([blocks, 2, 16, 128] bf16, dense in its last dim), and
+    kernels address it ([blocks, 2, 16, 128] bf16, or fp8 e4m3 under
+    ``kv_cache_dtype`` fp8, dense in its last dim), and
     the resolved decode CUDA-graph mode. Phase A's K2 reads no KV cache; with a
     kernel that does (``reads_kv``: K1, the split core) also the page addressing
     (DESIGN_BC 8.3): the KV manager's blocks are the kernel's, rows 16-byte
@@ -350,16 +353,21 @@ def refuse_caches(
     kernels use 64-bit page bases) and layers sharing one tensor (KV groups alias
     the same bytes)."""
     from vllm.config import CUDAGraphMode
+    from vllm.models.muse_spark.amd.specialized_decode.runtime import kv_fp8
 
     reasons = []
     block = getattr(getattr(vllm_config, "cache_config", None), "block_size", None)
+    fp8 = kv_fp8(vllm_config)
+    dtypes, want = (FP8_KV_DTYPES, "fp8 e4m3") if fp8 else ((torch.bfloat16,), "bf16")
     for i in sorted(layers):
         kv = _get(backbone.layers[i], "self_attn.attn.kv_cache")
         if not isinstance(kv, torch.Tensor):
             reasons.append(f"layer {i}: no KV cache tensor")
             continue
-        if kv.dtype != torch.bfloat16:
-            reasons.append(f"layer {i}: KV cache {kv.dtype} (bf16 only)")
+        if kv.dtype not in dtypes:
+            reasons.append(f"layer {i}: KV cache {kv.dtype} ({want} only)")
+        elif fp8 and reads_kv:
+            reasons.append(f"layer {i}: fp8 KV cache read by K1 / the split core")
         if kv.ndim != 4 or kv.shape[1] != 2 or kv.shape[3] != 2 * spec.HEAD_DIM:
             reasons.append(
                 f"layer {i}: KV cache shape {tuple(kv.shape)} "

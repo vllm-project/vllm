@@ -229,7 +229,20 @@ _REFUSALS = [
     ),
     # 24-28 dtypes, KV cache, attention
     ({"model_config.dtype": torch.float16}, {}, "model dtype torch.float16"),
-    ({"cache_config.cache_dtype": "fp8"}, {}, "KV cache dtype 'fp8'"),
+    ({"cache_config.cache_dtype": "fp8_e5m2"}, {}, "KV cache dtype 'fp8_e5m2'"),
+    (
+        {"cache_config.cache_dtype": "fp8", "additional_config": {"mono_front": "k1"}},
+        {},
+        "KV cache dtype 'fp8' with mono_front 'k1'",
+    ),
+    (
+        {
+            "cache_config.cache_dtype": "fp8",
+            "additional_config": {"mono_core": "split"},
+        },
+        {},
+        "mono_core 'split' (fp8 KV with the stock front",
+    ),
     ({"cache_config.block_size": 32}, {}, "KV block size 32"),
     (
         {"attention_config.backend": AttentionBackendEnum.TRITON_ATTN},
@@ -309,6 +322,16 @@ def test_refusals(on_mi355x, monkeypatch, over, env, reason):
             monkeypatch.setenv(k, v)
     reasons = runtime.refuse_config(vllm_config(**over))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+@pytest.mark.parametrize("dtype", ["fp8", "fp8_e4m3"])
+@pytest.mark.parametrize("core", ["tensor", "gated"])
+def test_fp8_kv_accepted_when_vllm_owns_the_cache(on_mi355x, dtype, core):
+    cfg = vllm_config(
+        **{"cache_config.cache_dtype": dtype, "additional_config": {"mono_core": core}}
+    )
+    assert runtime.refuse_config(cfg) == []
+    assert runtime.kv_fp8(cfg)
 
 
 def test_platform_reasons_off_rocm(monkeypatch):
@@ -717,6 +740,26 @@ def test_refuse_caches(kv, mode, reason):
         bb, layers, _cfg_mode(mode or CUDAGraphMode.FULL_AND_PIECEWISE)
     )
     assert len(reasons) == 1 and reasons[0].startswith(reason), reasons
+
+
+def _cfg_fp8():
+    cfg = _cfg_mode(CUDAGraphMode.FULL_AND_PIECEWISE)
+    cfg.cache_config = SimpleNamespace(cache_dtype="fp8", block_size=16)
+    return cfg
+
+
+@pytest.mark.parametrize("dtype", [U8, torch.float8_e4m3fn])
+def test_refuse_caches_fp8(dtype):
+    bb = _backbone()
+    layers = kernel_layers(bb)
+    for i in layers:
+        bb.layers[i].self_attn.attn.kv_cache = _kv(dtype=dtype)
+    assert refuse_caches(bb, layers, _cfg_fp8()) == []
+    reasons = refuse_caches(bb, layers, _cfg_fp8(), reads_kv=True)
+    assert reasons and all("read by K1 / the split core" in r for r in reasons)
+    bb.layers[2].self_attn.attn.kv_cache = _kv()
+    reasons = refuse_caches(bb, layers, _cfg_fp8())
+    assert reasons == ["layer 2: KV cache torch.bfloat16 (fp8 e4m3 only)"]
 
 
 # --------------------------------------------------------------------------
