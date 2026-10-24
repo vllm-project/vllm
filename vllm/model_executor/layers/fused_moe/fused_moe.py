@@ -1369,42 +1369,57 @@ def get_default_config(
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
     else:
-        # General defaults for bf16/fp16 and fp8 per-tensor.
+        # General defaults for bf16/fp16, fp8 per-tensor, and float32.
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
-        if M <= 32:
-            block_m = 16
-        elif M <= 96:
-            block_m = 32
-        elif M <= 512:
-            block_m = 64
+        is_fp32 = dtype in ("float32", "fp32", torch.float32)
+
+        if is_fp32:
+            # Float32 elements use 4 bytes (2x fp16/bf16), which doubles shared
+            # memory requirements. Cap tile sizes and num_stages to prevent
+            # triton.runtime.errors.OutOfResources on GPUs with limited shared
+            # memory per SM (e.g. SM89 hardware limit is 101,376 bytes).
+            block_m = 16 if M <= 32 else (32 if M <= 96 else 64)
+            block_n = 64
+            block_k = 64
+            num_stages = 2
+            num_warps = 4 if M <= 128 else 8
+            tokens_per_expert = M // max(E, 1)
+            group_m = 16 if tokens_per_expert > 128 else 1
         else:
-            block_m = 128
+            if M <= 32:
+                block_m = 16
+            elif M <= 96:
+                block_m = 32
+            elif M <= 512:
+                block_m = 64
+            else:
+                block_m = 128
 
-        block_n = 64 if M <= 64 else 128
+            block_n = 64 if M <= 64 else 128
 
-        # Small batches benefit from longer reduction (larger K tile),
-        # while large batches prefer more output parallelism.
-        # FP8 elements are half-width so larger K tiles are always cheap.
-        block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
+            # Small batches benefit from longer reduction (larger K tile),
+            # while large batches prefer more output parallelism.
+            # FP8 elements are half-width so larger K tiles are always cheap.
+            block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
 
-        # Grouping adjacent M-blocks lets them share weight tiles in L2.
-        # Only helps when there are enough M-blocks per expert to group;
-        # with many experts each one sees few tokens so grouping is useless.
-        tokens_per_expert = M // max(E, 1)
-        group_m = 16 if tokens_per_expert > 128 else 1
+            # Grouping adjacent M-blocks lets them share weight tiles in L2.
+            # Only helps when there are enough M-blocks per expert to group;
+            # with many experts each one sees few tokens so grouping is useless.
+            tokens_per_expert = M // max(E, 1)
+            group_m = 16 if tokens_per_expert > 128 else 1
 
-        # Large batches have enough blocks to saturate the GPU, so we
-        # use more warps per block to increase arithmetic intensity.
-        num_warps = 4 if M <= 128 else 8
+            # Large batches have enough blocks to saturate the GPU, so we
+            # use more warps per block to increase arithmetic intensity.
+            num_warps = 4 if M <= 128 else 8
 
-        if current_platform.is_rocm():
-            num_stages = num_stages_rocm
-        elif M <= 32:
-            num_stages = 4
-        else:
-            num_stages = 3
+            if current_platform.is_rocm():
+                num_stages = num_stages_rocm
+            elif M <= 32:
+                num_stages = 4
+            else:
+                num_stages = 3
 
         config = {
             "BLOCK_SIZE_M": block_m,
