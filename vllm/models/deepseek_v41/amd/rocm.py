@@ -575,15 +575,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
-        self._index_source_prefix: str | None = None
         if self.compress_ratio > 0:
             assert self.index_source_layer_id is not None
-            self._index_source_prefix = _replace_layer_index(
+            index_source_prefix = _replace_layer_index(
                 self.prefix, self.index_source_layer_id
             )
-            if self._index_source_prefix not in self._static_forward_context:
+            if index_source_prefix not in self._static_forward_context:
                 raise NotImplementedError(
-                    f"Index source {self._index_source_prefix} not found on "
+                    f"Index source {index_source_prefix} not found on "
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
@@ -1102,7 +1101,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         assert attn_metadata is not None
         assert swa_metadata.is_valid_token is not None
         assert self.topk_indices_buffer is not None
-        assert self._index_source_prefix is not None
 
         runtime = get_cross_layer_runtime()
         key = self._cross_layer_decode_key()
@@ -1396,7 +1394,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         assert swa_metadata.seq_lens is not None
         assert swa_metadata.is_valid_token is not None
         assert self.topk_indices_buffer is not None
-        assert self._index_source_prefix is not None
         assert self.compressed_cache_prefix is not None
 
         runtime = get_cross_layer_runtime()
