@@ -385,6 +385,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_ids,
             _,
             _,
+            _,
         ) = self.token_mapping_meta.meta_args(
             num_tokens, self.lora_config.specialize_active_lora
         )
@@ -478,6 +479,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_ids,
             no_lora_flag,
             num_active_loras,
+            _,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
