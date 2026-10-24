@@ -424,3 +424,106 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("prefix", ["", "model."])
+@pytest.mark.parametrize("invalid", [None, "missing", "duplicate", "shape", "dtype"])
+def test_context_only_gqa_loads_selected_weights_into_fused_kv(prefix, invalid):
+    """Pack each layer's K/V in order and reject incomplete context weights."""
+    from vllm.model_executor.models.dspark_context_kv import DSparkContextKVModel
+
+    model = DSparkContextKVModel.__new__(DSparkContextKVModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        num_hidden_layers=2, num_key_value_heads=2, head_dim=4, rms_norm_eps=1e-6
+    )
+    model.fc = nn.Linear(16, 8, bias=False, dtype=torch.bfloat16)
+    model.hidden_norm = nn.LayerNorm(8, bias=False, dtype=torch.bfloat16)
+    model.layers = nn.ModuleList()
+    for _ in range(2):
+        layer = nn.Module()
+        layer.self_attn = nn.Module()
+        attn = layer.self_attn
+        attn.k_norm = nn.LayerNorm(4, bias=False, dtype=torch.bfloat16)
+        attn.rotary_emb = SimpleNamespace(
+            head_size=4, cos_sin_cache=torch.zeros(32, 4), is_neox_style=True
+        )
+        attn.kv_size, attn.head_dim, attn.num_kv_heads = 8, 4, 2
+        attn.attn = nn.Identity()
+        model.layers.append(layer)
+    model._fused_kv_weight = nn.Parameter(
+        torch.empty(32, 8, dtype=torch.bfloat16), requires_grad=False
+    )
+    expected = {
+        name: torch.full_like(value, 0.25)
+        for name, value in model.named_parameters()
+        if name != "_fused_kv_weight"
+    }
+    for i in range(2):
+        for j, kind in enumerate(("k", "v")):
+            expected[f"layers.{i}.self_attn.{kind}_proj.weight"] = torch.full(
+                (8, 8), 2 * i + j + 1, dtype=torch.bfloat16
+            )
+    weights = [(prefix + name, value) for name, value in expected.items()]
+    weights.append(("layers.0.mlp.gate_proj.weight", torch.ones(2, 2)))
+    if invalid == "missing":
+        weights.pop(0)
+    elif invalid == "duplicate":
+        weights.append(weights[0])
+    elif invalid == "shape":
+        weights[0] = (weights[0][0], torch.zeros(1, dtype=torch.bfloat16))
+    elif invalid == "dtype":
+        weights[0] = (weights[0][0], weights[0][1].float())
+    if invalid:
+        with pytest.raises(ValueError, match="context weight|Context weight"):
+            model.load_context_weights(iter(weights))
+        return
+
+    model.load_context_weights(iter(weights))
+    for name, value in model.named_parameters():
+        if name != "_fused_kv_weight":
+            torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+    for i in range(2):
+        for j, kind in enumerate(("k", "v")):
+            row = (2 * i + j) * 8
+            torch.testing.assert_close(
+                model._fused_kv_weight[row : row + 8],
+                expected[f"layers.{i}.self_attn.{kind}_proj.weight"],
+                rtol=0,
+                atol=0,
+            )
+    assert not any(
+        part in name
+        for name, _ in model.named_parameters()
+        for part in ("q_proj", "mlp", "embed_tokens", "lm_head", "markov", "confidence")
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("role", [None, "kv_consumer", "kv_both", "kv_producer"])
+def test_context_only_rejects_non_producer_roles(role):
+    from vllm.model_executor.models.dspark_context_kv import context_kv_only
+
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        kv_transfer_config=None if role is None else SimpleNamespace(kv_role=role),
+        speculative_config=SimpleNamespace(
+            prefill_context_kv_only=True,
+            method="dspark",
+            draft_model_config=SimpleNamespace(
+                architectures=["Qwen3DSparkModel"], dtype=torch.bfloat16
+            ),
+            draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            target_parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+            ),
+        ),
+    )
+    if role == "kv_producer":
+        assert context_kv_only(config)
+    else:
+        with pytest.raises(ValueError, match="kv_producer"):
+            context_kv_only(config)
