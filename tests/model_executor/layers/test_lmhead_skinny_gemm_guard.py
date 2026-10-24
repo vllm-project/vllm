@@ -54,8 +54,13 @@ SMALL_SHAPE = (2048, 7168)  # 29 MiB bf16
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
+    # These tests assert exact dispatch selection, so pin every env var
+    # that feeds it: state leaked by unrelated tests earlier in a long
+    # suite run must not change the outcome here.
     monkeypatch.delenv(_DISABLE_VAR, raising=False)
     monkeypatch.delenv(_MAX_BYTES_VAR, raising=False)
+    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "1")
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     _skinny_guard_warned.clear()
     envs.disable_envs_cache()
     yield
@@ -81,16 +86,37 @@ def _set_guard(state):
     envs.disable_envs_cache()
 
 
-def _launched_kernels(fn, iters=3):
+# Event names that are not compute-kernel records: transfers, runtime API
+# wrappers, framework overhead. Every fn profiled here is a GEMM, so a
+# capture holding only these (in the observed failure: nothing at all)
+# recorded no kernels.
+_NOT_KERNEL = ("Memcpy", "Memset", "cuda", "hip", "aten::", "at::", "ProfilerStep")
+
+
+def _launched_kernels(fn, iters=3, attempts=3):
+    """Kernel names recorded for fn(), retrying failed captures.
+
+    Mid-suite, the ROCm activity tracer can drop every kernel record of a
+    capture while the neighboring captures in the same test stay healthy
+    (seen once in the full model_executor suite, next to a "ROCTracer
+    produced duplicate flow start" warning). A GEMM always launches
+    device kernels, so a capture without any kernel record is a failed
+    capture -- retry it rather than read it as dispatch evidence.
+    """
     from torch.profiler import ProfilerActivity, profile
 
     fn()
     torch.accelerator.synchronize()
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        for _ in range(iters):
-            fn()
-        torch.accelerator.synchronize()
-    return [e.key for e in prof.key_averages()]
+    kernels = []
+    for _ in range(attempts):
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            for _ in range(iters):
+                fn()
+            torch.accelerator.synchronize()
+        kernels = [e.key for e in prof.key_averages()]
+        if any(not k.startswith(_NOT_KERNEL) for k in kernels):
+            break
+    return kernels
 
 
 def _has_wvsplitk_hf_sml(names):
@@ -146,9 +172,11 @@ def test_n5_big_weight_dispatch(disabled, expect_skinny):
     x = _x(5, BIG_SHAPE[1])
     ref = torch.nn.functional.linear(x, w)
     kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-    assert _has_wvsplitk_hf_sml(kernels) == expect_skinny
+    assert _has_wvsplitk_hf_sml(kernels) == expect_skinny, f"kernels={kernels}"
     if not expect_skinny:
-        assert _has_cijk(kernels), "fall-through did not reach the hipBLASLt GEMM"
+        assert _has_cijk(kernels), (
+            f"fall-through did not reach the hipBLASLt GEMM; kernels={kernels}"
+        )
     out = rocm_unquantized_gemm_impl(x, w, None)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-1)
 
@@ -173,7 +201,7 @@ def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
         kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
         assert _has_wvsplitk_hf_sml(kernels) == expect_skinny, (
             f"guard_state={guard_state}: skinny dispatch changed for "
-            f"shape={shape} n={n}"
+            f"shape={shape} n={n}; kernels={kernels}"
         )
     out = rocm_unquantized_gemm_impl(x, w, None)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-1)
@@ -186,5 +214,5 @@ def test_n1_big_weight_dispatch_unchanged():
     x = _x(1, BIG_SHAPE[1])
     kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
     assert _has_wvsplitk_hf_sml(kernels), (
-        "n=1 was redirected by the guard; the carve-out is missing"
+        f"n=1 was redirected by the guard; the carve-out is missing; kernels={kernels}"
     )
