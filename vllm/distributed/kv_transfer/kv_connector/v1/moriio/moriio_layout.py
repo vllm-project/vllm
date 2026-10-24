@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
+from math import prod
 from typing import NamedTuple, cast
 
 import torch
@@ -294,19 +295,31 @@ def get_layer_transfer_geometry(
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
         and shape[1] == spec.num_heads
-        and shape[2] == spec.num_states
+        and spec.num_states % shape[2] == 0
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        num_blocks, num_heads, num_states, content_dim = shape
+        # N < num_states: dense kernel blocks; block ids stay manager blocks.
+        num_kernel_blocks, num_heads, _, content_dim = shape
+        kernel_blocks_per_block = spec.num_states // shape[2]
+        if kernel_blocks_per_block > 1 and (
+            num_kernel_blocks % kernel_blocks_per_block != 0
+            or stride[0] != prod(shape[1:])
+        ):
+            raise ValueError(
+                f"Unsupported MoRIIO kernel-block cache shape for layer "
+                f"{layer_name}: {tuple(shape)} with stride {tuple(stride)} is "
+                f"not {kernel_blocks_per_block} dense kernel blocks per block"
+            )
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = num_states * slot_size_bytes
+        block_len = spec.num_states * slot_size_bytes
+        # Assumes P and D share the block size and kernel layout.
         return LayerTransferGeometry(
-            num_blocks=num_blocks,
+            num_blocks=num_kernel_blocks // kernel_blocks_per_block,
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
+            block_stride=stride[0] * kernel_blocks_per_block,
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,
