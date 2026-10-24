@@ -324,6 +324,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
 
 def _init_hybrid_scheduler(*, save_decode_cache: bool, retention: int):
     vllm_config = SimpleNamespace(
+        speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both",
             kv_connector_extra_config={"save_decode_cache": save_decode_cache},
@@ -1499,7 +1500,7 @@ def test_decode_boundary_state_offload_claimed_with_save_decode_cache(kv_role):
     req_meta = meta.requests[0]
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 0
-    assert req_meta.boundary_state_offloads == [(1, 7, 16)]
+    assert req_meta.boundary_puts == [(1, 7, 16)]
     assert scheduler._pinned_saves[req_meta.store_job_id][0] == [7]
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     assert scheduler._request_trackers["req-0"].has_pending_offload is True
@@ -1534,7 +1535,7 @@ def test_decode_boundary_offload_rides_same_step_decode_save():
     req_meta = meta.requests[0]
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 48
-    assert req_meta.boundary_state_offloads == [(1, 7, 48)]
+    assert req_meta.boundary_puts == [(1, 7, 48)]
     assert tracker.num_saved_tokens == 48
     # Block 0 is the null block and is never referenced.
     assert scheduler._pinned_saves[req_meta.store_job_id][0] == [7, 1, 2]
@@ -1550,7 +1551,10 @@ def _make_finished_tail_scheduler(
         save_decode_cache=save_decode_cache,
     )
     request = SimpleNamespace(
-        request_id="req-0", block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"]
+        request_id="req-0",
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"],
+        num_prompt_tokens=12,
+        num_computed_tokens=18,
     )
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",

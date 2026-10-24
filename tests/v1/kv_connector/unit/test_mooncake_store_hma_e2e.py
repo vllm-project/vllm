@@ -79,6 +79,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.cache_config.cache_dtype = "auto"
     cfg.cache_config.mamba_cache_dtype = "auto"
     cfg.cache_config.mamba_ssm_cache_dtype = "auto"
+    cfg.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBNHC
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.parallel_config.decode_context_parallel_size = 1
     cfg.parallel_config.pipeline_parallel_size = 1

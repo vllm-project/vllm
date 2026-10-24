@@ -311,14 +311,14 @@ Every key is
 
 `<fingerprint>` is a 12-hex-digit digest of the settings that change a block's
 bytes or shape: KV cache dtype, model dtype, quantization, Mamba cache dtypes,
-scheduler and hash block sizes, every stored cache group's spec, and the parallel
-layout (TP/PP/PCP/DCP sizes for rank-local keys; PCP/DCP only for TP-shared
-namespaces, whose store TP and PP are already in the namespace). Instances of the
-same model directory that differ in any of these therefore never read each
-other's blocks, and the worker logs the digest at startup. Because the digest is
-part of the key, changing any of these settings, or upgrading from a vLLM that
-did not compute it, leaves existing store contents unreachable: the first
-requests miss.
+scheduler and hash block sizes, every stored cache group's full spec and layer
+count, the resolved KV cache layout, and the parallel layout (TP/PP/PCP/DCP sizes
+for rank-local keys; PCP/DCP only for TP-shared namespaces, whose store TP and PP
+are already in the namespace). Instances of the same model directory that differ
+in any of these therefore never read each other's blocks, and the worker logs the
+digest at startup. Because the digest is part of the key, changing any of these
+settings, or upgrading from a vLLM that did not compute it, leaves existing store
+contents unreachable: the first requests miss.
 
 ### Reproducible Block Hashes Across Processes
 

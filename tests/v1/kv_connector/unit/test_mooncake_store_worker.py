@@ -347,17 +347,18 @@ def _make_vllm_config(
 
 
 def _make_kv_cache_config(
-    *, block_size: int = 16, prefix_cache_retention_interval: int | None = 0
-) -> object:
+    *,
+    block_size: int = 16,
+    prefix_cache_retention_interval: int | None = 0,
+    num_kv_heads: int = 8,
+    head_size: int = 64,
+) -> KVCacheConfig:
     """Minimal single-group KVCacheConfig for topology tests."""
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheConfig,
-        KVCacheGroupSpec,
-    )
-
     spec = FullAttentionSpec(
-        block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=None,
     )
     return KVCacheConfig(
         num_blocks=10,
@@ -664,15 +665,20 @@ def _fingerprint(
     scheduler_block_size: int = 16,
     hash_block_size: int = 16,
     topology: tuple[int, ...] = (1, 1, 1, 1),
+    kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
+    num_kv_heads: int = 8,
+    head_size: int = 64,
 ) -> str:
-    cfg = _make_vllm_config()
+    cfg = _make_vllm_config(kv_cache_layout=kv_cache_layout)
     cfg.cache_config.cache_dtype = kv_cache_dtype
     cfg.cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
     cfg.model_config.dtype = model_dtype
     cfg.model_config.quantization = quantization
     return worker.build_store_config_fingerprint(
         cfg,
-        _make_kv_cache_config(block_size=block_size),
+        _make_kv_cache_config(
+            block_size=block_size, num_kv_heads=num_kv_heads, head_size=head_size
+        ),
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         topology=topology,
@@ -692,6 +698,24 @@ def test_store_config_fingerprint_separates_incompatible_layouts():
     assert _fingerprint(block_size=32, scheduler_block_size=32) != base
     assert _fingerprint(hash_block_size=32) != base
     assert _fingerprint(topology=(2, 1, 1, 1)) != base
+
+
+def test_store_config_fingerprint_separates_physical_block_order():
+    """A stored block is raw device memory, so whatever orders that memory
+    inside the block must reach the key: a consumer applies its own strides to
+    a producer's payload, and the rank-local store name carries no layout."""
+    base_spec = _make_kv_cache_config().prefix_cacheable_groups[0].kv_cache_spec
+    wide_spec = (
+        _make_kv_cache_config(num_kv_heads=4, head_size=128)
+        .prefix_cacheable_groups[0]
+        .kv_cache_spec
+    )
+    # Same page size, different head stride, so only the geometry tells them apart.
+    assert wide_spec.page_size_bytes == base_spec.page_size_bytes
+
+    base = _fingerprint()
+    assert _fingerprint(kv_cache_layout=KVCacheLayout.LBNHC) != base
+    assert _fingerprint(num_kv_heads=4, head_size=128) != base
 
 
 def _worker_key(cache_dtype: str) -> str:
