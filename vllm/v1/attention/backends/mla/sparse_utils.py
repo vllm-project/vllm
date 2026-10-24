@@ -746,3 +746,117 @@ def prepare_sparse_mla_safe_lengths(
             BLOCK=256,
         )
     return safe_lengths
+
+
+@triton.jit(do_not_specialize=["words_per_group"])
+def _query_group_membership_kernel(
+    topk_ptr,
+    topk_stride,
+    bits_ptr,
+    words_per_group,
+    TOPK: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # One byte per position: bit t is set iff query t of the group selected it.
+    token = tl.program_id(0)
+    group = token // GROUP
+    bit = 1 << (token % GROUP)
+    offs = tl.arange(0, BLOCK)
+    for k0 in range(0, TOPK, BLOCK):
+        pos = tl.load(
+            topk_ptr + token * topk_stride + k0 + offs, k0 + offs < TOPK, other=-1
+        )
+        word = group.to(tl.int64) * words_per_group + (pos >> 2)
+        tl.atomic_or(bits_ptr + word, bit << (8 * (pos & 3)), pos >= 0, sem="relaxed")
+
+
+@triton.jit(do_not_specialize=["words_per_group", "width"])
+def _query_group_emit_kernel(
+    bits_ptr,
+    words_per_group,
+    block_table_ptr,
+    enc_ptr,
+    lens_ptr,
+    width,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    group = tl.program_id(0)
+    bits = bits_ptr + group.to(tl.int64) * words_per_group
+    enc = enc_ptr + group.to(tl.int64) * width
+    offs = tl.arange(0, BLOCK)
+    count = tl.zeros([1], tl.int32)
+    for w0 in range(0, words_per_group, BLOCK // 4):
+        word = tl.load(
+            bits + w0 + (offs >> 2), w0 + (offs >> 2) < words_per_group, other=0
+        )
+        member = (word >> (8 * (offs & 3))) & 0xFF
+        keep = member != 0
+        pos = w0 * 4 + offs
+        block = tl.load(block_table_ptr + pos // BLOCK_SIZE, keep, other=0)
+        row = block * BLOCK_STRIDE_ROWS + pos % BLOCK_SIZE
+        dst = count + tl.cumsum(keep.to(tl.int32), 0) - 1
+        tl.store(enc + dst, row | (member << 24), keep)
+        count += tl.sum(keep.to(tl.int32), 0)
+    # The kernel walks whole 128-entry tiles (at least one), so -1 pad up to there.
+    pad = count + offs
+    padded_end = tl.maximum((count + 127) // 128 * 128, 128)
+    tl.store(enc + pad, -1, (offs < 128) & (pad < padded_end))
+    tl.store(lens_ptr + group + tl.arange(0, 1), count)
+
+
+def build_query_group_union(
+    logical_topk: torch.Tensor,
+    block_table_row: torch.Tensor,
+    *,
+    group_size: int,
+    max_seq_len: int,
+    block_size: int,
+    block_stride_rows: int,
+    width: int,
+    scratch_bytes: int = 64 << 20,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Union of the top-k of every `group_size` consecutive queries of ONE request.
+
+    `logical_topk` holds request-local positions (-1 padded) for a multiple of
+    `group_size` queries. Returns `enc` [num_groups, width] int32, the position-
+    sorted union mapped to KV rows through `block_table_row` and encoded as
+    `row | (membership << 24)` (bit t = query t selected the row), -1 padded to a
+    whole 128-entry tile, and `lens` [num_groups], the union sizes. Groups are
+    processed in chunks so the per-group position bitmap stays in `scratch_bytes`.
+    """
+    num_tokens, topk = logical_topk.shape
+    assert num_tokens % group_size == 0 and logical_topk.stride(1) == 1
+    num_groups = num_tokens // group_size
+    device = logical_topk.device
+    enc = torch.empty((num_groups, width), dtype=torch.int32, device=device)
+    lens = torch.empty((num_groups,), dtype=torch.int32, device=device)
+    words_per_group = cdiv(max_seq_len, 4)
+    chunk = max(1, min(num_groups, scratch_bytes // (4 * words_per_group)))
+    bits = torch.empty((chunk * words_per_group,), dtype=torch.int32, device=device)
+    for g0 in range(0, num_groups, chunk):
+        n = min(chunk, num_groups - g0)
+        bits[: n * words_per_group].zero_()
+        _query_group_membership_kernel[(n * group_size,)](
+            logical_topk[g0 * group_size :],
+            logical_topk.stride(0),
+            bits,
+            words_per_group,
+            TOPK=topk,
+            GROUP=group_size,
+            BLOCK=1024,
+        )
+        _query_group_emit_kernel[(n,)](
+            bits,
+            words_per_group,
+            block_table_row,
+            enc[g0:],
+            lens[g0:],
+            width,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            BLOCK=1024,
+        )
+    return enc, lens
