@@ -102,20 +102,24 @@ pub fn calculate_metrics(
         let mut tokens_per_second = vec![0.0_f64; duration_seconds];
         let mut concurrent_per_second = vec![0usize; duration_seconds];
 
-        for output in &successful_outputs {
-            // Calculate token generation timestamps
-            let mut token_times = vec![output.start_time + output.ttft];
-            let mut current_time = token_times[0];
+        for (output, &output_len) in
+            outputs.iter().zip(&actual_output_lens).filter(|(o, _)| o.success)
+        {
+            // Calculate chunk arrival timestamps
+            let mut chunk_times = vec![output.start_time + output.ttft];
+            let mut current_time = chunk_times[0];
             for itl_value in &output.itl {
                 current_time += itl_value;
-                token_times.push(current_time);
+                chunk_times.push(current_time);
             }
 
-            // Add tokens to second buckets
-            for token_time in &token_times {
-                let bucket = (token_time - min_start_time) as usize;
+            // A chunk can carry several tokens (speculative decoding,
+            // --stream-interval), so spread the request's tokens over its chunks.
+            let tokens_per_chunk = output_len as f64 / chunk_times.len() as f64;
+            for chunk_time in &chunk_times {
+                let bucket = (chunk_time - min_start_time) as usize;
                 if bucket < duration_seconds {
-                    tokens_per_second[bucket] += 1.0;
+                    tokens_per_second[bucket] += tokens_per_chunk;
                 }
             }
 
@@ -507,5 +511,35 @@ mod tests {
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let p99 = percentile_sorted(&data, 99.0);
         assert!((p99 - 98.01).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_peak_output_throughput_counts_tokens_not_chunks() {
+        // 32 tokens streamed in 4 chunks within the first second, as with
+        // --stream-interval 8. Counting chunks would report a peak of 4.
+        let outputs = vec![RequestFuncOutput {
+            success: true,
+            start_time: 0.0,
+            latency: 0.5,
+            ttft: 0.1,
+            itl: vec![0.1, 0.1, 0.1],
+            output_tokens: 32,
+            ..Default::default()
+        }];
+        let requests = vec![SampleRequest {
+            prompt_len: 8,
+            ..Default::default()
+        }];
+
+        let (metrics, _) = calculate_metrics(
+            &requests,
+            &outputs,
+            0.5,
+            &[99.0],
+            false,
+            &GoodputConfig::default(),
+        );
+
+        assert!((metrics.max_output_tokens_per_s - 32.0).abs() < 1e-9);
     }
 }

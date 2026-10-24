@@ -196,7 +196,7 @@ pub fn compute(
 
     let mut completed_in_window = 0usize;
     let mut input_tokens_in_window: usize = 0;
-    let mut output_tokens_in_window: usize = 0;
+    let mut output_tokens_in_window: f64 = 0.0;
     let mut ttfts_in_window: Vec<f64> = Vec::new();
     let mut tpots_in_window: Vec<f64> = Vec::new();
 
@@ -230,15 +230,22 @@ pub fn compute(
         if o.output_tokens == 0 && o.itl.is_empty() {
             continue;
         }
+        // A chunk can carry several tokens (speculative decoding,
+        // --stream-interval), so spread the request's tokens over its chunks.
+        let tokens_per_chunk = if o.output_tokens > 0 {
+            o.output_tokens as f64 / (1 + o.itl.len()) as f64
+        } else {
+            1.0
+        };
         let first_token_t = o.start_time + o.ttft;
         if first_token_t >= start_abs && first_token_t < end_abs {
-            output_tokens_in_window += 1;
+            output_tokens_in_window += tokens_per_chunk;
         }
         let mut t = first_token_t;
         for &dt in &o.itl {
             t += dt;
             if t >= start_abs && t < end_abs {
-                output_tokens_in_window += 1;
+                output_tokens_in_window += tokens_per_chunk;
             }
             if t >= end_abs {
                 break; // tokens only move forward in time
@@ -248,7 +255,7 @@ pub fn compute(
 
     let request_throughput = completed_in_window as f64 / duration;
     let input_throughput = input_tokens_in_window as f64 / duration;
-    let output_throughput = output_tokens_in_window as f64 / duration;
+    let output_throughput = output_tokens_in_window / duration;
     let total_token_throughput = input_throughput + output_throughput;
 
     let (mean_ttft, median_ttft, pct_ttft) = if is_pooling {
@@ -625,5 +632,29 @@ mod tests {
         assert_eq!(m.percentiles_ttft_ms.len(), 2);
         assert!((m.percentiles_ttft_ms[0].0 - 50.0).abs() < 1e-9);
         assert!((m.percentiles_ttft_ms[1].0 - 99.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_counts_tokens_not_chunks() {
+        // Same timeline as above, but each of the 5 chunks carries 8 tokens
+        // (e.g. --stream-interval 8). 4 chunks per request land in the window.
+        let itl = vec![2.0, 2.0, 2.0, 2.0];
+        let outputs = vec![
+            mk_full(0.0, 10.0, 2.0, itl.clone(), 40),
+            mk_full(0.0, 10.0, 2.0, itl.clone(), 40),
+            mk_full(0.0, 10.0, 2.0, itl.clone(), 40),
+        ];
+        let requests: Vec<SampleRequest> =
+            outputs.iter().map(|o| mk_sample(o.prompt_len)).collect();
+
+        let w = detect_window(&outputs, Some(3), 1.0, 0.1, 10.0).unwrap();
+        let m = compute(&outputs, &requests, &w, &[99.0], false);
+
+        // 4 chunks * 8 tokens * 3 requests = 96 tokens over 10s.
+        assert!(
+            (m.output_throughput - 9.6).abs() < 1e-6,
+            "got {}",
+            m.output_throughput
+        );
     }
 }
