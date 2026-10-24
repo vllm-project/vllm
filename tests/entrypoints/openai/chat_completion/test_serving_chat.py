@@ -20,7 +20,7 @@ from tests.entrypoints.openai.utils import (
 )
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
-from vllm.config import MultiModalConfig
+from vllm.config import MultiModalConfig, SchedulerConfig, VllmConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
@@ -2144,6 +2144,11 @@ async def test_serving_chat_data_parallel_rank_extraction():
 async def test_beam_search_preserves_request_priority(header):
     """Body and header priority survive every beam expansion."""
     engine = _build_mock_engine()
+    engine.vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=100, is_encoder_decoder=False, policy="priority"
+        )
+    )
     priorities = []
 
     async def generate(*args, priority=0, **kwargs):

@@ -3,6 +3,7 @@
 import json
 import time
 from collections.abc import Awaitable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
@@ -25,7 +26,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -250,19 +251,30 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                 return session_id
         return None
 
-    @staticmethod
     def _get_priority(
+        self,
         request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
         raw_request: Request | None,
     ) -> int:
+        priority = request.priority
         if raw_request is not None:
-            priority = raw_request.headers.get(PRIORITY_HEADER)
-            if priority is not None:
-                try:
-                    return int(priority)
-                except ValueError:
-                    pass
-        return request.priority
+            priority_header = raw_request.headers.get(PRIORITY_HEADER)
+            if priority_header is not None:
+                with suppress(ValueError):
+                    priority = int(priority_header)
+        return self._validate_priority(priority)
+
+    def _validate_priority(self, priority: int) -> int:
+        if (
+            priority != 0
+            and self.engine_client.vllm_config.scheduler_config.policy != "priority"
+        ):
+            raise VLLMValidationError(
+                "Non-zero priority requires priority scheduling.",
+                parameter="priority",
+                value=priority,
+            )
+        return priority
 
     async def _with_kv_transfer_rejection_cleanup(
         self,

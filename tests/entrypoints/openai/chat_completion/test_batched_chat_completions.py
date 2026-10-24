@@ -49,6 +49,7 @@ def default_server_args():
         "--max-num-seqs",
         "128",
         "--enforce-eager",
+        "--enable-scale-out",
     ]
 
 
@@ -56,6 +57,44 @@ def default_server_args():
 def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        (
+            "v1/chat/completions",
+            {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+                "stream": True,
+            },
+        ),
+        ("v1/completions", {"prompt": "Hi", "max_tokens": 1}),
+        ("v1/responses", {"input": "Hi", "max_output_tokens": 1}),
+        (
+            "v1/chat/completions/batch",
+            {"messages": [[{"role": "user", "content": "Hi"}]], "max_tokens": 1},
+        ),
+        (
+            "inference/v1/generate",
+            {"token_ids": [1], "sampling_params": {"max_tokens": 1}},
+        ),
+    ],
+)
+def test_priority_validation_http(server, endpoint, payload):
+    """The server rejects unsupported priorities before starting a response."""
+    response = httpx.post(
+        server.url_for(endpoint),
+        json={
+            "model": MODEL_NAME,
+            "priority": 5,
+            **payload,
+        },
+        timeout=60,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "priority"
 
 
 @pytest.mark.asyncio
