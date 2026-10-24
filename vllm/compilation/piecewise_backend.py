@@ -70,6 +70,11 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
                 )
                 t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
                 t = t.as_strided(new_shape, new_strides, new_storage_offset)
+                # Out-of-tree backends may stamp backend-specific tensor metadata
+                # on the traced inputs; carry it onto the rebuilt example input.
+                metadata = torch._utils.get_tensor_metadata(val)
+                if metadata:
+                    torch._utils.set_tensor_metadata(t, metadata)
                 args.append(t)
             else:
                 args.append(val)
