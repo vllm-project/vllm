@@ -446,7 +446,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.mhc.torch import mhc_pre_torch
-    from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
+    from vllm.model_executor.layers.mhc import MHCFusedPostPreOp, MHCPreOp
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
     from vllm.models.deepseek_v4.amd.mono.dims import INDEX_TOPK
@@ -487,6 +487,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
     runner = MonoRunner(tp, rank, get_tp_group().cpu_group, device, max_topk=hca_long)
     with set_current_vllm_config(vc):
         fused = MHCFusedPostPreOp()
+        pre = MHCPreOp()
 
     def random_moe(layer):
         """A layer's MoE (layer 0's routes by hash) and its exact reference."""
@@ -704,18 +705,26 @@ def _check_layer(rank: int, tp: int, device) -> None:
         assert err_m < 1.2 * err_v + 5e-3, (tag, err_m, err_v)
         assert _cos(a_m, a) > 0.995, (tag, _cos(a_m, a))
         # the FFN half on the kernels' own attention output
-        res2_m, post2_m, comb2_m, xf_m = seam("ffn", a_m.to(bf), runner.res_mid[:M],
+        res2_m, _, _, _ = seam("ffn", a_m.to(bf), runner.res_mid[:M],
                                               runner.post_a[:M].view(M, HC, 1),
                                               runner.comb_a[:M])  # fmt: skip
         torch.testing.assert_close(o[1], res2_m, rtol=2**-7, atol=1e-4)
         pm, cm = mix_ref("ffn", o[1])
         torch.testing.assert_close(o[2].view_as(pm), pm, rtol=1e-4, atol=1e-5)
         torch.testing.assert_close(o[3].view_as(cm), cm, rtol=1e-4, atol=1e-5)
+        sm = seams["ffn"]
+        with set_current_vllm_config(vc):
+            _, _, xf_m = pre(
+                o[1], sm["fn"], sm["scale"], sm["base"], eps,
+                cfg.hc_eps, cfg.hc_eps, 2.0, cfg.hc_sinkhorn_iters,
+                norm_weight=sm["norm"], norm_eps=eps,
+            )  # fmt: skip
         # the MoE on K2's own FFN input (where routing cannot differ)
         off = scratch_layout(M, tp, width)["normed"][0]
         xk = runner.scratch(M, width)[off : off + M * HIDDEN * 2]
         xk = xk.view(bf).view(M, HIDDEN)
-        assert _cos(xk, xf_m) > 0.999 and _rel(xk, xf_m) < 0.02, tag
+        cos, rel = _cos(xk, xf_m), _rel(xk, xf_m)
+        assert cos > 0.999 and rel < 0.02, (tag, "ffn input", rank, cos, rel)
         mo = moe_out(moe, xk, ids)
         ref = tensor_model_parallel_all_reduce(exact_moe(xk, route))
         err_v, err_m = _rel(mo, ref), _rel(o[0], ref)

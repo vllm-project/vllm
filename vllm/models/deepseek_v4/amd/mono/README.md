@@ -2,12 +2,15 @@
 
 One fused decoder layer for vLLM's decode steps on MI355X: the attention seam,
 the attention, the attention all-reduce, the FFN seam, the MoE and the MoE
-all-reduce, in two persistent launches a layer. The design is the DeepSeek-V4.1
-mono decode layer's (`models/deepseek_v41/amd/mono`, after ROCm/ATOM
-`atom/models/deepseek_v41/mono`): the seam and MoE stages (`stages/`) and the
-framework under them (`common/`) are adapted from it, each file naming its
-origin, here at Pro's widths and numerics; the attention stages (`attention/`)
-read vLLM's KV records and weights as loaded.
+all-reduce, in two persistent launches a layer. This implementation builds on
+the DeepSeek-V4.1-Flash mono decode layer (`models/deepseek_v41/amd/mono`).
+[ROCm/ATOM's V4.1 mono decode](https://github.com/ROCm/ATOM/tree/97359d6df46c59736468168b7be8bc50b482a1a9/atom/models/deepseek_v41/mono)
+is the reference design: its persistent execution framework, synchronization,
+peer memory, mHC seam and MoE stages underpin this implementation. The adapted
+files name their ATOM origins and retain attribution to Advanced Micro
+Devices, Inc., under the MIT License. Here they are specialized to Pro's
+widths and numerics; the attention stages (`attention/`) read vLLM's KV records
+and weights as loaded.
 
 ## Scope
 
