@@ -2255,6 +2255,42 @@ def test_sub_block_arena_limit_is_distinguished_from_ram_exhaustion():
     assert "No GPU KV block fits the current host budget" not in str(error.value)
 
 
+def test_host_budget_rejects_a_block_count_that_cannot_serve_the_context():
+    """A reduced block count must not be suggested when it cannot hold the request."""
+    with pytest.raises(ValueError, match="No feasible AuxOutput configuration") as error:
+        validate_shm_budget(
+            num_blocks=64,
+            scheduler_block_size=64,
+            hash_block_size=64,
+            bytes_per_token=100,
+            max_bytes=16 * 64 * 100,
+            available_host_bytes=(512 << 20) + 16 * 64 * 100,
+            staging_bytes=0,
+            required_context_tokens=8192,
+        )
+    message = str(error.value)
+    assert "at most 896 tokens" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+def test_host_budget_caps_headroom_by_the_slurm_allocation(monkeypatch):
+    """An unenforced Slurm quota is still the real host-memory limit."""
+    from types import SimpleNamespace
+
+    from vllm.distributed.aux_output_connector import memory
+
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "1024")
+    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    monkeypatch.setattr(
+        memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1 << 40)
+    )
+    monkeypatch.setattr(memory, "get_cgroup_memory_limit", lambda: None)
+    monkeypatch.setattr(memory, "get_cgroup_memory_usage", lambda: None)
+    monkeypatch.setattr(memory, "_cgroup_memory_current", lambda: 256 << 20)
+    assert memory.get_available_host_memory() == 768 << 20
+
+
+
 _HASHES = [bytes([index]) * 32 for index in range(4)]
 
 

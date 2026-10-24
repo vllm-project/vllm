@@ -212,6 +212,7 @@ class AuxOutputWorkerConnector:
             local_output_workers=max(
                 1, vllm_config.parallel_config.data_parallel_size_local
             ),
+            required_context_tokens=vllm_config.model_config.max_model_len,
         )
         store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host-memory admission checks for anonymous AuxOutput SHM arenas."""
 
+import os
+
 import psutil
 
 from vllm.logger import init_logger
@@ -14,6 +16,50 @@ logger = init_logger(__name__)
 _METADATA_BYTES_PER_OBJECT = 512
 
 
+def _slurm_memory_limit() -> int | None:
+    """Return the job's Slurm memory allocation in bytes, or None.
+
+    Slurm exports the request in MiB. Many clusters do not enforce it through a
+    cgroup memory controller, so the scheduler quota is the only place the real
+    limit is visible; ignoring it lets the admission check pass on a node with
+    far less memory than the job may use.
+    """
+    per_node = os.environ.get("SLURM_MEM_PER_NODE")
+    if per_node:
+        try:
+            return int(per_node) * 1024 * 1024
+        except ValueError:
+            return None
+    per_cpu = os.environ.get("SLURM_MEM_PER_CPU")
+    cpus = os.environ.get("SLURM_CPUS_ON_NODE") or os.environ.get("SLURM_CPUS_PER_TASK")
+    if per_cpu and cpus:
+        try:
+            return int(per_cpu) * int(cpus) * 1024 * 1024
+        except ValueError:
+            return None
+    return None
+
+
+def _cgroup_memory_current() -> int | None:
+    """Return this process' cgroup memory usage even when the limit is unset."""
+    try:
+        with open("/proc/self/cgroup") as fh:
+            for line in fh:
+                if not line.startswith("0::"):
+                    continue
+                relative = line.strip().split("::", 1)[1].lstrip("/")
+                path = f"/sys/fs/cgroup/{relative}/memory.current"
+                with open(path) as current:
+                    return int(current.read().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as usage:
+            return int(usage.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def get_available_host_memory() -> int:
     """Return current system/cgroup headroom for anonymous shared mappings."""
     available: int = psutil.virtual_memory().available
@@ -21,6 +67,10 @@ def get_available_host_memory() -> int:
     usage = get_cgroup_memory_usage()
     if limit is not None and usage is not None:
         available = min(available, max(0, limit - usage))
+    slurm_limit = _slurm_memory_limit()
+    if slurm_limit is not None:
+        used = _cgroup_memory_current() or 0
+        available = min(available, max(0, slurm_limit - used))
     return available
 
 
@@ -34,6 +84,7 @@ def validate_shm_budget(
     available_host_bytes: int,
     staging_bytes: int,
     local_output_workers: int = 1,
+    required_context_tokens: int | None = None,
 ) -> int:
     """Validate all local arenas and return the allocated bytes per worker.
 
@@ -43,9 +94,13 @@ def validate_shm_budget(
         hash_block_size: Tokens stored in one SHM object.
         bytes_per_token: Sum of all enabled artifact payload widths.
         max_bytes: Configured arena capacity, or None to match KV coverage.
-        available_host_bytes: Current system/cgroup memory headroom.
+        available_host_bytes: Current system/cgroup/Slurm memory headroom.
         staging_bytes: Estimated staging memory per output worker.
         local_output_workers: Output workers sharing this host-memory budget.
+        required_context_tokens: Tokens one request must be able to serve. When
+            the host budget only allows fewer KV blocks than that, no
+            utilization setting can satisfy both limits and the caller must be
+            told so instead of receiving a block count that cannot serve it.
 
     Returns:
         Arena capacity rounded down to complete SHM objects.
@@ -98,6 +153,25 @@ def validate_shm_budget(
         supported_blocks,
     )
     if required_bytes > arena_bytes or host_required > available_host_bytes:
+        max_context_tokens = supported_blocks * scheduler_block_size
+        if (
+            required_context_tokens is not None
+            and max_context_tokens < required_context_tokens
+        ):
+            raise ValueError(
+                f"AuxOutput SHM budget exceeded: Required AuxOutput SHM: "
+                f"{required_bytes / gib:.3f} GiB per worker "
+                f"({local_output_workers * required_bytes / gib:.3f} GiB total); "
+                f"available host memory={available_host_bytes / gib:.3f} GiB; "
+                f"maximum usable SHM={max_host_shm_bytes / gib:.3f} GiB per worker; "
+                f"estimated host need including staging, metadata and reserve="
+                f"{host_required / gib:.3f} GiB. Current KV Blocks: {num_blocks}. "
+                "No feasible AuxOutput configuration: this host budget supports at "
+                f"most {max_context_tokens} tokens ({supported_blocks} KV blocks), "
+                f"but max_model_len={required_context_tokens}. Increase available "
+                "RAM/container memory, reduce --max-model-len, or lower "
+                "--max-num-batched-tokens/--max-num-seqs to reduce staging memory."
+            )
         block_limit = min(num_blocks, supported_blocks)
         if block_limit > 0:
             adjustment = (
