@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -87,11 +88,16 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         super()._configure_decode_metadata_update()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # Under PCP, draft prefill all-gathers rank-local hidden states, whose
+        # partition changes every step; keep it out of FULL graphs.
+        prefill_cudagraph_mode = cudagraph_mode
+        if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            prefill_cudagraph_mode = cudagraph_mode.mixed_mode()
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            prefill_cudagraph_mode,
             self.num_speculative_steps + 1,
         )
 
@@ -134,6 +140,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.target_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
+            pcp_manager=self.pcp_manager,
         )
         self.on_prefill_end(self.max_num_reqs)
 
@@ -297,6 +304,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
+            elif not dummy_run:
+                self._sync_pcp_drafts(input_batch)
             return self.draft_tokens[:num_reqs]
 
         if self.pcp_manager is not None and not dummy_run:
@@ -368,7 +377,20 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
         self.on_multi_step_decode_end(num_reqs)
 
+        if not dummy_run:
+            self._sync_pcp_drafts(input_batch)
         return self.draft_tokens[:num_reqs]
+
+    def _sync_pcp_drafts(self, input_batch: InputBatch) -> None:
+        # Replicated draft steps are not bitwise identical across PCP ranks,
+        # but every rank must verify the same drafts.
+        if self.pcp_manager is None:
+            return
+        pcp_group = get_pcp_group()
+        pcp_group.broadcast(self.draft_tokens[: input_batch.num_reqs], src=0)
+        if self.draft_logits is not None:
+            idx = input_batch.idx_mapping
+            self.draft_logits[idx] = pcp_group.broadcast(self.draft_logits[idx], src=0)
 
     @torch.inference_mode()
     def _run_model(
@@ -379,12 +401,15 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        draft_prefill: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
         if self.pcp_manager is not None:
+            # Draft prefill reads the PCP buffers in both capture and replay.
             input_buffers, is_padding = self.pcp_manager.get_draft_input_buffers(
-                self.input_buffers, num_tokens
+                self.pcp_manager.input_buffers if draft_prefill else self.input_buffers,
+                num_tokens,
             )
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -463,6 +488,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
+            draft_prefill=True,
         )
         if self.pcp_manager is not None:
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(

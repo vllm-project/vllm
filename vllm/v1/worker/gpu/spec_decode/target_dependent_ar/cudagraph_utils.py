@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -17,6 +18,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
         specialize_spec_tokens: bool = False,
+        pcp_manager: "PCPManager | None" = None,
     ) -> None:
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
@@ -95,6 +100,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
+                pcp_manager=pcp_manager,
             )
 
             forward_kwargs = {}
