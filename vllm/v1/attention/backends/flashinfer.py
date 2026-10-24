@@ -806,9 +806,6 @@ class FlashInferMetadata:
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
 
-    slot_mapping: torch.Tensor
-    """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
-
     # The data types of the query for prefill and decode.
     # On SM90, these two data types may be different.
     q_data_type_prefill: torch.dtype
@@ -1625,7 +1622,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         attn_metadata = FlashInferMetadata(
             kv_cache_layout=self.kv_cache_layout,
             num_actual_tokens=num_actual_tokens,
-            slot_mapping=common_attn_metadata.slot_mapping,
             q_data_type_prefill=self.q_data_type_prefill,
             q_data_type_decode=self.q_data_type_decode,
             num_decodes=num_decodes,

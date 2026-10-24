@@ -397,7 +397,7 @@ def run_attention_backend(
     if not try_backend_includes_kv_cache_update(backend):
         # only impls whose backend sets forward_includes_kv_cache_update=False define it
         impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+            mock_layer, key, value, kv_cache, common_attn_metadata.slot_mapping
         )
     if use_cuda_graph:
         impl.forward(
@@ -978,7 +978,6 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     attn_metadata = flashinfer_backend.FlashInferMetadata(
         kv_cache_layout=KVCacheLayout.LBHNC,
         num_actual_tokens=2,
-        slot_mapping=torch.empty(0, dtype=torch.int64),
         q_data_type_prefill=torch.bfloat16,
         q_data_type_decode=torch.bfloat16,
         num_decodes=4,
