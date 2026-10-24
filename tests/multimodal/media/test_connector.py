@@ -198,6 +198,20 @@ async def test_fetch_image_local_files_relative_allowed_path(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["missing.png", "subdir"])
+async def test_fetch_image_local_files_not_a_file(tmp_path, name: str):
+    """A file URL that does not point to a file is a client error, not a 500."""
+    (tmp_path / "subdir").mkdir()
+    local_connector = MediaConnector(allowed_local_media_path=str(tmp_path))
+    url = (tmp_path / name).as_uri()
+
+    with pytest.raises(ValueError, match="is not an existing file"):
+        local_connector.fetch_image(url)
+    with pytest.raises(ValueError, match="is not an existing file"):
+        await local_connector.fetch_image_async(url)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
 async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     connector = MediaConnector()
