@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -13,7 +16,10 @@ from vllm.benchmarks.sweep.plot import (
     PlotLessThan,
     PlotLessThanOrEqualTo,
     PlotNotEqualTo,
+    SweepPlotArgs,
+    main,
 )
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class TestPlotFilters:
@@ -225,6 +231,61 @@ class TestPlotFilters:
         assert len(filters) == 2
         assert isinstance(filters[0], PlotGreaterThan)
         assert isinstance(filters[1], PlotLessThanOrEqualTo)
+
+    @pytest.mark.parametrize(
+        "expression,target",
+        [
+            ('label=="fp8,tp2",request_rate<2', "fp8,tp2"),
+            ("label=='fp8,tp2',request_rate<2", "fp8,tp2"),
+            ('label=="O\'Brien,tp2",request_rate<2', "O'Brien,tp2"),
+        ],
+    )
+    def test_quoted_commas_do_not_split_filter_values(self, expression, target):
+        df = pd.DataFrame({"label": [target, "other"], "request_rate": [1, 1]})
+
+        result = PlotFilters.parse_str(expression).apply(df)
+
+        assert result["label"].tolist() == [target]
+
+    @pytest.mark.parametrize("target", ["O'Brien", r"C:\models\example"])
+    def test_unquoted_values_keep_apostrophes_and_backslashes(self, target):
+        df = pd.DataFrame({"label": [target, "other"]})
+
+        result = PlotFilters.parse_str(f"label=={target}").apply(df)
+
+        assert result["label"].tolist() == [target]
+
+    @pytest.mark.parametrize("expression", ['label=="fp8,tp2', "label=='fp8,tp2"])
+    def test_unterminated_quoted_values_are_rejected(self, expression):
+        with pytest.raises(ValueError, match="Unterminated quoted value"):
+            PlotFilters.parse_str(expression)
+
+    def test_cli_applies_quoted_comma_filter(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        records = [
+            {
+                "_benchmark_name": name,
+                "request_rate": rate,
+                "total_token_throughput": 100,
+                "median_ttft_ms": 10,
+            }
+            for name, rate in [("fp8,tp2", 1), ("fp8", 2)]
+        ]
+        (tmp_path / "summary.json").write_text(json.dumps(records), encoding="utf-8")
+        parser = SweepPlotArgs.add_cli_args(FlexibleArgumentParser())
+        args = parser.parse_args(
+            [
+                str(tmp_path),
+                "--filter-by",
+                '_benchmark_name=="fp8,tp2",request_rate>1',
+            ]
+        )
+
+        main(args)
+
+        assert "No data to plot." in capsys.readouterr().out
+        assert not list(tmp_path.glob("*.png"))
 
     def test_parse_empty_filter(self):
         """Test parsing empty filter string."""
