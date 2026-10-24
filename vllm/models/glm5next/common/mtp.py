@@ -41,6 +41,11 @@ from .model import (
     get_spec_layer_idx_from_weight_name,
 )
 
+if current_platform.is_cuda():
+    from vllm.models.glm5next.nvidia.low_latency_gemm import (
+        enable_glm5next_low_latency_gemm,
+    )
+
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
@@ -211,6 +216,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if current_platform.is_cuda():
+            enable_glm5next_low_latency_gemm(self, vllm_config.model_config.dtype)
         self.set_moe_parameters()
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
