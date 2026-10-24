@@ -211,15 +211,15 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
-# Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
-# GPUs over xGMI, compared exactly against a direct serve.
+# Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
+# decode on separate GPUs over xGMI, compared exactly against a direct serve.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
   key: amd-moriio-write-dummy-e2e-mi355
   dind: false
   device: mi355_2
   num_devices: 2
-  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 20 cases the
-  # largest of 6 shards holds 5 (~22 min on MI355). Every case picks free ports
+  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 28 cases the
+  # largest of 6 shards holds 7 (~32 min on MI355). Every case picks free ports
   # for its servers and proxy and its own compile-cache dir.
   parallelism: 6
   timeout_in_minutes: 45
@@ -239,7 +239,8 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-# The same P/D with prefill TP2 writing into decode TP1, which needs 3 GPUs.
+# The same P/D between different TP sizes (WRITE TP2 -> TP1, READ of MLA
+# TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
   key: amd-moriio-write-dummy-hetero-tp-mi355
   dind: false
