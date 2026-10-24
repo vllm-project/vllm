@@ -431,3 +431,59 @@ retirée du `.env` le 20/10 → Q23) + 2 × 127.0.0.1 : nuisance connue, **zéro
 200**, pas une brèche. nbaudit `ok:true` (5 séries, 3/série, 0 échec).
 Condensation : client de repli construit à 23:05:51Z (chaîne de repli
 sollicitée pendant la saturation, c'est le comportement voulu).
+
+## 24/10 00:05Z — LE PRUNEUR ÉTAIT LA CAUSE DU « COMPTE-GOUTTE » : plafond 48 → 96 GiB (GO user)
+
+**Symptôme rapporté** : « on sert les tokens au compte-goutte ».
+
+**Mesure** : sonde de génération réelle = **80 tokens en 297 s (0,3 tok/s)**
+avec GPU à 88 % / 256 W, donc un moteur qui travaille, pas qui dort. Sur la
+même période `prompt_tokens_total` +566 640 dont **seulement 141 888 cachés
+(25 %)** → le moteur recalculait 425 K tokens de contexte. Soixante secondes
+plus tard, dans une fenêtre calme : **176 tok/s agrégé (~25 tok/s/flux) avec
+98,8 % de cache** — soit exactement la valeur nominale documentée. Le débit
+n'est donc pas bas en permanence, il s'effondre par épisodes.
+
+**La charge est massivement longue** : histogramme `request_prompt_tokens`
+sur les 543 requêtes du run → **179 dans (100 K, 200 K] et 133 > 200 K**, soit
+**57 % au-dessus de 100 K tokens**.
+
+**Le maillon manquant** : `fstier_state.json` montre la purge de
+**23:50:02Z = 896 fichiers / 22,9 GiB supprimés**, en pleine sonde (la purge
+de 22:20 avait fait 938 fichiers / 22,9 GiB). Ces blocs sont le **cache
+préfixe** des conversations longues. Un contexte de 200 K remis en cache coûte
+~1 s ; recalculé au débit de prefill du 27B dense (~1,5 K tok/s) il coûte
+**~130 s**. La chaîne est donc : contexte long → blocs évincés vers le tier →
+**pruneur les supprime** → tour suivant = miss → re-prefill géant → tout le
+reste attend.
+
+**Niveau de preuve** : corrélation mesurée sur deux points (25 % pendant,
+98,8 % après) avec une purge datée au milieu — **pas encore une preuve
+causale stricte**. Le contrôle prévu (échantillonnage du ratio toutes les
+30 s à travers la purge de 00:20) a été **rendu caduc par le GO** : le plafond
+relevé supprime la purge de 00:20, donc l'échantillonneur mesurera l'absence
+de creux. Ce n'est pas une gêne — c'est le second bras de l'A/B — mais il faut
+le dire plutôt que de présenter 00:20 comme un contrôle.
+
+**Changement appliqué** (`fstier_prune.ps1`, une ligne + commentaire) :
+`MaxGiB 48 → 96`. Réversible. Garde-fous **inchangés** :
+`min(96 GiB, libre invité − 40 GiB, libre C: − 12 %)`.
+Dry-run de vérification (00:02:23Z) : `max_gib 96.0`, `cap_bytes` 103 079 215 104,
+`bytes_total` 59 056 128 000 (55 GiB), **`bytes_over_cap 0`**, `errors_count 0`,
+libre invité 303 GiB, marge C: 169 GiB. **La purge de 00:20:02Z ne supprimera
+rien.**
+
+**Ce que ça achète et ce que ça n'achète pas.** À ~15,7 GB/h de croissance, la
+rétention passe de **90 min à ~2 h 40**. C'est un facteur 1,8, pas une
+solution : le besoin réel (57 % du trafic au-dessus de 100 K) dépasse tout
+plafond de cache plausible. **Demande d'espace disque postée à Maintenance**
+(`machine-myia-ai-01`, `[ASK]` + cross-post `workspace-Maintenance` + DM) pour
+monter à 160-192 GiB si la marge existe ; y sont rappelés les ~149 Go de
+volumes Docker anonymes et les 33 volumes `profiles_*` (sauf `…-v0320`, cache
+de compilation de la prod) que notre inventaire RX113 du 22/10 laissait
+récupérables.
+
+**Plafond structurel non résolu** : le prefill du 27B dense est 3-4× plus lent
+que le MoE remplacé le 25/09 (1,5 K vs 5,4-8,3 K tok/s). Aucun réglage de
+cache ne compense ça. Si la réactivité prime sur la qualité, `medium-qwen36-stock-tq.yml`
+reste le rollback armé.
