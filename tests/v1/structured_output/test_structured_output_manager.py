@@ -695,6 +695,30 @@ def test_outlines_choice_with_non_bmp_characters(tokenizer):
     assert grammar.accept_tokens("", tokenizer.encode(choices[0]))
 
 
+@pytest.mark.parametrize("disable_any_whitespace", [False, True])
+def test_outlines_honours_disable_any_whitespace(tokenizer, disable_any_whitespace):
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="outlines", disable_any_whitespace=disable_any_whitespace
+        )
+    )
+    backend = OutlinesBackend(
+        vllm_config, tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    request_type, grammar_spec = get_structured_output_key(
+        StructuredOutputsParams(
+            json={"type": "object", "properties": {"a": {"type": "integer"}}}
+        )
+    )
+
+    def accepts(text: str) -> bool:
+        grammar = backend.compile_grammar(request_type, grammar_spec)
+        return grammar.accept_tokens("", tokenizer.encode(text))
+
+    assert accepts('{"a":1}')
+    assert accepts('{"a": 1}') is not disable_any_whitespace
+
+
 def test_xgrammar_compiles_choice_without_rewrite(tokenizer):
     """Frontends that skip Python request validation send `choice` as is."""
     choices = ["yes", "no\nplease"]
