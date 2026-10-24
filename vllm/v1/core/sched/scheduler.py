@@ -128,6 +128,7 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_scheduled_decodes = vllm_config.max_num_scheduled_decodes
         # Admission into RUNNING. Separate from max_num_running_reqs, which
         # is the model-runner slot count.
         self.max_num_active_reqs = (
@@ -690,7 +691,12 @@ class Scheduler(SchedulerInterface):
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
+        scheduled_decode_req_ids: set[str] = set()
         preempted_reqs: list[Request] = []
+
+        # Balance established decodes without limiting prefill admission or
+        # chunks that finish a prompt in this step.
+        max_num_scheduled_decodes = self.max_num_scheduled_decodes
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -886,6 +892,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            is_decode = request.num_computed_tokens >= request.num_prompt_tokens
+            if is_decode and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes:
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -929,6 +940,7 @@ class Scheduler(SchedulerInterface):
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
                             restored = num_scheduled_tokens.pop(preempted_req_id)
+                            scheduled_decode_req_ids.discard(preempted_req_id)
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
@@ -967,6 +979,8 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if is_decode:
+                scheduled_decode_req_ids.add(request_id)
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1360,6 +1374,17 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
+                is_decode = (
+                    not load_kv_async
+                    and num_computed_tokens >= request.num_prompt_tokens
+                )
+                if (
+                    is_decode
+                    and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes
+                ):
+                    skip_request(request_queue)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1515,6 +1540,8 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if is_decode:
+                    scheduled_decode_req_ids.add(request_id)
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1579,6 +1606,7 @@ class Scheduler(SchedulerInterface):
         assert token_budget >= 0
         assert input_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
+        assert len(scheduled_decode_req_ids) <= max_num_scheduled_decodes
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).

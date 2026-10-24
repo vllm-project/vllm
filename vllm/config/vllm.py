@@ -679,8 +679,8 @@ class VllmConfig:
         """Query length of every request in a uniform decode batch.
 
         A decode step submits one query for the newly sampled token plus one
-        for each draft token, so the widest uniform decode batch the scheduler
-        can build is `max_num_seqs * uniform_decode_query_len` tokens. Anything
+        for each draft token, so an established decode batch is bounded by
+        `max_num_scheduled_decodes * uniform_decode_query_len` tokens. Anything
         that has to cover a decode batch reads this, so the sizing rule cannot
         drift between the places that apply it.
 
@@ -694,6 +694,21 @@ class VllmConfig:
         the failure this property exists to prevent.
         """
         return 1 + self.num_speculative_tokens
+
+    @property
+    def max_num_scheduled_decodes(self) -> int:
+        """Per-step established-decode limit, excluding prompt work."""
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size <= 1 or not self.use_v2_model_runner:
+            return max_num_seqs
+
+        from vllm.platforms import current_platform
+
+        # Respect XPU's explicit PP microbatch opt-out.
+        if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
+            return max_num_seqs
+        return (max_num_seqs + pp_size - 1) // pp_size
 
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
@@ -2384,6 +2399,7 @@ class VllmConfig:
         ```python
         default_max_graph_size = 1024 if is_data_center_blackwell else 512
         decode_query_len = self.uniform_decode_query_len
+        # FULL_DECODE_ONLY uses max_num_scheduled_decodes instead of max_num_seqs.
         max_graph_size = min(
             max_num_seqs * decode_query_len * 2, default_max_graph_size
         )
@@ -2447,6 +2463,13 @@ class VllmConfig:
                 )
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
+                if (
+                    self.compilation_config.cudagraph_mode
+                    == CUDAGraphMode.FULL_DECODE_ONLY
+                ):
+                    # Mixed/piecewise graphs must still cover unrestricted
+                    # prefill batches. Only shrink the default decode range.
+                    max_num_seqs = self.max_num_scheduled_decodes
                 max_cudagraph_capture_size = min(
                     max_num_seqs * decode_query_len * 2, default_max_graph_size
                 )
