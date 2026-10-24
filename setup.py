@@ -1557,6 +1557,7 @@ if _is_cuda() or _is_hip():
 if not _is_xpu():
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
+    ext_modules.append(CMakeExtension(name="vllm._session_prefix"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))

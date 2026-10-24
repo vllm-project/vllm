@@ -18,6 +18,15 @@ from vllm.config.utils import (
 # Helpers
 
 
+def test_session_history_capacity_does_not_change_computation_graph():
+    assert (
+        CacheConfig().compute_hash()
+        == CacheConfig(session_hash_cache_mb=32).compute_hash()
+    )
+    with pytest.raises(ValueError):
+        CacheConfig(session_hash_cache_mb=-1)
+
+
 def endswith_fqname(obj, suffix: str) -> bool:
     # normalize_value(type) returns fully-qualified name
     # Compare suffix to avoid brittle import paths.

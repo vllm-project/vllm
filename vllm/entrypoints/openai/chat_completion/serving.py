@@ -263,6 +263,8 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        *,
+        session_id: str | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -281,7 +283,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(request, session_id=session_id)
 
     async def create_chat_completion(
         self,
@@ -310,7 +312,8 @@ class OpenAIServingChat(GenerateBaseServing):
         parser: Parser | None = None
         if self.parser_cls is not None:
             parser = self._make_parser(request, tokenizer, chat_template_kwargs)
-        result = await self.render_chat_request(request)
+        session_id = self._get_session_id(request, raw_request)
+        result = await self.render_chat_request(request, session_id=session_id)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -379,7 +382,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
-            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(

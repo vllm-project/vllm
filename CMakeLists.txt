@@ -167,6 +167,15 @@ define_extension_target(
   WITH_SOABI)
 
 #
+# Session-prefix helpers operate on Python objects through the stable API.
+define_extension_target(
+  _session_prefix
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES csrc/session_prefix.cpp
+  USE_SABI 3.11
+  WITH_SOABI)
+
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND

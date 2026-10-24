@@ -4,6 +4,7 @@ import gc
 import os
 import queue
 import signal
+import sysconfig
 import threading
 import time
 from collections import defaultdict, deque
@@ -222,6 +223,21 @@ class EngineCore:
 
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size, caching_hash_fn
+            )
+
+        self.session_hash_cache = None
+        if (
+            vllm_config.cache_config.session_hash_cache_mb
+            and self.request_block_hasher is not None
+            and kv_connector is None
+            and vllm_config.lora_config is None
+            and not vllm_config.model_config.is_encoder_decoder
+            and not sysconfig.get_config_var("Py_GIL_DISABLED")
+        ):
+            from vllm.v1.core.session_prefix import SessionHashCache
+
+            self.session_hash_cache = SessionHashCache.create(
+                vllm_config.cache_config.session_hash_cache_mb << 20, hash_block_size
             )
 
         self.step_fn = (
@@ -823,6 +839,8 @@ class EngineCore:
 
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
+        if self.session_hash_cache is not None:
+            self.session_hash_cache.store.clear(close=True)
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -871,6 +889,13 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        if self.session_hash_cache is not None:
+            self.session_hash_cache.store.clear()
+            logger.debug(
+                "Session hash history reset: epoch=%d bytes=%d",
+                self.session_hash_cache.store.epoch,
+                self.session_hash_cache.store.bytes_used,
+            )
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
@@ -1105,6 +1130,8 @@ class EngineCore:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
+        if self.session_hash_cache is not None:
+            self.session_hash_cache.store.clear()
         self._weight_version = weight_version
 
     def get_weight_version(self) -> str:
@@ -1125,7 +1152,12 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(request, self.request_block_hasher)
+        cache = self.session_hash_cache
+        epoch = cache.store.epoch if cache is not None else 0
+        initial_hashes = cache.prefix(request) if cache is not None else None
+        req = Request.from_engine_core_request(
+            request, self.request_block_hasher, initial_block_hashes=initial_hashes
+        )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -1133,6 +1165,8 @@ class EngineCore:
             # grammar compilation is async. Scheduler always checks grammar
             # compilation status before scheduling request.
             self.structured_output_manager.grammar_init(req)
+        if cache is not None:
+            cache.publish(request, req, epoch)
         return req, request.current_wave
 
     def _eep_scale_up_before_kv_init(self):

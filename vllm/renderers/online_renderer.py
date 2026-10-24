@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -227,6 +227,7 @@ class OnlineRenderer:
         request: ChatCompletionRequest,
         *,
         skip_mm_cache: bool = False,
+        session_id: str | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -306,6 +307,7 @@ class OnlineRenderer:
                 tool_dicts=tool_dicts,
                 parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
+                session_id=session_id,
             )
         else:
             # For GPT-OSS.
@@ -761,6 +763,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        session_id: str | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -783,6 +786,11 @@ class OnlineRenderer:
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        context = renderer.session_prefix_context(
+            session_id, getattr(request, "cache_salt", None)
+        )
+        if context is not None:
+            tok_params = replace(tok_params, session_prefix_context=context)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
         ).with_defaults(
@@ -791,71 +799,79 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
-        if reuse_ids:
-            # Decode-side token reuse: feed the forwarded ids straight to the
-            # engine, skipping templating and tokenization. ``messages`` are not
-            # tokenized, so conversation is empty. The adjust_request tail below
-            # still runs.
-            conversation: list[ConversationMessage] = []
-            engine_input = tokens_input(
-                reuse_ids, cache_salt=getattr(request, "cache_salt", None)
-            )
-        else:
-            (conversation,), (engine_input,) = await renderer.render_chat_async(
-                [messages],
-                chat_params,
-                tok_params,
-                prompt_extras={
-                    k: v
-                    for k in ("mm_processor_kwargs", "cache_salt")
-                    if (v := getattr(request, k, None)) is not None
-                },
-                skip_mm_cache=skip_mm_cache,
-            )
-
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        #
-        # Exception: Mistral grammar-capable tokenizers always call
-        # adjust_request — even for tool_choice="none" — so that the grammar
-        # factory can prevent special-token leakage.
-        if parser is not None:
-            tokenizer = renderer.get_tokenizer()
-            tool_parser = parser.tool_parser_cls
-            tool_choice = getattr(request, "tool_choice", "none")
-            is_mistral_grammar_eligible = (
-                tool_parser is not None
-                and is_mistral_tool_parser(tool_parser)
-                and is_mistral_tokenizer(tokenizer)
-                and tokenizer.supports_grammar
-            )
-            should_adjust_request = (
-                parser.always_adjust_request
-                or parser.reasoning_parser_cls is not None
-                or tool_choice != "none"
-                or is_mistral_grammar_eligible
-            )
-            if should_adjust_request:
-                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
-                    msg = (
-                        "Tool usage is only supported "
-                        "for Chat Completions API or Responses API requests, "
-                        f"but got {type(request).__name__}"
-                    )
-                    raise NotImplementedError(msg)
-                request_parser = parser(
-                    tokenizer,
-                    request.tools,
-                    model_config=self.model_config,
-                    chat_template_kwargs=chat_params.chat_template_kwargs,
+        try:
+            reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
+            if reuse_ids:
+                # Decode-side token reuse: feed the forwarded ids straight to the
+                # engine, skipping templating and tokenization. ``messages`` are not
+                # tokenized, so conversation is empty. The adjust_request tail below
+                # still runs.
+                conversation: list[ConversationMessage] = []
+                engine_input = tokens_input(
+                    reuse_ids, cache_salt=getattr(request, "cache_salt", None)
                 )
-                prompt_token_ids = extract_prompt_components(
-                    self.model_config, engine_input
-                ).token_ids
-                if prompt_token_ids is not None:
-                    request_parser.set_prompt_token_ids(prompt_token_ids)
-                request = request_parser.adjust_request(request=request)
+            else:
+                (conversation,), (engine_input,) = await renderer.render_chat_async(
+                    [messages],
+                    chat_params,
+                    tok_params,
+                    prompt_extras={
+                        k: v
+                        for k in ("mm_processor_kwargs", "cache_salt")
+                        if (v := getattr(request, k, None)) is not None
+                    },
+                    skip_mm_cache=skip_mm_cache,
+                )
 
-        return conversation, [engine_input]
+            # tool parsing is done only if a tool_parser has been set and if
+            # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
+            # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+            #
+            # Exception: Mistral grammar-capable tokenizers always call
+            # adjust_request — even for tool_choice="none" — so that the grammar
+            # factory can prevent special-token leakage.
+            if parser is not None:
+                tokenizer = renderer.get_tokenizer()
+                tool_parser = parser.tool_parser_cls
+                tool_choice = getattr(request, "tool_choice", "none")
+                is_mistral_grammar_eligible = (
+                    tool_parser is not None
+                    and is_mistral_tool_parser(tool_parser)
+                    and is_mistral_tokenizer(tokenizer)
+                    and tokenizer.supports_grammar
+                )
+                should_adjust_request = (
+                    parser.always_adjust_request
+                    or parser.reasoning_parser_cls is not None
+                    or tool_choice != "none"
+                    or is_mistral_grammar_eligible
+                )
+                if should_adjust_request:
+                    if not isinstance(
+                        request, ChatCompletionRequest | ResponsesRequest
+                    ):
+                        msg = (
+                            "Tool usage is only supported "
+                            "for Chat Completions API or Responses API requests, "
+                            f"but got {type(request).__name__}"
+                        )
+                        raise NotImplementedError(msg)
+                    request_parser = parser(
+                        tokenizer,
+                        request.tools,
+                        model_config=self.model_config,
+                        chat_template_kwargs=chat_params.chat_template_kwargs,
+                    )
+                    prompt_token_ids = extract_prompt_components(
+                        self.model_config, engine_input
+                    ).token_ids
+                    if prompt_token_ids is not None:
+                        request_parser.set_prompt_token_ids(prompt_token_ids)
+                    request = request_parser.adjust_request(request=request)
+
+            if context is not None:
+                context.finish(publish=True)
+            return conversation, [engine_input]
+        finally:
+            if context is not None:
+                context.finish(publish=False)

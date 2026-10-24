@@ -420,6 +420,12 @@ class ModelConfig:
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
 
+    session_token_cache_mb: int = Field(default=0, ge=0)
+    """Per-renderer CPU session token history budget in MiB; zero disables it.
+    Initially supports only the audited Qwen3 HF tokenizer configuration and text chat.
+    Session IDs select candidates; exact content validation remains required.
+    """
+
     # Pooler config
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
@@ -466,6 +472,7 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
+            "session_token_cache_mb",
             "convert",
             "tokenizer",
             "tokenizer_mode",

@@ -80,6 +80,7 @@ class Request:
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
+        initial_block_hashes: tuple[int, list["BlockHash"]] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -223,6 +224,21 @@ class Request:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.block_hashes: list[BlockHash] = []
+        if initial_block_hashes is not None:
+            block_size, hashes = initial_block_hashes
+            if (
+                block_hasher is None
+                or block_size <= 0
+                or len(hashes) > self.num_prompt_tokens // block_size
+                or prompt_token_ids is None
+                or prompt_embeds is not None
+                or prompt_is_token_ids is not None
+                or self.mm_features
+                or lora_request is not None
+                or resumable
+            ):
+                raise ValueError("invalid initial prompt block hashes")
+            self.block_hashes = hashes.copy()
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -245,6 +261,7 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
+        initial_block_hashes: tuple[int, list["BlockHash"]] | None = None,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -261,6 +278,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            initial_block_hashes=initial_block_hashes,
             resumable=request.resumable,
             session_id=request.session_id,
             kv_hints=request.kv_hints,
