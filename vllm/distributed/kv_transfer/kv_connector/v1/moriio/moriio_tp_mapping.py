@@ -282,9 +282,8 @@ def compute_read_tp_mapping(
     else:
         ratio = producer_tp_size // consumer_tp_size
         holders = tuple(range(consumer_tp_rank * ratio, (consumer_tp_rank + 1) * ratio))
-    sources: list[ReadSource] = []
-    for producer_tp_rank in holders:
-        mapping = compute_write_tp_mapping(
+    mappings = [
+        compute_write_tp_mapping(
             producer_tp_rank,
             producer_tp_size,
             consumer_tp_size,
@@ -292,24 +291,21 @@ def compute_read_tp_mapping(
             is_mla,
             has_mamba,
         )
-        sources.extend(
-            ReadSource(producer_tp_rank, target)
-            for target in mapping.targets
-            if target.tp_rank == consumer_tp_rank
-        )
-    first = compute_write_tp_mapping(
-        holders[0],
-        producer_tp_size,
-        consumer_tp_size,
-        total_num_kv_heads,
-        is_mla,
-        has_mamba,
+        for producer_tp_rank in holders
+    ]
+    sources = tuple(
+        ReadSource(producer_tp_rank, target)
+        for producer_tp_rank, mapping in zip(holders, mappings)
+        for target in mapping.targets
+        if target.tp_rank == consumer_tp_rank
     )
+    # Every producer rank holds as many heads as any other, and so does every
+    # consumer rank, so any holder's mapping gives the per-rank head counts.
     return MoRIIOReadTPMapping(
         producer_tp_size=producer_tp_size,
         consumer_tp_size=consumer_tp_size,
-        local_num_heads=first.local_num_heads,
-        remote_num_heads=first.remote_num_heads,
-        sources=tuple(sources),
+        local_num_heads=mappings[0].local_num_heads,
+        remote_num_heads=mappings[0].remote_num_heads,
+        sources=sources,
         holder_tp_ranks=holders,
     )
