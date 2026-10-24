@@ -340,7 +340,7 @@ class KVCacheManager:
         boundary if the connector supplies it, so the caller must fall back to
         ``get_computed_blocks`` to reconcile when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        Non-hybrid models use ``get_computed_blocks``.
 
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
@@ -371,9 +371,18 @@ class KVCacheManager:
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
+        hit_diverged = min(per_group_hits) < num_local
+        # A divergent hit still needs connector backfill or reconciliation.
+        if (
+            not hit_diverged
+            and num_local > 0
+            and self.enable_kv_cache_events
+            and getattr(request, "kv_cache_report_mode", "incremental") == "full"
+        ):
+            self.coordinator.emit_cached_block_events(request, computed)
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
-        return blocks, num_local, 0, min(per_group_hits) < num_local
+        return blocks, num_local, 0, hit_diverged
 
     def allocate_slots(
         self,
