@@ -404,6 +404,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        num_decode_step_tokens: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -438,6 +439,10 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            num_decode_step_tokens: Main-model tokens of the decode step right
+                after the prefill (the sampled token plus the draft tokens).
+                Only the full-sequence gate counts them, so that a request
+                whose first decode step needs another block is not admitted.
 
         Blocks layout:
         ```
@@ -543,11 +548,13 @@ class KVCacheManager:
 
         full_sequence_shortfall = 0
         if full_sequence_must_fit:
-            # First check whether the full request sequence fits, including
-            # the lookahead slots its last chunk allocates.
-            full_num_tokens_main_model = min(request.num_tokens, self.max_model_len)
+            # First check whether the full request sequence fits, through the
+            # decode step after its prefill and its lookahead.
+            full_num_tokens_main_model = min(
+                request.num_tokens + num_decode_step_tokens, self.max_model_len
+            )
             full_num_tokens = min(
-                request.num_tokens + num_lookahead_tokens, self.max_model_len
+                full_num_tokens_main_model + num_lookahead_tokens, self.max_model_len
             )
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
