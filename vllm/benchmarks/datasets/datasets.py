@@ -2867,49 +2867,39 @@ class CustomAudioDataset(CustomDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item.get("prompt", "")
+            y, sr = process_audio(item["audio"])
+            if enable_multimodal_chat:
+                # Keep the prompt plain; the chat backend assembles the message.
+                buf = io.BytesIO()
+                sf.write(buf, y, sr, format="WAV")
+                audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                mm_content = {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_base64,
+                        "format": "wav",
+                    },
+                }
+            else:
+                mm_content = {"audio": (y, sr)}
+
             if tokenizer is None:
                 prompt_len = 1
                 new_output_len = (
                     output_len if (output_len is not None and output_len != -1) else 256
                 )
-                mm_content = None
             else:
                 use_chat_template = (
                     not skip_chat_template
                     and hasattr(tokenizer, "chat_template")
                     and tokenizer.chat_template is not None
                 )
-                if enable_multimodal_chat:
-                    # Chat-based audio models (e.g., Qwen2-Audio):
-                    # encode audio as base64; serve.py assembles the chat message
-                    # as: {"role": "user", "content": [
-                    #     {"type": "text", "text": prompt},
-                    #     {"type": "input_audio", "input_audio": {...}}
-                    # ]}
-                    y, sr = process_audio(item["audio"])
-                    buf = io.BytesIO()
-                    sf.write(buf, y, sr, format="WAV")
-                    audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                    mm_content = {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": "wav",
-                        },
-                    }
-                    # prompt stays as plain string; serve.py handles wrapping
-                else:
-                    # Whisper-style models: load audio array locally
-                    y, sr = process_audio(item["audio"])
-                    mm_content = {"audio": (y, sr)}
-                    if use_chat_template:
-                        # ASR models with a chat template but not multimodal chat
-                        prompt = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": prompt}],
-                            add_generation_prompt=True,
-                            tokenize=False,
-                        )
-                    # else: plain prompt for Whisper-style models
+                if not enable_multimodal_chat and use_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
                 prompt_len = (
                     len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
                 )
