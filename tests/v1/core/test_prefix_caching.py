@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -3634,18 +3635,16 @@ def test_kv_cache_events(blocks_to_cache: int):
     stored_block_hash = block.block_hashes
 
     # Remove blocks and send another request
-    # Should see block_to_cache number of removed block events and a new block
-    # stored event
+    # Should see one removed event carrying the blocks_to_cache evicted hashes
+    # and a new block stored event
     manager.free(req0)
     req1 = make_request("1", list(range(num_tokens)), block_size, sha256)
     _ = manager.allocate_slots(req1, num_tokens)
     events = manager.take_events()
 
-    for blocks in events[:-1]:
-        assert isinstance(blocks, BlockRemoved)
-        assert blocks.block_hashes[0] in stored_block_hash
-    assert len(events) == blocks_to_cache + 1
-    assert isinstance(events[-2], BlockRemoved)
+    assert len(events) == 2
+    assert isinstance(events[0], BlockRemoved)
+    assert sorted(events[0].block_hashes) == sorted(stored_block_hash)
     assert (
         len(events[-1].block_hashes)
         == blocks_to_cache
@@ -4075,9 +4074,120 @@ def test_block_removed_event_group_idx(group_id: int):
     events = pool.take_events()
     removed_events = [e for e in events if isinstance(e, BlockRemoved)]
 
-    assert len(removed_events) == 2
-    for event in removed_events:
-        assert event.group_idx == group_id
+    # Consecutive evictions from the same group coalesce into one event.
+    assert len(removed_events) == 1
+    assert len(removed_events[0].block_hashes) == 2
+    assert removed_events[0].group_idx == group_id
+
+
+def test_block_removed_events_coalesce_consecutive_same_group():
+    """Consecutive evictions from one group share a BlockRemoved event; a
+    different group or an intervening event starts a new one, so event order
+    is unchanged."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request("req", list(range(block_size * 2)), block_size, sha256)
+    hashes = [kv_cache_utils.maybe_convert_block_hash(h) for h in req.block_hashes]
+
+    group0_blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(req, group0_blocks, 0, 2, block_size, 0)
+    group1_blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(req, group1_blocks, 0, 1, block_size, 1)
+    pool.take_events()
+
+    for block in (*group0_blocks, *group1_blocks):
+        pool._maybe_evict_cached_block(block)
+    pool.cache_full_blocks(req, group1_blocks, 0, 1, block_size, 1)
+    pool._maybe_evict_cached_block(group1_blocks[0])
+
+    events = pool.take_events()
+    assert [type(e) for e in events] == [
+        BlockRemoved,
+        BlockRemoved,
+        BlockStored,
+        BlockRemoved,
+    ]
+    assert (events[0].group_idx, events[0].block_hashes) == (0, hashes)
+    assert (events[1].group_idx, events[1].block_hashes) == (1, hashes[:1])
+    assert (events[3].group_idx, events[3].block_hashes) == (1, hashes[:1])
+
+
+def test_block_removed_events_not_coalesced_across_media():
+    """HiSparse host and device pools share one event queue; their removals
+    must stay in separate events so each keeps its medium."""
+    block_size = 4
+    device_pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    host_pool = SharedEventQueueBlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        medium=MEDIUM_CPU,
+        event_owner=device_pool,
+    )
+    req = make_request("req", list(range(block_size * 2)), block_size, sha256)
+    device_blocks = device_pool.get_new_blocks(2)
+    device_pool.cache_full_blocks(req, device_blocks, 0, 2, block_size, 0)
+    host_blocks = host_pool.get_new_blocks(1)
+    host_pool.cache_full_blocks(req, host_blocks, 0, 1, block_size, 0)
+    device_pool.take_events()
+
+    device_pool._maybe_evict_cached_block(device_blocks[0])
+    host_pool._maybe_evict_cached_block(host_blocks[0])
+    device_pool._maybe_evict_cached_block(device_blocks[1])
+
+    events = device_pool.take_events()
+    assert [(type(e), e.medium, len(e.block_hashes)) for e in events] == [
+        (BlockRemoved, MEDIUM_GPU, 1),
+        (BlockRemoved, MEDIUM_CPU, 1),
+        (BlockRemoved, MEDIUM_GPU, 1),
+    ]
+
+
+@pytest.mark.parametrize("use_lora", [False, True])
+def test_block_stored_event_extra_keys(use_lora: bool):
+    """BlockStored carries one extra_keys entry per block, None when the
+    request has no extra keys."""
+    block_size = 4
+    num_blocks = 3
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    lora_request = (
+        LoRARequest(lora_name="test_lora", lora_int_id=1, lora_path="/test/path")
+        if use_lora
+        else None
+    )
+    req = make_request(
+        "req",
+        list(range(block_size * num_blocks)),
+        block_size,
+        sha256,
+        lora_request=lora_request,
+    )
+    blocks = pool.get_new_blocks(num_blocks)
+    pool.cache_full_blocks(req, blocks, 0, num_blocks, block_size, 0)
+    pool.emit_cached_block_events(req, num_blocks, block_size, 0)
+
+    expected = [("test_lora",) if use_lora else None] * num_blocks
+    events = pool.take_events()
+    assert len(events) == 2
+    for event in events:
+        assert isinstance(event, BlockStored)
+        assert event.extra_keys == expected
 
 
 def test_emit_cached_block_events():
