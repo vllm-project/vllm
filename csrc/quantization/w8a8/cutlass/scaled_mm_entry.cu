@@ -170,6 +170,12 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
   } else if (cuda_device_capability >= 90) {
     return CUDA_VERSION >= 12000;
   }
+  #if defined ENABLE_SCALED_MM_SM89_BLOCKWISE && ENABLE_SCALED_MM_SM89_BLOCKWISE
+  if (cuda_device_capability == 89) {
+    // Ada: CUTLASS 2.x blockwise kernel (FP8 mma.sync needs CUDA 12.4)
+    return CUDA_VERSION >= 12040;
+  }
+  #endif
 #endif
 
   return false;

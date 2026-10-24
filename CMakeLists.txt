@@ -917,6 +917,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_C2X_SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
     message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
+
+    # Blockwise FP8 (1x128 activation, 128x128 weight scales) for Ada.
+    # CUTLASS 2.x mainloop; FP8 mma.sync on SM89 needs CUDA 12.4.
+    cuda_archs_loose_intersection(SCALED_MM_SM89_BLOCKWISE_ARCHS
+      "8.9" "${SCALED_MM_2X_ARCHS}")
+    if(SCALED_MM_SM89_BLOCKWISE_ARCHS AND
+       ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.4)
+      set(SCALED_MM_SM89_BLOCKWISE_SRCS
+        "csrc/quantization/w8a8/cutlass/scaled_mm_blockwise_sm89_fp8.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${SCALED_MM_SM89_BLOCKWISE_SRCS}"
+        CUDA_ARCHS "${SCALED_MM_SM89_BLOCKWISE_ARCHS}")
+      list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_SM89_BLOCKWISE_SRCS}")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM89_BLOCKWISE=1")
+      message(STATUS "Building scaled_mm_blockwise_sm89_fp8 for archs: "
+                     "${SCALED_MM_SM89_BLOCKWISE_ARCHS}")
+    endif()
   else()
     if (SCALED_MM_3X_ARCHS)
       message(STATUS "Not building scaled_mm_c2x as all archs are already built"
