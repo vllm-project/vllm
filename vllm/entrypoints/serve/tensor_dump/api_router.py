@@ -1,9 +1,10 @@
-import json
-import os
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+import vllm.envs as envs
+from vllm.v1.worker.gpu.tensor_dump import TensorDumpConfig
 
 router = APIRouter()
 
@@ -12,14 +13,18 @@ router = APIRouter()
 async def control_dumper(
     action: Literal["configure", "reset", "get_state"],
     request: Request,
-    body: dict | None = None,
+    body: TensorDumpConfig | None = None,
 ):
+    if action == "configure" and body is None:
+        raise HTTPException(
+            status_code=422, detail="configure requires a configuration"
+        )
     results = await request.app.state.engine_client.collective_rpc(
-        "dumper_control", args=(action, json.dumps(body or {}))
+        "dumper_control", args=(action, body.model_dump() if body is not None else None)
     )
     return JSONResponse(content=results)
 
 
 def attach_router(app: FastAPI):
-    if os.getenv("DUMPER_SERVER_PORT") == "reuse":
+    if envs.VLLM_TENSOR_DUMP_DIR:
         app.include_router(router)

@@ -2040,12 +2040,7 @@ class VllmConfig:
         self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
-        from vllm.utils.debug_utils.dumper import dumper
-
-        if dumper.may_enable and (
-            not self.use_v2_model_runner or not self.model_config.enforce_eager
-        ):
-            raise ValueError("Tensor dumping requires eager Model Runner V2")
+        self._validate_tensor_dump()
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
@@ -3312,6 +3307,14 @@ class VllmConfig:
                 "proton_graph_attribution=True to capture replayed kernels. "
                 "Enable attribution or use --enforce-eager."
             )
+
+    def _validate_tensor_dump(self) -> None:
+        if not envs.VLLM_TENSOR_DUMP_DIR:
+            return
+        if not self.use_v2_model_runner or not self.model_config.enforce_eager:
+            raise ValueError("Tensor dumping requires eager Model Runner V2")
+        if self.parallel_config.use_ubatching:
+            raise ValueError("Tensor dumping does not support microbatch execution")
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
