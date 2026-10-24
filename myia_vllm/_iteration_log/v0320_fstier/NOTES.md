@@ -840,3 +840,68 @@ Disque invité **74 %** (255 GB libres), commit hôte **77,0 %** (marge 91,8 GB)
 G: 85 %. Condensation nominale (bannière 3 étages `key=OK`, repli cloud actif,
 aucun événement). Les 5 × 500 du census sont ceux de la frontière du restart
 de 02:10, déjà documentés.
+
+## 2026-10-24 06:41Z — RÉTRACTION : le « basculement en lecture » du tier fs n'était qu'une fenêtre ; 7ᵉ × 400
+
+**Moteur** : `StartedAt 02:10:33Z`, **4 h 30 sans restart**, health 200 en
+4,0 ms, RC=0, OOM 0, 771 sondes OK. Un seul `fail 1/2` (06:39:07, snapshot
+p=152,5 M) → **RECOVERED 06:41:07**, streak BUSY 0. Préemptions **8
+inchangées** (aucune saturation KV depuis le boot). VRAM 21 381 / 20 650 MiB,
+`/dev/shm` 17 G (26 %), disque invité 75 % (248 GB), C: 608 GB libres,
+commit hôte 76,3 % (marge 94,5 GB), G: 85 %. nbaudit `ok:true` (06:06:07Z,
+vague 2 `Image/` en cours). Pruneur 06:20:02Z : 111,1 GiB total, 15,1
+au-dessus, 618 fichiers supprimés, 0 erreur — le régime de purge à 96 GiB
+est stable (2 cycles observés).
+
+### ★ Rétraction — « le tier a basculé en lecture » était un effet de fenêtre
+
+Fenêtre 04:41Z → 06:41Z (compteurs cumulés, même génération moteur) :
+
+| Compteur | 04:41Z | 06:41Z | Δ 2 h |
+|---|---|---|---|
+| `read_bytes{fs}` | 282,4 GB | 322,0 GB | **+39,6 GB** (5,5 MB/s) |
+| `write_bytes{fs}` | 355,6→ | 355,6 GB | **+164,7 GB** (22,9 MB/s) |
+| `chunk_queries{fs}` | 21 138 | 27 151 | +6 013 |
+| `chunk_hits{fs}` | 10 748 | 12 255 | +1 507 (**25,1 %**) |
+
+Le ratio lecture/écriture de la fenêtre précédente (**1,48:1**) ne tient pas :
+cette fenêtre est à **1:4,2**, et le cumul depuis boot repasse sous l'égalité
+(322,0 lus / 355,6 écrits = **1:1,10**). **Interprétation corrigée** : la
+fenêtre 02:41-04:41 était la **phase de re-jeu post-restart** — le cache GPU
+avait été remis à zéro à 02:10 et les sessions relisaient leurs préfixes
+survivants du disque. En régime établi, le tier fs redevient
+**écriture-dominé** (nouveaux blocs), avec un taux de hit chunk de ~25 %.
+La leçon s'applique à moi-même : *deux points ne font pas une pente* —
+j'ai annoncé « la pathologie du 21/10 est inversée » sur une seule fenêtre
+de 2 h ; c'était le profil transitoire, pas l'état stable.
+
+Ce que la mesure **garantit** toujours : la valeur du tier se concentre
+(a) dans la survie au restart (prouvée 20/10) et (b) dans le replay à chaud
+des préfixes évictés du GPU — 25 % de hit chunk en régime établi n'est pas
+négligeable, mais ce n'est plus « le disque rend plus qu'il n'écrit ».
+
+### Amortissement préfixe, lui, est excellent et durable
+
+`prefix_cache` cumul : 122,07 M hits / 152,64 M queries = **80,0 %**.
+**Incrémentiel 2 h : 57,98 M / 62,83 M = 92,3 %** — chaque tour ne paie
+presque que son delta. C'est le régime sain décrit en §5quater. Les 92 %
+viennent du couple GPU+RAM ; le fs sert la queue longue (25 % de ses
+probes). Cohérent avec l'objectif initial du multi-tier.
+
+### 7ᵉ × 400 de la même famille (05:02:03Z, corps 938 639 o)
+
+Même signature : Bun hub, `90.65.170.144`, clé MEDIUM, session Claude Code,
+corps sous la barre du plus gros 200 observé (945 341 o). **7 occurrences
+depuis 23:47Z** (958 062×2, 1 007 885, 712 403, 942 554×2, 938 639).
+La capture du corps de réponse (PR #163) reste **inactive** — le moteur
+n'a pas redémarré depuis son commit ; le champ `error_body` est absent des
+1 255 lignes du log, conforme à l'attente. Le diagnostic suivra au
+prochain restart.
+
+### Census 2 h
+
+591 req (4,9/min) : `200 × 570`, `401 × 20` (sondeur `108.165.33.236`,
+clé MEDIUM_VL morte — mur tenu), `400 × 1` (ci-dessus), **0 × 500**.
+Aucune IP inconnue avec 200. Condensation : aucun événement depuis 00:56Z,
+bannière vivante ; deux WARN `STALE-FILE #3230` (05:46Z) = périmètre RSM,
+la vue PG sert de secours comme prévu.
