@@ -14,6 +14,11 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    CutlassNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -62,6 +67,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.tp_weight_switch import (
+    NVFP4_SWIZZLED_BLOCK_SCALE_LAYOUT,
+    TPWeightGatherSpec,
+    TPWeightSwitchMixin,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     trtllm_nvfp4_hidden_alignment,
 )
@@ -2536,8 +2546,17 @@ class _DropInputScale(FormatScheme):
 _DROP_INPUT_SCALE = _DropInputScale()
 
 
+_PCP_TP_NVFP4_CUTLASS_LAYOUT_KERNELS = (
+    CutlassNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
+)
+
+
 @register_weight_loader_v2_supported_method
-class ModelOptLinearMethod(LinearMethodBase):
+class ModelOptLinearMethod(TPWeightSwitchMixin, LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
     an activation scheme (from the QuantSpec pair) and an optional
     ``FormatScheme``, runs a fixed lifecycle, selects the kernel from the pair,
@@ -2547,6 +2566,42 @@ class ModelOptLinearMethod(LinearMethodBase):
     ``BasevLLMParameter`` params route through the v2 fused loader, not the
     legacy shape-assert path.
     """
+
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1, make_full_contiguous=True),
+        TPWeightGatherSpec(
+            "weight_scale", gather_dim=1, layout=NVFP4_SWIZZLED_BLOCK_SCALE_LAYOUT
+        ),
+    )
+
+    def get_tp_weight_switch_specs(
+        self, layer: torch.nn.Module
+    ) -> tuple[TPWeightGatherSpec, ...]:
+        """Validate the NVFP4 post-load layout used by PCP O-Proj TP.
+
+        CUTLASS-compatible kernels keep packed weights concatenative on the
+        input axis, but store per-block scales in a 128x4 swizzled layout.
+        Global input/weight scales are replicated and do not participate in
+        the collective.
+        """
+        if (
+            self.spec.weight != kNvfp4Static
+            or self.spec.activation != kNvfp4Dynamic
+            or self.ctx.group_size != 16
+        ):
+            raise RuntimeError("PCP O-Proj TP supports only ModelOpt W4A4 NVFP4.")
+        if not isinstance(self.kernel, _PCP_TP_NVFP4_CUTLASS_LAYOUT_KERNELS):
+            raise RuntimeError(
+                "ModelOpt NVFP4 PCP O-Proj TP currently supports only "
+                "CUTLASS-compatible post-load layouts; got "
+                f"{type(self.kernel).__name__}."
+            )
+        if layer.weight.shape[1] != layer.input_size_per_partition // 2:
+            raise RuntimeError(
+                "ModelOpt NVFP4 PCP O-Proj TP requires each local packed "
+                "weight shard to need no input-axis padding."
+            )
+        return self.tp_weight_gather_specs
 
     def __init__(
         self,

@@ -890,6 +890,12 @@ class PCPManager:
             ]
         return hidden_states, aux_hidden_states, self._global_batch
 
+    @property
+    def global_has_prefill(self) -> bool:
+        """Return the pre-partition batch type shared by every PCP rank."""
+        assert self._global_batch is not None
+        return self._global_batch.has_prefill
+
 
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
