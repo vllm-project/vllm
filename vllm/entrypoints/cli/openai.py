@@ -6,9 +6,10 @@ import os
 import signal
 import sys
 import time
+import traceback
 from typing import TYPE_CHECKING
 
-from openai import OpenAI
+from openai import APIError, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from vllm.entrypoints.cli.types import CLISubcommand
@@ -114,24 +115,67 @@ def _print_completion_stream(stream, stats: bool = False) -> str:
     return output
 
 
-def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
+def chat(
+    system_prompt: str | None,
+    model_name: str,
+    client: OpenAI,
+    *,
+    stats: bool = False,
+    interactive: bool = False,
+) -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
+    initial_conversation = conversation.copy()
 
     print("Please enter a message for the chat model:")
+    if interactive:
+        print("Commands: /help, /clear, /exit. Prefix a message with // to send /.")
     while True:
         try:
             input_message = input("> ")
         except EOFError:
             break
-        conversation.append({"role": "user", "content": input_message})
+        if interactive:
+            command = input_message.strip()
+            if command == "/exit":
+                break
+            if command == "/clear":
+                conversation = initial_conversation.copy()
+                print("Conversation cleared; system prompt preserved.")
+                continue
+            if command == "/help":
+                print("Commands: /help, /clear, /exit. Use // to send a leading /.")
+                continue
+            if input_message.startswith("//"):
+                input_message = input_message[1:]
+            elif command.startswith("/"):
+                print("Unknown command. Use /help, or // to send a leading /.")
+                continue
+            if not input_message.strip():
+                continue
 
-        stream = client.chat.completions.create(
-            model=model_name, messages=conversation, stream=True
-        )
-        output = _print_chat_stream(stream)
-        conversation.append({"role": "assistant", "content": output})
+        messages = conversation + [{"role": "user", "content": input_message}]
+        create_kwargs = {"model": model_name, "stream": True}
+        if stats:
+            create_kwargs["stream_options"] = {"include_usage": True}
+        try:
+            with client.chat.completions.create(
+                messages=messages, **create_kwargs
+            ) as stream:
+                output = _print_chat_stream(stream, stats)
+        except APIError:
+            if not interactive:
+                raise
+            traceback.print_exc()
+            print(
+                "\nRequest failed or response was interrupted; this turn was not "
+                "saved. Previous conversation is unchanged. "
+                "Use /clear to start over or enter another message.",
+                file=sys.stderr,
+            )
+            continue
+        conversation = messages + [{"role": "assistant", "content": output}]
 
 
 def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -195,19 +239,13 @@ class ChatCommand(CLISubcommand):
             conversation.append({"role": "assistant", "content": output})
             return
 
-        print("Please enter a message for the chat model:")
-        while True:
-            try:
-                input_message = input("> ")
-            except EOFError:
-                break
-            conversation.append({"role": "user", "content": input_message})
-
-            stream = client.chat.completions.create(
-                messages=conversation, **create_kwargs
-            )
-            output = _print_chat_stream(stream, stats)
-            conversation.append({"role": "assistant", "content": output})
+        chat(
+            system_prompt,
+            model_name,
+            client,
+            stats=stats,
+            interactive=args.interactive,
+        )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -222,12 +260,23 @@ class ChatCommand(CLISubcommand):
                 "used for models that support system prompts."
             ),
         )
-        parser.add_argument(
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument(
             "-q",
             "--quick",
             type=str,
             metavar="MESSAGE",
             help=("Send a single prompt as MESSAGE and print the response, then exit."),
+        )
+        mode.add_argument(
+            "-i",
+            "--interactive",
+            action="store_true",
+            help=(
+                "Enable /help, /clear, /exit and recovery from API errors. "
+                "Full error tracebacks are preserved. Disabled by default. "
+                "Cannot be combined with --quick."
+            ),
         )
         parser.add_argument(
             "--stats",

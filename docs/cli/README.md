@@ -98,7 +98,26 @@ vllm chat --quick "hi"
 
 # Print TTFT and throughput statistics after each response
 vllm chat --stats
+
+# Enable chat commands and recover from API errors
+vllm chat --interactive
 ```
+
+`--interactive` (alias `-i`) is opt-in and cannot be combined with `--quick`. It enables
+`/help`, `/clear` (reset conversation history while preserving the configured
+system prompt), and `/exit`. Commands are handled locally; prefix a message with
+`//` to send a literal leading slash. Unknown commands display a hint without
+sending a request.
+
+In this mode, API errors during a chat request or response stream print their
+full traceback and return to the prompt. Startup errors still propagate.
+Previously completed turns remain in history; a failed or interrupted turn is
+not saved, even if part of its answer was already printed. The client does not
+automatically retry interrupted streams, truncate history, or summarize it.
+The OpenAI SDK's existing request retries are unchanged. Use `/clear` to recover
+when a conversation exceeds the server's context limit. Unexpected programming
+errors still propagate. Without `--interactive`, slash-prefixed messages are
+sent to the model and API errors propagate as before.
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
 
