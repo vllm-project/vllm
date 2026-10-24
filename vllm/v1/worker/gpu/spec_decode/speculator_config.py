@@ -14,15 +14,13 @@ Parts only needed by the V1 model runner are marked "V1 model runner only", and
 will be removed with it.
 """
 
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
-
-TargetEmbedSharing: TypeAlias = Literal["never", "always", "target_opt_in"]
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -52,8 +50,10 @@ class SpeculatorConfig:
     # For performance, prefers requests' full token history on the GPU instead of
     # UVA memory (e.g. ngram).
     prefer_dense_token_history: ClassVar[bool] = False
-    # Reuses the target's input embedding: never, always, or on target opt-in.
-    target_embed_sharing: ClassVar[TargetEmbedSharing] = "never"
+    # Reuses the target's input embedding (as hidden-state drafters do) only for
+    # target models that opt in (see `spec_decode_needs_target_embed`), since
+    # e.g. MTP layers usually have their own.
+    target_embed_needs_opt_in: ClassVar[bool] = False
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True

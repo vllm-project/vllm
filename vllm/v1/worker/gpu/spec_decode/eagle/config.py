@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import ClassVar
-
 from vllm.config import SpeculativeConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     DraftModelSpeculatorConfig,
-    TargetEmbedSharing,
 )
 
 
@@ -26,7 +23,6 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
     supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
-    target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
     supports_watermarking = True
 
     @classmethod
