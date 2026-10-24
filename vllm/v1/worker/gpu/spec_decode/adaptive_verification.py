@@ -161,6 +161,10 @@ class AdaptiveVerificationManager:
         self._batch_draft_capacity = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        # With VLLM_DYN_DRAFT=cost, the drafter's stopping threshold: the expected
+        # accepted tokens that one more draft position must add. Set every step.
+        self.draft_stop_threshold: torch.Tensor | None = None
+        self._draft_stop_threshold_value = 0.0
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
@@ -341,7 +345,16 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        tokens_per_ms = num_tokens_to_estimated_accepted_tokens / costs
+        draft_budget = int(np.argmax(tokens_per_ms))
+        # Drafting one more position costs draft_cost_ms / k (drafting time taken
+        # as linear in positions); it pays off if it adds at least that much time's
+        # worth of tokens at the expected throughput of this step.
+        self._draft_stop_threshold_value = float(
+            draft_cost_ms[len(req_ids)]
+            / self.num_speculative_steps
+            * tokens_per_ms[draft_budget]
+        )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -407,6 +420,12 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
+        if self.draft_stop_threshold is not None:
+            # The drafter reads it at the end of this step.
+            async_tensor_h2d(
+                np.array([self._draft_stop_threshold_value], dtype=np.float32),
+                out=self.draft_stop_threshold.view(1),
+            )
 
         # Rank draft slots by survival probability and admit the best prefix.
         # capacities enters holding each request's valid draft count (the kernel

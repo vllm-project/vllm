@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 from torch.distributed import ProcessGroup
@@ -101,8 +103,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
-        from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
+        from vllm.distributed.device_communicators.symm_mem import (
+            SymmMemAllGather,
+            SymmMemCommunicator,
+        )
 
+        # Created by symm_mem_all_gather(), which routes all_gather through it.
+        self.symm_mem_gather: SymmMemAllGather | None = None
+        self._all_gather_via_symm_mem = False
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
@@ -457,7 +465,33 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return None
         return ca_comm.custom_reduce_scatter(input_.contiguous())
 
+    @contextmanager
+    def symm_mem_all_gather(self, max_bytes: int) -> Iterator[None]:
+        """Routes all_gather through symmetric memory inside the context, so the
+        all-gathers captured there launch no NCCL kernel, as a CUDA graph
+        conditional body requires. The first use allocates a buffer for max_bytes
+        of gathered output, collectively; later uses must fit in it."""
+        from vllm.distributed.device_communicators.symm_mem import SymmMemAllGather
+
+        if self.symm_mem_gather is None:
+            self.symm_mem_gather = SymmMemAllGather(
+                self.cpu_group, self.device, max_bytes
+            )
+        elif self.symm_mem_gather.max_bytes < max_bytes:
+            raise ValueError(
+                f"symm_mem_all_gather: {max_bytes} bytes requested, but the buffer "
+                f"holds {self.symm_mem_gather.max_bytes}."
+            )
+        previous, self._all_gather_via_symm_mem = self._all_gather_via_symm_mem, True
+        try:
+            yield
+        finally:
+            self._all_gather_via_symm_mem = previous
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if self._all_gather_via_symm_mem:
+            assert self.symm_mem_gather is not None
+            return self.symm_mem_gather.all_gather(input_, dim)
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
         # PyNccl/base-class all-gather. Sequence parallelism's
@@ -809,6 +843,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        self.symm_mem_gather = None
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
