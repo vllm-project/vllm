@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    KVConnectorWorkerMemoryPlan,
 )
 from vllm.distributed.parallel_state import (
     Handle,
@@ -660,6 +661,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+            self._build_kv_connector_worker_memory_plan()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -750,6 +752,17 @@ class Worker(WorkerBase):
             - cudagraph_memory_estimate_applied
         )
 
+        memory_plan = self._build_kv_connector_worker_memory_plan()
+        connector_reserved_bytes = memory_plan.reserved_bytes
+        self.available_kv_cache_memory_bytes -= connector_reserved_bytes
+        if connector_reserved_bytes:
+            logger.info(
+                "Reserved %s GiB for the KV connector; %s GiB remains available "
+                "for KV cache.",
+                format_gib(connector_reserved_bytes),
+                format_gib(self.available_kv_cache_memory_bytes),
+            )
+
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
             "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
@@ -812,6 +825,30 @@ class Worker(WorkerBase):
             self.model_config.multimodal_config,
             getattr(self.parallel_config, "_api_process_count", 1),
         )
+
+    def _build_kv_connector_worker_memory_plan(
+        self,
+    ) -> KVConnectorWorkerMemoryPlan:
+        existing = getattr(self, "_kv_connector_worker_memory_plan", None)
+        if existing is not None:
+            return existing
+
+        plan = KVConnectorWorkerMemoryPlan()
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_transfer_instance
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            plan = connector_cls.build_worker_memory_plan(
+                self.vllm_config, self.model_runner.get_kv_cache_spec()
+            )
+        self._kv_connector_worker_memory_plan = plan
+        return plan
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -901,6 +938,11 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=mem_pool_context,
+            )
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().initialize_worker_memory(
+                getattr(self, "_kv_connector_worker_memory_plan", None)
             )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -214,6 +215,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     test are populated; role flags and async_zmq_ctx keep __del__'s shutdown
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._bound_raw_submissions = False
     worker.xfer_stats = MooncakeKVConnectorStats()
     worker.engine = MagicMock()
     worker.async_zmq_ctx = MagicMock()
@@ -285,9 +287,9 @@ def test_expired_request_bumps_counter():
             sending=0,
         ),
     }
-    worker.finished_sending_reqs = set()
+    worker._finished_sending = queue.SimpleQueue()
 
-    asyncio.run(worker.fetch_finished_sending_reqs())
+    worker._sweep_expired_sends()
 
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
