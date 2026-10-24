@@ -73,6 +73,8 @@ from .muse_moe_runner import (
     MuseMoERunner,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkRoutedExperts,
+    aiter_returns_per_slot_routes,
+    per_slot_routes_for_batch,
 )
 from .ops.fused_norm_expand import fused_rmsnorm_expand
 from .ops.fused_qk_norm_rope_kv import rocm_fused_qk_norm_rope_kv_insert
@@ -322,17 +324,28 @@ class MuseSpark1xMoE(nn.Module):
             self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
         )
 
+    @functools.cached_property
+    def _experts_route_per_slot(self) -> bool:
+        return aiter_returns_per_slot_routes()
+
+    @functools.cached_property
+    def _experts_use_ep(self) -> bool:
+        return self.experts.routed_experts.moe_config.moe_parallel_config.use_ep
+
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
+            per_slot = self._experts_route_per_slot and per_slot_routes_for_batch(
+                hidden_states.shape[0], self.top_k, self._experts_use_ep
+            )
             return fused_rmsnorm_expand(
                 hidden_states,
                 norm.weight if norm.has_weight else None,
                 norm.variance_epsilon,
                 norm.fused_gain_center,
                 norm.applies_weight_before_norm and norm.has_weight,
-                self.top_k,
+                1 if per_slot else self.top_k,
             )
         return norm(hidden_states)
 
