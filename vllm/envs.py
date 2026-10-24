@@ -301,6 +301,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
+    VLLM_GC_THRESHOLDS: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
@@ -2096,6 +2097,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Comma-separated `gc.set_threshold` values applied after the startup heap
+    # is frozen, e.g. "50000,20,100". Unset keeps the CPython defaults.
+    "VLLM_GC_THRESHOLDS": lambda: os.getenv("VLLM_GC_THRESHOLDS", ""),
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
