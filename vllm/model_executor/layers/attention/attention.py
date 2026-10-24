@@ -548,7 +548,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 and value is not None
             ):
                 kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
+                    key, value
                 )
             unified_attention_with_output(
                 query,
