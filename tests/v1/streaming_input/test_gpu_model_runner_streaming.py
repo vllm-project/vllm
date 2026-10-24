@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 @pytest.fixture
 def mock_model_runner_with_input_batch():
     """Create a mock GPUModelRunner with a real InputBatch for e2e testing."""
-
     runner = Mock(spec=GPUModelRunner)
     runner.uses_mrope = False
     runner.requests = {}
@@ -39,7 +38,6 @@ def mock_model_runner_with_input_batch():
         device="cpu",
         vocab_size=32000,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         logitsprocs=None,
         is_pooling_model=False,
@@ -103,6 +101,7 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
     # Step 4: Verify the request state was updated correctly
     assert updated_req_state.prompt_token_ids == [1, 2, 3, 10, 4, 5]
     assert updated_req_state.num_computed_tokens == 4
+    assert updated_req_state.sampling_params is not None
     assert updated_req_state.sampling_params.temperature == 0.8
     assert updated_req_state.sampling_params.max_tokens == 50
     assert updated_req_state.block_ids == ([0, 1],)
@@ -200,6 +199,7 @@ def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_bat
 
     # Verify other parameters were updated
     assert updated_req_state.num_computed_tokens == 14
+    assert updated_req_state.sampling_params is not None
     assert updated_req_state.sampling_params.temperature == 0.7
     assert updated_req_state.sampling_params.max_tokens == 30
     assert updated_req_state.block_ids == ([0, 1],)

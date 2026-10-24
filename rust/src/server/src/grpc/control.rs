@@ -6,15 +6,17 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
-use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
+use crate::lora::{
+    LoadLoraError, LoadedLora, LoraDisabledError, LoraPathAccessError, UnloadLoraError,
+};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -23,6 +25,7 @@ pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
 pub struct ControlServiceImpl {
     state: Arc<AppState>,
     rl_lock: Mutex<()>,
+    engine_shutdown: Option<CancellationToken>,
 }
 
 impl ControlServiceImpl {
@@ -30,7 +33,13 @@ impl ControlServiceImpl {
         Self {
             state,
             rl_lock: Mutex::new(()),
+            engine_shutdown: None,
         }
+    }
+
+    pub fn with_engine_shutdown(mut self, shutdown: Option<CancellationToken>) -> Self {
+        self.engine_shutdown = shutdown;
+        self
     }
 
     fn ready(&self) -> &EngineCoreReadyResponse {
@@ -50,6 +59,7 @@ impl ControlServiceImpl {
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
             world_size: ready.world_size,
+            data_parallel_size_local: self.client().engine_count() as u32,
         }
     }
 
@@ -137,7 +147,7 @@ fn weight_version(value: String) -> Result<String, Status> {
     Ok(value)
 }
 
-fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
+fn lora_to_proto(adapter: &LoadedLora) -> pb::LoraAdapter {
     pb::LoraAdapter {
         lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
         lora_name: adapter.lora_name.clone(),
@@ -178,6 +188,18 @@ fn list_loras_status(error: LoraDisabledError) -> Status {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        let shutdown = self.engine_shutdown.as_ref().ok_or_else(|| {
+            Status::failed_precondition("this frontend does not manage the engine process")
+        })?;
+        tracing::info!("engine shutdown requested via gRPC");
+        shutdown.cancel();
+        Ok(Response::new(pb::ShutdownResponse {}))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
@@ -195,6 +217,8 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
+            proto_version: pb::VERSION.to_string(),
+            effective_attention_block_size: self.client().effective_attention_block_size(),
         }))
     }
 
@@ -316,7 +340,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         let clear_cache = request.clear_cache.unwrap_or(true);
         let _guard = self.rl_lock.lock().await;
         self.client()
-            .pause_scheduler(mode, clear_cache)
+            .pause_generation(mode, clear_cache)
             .await
             .map_err(|error| utility_status("pause_generation", error))?;
         Ok(Response::new(pb::PauseGenerationResponse {}))

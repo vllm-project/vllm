@@ -20,14 +20,20 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     biased_moe_quant_config,
+    int8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
+    CPUExpertsInt8,
     CPUUnquantizedExperts,
     PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+)
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -306,17 +312,28 @@ def test_cpu_fused_moe(
 
 
 @pytest.mark.skipif(
-    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
-    reason="Requires Arm CPU",
+    current_platform.get_cpu_architecture()
+    not in (CpuArchEnum.ARM, CpuArchEnum.POWERPC),
+    reason="Requires Arm or POWER CPU",
 )
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("expert_num", EXPERT_NUM)
 @pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
 @pytest.mark.parametrize("intermediate_size", INTERMEDIATE_DIM)
 @pytest.mark.parametrize("use_bias", USE_BIAS)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        [torch.float32, torch.float16, torch.bfloat16]
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        else [torch.float32, torch.bfloat16]
+    ),
+)
 @pytest.mark.parametrize("act", ACT)
-@pytest.mark.parametrize("isa", ["neon"])
+@pytest.mark.parametrize(
+    "isa",
+    ["neon"] if current_platform.get_cpu_architecture() == CpuArchEnum.ARM else ["vsx"],
+)
 def test_cpu_fused_moe_int8(
     batch_size: int,
     expert_num: int,
@@ -386,7 +403,8 @@ def test_cpu_fused_moe_int8(
         isa,
     )
 
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
+    atol = rtol = 1e-1 if isa == "vsx" else 2e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
 # moe_intermediate_size not a multiple of 32, e.g. what tensor-parallel
@@ -501,7 +519,6 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 ):
     """CPU kernels handle unaligned intermediate sizes by zero-padding the
     weights before prepacking."""
-
     set_random_seed(0)
     batch_size = 64
     intermediate_size = UNALIGNED_INTERMEDIATE_DIM
@@ -595,3 +612,95 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.X86
+    or not torch.cpu._is_amx_tile_supported(),
+    reason="CPUExpertsInt8 requires x86 AMX",
+)
+@pytest.mark.parametrize("act", [MoEActivation.SILU, MoEActivation.GELU_TANH])
+def test_cpu_experts_int8_unaligned_intermediate_size(
+    default_vllm_config, act: MoEActivation
+):
+    """INT8 experts zero-pad the intermediate dim (weights and w13 scale)
+    before prepacking."""
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    expert_num, hidden_size, batch_size = 8, 128, 64
+    intermediate_size = UNALIGNED_INTERMEDIATE_DIM
+    topk_num = expert_num // 2
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13, w13_scale = quantize_per_channel(
+        torch.randn((expert_num, 2 * intermediate_size, hidden_size), dtype=dtype)
+        / (0.5 * hidden_size**0.5)
+    )
+    w2, w2_scale = quantize_per_channel(
+        torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype)
+        / (0.5 * intermediate_size**0.5)
+    )
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+    topk_weight, topk_ids = _softmax_topk(router_logits, topk_num, False)
+
+    ref_output = ref_fused_moe_int8(
+        input, w13, w2, w13_scale, w2_scale, None, None, topk_weight, topk_ids, act
+    )
+
+    # The compressed-tensors method stores the per-channel scales as [E, N, 1].
+    layer = _StubMoELayer(w13.clone(), w2.clone(), act)
+    layer.w13_weight_scale = torch.nn.Parameter(
+        w13_scale.unsqueeze(-1).clone(), requires_grad=False
+    )
+    layer.w2_weight_scale = torch.nn.Parameter(
+        w2_scale.unsqueeze(-1).clone(), requires_grad=False
+    )
+
+    moe_config = _make_moe_config(
+        expert_num, hidden_size, intermediate_size, topk_num, dtype, act
+    )
+    supported, reason = CPUExpertsInt8.is_supported_config(
+        CPUExpertsInt8,
+        moe_config,
+        kInt8StaticChannelSym,
+        kInt8DynamicTokenSym,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported, (
+        f"expected the padded intermediate size to be supported, got {reason}"
+    )
+
+    # Mirror the quantization method: the quant config holds the scale
+    # Parameters before the experts pad and prepack the layer.
+    quant_config = int8_w8a8_moe_quant_config(
+        w1_scale=layer.w13_weight_scale,
+        w2_scale=layer.w2_weight_scale,
+        a1_scale=None,
+        a2_scale=None,
+        per_act_token_quant=True,
+    )
+    experts = CPUExpertsInt8(moe_config, quant_config)
+    experts.process_weights_after_loading(layer)
+
+    output = torch.empty_like(input)
+    experts.apply(
+        output=output,
+        hidden_states=input,
+        w1=layer.w13_weight,
+        w2=layer.w2_weight,
+        topk_weights=topk_weight,
+        topk_ids=topk_ids,
+        activation=act,
+        global_num_experts=expert_num,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
