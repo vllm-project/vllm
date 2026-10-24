@@ -13,6 +13,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
+from transformers import PreTrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
@@ -384,11 +385,30 @@ def _support_torch_compile(
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
-        annotations = [p.annotation for p in sig.parameters.values()]
+        annotations: list[Any] = []
+        for param in list(sig.parameters.values())[1:]:  # skip `self`
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                annotations += [param.annotation] * (len(args) - len(annotations))
+                break
+            if param.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                break
+            annotations.append(param.annotation)
         for arg, annotation in zip(args, annotations):
             if annotation is inspect._empty:
                 continue
-            if not isinstance(arg, annotation):
+            try:
+                # vLLM may pass its own or a re-imported remote-code config class
+                # in place of the annotated one, so configs are not checked.
+                if issubclass(annotation, PreTrainedConfig):
+                    continue
+                is_match = isinstance(arg, annotation)
+            except TypeError:
+                # Only plain classes are checked, e.g. not `Callable[[T], U]`
+                continue
+            if not is_match:
                 init = f"'{type(self).__name__}.__init__'"
                 arg_type = f"'{type(arg).__name__}'"
                 raise TypeError(
