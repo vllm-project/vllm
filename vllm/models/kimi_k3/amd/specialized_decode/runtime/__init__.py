@@ -29,13 +29,13 @@ K3_SHAPES = (7168, 896, 96, 128, 4)
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    # rows a request verifies: num_speculative_tokens + 1
+    # rows per request: 1 for regular decode, or num_speculative_tokens + 1
     q: int
 
     @property
     def widths(self) -> tuple[int, ...]:
         """The rows a launch serves: whole requests, at most MAX_TOKENS rows. Every
-        uniform verify step up to MAX_TOKENS rows is one of them, so an eager step
+        uniform decode step up to MAX_TOKENS rows is one of them, so an eager step
         never pads; a FULL replay pads whole requests the way vLLM's stock decode
         does."""
         return tuple(range(self.q, MAX_TOKENS + 1, self.q))
@@ -71,7 +71,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "decode step as stock; use FULL decode graphs"
         )
     spec = vllm_config.speculative_config
-    return DecodeConfig(q=spec.num_speculative_tokens + 1)
+    return DecodeConfig(q=spec.num_speculative_tokens + 1 if spec is not None else 1)
 
 
 def unsupported(vllm_config) -> list[str]:
@@ -125,8 +125,7 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
-        # the kernels serve spec-verify steps of whole uniform requests only
-        (spec is None, "decoding without speculative decoding"),
+        # the kernels serve pure, uniform regular-decode or spec-verify steps
         (
             spec is not None and spec.num_speculative_tokens + 1 > MAX_TOKENS,
             f"more than {MAX_TOKENS - 1} speculative tokens",
@@ -144,8 +143,10 @@ def unsupported(vllm_config) -> list[str]:
         (
             MambaStateDtypeCalculator.kda_state_dtype(mc.dtype, cc.mamba_cache_dtype)
             != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
         # the model state hooks build the executor and bind it to each KV cache
