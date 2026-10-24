@@ -15,6 +15,9 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    KimiGatedDeltaNetAttention,
+)
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
 )
@@ -145,6 +148,30 @@ def test_kda_recoverssm_config_state_layout():
     assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(
         vllm_config
     ) == MambaStateShapeCalculator.kda_state_shape(1, 4, 32, num_spec=2)
+
+
+@pytest.mark.parametrize(
+    ("ssm_dtype", "expected"),
+    [("auto", torch.float32), ("float32", torch.float32), ("bfloat16", torch.bfloat16)],
+)
+def test_kimi_linear_kda_state_dtype_matches_model(ssm_dtype, expected):
+    """The KV-cache spec reads the layer dtype and the hybrid page size the
+    model dtype, so --mamba-ssm-cache-dtype must reach both."""
+    model_config = SimpleNamespace(dtype=torch.bfloat16)
+    cache_config = SimpleNamespace(
+        mamba_cache_dtype="auto",
+        mamba_ssm_cache_dtype=ssm_dtype,
+        use_kda_recoverssm=False,
+    )
+    vllm_config = SimpleNamespace(model_config=model_config, cache_config=cache_config)
+    want = (torch.bfloat16, expected)
+
+    layer = object.__new__(KimiGatedDeltaNetAttention)
+    object.__setattr__(layer, "model_config", model_config)
+    object.__setattr__(layer, "cache_config", cache_config)
+
+    assert KimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == want
+    assert layer.get_state_dtype() == want
 
 
 @torch.inference_mode()
