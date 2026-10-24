@@ -125,11 +125,12 @@ class AuxOutputWorkerConnector:
             self._indexer is None
             and vllm_config.aux_output_config.enable_return_indexer_topk
         ):
-            self._indexer = bind_indexer_capturer(
+            self._indexer = IndexerCapturer(
                 model,
                 vllm_config,
                 output_rank=get_tp_group().is_first_rank,
             )
+            bind_indexer_capturer(model, self._indexer)
         self._r3_shape = self._capturer.shape_per_token if self._capturer else ()
         self._r3_dtype = (
             np.dtype(self._capturer.output_dtype_name)
@@ -228,8 +229,8 @@ class AuxOutputWorkerConnector:
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
-            token_starts=input_batch.num_computed_tokens_np[: len(request_ids)].copy(),
-            query_start_loc=query_start_loc.copy(),
+            token_starts=input_batch.num_computed_tokens_np[: len(request_ids)],
+            query_start_loc=query_start_loc,
             routed_experts_gpu=(
                 self._capturer.snapshot_routing_data(num_rows)
                 if self._capturer
@@ -462,6 +463,14 @@ class AuxOutputWorkerConnector:
                 buffer.release_block(rows)
             buffer.discard(request_id)
 
+    def _get_namespace(self, generation: int) -> str:
+        namespace = str(generation)
+        if self._indexer is not None:
+            namespace += "/" + self._indexer.namespace
+            if self._capturer is not None:
+                namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
+        return namespace
+
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
 
@@ -478,7 +487,11 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            namespace = self._get_namespace(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = aux_output_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = aux_output_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -506,14 +519,9 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
-                namespace = str(self._generation)
-                if self._indexer is not None:
-                    namespace += "/" + self._indexer.namespace
-                    if self._capturer is not None:
-                        namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
+                namespace = self._get_namespace(self._generation)
                 keys = aux_output_keys(block_hashes, namespace)
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)

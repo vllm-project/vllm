@@ -11,6 +11,10 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass(frozen=True)
 class BlockObject:
@@ -98,7 +102,7 @@ class BackgroundBlockObjectStore:
 
 
 class BlockObjectStore:
-    """Single-owner bounded store that fails closed after an eviction."""
+    """Single-owner store that fails closed after an eviction."""
 
     _UNALLOCATED_SLOT = -1
 
@@ -133,11 +137,6 @@ class BlockObjectStore:
                 victims.append(key)
                 if len(victims) == excess:
                     break
-        if len(victims) != excess:
-            raise BlockObjectStoreError(
-                "auxiliary output store cannot retain the requested batch: "
-                f"limit={self.num_slots} objects"
-            )
         for victim in victims:
             del self._lru[victim]
             slot = self._slots.pop(victim)
@@ -164,6 +163,11 @@ class BlockObjectStore:
         if any(len(obj.payload) != self.object_nbytes for obj in objects):
             raise ValueError("AuxOutput payload length does not match fixed slot size")
         unique = {obj.key: obj for obj in objects}
+        for key in unique.keys() & self._lru.keys():
+            del self._lru[key]
+            slot = self._slots.pop(key)
+            if slot != self._UNALLOCATED_SLOT:
+                self._free_slots.append(slot)
         self._retain(retain_keys)
         terminal_order = self._release(release_keys)
         for key in unique:
@@ -174,14 +178,17 @@ class BlockObjectStore:
         for key in terminal_order:
             if key in self._lru:
                 self._lru.move_to_end(key)
-        try:
-            self._evict_to_fit(set(unique) - set(terminal_order))
-        except BlockObjectStoreError:
-            for key in unique:
-                if self._slots.get(key) == self._UNALLOCATED_SLOT:
-                    del self._slots[key]
-                    self._lru.pop(key, None)
-            raise
+        self._evict_to_fit(set(unique) - set(terminal_order))
+        if (nbytes := len(self._slots) * self.object_nbytes) > len(arena):
+            nbytes = max(nbytes, 2 * len(arena))
+            logger.warning(
+                "Auxiliary output store grows to %d bytes: all objects are referenced.",
+                nbytes,
+            )
+            grown = mmap.mmap(-1, nbytes)
+            grown[: len(arena)] = arena
+            self._arena = arena = grown
+            self.num_slots = len(grown) // self.object_nbytes
         for object_id, obj in unique.items():
             if self._slots.get(object_id) != self._UNALLOCATED_SLOT:
                 continue
@@ -220,8 +227,7 @@ class BlockObjectStore:
             raise BlockObjectStoreError(
                 "auxiliary output object does not exist; the object may have been "
                 f"evicted (used={len(self._slots)}, "
-                f"limit={self.num_slots} objects). Increase "
-                "aux_output_config.max_bytes when a KV cache hit requires it."
+                f"limit={self.num_slots} objects)."
             ) from error
         arena = memoryview(arena_obj)
         try:

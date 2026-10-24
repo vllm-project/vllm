@@ -8,6 +8,7 @@ from transformers import LlamaConfig
 
 from vllm.config import DeviceConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.layers.indexer_capture import (
+    IndexerCapturer,
     IndexerCaptureSink,
     IndexerCaptureSource,
     bind_indexer_capturer,
@@ -74,7 +75,9 @@ def test_binding_maps_sparse_layer_ids_before_shared_topk_is_overwritten(
     first, second = CaptureSource(2), CaptureSource(5)
     consumer, mtp = CaptureSource(4, producer=False), CaptureSource(8, topk=7)
     model = torch.nn.ModuleList([second, mtp, consumer, first])
-    capture = bind_indexer_capturer(model, capture_config)
+    capture = IndexerCapturer(model, capture_config)
+    assert first.indexer_capture is None and second.indexer_capture is None
+    bind_indexer_capturer(model, capture)
     assert capture.source_columns == {2: 0, 5: 1}
     assert consumer.indexer_capture is None and mtp.indexer_capture is None
     shared = torch.tensor([[3, -1], [4, 2]], dtype=torch.int32)
@@ -91,9 +94,9 @@ def test_binding_maps_sparse_layer_ids_before_shared_topk_is_overwritten(
 
 def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
     first, second = CaptureSource(2), CaptureSource(5)
-    capture = bind_indexer_capturer(
-        torch.nn.ModuleList([first, second]), capture_config
-    )
+    model = torch.nn.ModuleList([first, second])
+    capture = IndexerCapturer(model, capture_config)
+    bind_indexer_capturer(model, capture)
     shared = torch.tensor([[3, 1], [4, 2]], dtype=torch.int32)
     first(shared)
     shared.add_(10)
@@ -121,12 +124,14 @@ def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
 
 def test_close_unbinds_sources_and_preserves_later_binding(capture_config):
     source = CaptureSource(2)
-    capture = bind_indexer_capturer(source, capture_config)
+    capture = IndexerCapturer(source, capture_config)
+    bind_indexer_capturer(source, capture)
     with pytest.raises(ValueError, match="already bound"):
-        bind_indexer_capturer(source, capture_config)
+        bind_indexer_capturer(source, capture)
     capture.close()
     assert source.indexer_capture is None
-    rebound = bind_indexer_capturer(source, capture_config)
+    rebound = IndexerCapturer(source, capture_config)
+    bind_indexer_capturer(source, rebound)
     assert rebound.namespace == capture.namespace
     capture.close()
     source(torch.tensor([[7, 1]], dtype=torch.int32))
@@ -139,15 +144,15 @@ def test_close_unbinds_sources_and_preserves_later_binding(capture_config):
 @pytest.mark.parametrize(
     "layers,topks", [((2, 2), (2, 2)), ((2, 5), (2, 3)), ((2,), (0,)), ((-1,), (2,))]
 )
-def test_binding_rejects_invalid_source_layout(capture_config, layers, topks):
+def test_capturer_rejects_invalid_source_layout(capture_config, layers, topks):
     model = torch.nn.ModuleList(
         [CaptureSource(layer, topk) for layer, topk in zip(layers, topks, strict=True)]
     )
     with pytest.raises(ValueError, match="unique layers and uniform positive topk"):
-        bind_indexer_capturer(model, capture_config)
+        IndexerCapturer(model, capture_config)
     assert all(source.indexer_capture is None for source in model)
 
 
-def test_binding_rejects_models_without_explicit_capture_support(capture_config):
+def test_capturer_rejects_models_without_explicit_capture_support(capture_config):
     with pytest.raises(ValueError, match="No backbone indexer capture sources"):
-        bind_indexer_capturer(torch.nn.Linear(2, 2), capture_config)
+        IndexerCapturer(torch.nn.Linear(2, 2), capture_config)
