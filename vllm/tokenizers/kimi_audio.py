@@ -15,6 +15,10 @@ from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.tokenizers.control_tokens import (
+    encode_marked_prompt,
+    mark_chat_control_tokens,
+)
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -300,6 +304,9 @@ class KimiAudioTokenizer(TokenizerLike):
             tokens = self._maybe_truncate(tokens, max_length)
         return tokens
 
+    def _encode_without_added_tokens(self, text: str) -> list[int]:
+        return self._tokenizer.encode(text, disallowed_special=())
+
     def decode(
         self, ids: Sequence[int] | int, skip_special_tokens: bool = False
     ) -> str:
@@ -398,6 +405,10 @@ class KimiAudioTokenizer(TokenizerLike):
             raise ValueError(
                 "No chat template available. Provide `chat_template` explicitly."
             )
+        sanitize = kwargs.pop("sanitize_control_tokens", False)
+        if sanitize:
+            conversation = mark_chat_control_tokens(self, conversation)
+            tools = mark_chat_control_tokens(self, tools)
         # Use render_jinja_template instead of apply_chat_template
         # Note: render_jinja_template returns ([prompts], [generation_indices])
         rendered, _ = hf_chat_utils.render_jinja_template(
@@ -408,6 +419,8 @@ class KimiAudioTokenizer(TokenizerLike):
         )
         # Extract the first (and usually only) prompt
         prompt = rendered[0] if rendered else ""
+        if sanitize:
+            return encode_marked_prompt(self, prompt)
         if tokenize:
             return self.encode(prompt, add_special_tokens=False)
         return prompt

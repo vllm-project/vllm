@@ -419,6 +419,11 @@ class ModelConfig:
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
+    sanitize_control_tokens: bool = False
+    """Encode control tokens (special tokens, and added tokens used by the
+    chat template) that appear in chat messages, tools and documents as plain
+    text, so that only the chat template can emit them. Applies to every chat
+    request and cannot be disabled per request."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -488,6 +493,7 @@ class ModelConfig:
             "hf_overrides",
             "logits_processors",
             "io_processor_plugin",
+            "sanitize_control_tokens",
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",

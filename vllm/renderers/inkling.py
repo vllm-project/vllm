@@ -82,7 +82,9 @@ class _HfBackedTmlTokenizer:
         self._special_ids = special_ids
 
     def encode_text(self, text: str) -> list[int]:
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        # Like `encode_ordinary` in the Rust renderer: message text never
+        # matches added or special tokens.
+        return self._tokenizer._encode_without_added_tokens(text)
 
     def encode_special(self, token: str) -> int:
         return self._special_ids[token]
