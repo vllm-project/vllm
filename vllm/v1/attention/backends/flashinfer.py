@@ -111,9 +111,12 @@ def _nvfp4_kv_on_fa2() -> bool:
     return any(current_platform.is_device_capability_family(f) for f in (80, 90, 120))
 
 
-def _use_fa2_native_decode() -> bool:
-    # Below SM90, native decode runs fa2, which takes uniform multi-token queries.
-    return not current_platform.has_device_capability(90)
+def _use_fa2_native_decode(is_nvfp4: bool = False) -> bool:
+    # Below SM90, and on SM90 for an NVFP4 cache, native decode runs fa2, which
+    # takes uniform multi-token queries.
+    return not current_platform.has_device_capability(90) or (
+        is_nvfp4 and current_platform.is_device_capability(90)
+    )
 
 
 _KVPair = tuple[torch.Tensor, torch.Tensor]
@@ -1026,7 +1029,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
-        self.use_fa2_native_decode = _use_fa2_native_decode()
+        self.use_fa2_native_decode = _use_fa2_native_decode(self.is_kvcache_nvfp4)
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
@@ -1160,7 +1163,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
-        if _use_fa2_native_decode():
+        if all(
+            _use_fa2_native_decode(spec.kv_quant_mode.is_nvfp4)
+            for spec in kv_specs
+            if isinstance(spec, AttentionSpec)
+        ):
             # fa2 decodes uniform causal spec queries.
             if kv_specs and not vllm_config.attention_config.use_non_causal:
                 return AttentionCGSupport.UNIFORM_BATCH
