@@ -67,14 +67,22 @@ class RequestSchedulingState:
         """Check if request is ready for loading."""
         return self.phase == "WAITING_TO_LOAD" and self.needs_loading()
 
-    def update_tokens_and_blocks(self, new_token_ids: list[int], new_block_ids) -> None:
+    def update_tokens_and_blocks(
+        self,
+        new_token_ids: list[int],
+        new_block_ids,
+        replace_block_ids: bool = False,
+    ) -> None:
         """Update with new tokens and blocks."""
         if new_token_ids:
             self.token_ids.extend(new_token_ids)
 
         if new_block_ids is not None:
             normalized_block_ids = self._normalize_block_ids(new_block_ids)
-            self.allocated_block_ids.extend(normalized_block_ids)
+            if replace_block_ids:
+                self.allocated_block_ids = normalized_block_ids.copy()
+            else:
+                self.allocated_block_ids.extend(normalized_block_ids)
 
     def _normalize_block_ids(self, block_ids) -> list[int]:
         """Normalize block_ids to list format."""
