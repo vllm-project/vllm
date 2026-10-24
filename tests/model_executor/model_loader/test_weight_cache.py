@@ -454,6 +454,36 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     assert get_engine_dp_placement(daemon_config(is_moe=True), dp_rank=3) == (4, 3)
 
 
+def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
+    """Per-rank state such as the torch.compile cache is keyed by
+    parallel_config.rank, so daemons left at rank 0 would share rank 0's
+    compiled artifact and run every rank's kernels on rank 0's device."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+
+    monkeypatch.setattr(
+        daemon.WeightCacheKey, "from_model_config", lambda *args, **kwargs: None
+    )
+    for global_rank in range(4):
+        vllm_config = SimpleNamespace(
+            parallel_config=_parallel(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=2,
+                enable_eplb=False,
+                enable_expert_parallel=False,
+                expert_placement_strategy="linear",
+                rank=0,
+            ),
+            model_config=SimpleNamespace(is_moe=False),
+            cache_config=None,
+        )
+        server = daemon.WeightCacheDaemon(
+            vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
+        )
+        assert server.vllm_config.parallel_config.rank == global_rank
+
+
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
@@ -468,6 +498,8 @@ def test_weight_cache_key_distinguishes_dp_ranks():
         quantization=None,
         quant_config_hash="h",
         rope_parameters_hash="initial",
+        kv_cache_dtype="auto",
+        kv_cache_dtype_skip_layers=(),
         revision=None,
         vllm_version="v",
         dp_size=16,
@@ -491,6 +523,7 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
 
     import torch
 
+    from vllm.config import CacheConfig
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
     from vllm.utils.hashing import safe_hash
@@ -507,11 +540,15 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
             quantization_config=hf_quant_config,
         ),
     )
-    static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    static_key = WeightCacheKey.from_model_config(
+        model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+    )
     model_config.quantization_config = QuantizationConfigArgs(
         moe={"activation": "nvfp4_per_token"}
     )
-    per_token_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    per_token_key = WeightCacheKey.from_model_config(
+        model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+    )
     assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
 
     legacy_hash = (
@@ -543,7 +580,9 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         (True, "deepseek_yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
     ],
 )
-def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
+def test_ipc_rope_matching(
+    tmp_path, monkeypatch, default_vllm_config, fallback, nested, case
+):
     """Reloads accept constructor-normalized RoPE without weakening other checks."""
     import socket
     from concurrent.futures import ThreadPoolExecutor
@@ -579,7 +618,9 @@ def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
-    server.cache_config = WeightCacheKey.from_model_config(model_config, 1, 0)
+    server.cache_key = WeightCacheKey.from_model_config(
+        model_config, 1, 0, cache_config=default_vllm_config.cache_config
+    )
     rope = model_config.hf_text_config.rope_parameters
     # DeepseekV2 construction normalizes yarn to deepseek_yarn.
     rope["rope_type"] = "deepseek_yarn"
@@ -618,7 +659,11 @@ def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
                 if is_reload:
                     loader.load_weights(model, model_config)
                 else:
-                    loader._fetch_entries(model_config)
+                    loader._fetch_entries(
+                        model_config,
+                        default_vllm_config.cache_config,
+                        default_vllm_config.parallel_config,
+                    )
             if is_reload:
                 expected = torch.zeros(2) if mismatch else server.model.rotary_cache
                 torch.testing.assert_close(model.rotary_cache, expected)
@@ -639,3 +684,121 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_daemon_reports_exported_weight_bytes():
+    """The engine's budget excludes exactly the storages it maps from the
+    daemon, not daemon-only allocations or tensors it does not export."""
+    import socket
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    def query_memory(server: daemon.WeightCacheDaemon) -> int:
+        client, connection = socket.socketpair()
+        with client, connection:
+            send_msg(client, {"cmd": "get_memory"})
+            server._handle_connection(connection)
+            response = recv_msg(client)
+        assert response["status"] == "ok"
+        return response["memory_bytes"]
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(
+        torch.empty(256, 1024, device="cuda"), requires_grad=False
+    )
+    # A tied parameter and a view share the weight's storage.
+    model.lm_head = model.weight
+    model.register_buffer("weight_row", model.weight[0], persistent=False)
+    model.register_buffer("bias", torch.empty(1024, device="cuda"))
+    # Shipped by value rather than mapped.
+    model.register_buffer("cpu_table", torch.empty(1024))
+    # Kept by the daemon but not exported (e.g. warmup workspace).
+    model.scratch = torch.empty(1 << 20, device="cuda")
+    leftover = torch.empty(1 << 20, device="cuda")
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server.model = model
+    assert query_memory(server) == (256 * 1024 + 1024) * 4
+    server.model = None
+    assert query_memory(server) == 0
+    del leftover
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,skip_layers,mismatched_fields",
+    [
+        ("auto", ["1", "2"], ["kv_cache_dtype"]),
+        ("fp8", ["1"], ["kv_cache_dtype_skip_layers"]),
+        ("fp8", ["2", "1", "2"], []),
+    ],
+)
+def test_ipc_cache_key_tracks_kv_quantization(
+    tmp_path, monkeypatch, cache_dtype, skip_layers, mismatched_fields
+):
+    """Initial loads and standalone reloads use the same KV compatibility key."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, LoadConfig, ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="fp8",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["Qwen2ForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+        is_moe=False,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=ParallelConfig(),
+        speculative_config=None,
+        cache_config=CacheConfig(
+            cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
+        ),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    config.cache_config = CacheConfig(
+        cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=skip_layers
+    )
+    for name in ("get_dp_group", "get_pp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key, *, is_reload=False):
+        requested_keys.append(key)
+        return WeightCacheState(entries={}, aliases={}, attrs={})
+
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    model = loader.load_model(config, model_config)
+    config.cache_config.cache_dtype = "bfloat16"
+    config.cache_config.kv_cache_dtype_skip_layers.clear()
+    config.parallel_config.enable_expert_parallel = True
+    config.parallel_config.expert_placement_strategy = "round_robin"
+    loader.load_weights(model, model_config)
+    assert len(requested_keys) == 2
+    for key in requested_keys:
+        assert server.cache_key.mismatched_fields(key) == mismatched_fields
