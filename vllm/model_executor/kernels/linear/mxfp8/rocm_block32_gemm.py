@@ -523,6 +523,35 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (4096, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (8192, _tiled(128, 256, 128, 1, True, 2, 2, 32, 0)),
     ],
+    # --- DEP8/EP8 (TP1) full per-rank attention + shared-expert shapes ---
+    # Attention runs data-parallel at DP8/EP8, so each rank sees the FULL
+    # (unsharded) projections. These fell through to _default_config, which
+    # drops to a 128x128x128 tile past M=256 that under-occupies these N and
+    # roughly doubles the decode-M cost. Tuned on MI355X (DSpark K6), same
+    # method as the TP2/TP4 tiers above.
+    #
+    # shared expert gate_up (2*2304 x hidden). 64x64x256 is robust across the
+    # whole 225..448 decode band (~22us); the wider 128x64 tile itself cliffs
+    # near M=448, and 128x128 only wins at the M=512 prefill-chunk edge.
+    (4608, 5120): [
+        (448, _tiled(64, 64, 256, 1, True, 4, 2, 16, 0)),
+        (8192, _tiled(128, 128, 256, 1, True, 8, 2, 16, 0)),
+    ],
+    # wo_b (hidden x n_groups*o_lora): deep K favors a wide BLOCK_K at low M;
+    # the winner is non-monotonic (128x64 best in the 257..336 steady-decode
+    # band, 64x64 best at 384, 128x128 at the M>=448 prefill-chunk edge).
+    (5120, 8192): [
+        (192, _tiled(64, 64, 512, 1, True, 8, 2, 16, 0)),
+        (256, _tiled(64, 64, 256, 1, True, 4, 2, 16, 0)),
+        (336, _tiled(128, 64, 256, 1, True, 8, 2, 16, 0)),
+        (384, _tiled(64, 64, 256, 1, True, 4, 2, 16, 0)),
+        (8192, _tiled(128, 128, 256, 1, True, 8, 2, 16, 0)),
+    ],
+    # wq_b (n_heads*head_dim x q_lora): huge N wants the big 128x128x128 tile to
+    # cut the wave count (the default fell to 64x64x256 and cliffed at M=224).
+    (32768, 1280): [
+        (8192, _tiled(128, 128, 128, 1, True, 8, 2, 16, 0)),
+    ],
     # wq_b, TP2
     (16384, 1280): [
         (2, _packed(4, 32, 128, 4, 2, 3, 16, 1)),
