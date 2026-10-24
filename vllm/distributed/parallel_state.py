@@ -56,7 +56,12 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import get_distributed_init_method
+from vllm.utils.network_utils import (
+    aiter_requires_tcp_store,
+    get_distributed_init_method,
+    get_dp_file_store_init_method,
+    is_loopback_address,
+)
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -1916,9 +1921,24 @@ def init_distributed_environment(
                         timeout=timeout or default_pg_timeout,
                         multi_tenant=True,
                     )
+                distributed_init_method = get_distributed_init_method(ip, port)
             else:
                 port = parallel_config.get_next_dp_init_port()
-            distributed_init_method = get_distributed_init_method(ip, port)
+                # Nothing holds this number between the launcher's probe and
+                # the ranks' bind, so prefer a file store keyed by the token
+                # the launcher handed down, as the executors do. Only safe
+                # when every rank rendezvous on this host.
+                run_token = envs.VLLM_DP_MASTER_PORT
+                if (
+                    run_token
+                    and is_loopback_address(ip)
+                    and not aiter_requires_tcp_store()
+                ):
+                    distributed_init_method = get_dp_file_store_init_method(
+                        run_token, port
+                    )
+                else:
+                    distributed_init_method = get_distributed_init_method(ip, port)
             logger.debug(
                 "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
                 world_size,

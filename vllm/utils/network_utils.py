@@ -154,6 +154,36 @@ def get_file_store_init_method() -> str:
     return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
 
 
+def is_loopback_address(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def get_dp_rendezvous_dir(run_token: int) -> str:
+    """Directory holding the rendezvous files of one local DP run.
+
+    Keyed by the token the launcher handed to every rank, so concurrent runs
+    never share it, and by the user, because a shared ``/tmp`` would otherwise
+    hand one run a directory it cannot write to. The launcher that chose the
+    token owns the directory and removes it once the ranks are gone.
+    """
+    return f"{tempfile.gettempdir()}/vllm_dp_rdzv_{os.getuid()}_{run_token}"
+
+
+def get_dp_file_store_init_method(run_token: int, group_token: int) -> str:
+    """Rendezvous shared by every rank of one DP process group, creating its
+    directory. Every rank derives this independently, so both tokens must come
+    from values the ranks already agree on rather than a per-call ``uuid4()``.
+    """
+    directory = get_dp_rendezvous_dir(run_token)
+    os.makedirs(directory, exist_ok=True)
+    return f"file://{directory}/{group_token}"
+
+
 def aiter_requires_tcp_store() -> bool:
     """AITER custom all-reduce requires a pure-TCP default store (its IPC
     metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
