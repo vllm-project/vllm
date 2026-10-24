@@ -310,6 +310,7 @@ steps:
           kernels/test_kpool_decode_update_batched.py
           kernels/test_minimax_m3_amd_ops.py
           kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_muse_spark_rocm_skinny_gemm.py
           kernels/test_muse_spark_router_bf16x3.py
           kernels/test_onednn.py
           kernels/test_relu2_fp8_quant.py

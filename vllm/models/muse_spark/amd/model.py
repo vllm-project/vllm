@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -22,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -81,6 +84,7 @@ from .ops.router_bf16x3 import (
     split_fp32_to_bf16x3,
     supports_router_bf16x3,
 )
+from .ops.skinny_gemm import skinny_gemm, skinny_gemm_config
 
 logger = init_logger(__name__)
 
@@ -149,6 +153,79 @@ class MuseSparkTorchLinearMethod(UnquantizedLinearMethod):
         return F.linear(x, layer.weight, bias)
 
 
+class MuseSparkShardedProjMethod(MuseSparkTorchLinearMethod):
+    """Run a TP column shard of a compression projection, accumulating in fp32.
+
+    Decode-sized inputs take a split-K kernel: the shard is too narrow for
+    hipBLASLt to fill the GPU at those sizes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.use_skinny_gemm = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            # The split-K configs are tuned on gfx950 only.
+            self.use_skinny_gemm = on_gfx950()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        weight = layer.weight
+        if (
+            self.use_skinny_gemm
+            and bias is None
+            and x.dim() == 2
+            and x.is_contiguous()
+            and weight.is_contiguous()
+        ):
+            n, k = weight.shape
+            config = skinny_gemm_config(n, k, x.shape[0])
+            if config is not None:
+                return skinny_gemm(x, weight, config)
+        return F.linear(x, weight, bias)
+
+
+def _all_gather_columns(x: torch.Tensor) -> torch.Tensor:
+    """Concatenate every TP rank's column block of ``x``, in rank order."""
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    if aiter_ar is not None and not aiter_ar.disabled and x.dim() == 2:
+        if aiter_ar.should_custom_ag(x):
+            out = aiter_ar.custom_all_gather(x, dim=-1)
+            if out is not None:
+                return out
+        elif x.is_contiguous() and not torch.cuda.is_current_stream_capturing():
+            out = _chunked_aiter_all_gather_columns(aiter_ar.aiter_ca, x)
+            if out is not None:
+                return out
+    return tensor_model_parallel_all_gather(x, dim=-1)
+
+
+def _chunked_aiter_all_gather_columns(ca, x: torch.Tensor) -> torch.Tensor | None:
+    """AITER's column all-gather of ``x`` in token chunks that fit its IPC
+    buffer; prefill-sized gathers are faster this way than through RCCL."""
+    row_bytes = x.shape[1] * x.element_size()
+    rows = ca.max_size // (ca.world_size * 2) // row_bytes
+    # AITER needs every chunk, including the last partial one, 16-byte aligned.
+    if row_bytes % 16 or not 0 < rows < x.shape[0] or not ca.should_custom_ag(x[:rows]):
+        return None
+    out = x.new_empty(x.shape[0], x.shape[1] * ca.world_size)
+    for start in range(0, x.shape[0], rows):
+        end = min(start + rows, x.shape[0])
+        ca.all_gather_unreg(x[start:end], out=out[start:end], dim=-1)
+    return out
+
+
+def _gathered_column_proj(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """A column-parallel projection of ``x``, gathered to the full output."""
+    out, _ = layer(x)
+    return _all_gather_columns(out)
+
+
 class MuseSpark1xMoE(nn.Module):
     post_norm_routed_experts_cls = MuseSparkRoutedExperts
     post_norm_runner_cls = MuseMoERunner
@@ -211,24 +288,37 @@ class MuseSpark1xMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
+        parallel_config = vllm_config.parallel_config
+        # Splitting the pooler/unpooler output columns over TP needs the same
+        # tokens, in the same order, on every TP rank. The split-K GEMM picks
+        # its config by token count, so it is not batch invariant.
+        replicated_tokens = (
+            self.tp_size > 1
+            and not self.is_sequence_parallel
+            and parallel_config.data_parallel_size == 1
+            and not envs.VLLM_BATCH_INVARIANT
+        )
+        self.shard_pooler = replicated_tokens and getattr(
+            config, "muse_spark_tep_shard_pooler", True
+        )
+        self.shard_unpooler = replicated_tokens and getattr(
+            config, "muse_spark_tep_shard_unpooler", True
+        )
+        if self.shard_pooler or self.shard_unpooler:
+            logger.info_once(
+                "Column-sharding MuseSpark projections over TP: pooler=%s, "
+                "unpooler=%s.",
+                self.shard_pooler,
+                self.shard_unpooler,
+            )
         # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
         # BF16-accumulating kernels for these shapes.
-        self.pooler = ReplicatedLinear(
-            config.hidden_size,
-            hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.pooler",
+        self.pooler = self._make_projection(
+            config.hidden_size, hidden_size, self.shard_pooler, f"{prefix}.pooler"
         )
-        self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler = ReplicatedLinear(
-            hidden_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.unpooler",
+        self.unpooler = self._make_projection(
+            hidden_size, config.hidden_size, self.shard_unpooler, f"{prefix}.unpooler"
         )
-        self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         self.pre_expert_norm = MuseSpark1xRMSNorm(
             hidden_size=hidden_size,
@@ -272,6 +362,20 @@ class MuseSpark1xMoE(nn.Module):
             runner_args={"post_expert_norm": self.post_expert_norm},
             moe_config_cls=MuseSparkMoEConfig,
         )
+
+    @staticmethod
+    def _make_projection(
+        input_size: int, output_size: int, shard: bool, prefix: str
+    ) -> ReplicatedLinear | ColumnParallelLinear:
+        """An unquantized projection, column-parallel over TP if ``shard``."""
+        layer_cls = ColumnParallelLinear if shard else ReplicatedLinear
+        layer = layer_cls(
+            input_size, output_size, bias=False, quant_config=None, prefix=prefix
+        )
+        layer.quant_method = (
+            MuseSparkShardedProjMethod() if shard else MuseSparkTorchLinearMethod()
+        )
+        return layer
 
     def _load_router_weight(
         self, param: nn.Parameter, loaded_weight: torch.Tensor
@@ -323,7 +427,10 @@ class MuseSpark1xMoE(nn.Module):
         )
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.pooler(hidden_states)
+        if self.shard_pooler:
+            hidden_states = _gathered_column_proj(self.pooler, hidden_states)
+        else:
+            hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
             return fused_rmsnorm_expand(
@@ -349,7 +456,10 @@ class MuseSpark1xMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        experts_out, _ = self.unpooler(experts_out)
+        if self.shard_unpooler:
+            experts_out = _gathered_column_proj(self.unpooler, experts_out)
+        else:
+            experts_out, _ = self.unpooler(experts_out)
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
@@ -1182,6 +1292,7 @@ __all__ = [
     "MuseSpark1xForCausalLM",
     "MuseSpark1xMoE",
     "MuseSpark1xModel",
+    "MuseSparkShardedProjMethod",
     "MuseSparkTorchLinearMethod",
     "norm_residual_then_norm",
 ]
