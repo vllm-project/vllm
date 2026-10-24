@@ -432,6 +432,8 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     runner.attn_groups = []
     runner.kv_cache_config = SimpleNamespace()
     runner.cudagraph_manager = object()
+    runner.native_cudagraph_manager = object()
+    runner.native_attn_groups = [object()]
     runner.lora_config = None
     runner.maybe_remove_all_loras = lambda _: None
 
@@ -443,3 +445,5 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     assert runner.model_state._mamba_ctx is None
     assert runner.model_state._mamba_group_ids == []
     assert runner.model_state._mamba_spec is None
+    assert runner.native_cudagraph_manager is None
+    assert runner.native_attn_groups == []

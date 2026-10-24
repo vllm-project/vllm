@@ -124,6 +124,10 @@ class InputBatch:
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    # Draft suspension is distinct from K=0 (which maintains draft KV).
+    skip_draft: bool = False
+    native_target: bool = False
+
     @classmethod
     def make_dummy(
         cls,

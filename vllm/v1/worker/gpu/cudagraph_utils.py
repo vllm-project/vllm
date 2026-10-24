@@ -1081,6 +1081,8 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         del runner.kv_cache_config
     # Dropping the manager releases the profiling graphs and throwaway pool.
     runner.cudagraph_manager = None
+    runner.native_cudagraph_manager = None
+    runner.native_attn_groups = []
     # Release encoder graphs captured during profiling; the real
     # capture_model() re-captures them.
     if runner.model_state.supports_mm_inputs:

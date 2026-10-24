@@ -6,6 +6,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.speculative import XPRESS_ARCHITECTURES
+from vllm.v1.spec_decode.registry import get_speculative_method
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
@@ -19,6 +20,10 @@ def init_speculator(
     """Build the speculator for this config."""
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    registered = get_speculative_method(speculative_config.method)
+    if registered is not None:
+        # A method registered by a plugin (see vllm.v1.spec_decode.registry).
+        return registered.resolve_speculator_cls()(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,
