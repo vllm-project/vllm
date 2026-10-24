@@ -377,7 +377,8 @@ guide: |
 
   The checkpoint also fits on a single MI355X (288 GB HBM3E): use
   `--tensor-parallel-size 1` with the same flags to serve one replica per GPU.
-  TP2 leaves more memory for KV cache.
+  TP2 leaves more memory for KV cache and gives slightly lower per-token
+  latency; TP1 gives more throughput per GPU.
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
