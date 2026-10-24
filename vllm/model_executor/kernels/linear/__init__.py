@@ -131,6 +131,7 @@ from vllm.model_executor.kernels.linear.mxfp8.pytorch import (
 )
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
+    RocmHipbmmMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.xpu import (
     XPUMxFp8LinearKernel,
@@ -966,6 +967,8 @@ def init_mxfp8_linear_kernel(
             if current_platform.is_cuda()
             else []
         )
+    elif current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM:
+        possible = [RocmHipbmmMxfp8LinearKernel]
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
