@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import NamedTuple
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -77,6 +78,40 @@ def assemble_chat_message_fields(
             "Returning a standard chat completion."
         )
     return ChatMessageFields(reasoning, content, [])
+
+
+def get_chat_response_role(request: ChatCompletionRequest, response_role: str) -> str:
+    """Role of the response message: `response_role` (the server's
+    `--response-role`), or the last message's role when the request continues
+    it (`add_generation_prompt=False`).
+    """
+    if request.add_generation_prompt:
+        return response_role
+    return request.messages[-1]["role"]
+
+
+def get_echo_content(messages: Sequence[Mapping[str, Any]], role: str) -> str:
+    """Text that `echo` prepends to the response content.
+
+    Args:
+        messages: The conversation, parsed or as sent in the request.
+        role: The response role from `get_chat_response_role`.
+
+    Returns:
+        The last message's text when its role is `role`, otherwise "". Text
+        parts of list content are joined with newlines, as chat parsing does.
+
+    """
+    if not messages or messages[-1].get("role") != role:
+        return ""
+    content = messages[-1].get("content") or ""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        part if isinstance(part, str) else part["text"]
+        for part in content
+        if isinstance(part, str) or "text" in part
+    )
 
 
 def _to_tool_calls(

@@ -16,7 +16,9 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
+from vllm.outputs import CompletionOutput
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
@@ -1689,7 +1691,7 @@ def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
     assert choice.finish_reason == "stop"
 
 
-def _make_derenderer(tokenizer, generation_config: dict | None = None):
+def _make_derenderer(tokenizer, generation_config: dict | None = None, **kwargs):
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
     renderer.get_eos_token_id.return_value = tokenizer.eos_token_id
@@ -1704,6 +1706,7 @@ def _make_derenderer(tokenizer, generation_config: dict | None = None):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
+        **kwargs,
     )
 
 
@@ -1776,6 +1779,72 @@ def test_derender_batch_trims_stop_like_engine(
 
     assert output_text == text
     assert choice.stop_reason == reason
+
+
+@pytest.mark.parametrize("tool_parser", [None, "hermes"])
+@pytest.mark.parametrize(
+    ("add_generation_prompt", "echo", "role", "echoed"),
+    [
+        (True, True, "bot", ""),
+        (False, False, "assistant", ""),
+        (False, True, "assistant", "1, 2,"),
+    ],
+)
+def test_derender_chat_role_and_echo_match_chat_completion(
+    tokenizer, tool_parser, add_generation_prompt, echo, role, echoed
+):
+    """Batch /derender takes the role from `--response-role` or, when the
+    last message is continued, from that message, and prepends it on
+    `echo`, as `/v1/chat/completions` does."""
+    derenderer = _make_derenderer(
+        tokenizer,
+        response_role="bot",
+        tool_parser=tool_parser,
+        enable_auto_tools=tool_parser is not None,
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {"role": "assistant", "content": "1, 2,"},
+        ],
+        add_generation_prompt=add_generation_prompt,
+        continue_final_message=not add_generation_prompt,
+        echo=echo,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(" 3, 4, 5", add_special_tokens=False),
+            finish_reason="length",
+        )
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+    (plain,) = derenderer._derender_chat(
+        response, request.model_copy(update={"echo": False})
+    )
+
+    assert choice.message.role == role
+    assert choice.message.content == echoed + plain.message.content
+
+
+def test_generate_derender_role_is_response_role(tokenizer):
+    """Generate `output_mode: "derender"` returns `--response-role`."""
+    derenderer = _make_derenderer(tokenizer, response_role="bot")
+    output = CompletionOutput(
+        index=0,
+        text="Hello",
+        token_ids=[1],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    )
+
+    ((message, _),) = derenderer._derender_text_choices(
+        [output], ParseContext().to_chat_request(), 0, None
+    )
+
+    assert message.role == "bot"
 
 
 @pytest.mark.asyncio

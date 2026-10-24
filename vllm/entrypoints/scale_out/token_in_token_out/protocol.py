@@ -833,7 +833,7 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial `role: "assistant"` delta has been emitted.
+    """True once the initial role delta (and any `echo` text) has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).

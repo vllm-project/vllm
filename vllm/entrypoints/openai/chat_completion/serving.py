@@ -28,6 +28,8 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
+    get_chat_response_role,
+    get_echo_content,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -437,9 +439,7 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
-        if request.add_generation_prompt:
-            return self.response_role
-        return request.messages[-1]["role"]
+        return get_chat_response_role(request, self.response_role)
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Construct the response :class:`ChatMessage` for the non-streaming path.
@@ -629,14 +629,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: str | list[dict[str, str]] = ""
-                        if (
-                            conversation
-                            and "content" in conversation[-1]
-                            and conversation[-1].get("role") == role
-                        ):
-                            last_msg_content = conversation[-1]["content"] or ""
-
+                        last_msg_content = get_echo_content(conversation, role)
                         if last_msg_content:
                             for i in range(num_choices):
                                 choice_data = ChatCompletionResponseStreamChoice(
@@ -1069,16 +1062,7 @@ class OpenAIServingChat(GenerateBaseServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: str | list[dict[str, str]] = ""
-            if (
-                conversation
-                and "content" in conversation[-1]
-                and conversation[-1].get("role") == role
-            ):
-                last_msg_content = conversation[-1]["content"] or ""
-            if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
-
+            last_msg_content = get_echo_content(conversation, role)
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content or "")
                 choice.message.content = full_message

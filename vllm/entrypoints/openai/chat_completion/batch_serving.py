@@ -9,6 +9,9 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    get_echo_content,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -306,18 +309,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
                 if request.echo:
-                    conversation = all_conversations[prompt_idx]
-                    last_msg_content: str | list[dict[str, str]] = ""
-                    if (
-                        conversation
-                        and "content" in conversation[-1]
-                        and conversation[-1].get("role") == role
-                    ):
-                        last_msg_content = conversation[-1]["content"] or ""
-                    if isinstance(last_msg_content, list):
-                        last_msg_content = "\n".join(
-                            msg["text"] for msg in last_msg_content
-                        )
+                    last_msg_content = get_echo_content(
+                        all_conversations[prompt_idx], role
+                    )
                     message.content = last_msg_content + (message.content or "")
 
                 choice_data = ChatCompletionResponseChoice(
