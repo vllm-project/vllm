@@ -130,9 +130,35 @@ def top_k_per_row_prefill_index_order(
     stride0: int,
     stride1: int,
     topk_tokens: int,
+    *,
+    zero_starts: bool = False,
 ) -> None:
     """Select like top_k_per_row_prefill, then write the selected local indices
-    in ascending order with -1 padding last."""
+    in ascending order with -1 padding last.
+
+    zero_starts promises every row starts at column zero; then
+    VLLM_BI_INDEXER_DEEPSELECT selects with DeepSelect instead."""
+    from vllm import envs
+
+    if zero_starts and envs.VLLM_BI_INDEXER_DEEPSELECT:
+        import vllm._deepselect_C  # noqa: F401
+
+        torch.ops.deep_select.topk(
+            logits[:num_rows],
+            topk_tokens,
+            None,  # begin: rows start at column zero
+            cu_seqlen_ke[:num_rows].contiguous(),
+            False,  # sorted_value
+            True,  # sorted_index: ascending, -1 padding last
+            None,
+            raw_topk_indices[:num_rows],
+            None,
+            -1,
+            float("-inf"),
+            False,  # return_value
+            False,  # abort_when_nan_found
+        )
+        return
     require_batch_invariant_kernel()
     torch.ops.vllm_batch_invariant.top_k_per_row_prefill_index_order(
         logits,

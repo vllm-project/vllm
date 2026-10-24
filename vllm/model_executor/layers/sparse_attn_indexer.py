@@ -775,8 +775,11 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
+                topk_kwargs = {}
                 if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
                     top_k_per_row_prefill = _bi_top_k_per_row(dcp_world_size)
+                    if dcp_world_size == 1:
+                        topk_kwargs["zero_starts"] = row_starts is None
                 else:
                     top_k_per_row_prefill = ops.top_k_per_row_prefill
                 top_k_per_row_prefill(
@@ -788,6 +791,7 @@ def sparse_attn_indexer(
                     logits.stride(0),
                     logits.stride(1),
                     topk_tokens,
+                    **topk_kwargs,
                 )
 
             if deinterleave_idx is None:
@@ -961,6 +965,7 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+                **({"zero_starts": True} if dcp_world_size == 1 else {}),
             )
         else:
             # The backend comes from the layer (config is only readable at

@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_BI_MXFP8_PREQUANT: bool = False
     VLLM_BI_MHC_OVERLAP: bool = False
     VLLM_BI_WO_FP8_EPILOGUE: bool = False
+    VLLM_BI_INDEXER_DEEPSELECT: bool = False
     VLLM_BI_REPLAY_STAGE_LAYERS: int = 0
     VLLM_BI_BF16_SPLITK: int = 0
     VLLM_BI_TOPK_TRITON: bool = False
@@ -697,6 +698,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_BI_MXFP8_PREQUANT.
     "VLLM_BI_WO_FP8_EPILOGUE": lambda: bool(
         int(os.getenv("VLLM_BI_WO_FP8_EPILOGUE", "0"))
+    ),
+    # Under VLLM_BATCH_INVARIANT, the indexer's index-ordered top-k over
+    # zero-based rows runs on DeepSelect (sorted indices), as DeepInfer does,
+    # instead of the native per-row kernel. Boundary ties follow a fixed visit
+    # order that depends only on row length and dtype, so it is row invariant
+    # but breaks ties differently from the native kernel: the trainer must run
+    # with the same switch (zero_starts=True at its call).
+    "VLLM_BI_INDEXER_DEEPSELECT": lambda: bool(
+        int(os.getenv("VLLM_BI_INDEXER_DEEPSELECT", "0"))
     ),
     # Batch-invariant exact SWA replay: run the decoder replay layers in stages
     # of this many layers, each on only the trailing rows its layers need for
