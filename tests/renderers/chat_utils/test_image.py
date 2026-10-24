@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import warnings
 
 import pytest
 import torch
+from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.multimodal.utils import encode_image_url
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 from vllm.utils.serial_utils import tensor2base64
 
@@ -80,6 +83,70 @@ def test_parse_chat_messages_single_image(
     ]
     assert_mm_data_is_image_input(mm_data, 1)
     assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
+def test_parse_chat_messages_auto_derives_uuids_from_urls(
+    phi3v_model_config,
+    monkeypatch,
+):
+    monkeypatch.setenv("VLLM_UUID_AUTO_DERIVE", "1")
+    image_urls = [
+        encode_image_url(Image.new("RGB", (1, 1), color=color))
+        for color in ("red", "blue")
+    ]
+
+    _, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": url}}
+                    for url in image_urls
+                ],
+            }
+        ],
+        phi3v_model_config,
+        content_format="string",
+    )
+
+    expected_uuids: list[str | None] = [
+        hashlib.sha256(url.encode()).hexdigest() for url in image_urls
+    ]
+    assert expected_uuids[0] != expected_uuids[1]
+    assert_mm_data_is_image_input(mm_data, 2)
+    assert_mm_uuids(mm_uuids, 2, expected_uuids=expected_uuids)
+
+
+def test_parse_chat_messages_explicit_uuid_overrides_auto_derivation(
+    phi3v_model_config,
+    monkeypatch,
+):
+    monkeypatch.setenv("VLLM_UUID_AUTO_DERIVE", "1")
+    image_urls = [
+        encode_image_url(Image.new("RGB", (1, 1), color=color))
+        for color in ("red", "blue")
+    ]
+
+    _, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                        "uuid": "shared-uuid",
+                    }
+                    for url in image_urls
+                ],
+            }
+        ],
+        phi3v_model_config,
+        content_format="string",
+    )
+
+    assert_mm_data_is_image_input(mm_data, 2)
+    assert_mm_uuids(mm_uuids, 2, expected_uuids=["shared-uuid", "shared-uuid"])
 
 
 def test_parse_chat_messages_single_image_with_uuid(
