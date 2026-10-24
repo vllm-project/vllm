@@ -684,16 +684,19 @@ class EngineCore:
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
-
-    def post_step(self, model_executed: bool) -> None:
-        # When using async scheduling we can't get draft token ids in advance,
-        # so we update draft token ids in the worker process and don't
-        # need to update draft token ids here.
-        if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
+        # Phase 2: Generate drafts for next step with updated grammar state.
+        if self.check_for_draft_tokens:
+            self.model_executor.generate_drafts()
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def post_step(self, model_executed: bool) -> None:
+        # Draft handling moved to step() for both sync and async scheduling.
+        # This method is now a no-op.
+        pass
 
     def step_with_batch_queue(
         self,
@@ -785,6 +788,13 @@ class EngineCore:
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
+
+        # Phase 2: Generate drafts for next step with updated grammar state.
+        if self.check_for_draft_tokens:
+            self.model_executor.generate_drafts()
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is

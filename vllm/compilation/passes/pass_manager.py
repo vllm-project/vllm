@@ -49,6 +49,7 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+    from .fusion.moe_tp_collective_optimization import MoETPCollectiveOptimizationPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
@@ -169,6 +170,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:
                     self.passes += [AllReduceFusionPass(config)]
+
+            # MoE TP Collective Optimization - eliminate redundant all-reduces in expert output projection
+            if self.pass_config.fuse_moe_tp_collectives:
+                self.passes += [MoETPCollectiveOptimizationPass(config)]
 
             if enable_transformers_norm_canonicalization:
                 # Let AR+RMS match before moving output reshapes ahead of the

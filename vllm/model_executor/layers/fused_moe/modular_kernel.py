@@ -1319,6 +1319,15 @@ class FusedMoEKernelModularImpl:
             a1q, w1, w2, topk_ids
         )
 
+        # TP sharding for MoE output projection (w2/down_proj):
+        # Each TP rank computes only its output shard of the hidden dimension.
+        # K is the hidden_size (output of w2), N is the intermediate size (input to w2).
+        tp_size = self.moe_parallel_config.tp_size
+        if tp_size > 1:
+            K_local = K // tp_size
+        else:
+            K_local = K
+
         # This happens when none of the tokens from the all2all reach this
         # EP rank. Also, note that this is only relevant for CUDAGraph
         # incompatible all2all kernels like the DeepEP high-throughput
@@ -1327,6 +1336,8 @@ class FusedMoEKernelModularImpl:
         # the tensor.numel() == 0 case.
         if M_full == 0:
             out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            if tp_size > 1:
+                out_dim = out_dim // tp_size
             return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
@@ -1335,8 +1346,8 @@ class FusedMoEKernelModularImpl:
                 a1q.device,
                 M_full,
                 M_full,
-                N,
-                K,
+                N,  # N (intermediate size) unchanged
+                K_local,  # Use local K (hidden_size) for TP sharding
                 top_k,
                 global_num_experts,
                 local_num_experts,
