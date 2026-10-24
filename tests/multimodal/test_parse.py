@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from io import BytesIO
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
@@ -164,3 +167,35 @@ def test_cached_audio_items_preserve_positions_during_resampling():
     assert items.get(2) is None
     assert len(items.get(1)) == 32
     np.testing.assert_array_equal(items.get(3), waveform)
+
+
+def _make_exif_jpeg(orientation: int) -> bytes:
+    """Build a 40x20 JPEG whose EXIF orientation tag is `orientation`."""
+    image = Image.new("RGB", (40, 20), (255, 0, 0))
+    exif = image.getexif()
+    exif[274] = orientation
+    with BytesIO() as buf:
+        image.save(buf, format="JPEG", exif=exif.tobytes())
+        return buf.getvalue()
+
+
+def test_parse_image_data_orientation_flag():
+    """Directly passed PIL images keep their stored pixels when
+    normalization is disabled, matching the Mistral chat template."""
+    data = _make_exif_jpeg(6)
+
+    normalized = cast(
+        "ImageProcessorItems",
+        MultiModalDataParser().parse_mm_data({"image": [Image.open(BytesIO(data))]})[
+            "image"
+        ],
+    )
+    stored = cast(
+        "ImageProcessorItems",
+        MultiModalDataParser(normalize_image_orientation=False).parse_mm_data(
+            {"image": [Image.open(BytesIO(data))]}
+        )["image"],
+    )
+
+    assert normalized.get_image_size(0) == (20, 40)
+    assert stored.get_image_size(0) == (40, 20)

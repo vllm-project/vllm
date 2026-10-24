@@ -238,13 +238,31 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsMultiModal], model_cls)
 
+    @cached_property
+    def uses_mistral_chat_template(self) -> bool:
+        """Whether the prompt is rendered by the Mistral chat template,
+        which re-decodes media from their source bytes itself."""
+        # Lazy import to avoid import cycles at module load time.
+        from vllm.tokenizers.registry import uses_mistral_tokenizer
+
+        return uses_mistral_tokenizer(self._model_config)
+
     @property
     def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
-        return self._media_io_kwargs or (
+        kwargs = self._media_io_kwargs or (
             self._model_config.multimodal_config.media_io_kwargs
             if self._model_config.multimodal_config
             else None
         )
+        if self.uses_mistral_chat_template:
+            # The Mistral chat template re-decodes images from their source
+            # bytes without EXIF normalization; vLLM's decode must match it
+            # or the image token grids computed from the two decodes
+            # disagree and placeholder validation fails.
+            image_kwargs = {**(kwargs or {}).get("image", {})}
+            image_kwargs["normalize_orientation"] = False
+            kwargs = {**(kwargs or {}), "image": image_kwargs}
+        return kwargs
 
     @property
     def allowed_local_media_path(self):

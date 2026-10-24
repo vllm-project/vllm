@@ -554,6 +554,10 @@ class MultiModalDataParser:
         allow_missing_mm_embeddings (bool): Whether pre-computed embedding
             tensors may be absent from the request on a disaggregated consumer.
             Derived by `BaseProcessingInfo.allow_missing_mm_embeddings`.
+        normalize_image_orientation (bool): Whether to apply EXIF orientation
+            normalization to directly passed PIL images. Disabled for the
+            Mistral tokenizer path, whose chat template decodes images from
+            their source bytes without EXIF normalization.
 
     """
 
@@ -606,10 +610,12 @@ class MultiModalDataParser:
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
         allow_missing_mm_embeddings: bool = False,
+        normalize_image_orientation: bool = True,
     ) -> None:
         super().__init__()
 
         self.allow_missing_mm_embeddings = allow_missing_mm_embeddings
+        self.normalize_image_orientation = normalize_image_orientation
 
         self.audio_resampler = AudioResampler(
             target_sr=target_sr,
@@ -770,7 +776,10 @@ class MultiModalDataParser:
             data_items = data
 
         data_items = [
-            convert_image_mode(normalize_image(item), "RGB")
+            convert_image_mode(
+                normalize_image(item) if self.normalize_image_orientation else item,
+                "RGB",
+            )
             if isinstance(item, PILImage.Image)
             else item
             for item in data_items

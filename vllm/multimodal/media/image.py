@@ -31,6 +31,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def __init__(
         self,
         image_mode: str | None = "RGB",
+        normalize_orientation: bool = True,
         *,
         decoded_budget: MediaDecodedBudget | None = None,
         **kwargs,
@@ -41,6 +42,11 @@ class ImageMediaIO(MediaIO[Image.Image]):
         # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
         self.decoded_budget = decoded_budget
+        # Whether to normalize EXIF orientation so pixel data matches visual
+        # display. Must stay disabled when the image is also decoded by the
+        # Mistral chat template, which does not apply EXIF normalization;
+        # otherwise the two decodes disagree on the image token grid.
+        self.normalize_orientation = normalize_orientation
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
         # per-request runtime media_io_kwargs via merge_kwargs().
@@ -91,7 +97,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 )
             if self.decoded_budget is not None:
                 self.decoded_budget.charge(w * h * 4)
-            image = normalize_image(image)
+            if self.normalize_orientation:
+                image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
         # Pillow raises SyntaxError (not OSError) for broken PNG chunks.

@@ -578,3 +578,30 @@ def test_get_cached_bytes_file_deleted_before_read():
         connector._media_cache_path(url).unlink()
 
         assert connector._get_cached_bytes(url) is None
+
+
+def _make_exif_jpeg(orientation: int) -> bytes:
+    """Build a 40x20 JPEG whose EXIF orientation tag is `orientation`."""
+    image = Image.new("RGB", (40, 20), (255, 0, 0))
+    exif = image.getexif()
+    exif[274] = orientation
+    with BytesIO() as buf:
+        image.save(buf, format="JPEG", exif=exif.tobytes())
+        return buf.getvalue()
+
+
+def test_fetch_image_normalize_orientation_media_io_kwargs():
+    """media_io_kwargs can disable EXIF normalization; used for the Mistral
+    path, whose chat template re-decodes images from their source bytes."""
+    data_url = "data:image/jpeg;base64," + base64.b64encode(_make_exif_jpeg(6)).decode(
+        "utf-8"
+    )
+
+    default = MediaConnector().fetch_image(data_url)
+    assert default.size == (20, 40)
+
+    connector = MediaConnector(
+        media_io_kwargs={"image": {"normalize_orientation": False}}
+    )
+    stored = connector.fetch_image(data_url)
+    assert stored.size == (40, 20)
