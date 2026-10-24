@@ -32,6 +32,148 @@ mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_mimo_mtp_preserves_checkpoint_layer_count(count):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.mimo_v2_mtp import get_mimo_mtp_layer_count
+
+    assert (
+        get_mimo_mtp_layer_count(SimpleNamespace(num_nextn_predict_layers=count))
+        == count
+    )
+    assert get_mimo_mtp_layer_count(SimpleNamespace()) == 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("count", [0, -1, 4, None, True, 1.5])
+def test_mimo_mtp_rejects_unqualified_checkpoint_layer_count(count):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.mimo_v2_mtp import get_mimo_mtp_layer_count
+
+    with pytest.raises(ValueError, match="one to three"):
+        get_mimo_mtp_layer_count(SimpleNamespace(num_nextn_predict_layers=count))
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("chain", [False, True])
+def test_multi_module_mtp_hidden_state_contract(chain):
+    from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
+        MultiModuleMTPSpeculator,
+    )
+
+    speculator = object.__new__(MultiModuleMTPSpeculator)
+    speculator.chain_mtp_hidden_states = chain
+    target = torch.randn(4, 8)
+    speculator.hidden_states = target.clone()
+    draft = torch.randn(3, 8)
+    for _ in range(3):
+        speculator._update_mtp_hidden_states(draft, 3)
+    expected = target.clone()
+    if chain:
+        expected[:3] = draft
+    torch.testing.assert_close(speculator.hidden_states, expected)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("scale", [1.0, 0.75, 1.25, 1.5])
+def test_mimo_proposal_scale_reaches_sampling_and_rejection_cache(monkeypatch, scale):
+    from unittest.mock import Mock
+
+    from vllm.v1.worker.gpu.spec_decode import speculator as mod
+
+    speculator = Mock(spec=mod.DraftModelSpeculator)
+    speculator.use_local_argmax_reduction = False
+    speculator.mimo_draft_logit_scale = scale
+    speculator.draft_watermarker = None
+    speculator.use_fp64_gumbel = False
+    logits = torch.randn(3, 8)
+    original = logits.clone()
+    speculator.compute_draft_logits = lambda hidden, step: logits
+    seen = []
+    speculator._maybe_predict_acceptance = lambda value, *_: seen.append(value)
+
+    def sampler(value, mapping, temperature, seeds, positions, **kwargs):
+        kwargs["logits_cache"].copy_(value)
+        return value.argmax(-1)
+
+    monkeypatch.setattr(mod, "gumbel_sample", sampler)
+    cache = torch.empty_like(logits)
+    temperature = torch.ones(3)
+    idx = torch.arange(3)
+    result = mod.DraftModelSpeculator.sample_draft(
+        speculator,
+        torch.empty(3, 4),
+        idx,
+        idx,
+        temperature,
+        idx,
+        torch.tensor(0),
+        cache,
+    )
+    torch.testing.assert_close(cache, original * scale)
+    torch.testing.assert_close(seen[0], cache)
+    torch.testing.assert_close(result, original.argmax(-1))
+    torch.testing.assert_close(logits, original)
+    torch.testing.assert_close(temperature, torch.ones(3))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_mimo_proposal_scale_cuda_graph():
+    from unittest.mock import Mock
+
+    from vllm.v1.worker.gpu.spec_decode import speculator as mod
+
+    speculator = Mock(spec=mod.DraftModelSpeculator)
+    speculator.use_local_argmax_reduction = False
+    speculator.draft_watermarker = None
+    speculator.use_fp64_gumbel = False
+    logits = torch.randn(3, 128, device="cuda")
+    speculator.compute_draft_logits = lambda hidden, step: logits
+    speculator._maybe_predict_acceptance = lambda *args: None
+    positions = torch.arange(3, device="cuda")
+    temperature = torch.ones(3, device="cuda")
+    seeds = torch.tensor([31, 53, 79], device="cuda")
+    step = torch.tensor(0, device="cuda")
+    for scale in (1.0, 0.75, 1.25, 1.5):
+        speculator.mimo_draft_logit_scale = scale
+        cache = torch.empty(3, 1, 128, device="cuda")
+        hidden = torch.empty(3, 4, device="cuda")
+
+        def run(hidden=hidden, cache=cache):
+            return mod.DraftModelSpeculator.sample_draft(
+                speculator,
+                hidden,
+                positions,
+                positions,
+                temperature,
+                seeds,
+                step,
+                cache,
+            )
+
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run()
+        logits.copy_(torch.randn_like(logits))
+        graph.replay()
+        expected = mod.gumbel_sample(
+            logits * scale,
+            positions,
+            temperature,
+            seeds,
+            positions,
+            apply_temperature=True,
+            is_drafting=True,
+            use_fp64=False,
+        )
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        torch.testing.assert_close(cache[:, 0], logits * scale, rtol=0, atol=0)
+
+
 def test_glm_mtp_defers_lm_head(default_vllm_config):
     from vllm.model_executor.models import deepseek_mtp
     from vllm.models.glm5next.common import mtp

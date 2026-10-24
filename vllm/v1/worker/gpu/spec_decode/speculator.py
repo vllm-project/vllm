@@ -113,6 +113,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.method = self.speculative_config.method
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         self.draft_model_config = self.speculative_config.draft_model_config
+        self.mimo_draft_logit_scale = self.speculative_config.mimo_draft_logit_scale
 
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -454,6 +455,8 @@ class DraftModelSpeculator(BaseSpeculator):
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
+            if self.mimo_draft_logit_scale != 1.0:
+                logits = logits * self.mimo_draft_logit_scale
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None

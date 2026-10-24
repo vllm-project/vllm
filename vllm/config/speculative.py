@@ -633,6 +633,11 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    mimo_draft_logit_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    """Positive MiMo MTP proposal-logit scale. Requires probabilistic drafting
+    and standard rejection. The same scaled logits are sampled and cached for
+    rejection; target logits and temperature are unchanged. Opt-in."""
+
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
@@ -664,7 +669,7 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
+        factors: list[Any] = [self.mimo_draft_logit_scale]
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -690,6 +695,11 @@ class SpeculativeConfig:
                 factors.append(tuple(layer_ids))
 
         if self.method == "mtp" and self.draft_model_config is not None:
+            factors.append(
+                getattr(
+                    self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+                )
+            )
             factors.append(
                 getattr(
                     self.draft_model_config.hf_config,
@@ -795,6 +805,7 @@ class SpeculativeConfig:
         ):
             from vllm.model_executor.models.mimo_v2_mtp import (
                 _MIMO_V2_PRO_NUM_MTP_LAYERS,
+                get_mimo_mtp_layer_count,
             )
 
             mtp_arch_maps = {
@@ -803,8 +814,12 @@ class SpeculativeConfig:
             }
 
             hf_config.model_type = "mimo_v2_mtp"
-            # vLLM currently supports only the first MiMo-V2 MTP layer.
-            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            # Preserve Omni's existing single-layer behavior pending validation.
+            n_predict = (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS
+                if arch == "MiMoV2OmniForCausalLM"
+                else get_mimo_mtp_layer_count(hf_config)
+            )
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
@@ -816,12 +831,11 @@ class SpeculativeConfig:
 
         if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
             from vllm.model_executor.models.mimo_v2_mtp import (
-                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+                get_mimo_mtp_layer_count,
             )
 
             hf_config.model_type = "mimo_v2_mtp"
-            # vLLM currently supports only the first MiMo-V2 MTP layer.
-            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            n_predict = get_mimo_mtp_layer_count(hf_config)
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
@@ -1441,6 +1455,7 @@ class SpeculativeConfig:
                         )
                     if (
                         self.num_speculative_tokens > 1
+                        and not self.use_multi_module_mtp()
                         and self.draft_model_config.hf_config.model_type
                         not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
                     ):
@@ -1677,7 +1692,24 @@ class SpeculativeConfig:
                 "materializes. Disable one of them."
             )
 
+        self._validate_mimo_draft_logit_scale()
         return self
+
+    def _validate_mimo_draft_logit_scale(self) -> None:
+        if self.mimo_draft_logit_scale == 1.0:
+            return
+        if (
+            self.method != "mtp"
+            or self.draft_sample_method != "probabilistic"
+            or self.rejection_sample_method != "standard"
+            or self.draft_model_config is None
+            or self.draft_model_config.hf_config.model_type != "mimo_v2_mtp"
+            or self.draft_model_config.hf_config.architectures != ["MiMoV2MTPModel"]
+        ):
+            raise ValueError(
+                "mimo_draft_logit_scale requires MiMo V2 MTP with probabilistic "
+                "drafting and standard rejection"
+            )
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
@@ -2140,6 +2172,17 @@ class SpeculativeConfig:
 
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
+
+    def validate_mimo_runner(self, use_v2: bool) -> None:
+        if (
+            not use_v2
+            and self.draft_model_config is not None
+            and self.draft_model_config.hf_config.model_type == "mimo_v2_mtp"
+            and (self.use_multi_module_mtp() or self.mimo_draft_logit_scale != 1.0)
+        ):
+            raise ValueError(
+                "Multi-layer or calibrated MiMo MTP requires Model Runner V2"
+            )
 
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
