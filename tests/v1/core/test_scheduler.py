@@ -2082,15 +2082,17 @@ def test_preemption_re_records_prefix_cache_query():
 
 def test_preemption_processes_stale_aux_output():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     scheduler.running.remove(request)
-    scheduler.aux_output_connector = Mock()
     scheduler._preempt_request(request, 0.0)
-    scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
+    routing = np.arange(request.num_prompt_tokens, dtype=np.uint8).reshape(-1, 1, 1)
 
-    scheduler.update_from_output(
+    outputs = scheduler.update_from_output(
         scheduler_output,
         ModelRunnerOutput(
             req_ids=[request.request_id],
@@ -2099,10 +2101,15 @@ def test_preemption_processes_stale_aux_output():
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            aux_output_connector_output={
+                request.request_id: AuxRequestOutput(0, routing)
+            },
         ),
     )
 
-    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [1000]
+    np.testing.assert_array_equal(output.routed_experts, routing)
 
 
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():

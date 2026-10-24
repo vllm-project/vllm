@@ -371,6 +371,13 @@ async fn generate_merges_outputs_by_stream_interval() {
                         vec![token_ids.len(), 1, 2],
                         rows,
                     )));
+                    output.indexer_topk = Some(Box::new(
+                        WireNdArray::from_i32(
+                            vec![token_ids.len(), 1, 2],
+                            token_ids.iter().flat_map(|&id| [id as i32, -1]).collect(),
+                        )
+                        .unwrap(),
+                    ));
                     send_outputs(
                         push,
                         RequestBatchOutputs {
@@ -457,6 +464,22 @@ async fn generate_merges_outputs_by_stream_interval() {
             )))
         ]
     );
+    let indexer_topk: Vec<_> =
+        outputs.iter().map(|output| output.indexer_topk.clone()).collect();
+    assert_eq!(
+        indexer_topk,
+        [
+            None,
+            None,
+            Some(Box::new(
+                WireNdArray::from_i32(
+                    vec![7, 1, 2],
+                    (1..=7).flat_map(|id| [id, -1]).collect(),
+                )
+                .unwrap(),
+            ))
+        ]
+    );
     let last_token_timestamps: Vec<_> =
         outputs.iter().map(|output| output.timestamps.last_token_ts).collect();
     assert_eq!(last_token_timestamps, [1.0, 4.0, 6.0]);
@@ -484,6 +507,9 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                     RequestBatchOutputs {
                         outputs: vec![
                             EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
+                                )),
                                 prefill_stats: Some(Box::new(PrefillStats {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
@@ -504,6 +530,9 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                 )
                             },
                             EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![2, 0]).unwrap(),
+                                )),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
                                     SamplingMask {
                                         rows: vec![vec![2, 44, 88]],
@@ -537,6 +566,10 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
 
+    assert_eq!(
+        collected.indexer_topk,
+        Some(WireNdArray::from_i32(vec![2, 1, 2], vec![8, -1, 2, 0]).unwrap())
+    );
     assert_eq!(collected.request_id, internal_id);
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
@@ -580,6 +613,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
+        indexer_topk: None,
         timestamps: Default::default(),
     };
 

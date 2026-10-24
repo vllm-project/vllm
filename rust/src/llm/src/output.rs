@@ -67,6 +67,8 @@ pub struct CollectedGenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request.
     pub routed_experts: Option<WireNdArray>,
+    /// Raw int32 Indexer TopK rows for the whole request.
+    pub indexer_topk: Option<WireNdArray>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -190,6 +192,8 @@ pub struct GenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request, set on terminal outputs only.
     pub routed_experts: Option<Box<WireNdArray>>,
+    /// Raw int32 Indexer TopK rows, set on terminal outputs only.
+    pub indexer_topk: Option<Box<WireNdArray>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -251,6 +255,7 @@ impl GenerateOutput {
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
         self.routed_experts = next.routed_experts;
+        self.indexer_topk = next.indexer_topk;
         self.timestamps = next.timestamps;
     }
 }
@@ -282,6 +287,7 @@ impl GenerateOutput {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -302,6 +308,8 @@ pub struct GenerateOutputStream {
     num_output_tokens: usize,
     /// Routed-expert rows received so far, concatenated on the terminal output.
     routed_experts_chunks: Vec<WireNdArray>,
+    /// Indexer rows received so far, concatenated on the terminal output.
+    indexer_chunks: Vec<WireNdArray>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -327,6 +335,7 @@ impl GenerateOutputStream {
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
             routed_experts_chunks: Vec::new(),
+            indexer_chunks: Vec::new(),
             _request_guard: request_guard,
         }
     }
@@ -371,6 +380,9 @@ impl GenerateOutputStream {
         let raw = raw.output;
         if let Some(rows) = raw.routed_experts {
             self.routed_experts_chunks.push(*rows);
+        }
+        if let Some(rows) = raw.indexer_topk {
+            self.indexer_chunks.push(*rows);
         }
 
         // Populate the one-time prompt info on the first output.
@@ -417,10 +429,17 @@ impl GenerateOutputStream {
         } else {
             None
         };
-        let routed_experts = if finish_reason.is_some() {
-            self.take_routed_experts(&raw.request_id)?
+        let (routed_experts, indexer_topk) = if finish_reason.is_some() {
+            (
+                take_aux_output_rows(
+                    &mut self.routed_experts_chunks,
+                    &raw.request_id,
+                    "routed experts",
+                )?,
+                take_aux_output_rows(&mut self.indexer_chunks, &raw.request_id, "indexer_topk")?,
+            )
         } else {
-            None
+            (None, None)
         };
 
         let output = GenerateOutput {
@@ -436,38 +455,11 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
             routed_experts,
+            indexer_topk,
             timestamps: self.request_metrics.timestamps(),
         };
 
         Ok(output)
-    }
-
-    /// Concatenate the routed-expert rows received so far along the token
-    /// axis, like Python's `np.concatenate`.
-    fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
-        let chunks = std::mem::take(&mut self.routed_experts_chunks);
-        let Some(first) = chunks.first() else {
-            return Ok(None);
-        };
-        let row_shape = first.shape.get(1..);
-        let mut num_rows = 0;
-        let mut data = Vec::new();
-        for chunk in &chunks {
-            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
-                return Err(crate::Error::RoutedExpertsShapeMismatch {
-                    request_id: request_id.to_string(),
-                });
-            }
-            num_rows += chunk.shape[0];
-            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
-        }
-        let mut shape = first.shape.clone();
-        shape[0] = num_rows;
-        Ok(Some(Box::new(WireNdArray::from_raw(
-            first.dtype,
-            shape,
-            data,
-        ))))
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
@@ -489,6 +481,39 @@ impl GenerateOutputStream {
                 .collect(),
         )
     }
+}
+
+/// Concatenate auxiliary rows along the token axis, like Python's `np.concatenate`.
+fn take_aux_output_rows(
+    chunks: &mut Vec<WireNdArray>,
+    request_id: &str,
+    artifact: &'static str,
+) -> Result<Option<Box<WireNdArray>>> {
+    let chunks = std::mem::take(chunks);
+    let Some(first) = chunks.first() else {
+        return Ok(None);
+    };
+    let row_shape = first.shape.get(1..);
+    let mut num_rows = 0;
+    let mut data = Vec::new();
+    for chunk in &chunks {
+        if chunk.shape.is_empty() || chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape
+        {
+            return Err(crate::Error::AuxOutputShapeMismatch {
+                request_id: request_id.to_string(),
+                artifact,
+            });
+        }
+        num_rows += chunk.shape[0];
+        data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
+    }
+    let mut shape = first.shape.clone();
+    shape[0] = num_rows;
+    Ok(Some(Box::new(WireNdArray::from_raw(
+        first.dtype,
+        shape,
+        data,
+    ))))
 }
 
 impl Stream for GenerateOutputStream {
@@ -594,6 +619,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         spec_decode_metrics: None,
                         weight_versions: None,
                         routed_experts: None,
+                        indexer_topk: None,
                     });
                 }
 
@@ -610,6 +636,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
                     collected.routed_experts = output.routed_experts.map(|value| *value);
+                    collected.indexer_topk = output.indexer_topk.map(|value| *value);
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {
@@ -625,5 +652,27 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             unreachable!("generate stream should yield an error instead of closing early")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auxiliary_rows_reject_changed_source_layout() {
+        let mut chunks = vec![
+            WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
+            WireNdArray::from_i32(vec![1, 2, 1], vec![2, 0]).unwrap(),
+        ];
+        let error =
+            take_aux_output_rows(&mut chunks, "req-indexer", "indexer_topk").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::AuxOutputShapeMismatch {
+                artifact: "indexer_topk",
+                ..
+            }
+        ));
     }
 }

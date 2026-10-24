@@ -13,6 +13,10 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -118,7 +122,7 @@ class DeepseekV32Indexer(nn.Module):
         )
 
 
-class DeepseekV32Attention(MLAAttention):
+class DeepseekV32Attention(MLAAttention, IndexerCaptureSource):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
     supports_pcp_dcp: ClassVar[bool] = True
@@ -234,6 +238,12 @@ class DeepseekV32Attention(MLAAttention):
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
+        if (
+            vllm_config.aux_output_config.enable_return_indexer_topk
+            and indexer is not None
+        ):
+            # Replay needs the selection even on a short dense-MHA prefill.
+            self._dense_mha_metadata_layer_name = ""
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
@@ -294,6 +304,11 @@ class DeepseekV32Attention(MLAAttention):
             or cudagraph_runtime_mode == CUDAGraphMode.FULL
             or torch.cuda.is_current_stream_capturing()
         )
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if self.indexer is None:
+            return None
+        return extract_layer_index(self.layer_name), self.indexer.topk_tokens
 
     def forward(  # type: ignore[override]
         self,
@@ -516,6 +531,10 @@ class DeepseekV32Attention(MLAAttention):
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
             )
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(q_c)
+            )
+
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(

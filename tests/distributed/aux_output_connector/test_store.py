@@ -4,6 +4,7 @@
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,18 +13,19 @@ import pytest
 import torch
 
 from vllm.distributed.aux_output_connector import store as store_module
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
 )
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
-)
+from vllm.distributed.aux_output_connector.memory import validate_shm_budget
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
@@ -33,8 +35,10 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -185,8 +189,12 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
+    indexer_shape: tuple[int, int] | None = None,
+    enable_r3: bool = True,
 ) -> AuxOutputWorkerConnector:
-    object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
+    r3_nbytes = int(np.prod(_SHAPE)) if enable_r3 else 0
+    shape = (r3_nbytes + int(np.prod(indexer_shape)) * 4,) if indexer_shape else _SHAPE
+    object_nbytes = _BLOCK_SIZE * int(np.prod(shape))
     store = _make_store(
         max_bytes=(
             1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
@@ -194,10 +202,25 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._unbind_capturer = None
+    worker._indexer = (
+        SimpleNamespace(
+            shape_per_token=indexer_shape,
+            fixed_bytes_per_token=int(np.prod(indexer_shape)) * 4,
+            namespace="synthetic-indexer",
+            release_snapshot=lambda slot: None,
+            close=lambda: None,
+        )
+        if indexer_shape
+        else None
+    )
+    worker._r3_nbytes = r3_nbytes
+    worker._r3_dtype = _DTYPE
+    worker._r3_shape = _SHAPE
     worker._store = store
-    worker._buffer = RoutedExpertsBuffer(
+    worker._buffer = AuxOutputBuffer(
         _DTYPE,
-        _SHAPE,
+        shape,
         _BLOCK_SIZE,
         max_num_seqs,
         max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
@@ -247,6 +270,7 @@ def _input_batch(request_ids, token_starts, query_start_loc):
 
 def test_non_output_rank_skips_capture_snapshot():
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._indexer = None
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
@@ -306,7 +330,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
 
     assert result.sampled_token_ids == [[7]]
     np.testing.assert_array_equal(
-        result.aux_output_connector_output["request"].rows, rows.numpy()
+        result.aux_output_connector_output["request"].routed_rows, rows.numpy()
     )
     process_output.assert_called_once()
     assert worker._pending_outputs == []
@@ -337,7 +361,7 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
 
     for i, pending in enumerate(pending_outputs):
         output = worker.process_output(pending)
-        np.testing.assert_array_equal(output["request"].rows, rows)
+        np.testing.assert_array_equal(output["request"].routed_rows, rows)
         if i + 1 < num_pending:
             assert "request" in worker._requests
             assert worker._store._references
@@ -399,14 +423,22 @@ def _process_output(
     token_starts=None,
     num_tokens=None,
     query_start_loc=None,
+    indexer_rows=None,
 ):
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
     if token_starts is None or num_tokens is None:
         assert isinstance(step, _WorkerStep)
         token_starts, num_tokens = _execution_ranges(step, request_ids)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    worker._capturer = None
+    if worker._r3_nbytes:
+        worker._capturer = Mock()
+        worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    if worker._indexer is not None:
+        worker._indexer.snapshot = lambda n: SimpleNamespace(
+            rows=torch.from_numpy(indexer_rows[:n].copy()),
+            slot=0,
+        )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -442,8 +474,8 @@ def test_worker_ignores_cudagraph_query_padding():
         query_start_loc=np.array([0, 1, 2, 2], dtype=np.int32),
     )
 
-    np.testing.assert_array_equal(output["first"].rows, logical[:1])
-    np.testing.assert_array_equal(output["second"].rows, logical[1:])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:1])
+    np.testing.assert_array_equal(output["second"].routed_rows, logical[1:])
     worker.close()
 
 
@@ -510,7 +542,7 @@ def test_worker_rejects_mismatched_capture_profile(routing):
 def test_logical_buffer_rejects_noncontiguous_capture(
     initial_start, initial_rows, invalid_start
 ):
-    buffer = RoutedExpertsBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
+    buffer = AuxOutputBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
     if initial_start is not None:
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
         assert buffer.capture("request", initial_start, rows) == []
@@ -522,7 +554,7 @@ def test_logical_buffer_rejects_noncontiguous_capture(
 
 
 def test_logical_buffer_captures_one_row_per_decode_step():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, 3, 2)
 
     completed = []
@@ -534,7 +566,7 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
 
 def test_logical_buffer_copies_borrowed_block_when_retained():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
 
     expected = logical.copy()
@@ -558,14 +590,14 @@ def _make_store(
     )
 
 
-def test_publish_routed_experts_publishes_full_blocks():
+def test_publish_aux_output_publishes_full_blocks():
     store = _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)))
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
-    keys = routed_experts_keys(hashes, "0")
+    keys = aux_output_keys(hashes, "0")
     blocks = buffer.capture("request", 0, logical)
-    publish_routed_experts(
+    publish_aux_output(
         store,
         batches=[(keys, blocks)],
         block_size=_BLOCK_SIZE,
@@ -574,7 +606,7 @@ def test_publish_routed_experts_publishes_full_blocks():
     logical[:] = 0
 
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             store,
             keys,
             shape_per_token=_SHAPE,
@@ -597,7 +629,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["first"].rows, logical[:8])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:8])
 
     second = _metadata(
         generation=0,
@@ -606,7 +638,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["second"].rows, logical)
+    np.testing.assert_array_equal(output["second"].routed_rows, logical)
     worker.close()
 
 
@@ -642,18 +674,18 @@ def test_worker_matches_kv_eviction_order_after_requests_finish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[1], hashes[3], hashes[4]], "0"),
+            aux_output_keys([hashes[1], hashes[3], hashes[4]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         np.concatenate([blocks[1], blocks[3], blocks[4]]),
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[2]], "0"),
+            aux_output_keys([hashes[2]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         )
@@ -733,14 +765,14 @@ def test_worker_replays_rejected_speculative_gap():
         np.array([0]),
     )
 
-    np.testing.assert_array_equal(first_output["request"].rows, logical[:1])
+    np.testing.assert_array_equal(first_output["request"].routed_rows, logical[:1])
     assert queued_output["request"].token_start == 1
     np.testing.assert_array_equal(
-        queued_output["request"].rows,
+        queued_output["request"].routed_rows,
         logical[1:2],
     )
     np.testing.assert_array_equal(
-        rolled_back_output["request"].rows,
+        rolled_back_output["request"].routed_rows,
         logical[2:],
     )
     assert worker._requests["request"].capture_cursor == len(logical)
@@ -803,8 +835,8 @@ def test_worker_publishes_entire_batch_before_materializing_prefix():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["consumer"].rows, logical)
-    np.testing.assert_array_equal(output["producer"].rows, logical[:4])
+    np.testing.assert_array_equal(output["consumer"].routed_rows, logical)
+    np.testing.assert_array_equal(output["producer"].routed_rows, logical[:4])
     worker.close()
 
 
@@ -826,7 +858,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[:4])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[:4])
     assert worker._requests["request"].pending_blocks[0][0] == 0
 
     block_hash = b"a" * 32
@@ -838,13 +870,13 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -947,9 +979,9 @@ def test_worker_does_not_pin_unscheduled_prompt_blocks():
     run([second, other], [4, 4], np.concatenate((logical[:4], logical[4:8])))
 
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([b"x" * 32], "0"),
+            aux_output_keys([b"x" * 32], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -980,9 +1012,9 @@ def test_worker_publishes_pending_block_without_forward():
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1072,7 +1104,7 @@ def test_worker_does_not_rematerialize_emitted_rows():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     worker._store.get_concatenated.assert_not_called()
     worker.close()
 
@@ -1089,7 +1121,7 @@ def test_worker_resumes_from_scheduler_emit_boundary():
     output = _process_output(worker, resumed, logical[4:], ["request"], np.array([0]))
 
     assert output["request"].token_start == 4
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert worker._requests["request"].emit_cursor == 5
     worker.close()
 
@@ -1120,7 +1152,7 @@ def test_worker_emits_mid_block_chunked_prefill():
     )
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1150,7 +1182,7 @@ def test_worker_emits_published_block_and_mid_block_tail():
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1177,7 +1209,7 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     )
 
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
-    emitted = output["request"].rows
+    emitted = output["request"].routed_rows
     expected = logical.copy()
 
     replacement = np.full_like(logical, 99)
@@ -1268,9 +1300,9 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     assert "request" not in worker._buffer._requests
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1527,7 +1559,7 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
-    np.testing.assert_array_equal(connector.take_output(request, output), routing)
+    np.testing.assert_array_equal(connector.take_output(request, output)[0], routing)
 
 
 @pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
@@ -1662,18 +1694,18 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[:1], "0"),
+            aux_output_keys(block_hashes[:1], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         logical[:_BLOCK_SIZE],
     )
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[1:], "0"),
+            aux_output_keys(block_hashes[1:], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1717,16 +1749,16 @@ def test_worker_releases_terminal_pins_before_same_step_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([producer_hash], "0"),
+            aux_output_keys([producer_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         producer_rows,
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        worker._store.get_concatenated(routed_experts_keys([victim_hash], "0"))
+        worker._store.get_concatenated(aux_output_keys([victim_hash], "0"))
     worker.close()
 
 
@@ -1762,9 +1794,9 @@ def test_terminal_request_publishes_hash_discovered_after_last_schedule():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1797,7 +1829,7 @@ def test_scheduler_connector_recreates_preempted_request_state():
 
 def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=6)
+    request = _scheduler_request("request", [], num_tokens=6, num_output_tokens=0)
     connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]),
         {request.request_id: request},
@@ -1809,10 +1841,10 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector.request_finished(request)
 
     request.num_tokens = 5
-    np.testing.assert_array_equal(connector.take_output(request, first), first_rows)
+    np.testing.assert_array_equal(connector.take_output(request, first)[0], first_rows)
     request.num_tokens = 6
     np.testing.assert_array_equal(
-        connector.take_output(request, second), second_rows[:1]
+        connector.take_output(request, second)[0], second_rows[:1]
     )
 
 
@@ -1848,7 +1880,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
     }
 
     with pytest.raises(AssertionError, match="invalid token range"):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 def test_scheduler_rejects_aux_output_past_finished_request():
@@ -1869,7 +1901,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     with pytest.raises(
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 @pytest.mark.parametrize("chunk_size", [2, 4])
@@ -1903,7 +1935,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         request.num_tokens = 5
         request.num_output_tokens = 1
         request.finished = max_tokens == 1
-        result = connector.take_output(request, output)
+        result = connector.take_output(request, output)[0]
         np.testing.assert_array_equal(result, rows[:0])
 
         if max_tokens == 2:
@@ -1923,7 +1955,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             request.num_tokens = 6
             request.finished = True
             np.testing.assert_array_equal(
-                connector.take_output(request, output), rows[4:]
+                connector.take_output(request, output)[0], rows[4:]
             )
     finally:
         worker.close()
@@ -1999,6 +2031,266 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
 
+@pytest.mark.parametrize("enable_r3", [False, True])
+def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
+    worker = _make_worker(2, indexer_shape=(1, 2), enable_r3=enable_r3)
+    indexer = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
+    routing = np.arange(36, dtype=np.uint8).reshape(6, *_SHAPE)
+    first = _metadata(0, [_request_metadata("producer", 0, 6, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        first,
+        routing,
+        ["producer"],
+        np.array([2]),
+        indexer_rows=indexer,
+    )["producer"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:4])
+    assert output.get_num_rows() == 4
+    if enable_r3:
+        np.testing.assert_array_equal(output.routed_rows, routing[:4])
+    else:
+        assert output.routed_rows is None
+    # A different request skips the cached prefix's forward entirely.
+    cached = _metadata(0, [_request_metadata("cached", 4, 1, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        cached,
+        routing[4:5],
+        ["cached"],
+        np.array([0]),
+        indexer_rows=indexer[4:5],
+    )["cached"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:5])
+    if enable_r3:
+        np.testing.assert_array_equal(output.routed_rows, routing[:5])
+    worker.close()
+
+
+def test_preemption_discards_partial_block_before_request_resumes():
+    worker = _make_worker(1)
+    rows = np.arange(30, dtype=np.uint8).reshape(5, *_SHAPE)
+    first = _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {})
+    _process_output(worker, first, rows[:3] + 100, ["request"], np.array([0]))
+    _begin_step(worker, _metadata(0, [], {"request": []}))
+    resumed = _metadata(0, [_request_metadata("request", 0, 5, 3, [b"a" * 32])], {})
+    output = _process_output(worker, resumed, rows, ["request"], np.array([0]))[
+        "request"
+    ]
+    assert output.token_start == 3
+    np.testing.assert_array_equal(output.routed_rows, rows[3:])
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    ("routed", "indexer_enabled"), [(True, False), (False, True), (True, True)]
+)
+def test_indexer_and_routing_prompt_offsets_are_independent(routed, indexer_enabled):
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}),
+        enable_routed_experts=routed,
+        enable_indexer=indexer_enabled,
+    )
+    request = Request(
+        "request",
+        [0, 1, 2, 3],
+        SamplingParams(
+            max_tokens=2, routed_experts_prompt_start=3, indexer_topk_prompt_start=1
+        ),
+        None,
+    )
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [4]), {"request": request}
+    )
+    assert metadata.requests["request"] == (1 if indexer_enabled else 3)
+    request.append_output_token_ids([4, 5])
+    routing = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
+    indexer = np.arange(8, dtype=np.int32).reshape(4, 1, 2)
+    outputs = {
+        "request": AuxRequestOutput(
+            1, routing if routed else None, indexer if indexer_enabled else None
+        )
+    }
+    assert outputs["request"].get_num_rows() == 4
+    routed_rows, selections = connector.take_output(request, outputs)
+    if routed:
+        np.testing.assert_array_equal(routed_rows, routing[2:])
+    else:
+        assert routed_rows is None
+    if indexer_enabled:
+        np.testing.assert_array_equal(selections, indexer)
+    else:
+        assert selections is None
+
+
+def test_shared_output_validation_rejects_mismatched_artifact_rows():
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager({}), enable_indexer=True)
+    request = Request("request", [0, 1], SamplingParams(max_tokens=1), None)
+    output = AuxRequestOutput(
+        0, np.empty((1, 1, 2), dtype=np.uint8), np.empty((2, 1, 2), dtype=np.int32)
+    )
+    with pytest.raises(AssertionError, match="artifact row counts differ"):
+        connector.take_output(request, {"request": output})
+
+
+def test_indexer_only_checks_accepted_range_without_routing_placeholder():
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}), enable_routed_experts=False, enable_indexer=True
+    )
+    request = Request("request", [0, 1, 2, 3], SamplingParams(max_tokens=1), None)
+    request.append_output_token_ids(4)
+    output = AuxRequestOutput(0, indexer_rows=np.empty((3, 1, 2), dtype=np.int32))
+    with pytest.raises(AssertionError, match="invalid token range"):
+        connector.take_output(request, {"request": output})
+
+
+def test_fixed_store_rejects_payload_size_before_retaining_keys():
+    store = BlockObjectStore(max_bytes=16, object_nbytes=8)
+    with pytest.raises(ValueError, match="fixed slot size"):
+        store.put([BlockObject("bad", b"short")], retain_keys=["bad"])
+    assert not store._references
+    store.close()
+
+
+def test_budget_covers_every_kv_block_without_silent_truncation():
+    assert (
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+        == 3200
+    )
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 9"):
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3199,
+            hash_block_size=16,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+
+
+def test_host_budget_counts_local_workers_and_hash_object_metadata():
+    """The inferred KV limit includes every local arena and all hash slots."""
+    validate_budget = partial(
+        validate_shm_budget,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        bytes_per_token=20,
+        max_bytes=None,
+        available_host_bytes=(512 << 20) + 2 * (4096 + 8 * (80 + 512)),
+        staging_bytes=4096,
+        local_output_workers=2,
+    )
+    assert validate_budget(num_blocks=2) == 640
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 2") as error:
+        validate_budget(num_blocks=3)
+    assert "--num-gpu-blocks-override 2" in str(error.value)
+
+
+def test_explicit_arena_larger_than_ram_requires_resizing_the_arena():
+    """Fewer KV blocks alone do not shrink an explicit arena allocation."""
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 3") as error:
+        validate_shm_budget(
+            num_blocks=2,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=4 * 320,
+            available_host_bytes=(512 << 20) + 4096 + 3 * (320 + 512),
+            staging_bytes=4096,
+        )
+    assert "--num-gpu-blocks-override 2" in str(error.value)
+    assert "Unset aux_output_config.max_bytes" in str(error.value)
+
+
+def test_arena_budget_matches_complete_store_slots():
+    assert (
+        validate_shm_budget(
+            num_blocks=2,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3 * 320 - 1,
+            available_host_bytes=(512 << 20) + 2 * (320 + 512),
+            staging_bytes=0,
+        )
+        == 640
+    )
+
+
+def test_staging_exhaustion_does_not_suggest_zero_gpu_blocks():
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 0") as error:
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=(512 << 20) + 4096,
+            staging_bytes=4096,
+        )
+    assert "No GPU KV block fits" in str(error.value)
+    assert "--num-gpu-blocks-override 0" not in str(error.value)
+
+
+def test_sub_block_arena_limit_is_distinguished_from_ram_exhaustion():
+    with pytest.raises(ValueError, match="cannot hold one KV block") as error:
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=319,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+    assert "No GPU KV block fits the current host budget" not in str(error.value)
+
+
+def test_host_budget_rejects_a_block_count_that_cannot_serve_the_context():
+    """A reduced block count must not be suggested when it cannot hold the request."""
+    with pytest.raises(ValueError, match="No feasible AuxOutput configuration") as error:
+        validate_shm_budget(
+            num_blocks=64,
+            scheduler_block_size=64,
+            hash_block_size=64,
+            bytes_per_token=100,
+            max_bytes=16 * 64 * 100,
+            available_host_bytes=(512 << 20) + 16 * 64 * 100,
+            staging_bytes=0,
+            required_context_tokens=8192,
+        )
+    message = str(error.value)
+    assert "at most 896 tokens" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+def test_host_budget_caps_headroom_by_the_slurm_allocation(monkeypatch):
+    """An unenforced Slurm quota is still the real host-memory limit."""
+    from types import SimpleNamespace
+
+    from vllm.distributed.aux_output_connector import memory
+
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "1024")
+    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    monkeypatch.setattr(
+        memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1 << 40)
+    )
+    monkeypatch.setattr(memory, "get_cgroup_memory_limit", lambda: None)
+    monkeypatch.setattr(memory, "get_cgroup_memory_usage", lambda: None)
+    monkeypatch.setattr(memory, "_cgroup_memory_current", lambda: 256 << 20)
+    assert memory.get_available_host_memory() == 768 << 20
+
+
+
 _HASHES = [bytes([index]) * 32 for index in range(4)]
 
 
@@ -2057,7 +2349,7 @@ def test_connector_keeps_pending_load_blocks_retained():
 def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     worker = _make_worker(1)
     store = worker._store
-    keys = routed_experts_keys(_HASHES[:2], "0")
+    keys = aux_output_keys(_HASHES[:2], "0")
     step = _metadata(0, [], {})
     step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
     _begin_step(worker, step)

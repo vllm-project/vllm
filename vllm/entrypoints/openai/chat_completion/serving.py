@@ -25,6 +25,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
+    indexer_response_fields,
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
@@ -799,6 +800,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             logprobs=logprobs,
                             finish_reason=finish_reason,
                             stop_reason=output.stop_reason,
+                            **indexer_response_fields(output),
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
@@ -1069,6 +1071,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                **indexer_response_fields(output),
                 weight_versions=(
                     output.weight_versions if request.return_weight_versions else None
                 ),
