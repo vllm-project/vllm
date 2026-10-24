@@ -439,7 +439,7 @@ impl RoundtripCase {
     /// HF Jinja renderer + unified parser).
     fn muse_spark() -> Self {
         Self {
-            model_id: "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+            model_id: "meta-models/Muse-Spark-open-816B-A42B-NVFP4",
             assistant_stop_suffix: "<|eot|>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
