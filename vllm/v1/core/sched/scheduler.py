@@ -1362,6 +1362,11 @@ class Scheduler(SchedulerInterface):
                     )
 
                 reserved_blocks = 0
+                # The full-sequence gate also covers the spec decode step that
+                # follows the prefill.
+                num_decode_step_tokens = (
+                    1 + self.num_spec_tokens if self.num_spec_tokens else 0
+                )
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
@@ -1372,6 +1377,7 @@ class Scheduler(SchedulerInterface):
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks
                     )
+                    num_decode_step_tokens = 0
 
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
@@ -1393,6 +1399,7 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    num_decode_step_tokens=num_decode_step_tokens,
                 )
 
                 if new_blocks is None:

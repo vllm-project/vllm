@@ -5353,15 +5353,15 @@ def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
 
 
 @pytest.mark.parametrize(
-    ("prompt_len", "num_lookahead_tokens", "fits"),
-    [(64, 0, True), (61, 3, True), (62, 3, False)],
+    ("prompt_len", "num_decode_step_tokens", "num_lookahead_tokens", "fits"),
+    [(64, 0, 0, True), (62, 0, 3, False), (57, 4, 3, True), (58, 4, 3, False)],
 )
-def test_full_sequence_admission_counts_lookahead(
-    prompt_len, num_lookahead_tokens, fits
+def test_full_sequence_admission_counts_the_first_decode_step(
+    prompt_len, num_decode_step_tokens, num_lookahead_tokens, fits
 ):
-    """The final chunk also allocates the lookahead slots, so a prompt that
-    fits its blocks only without them must not be admitted: its last chunk
-    would fail to allocate and preempt it after the whole prefill ran."""
+    """The last prefill chunk allocates the lookahead slots and the decode step
+    after it adds its own tokens, so a prompt that fits its blocks only without
+    them must not be admitted: it would be preempted after its prefill ran."""
     block_size = 16
     config = KVCacheConfig(
         num_blocks=5,  # Four usable blocks after the null block.
@@ -5388,6 +5388,7 @@ def test_full_sequence_admission_counts_lookahead(
         block_size,
         num_lookahead_tokens=num_lookahead_tokens,
         full_sequence_must_fit=True,
+        num_decode_step_tokens=num_decode_step_tokens,
     )
 
     assert (blocks is not None) is fits
