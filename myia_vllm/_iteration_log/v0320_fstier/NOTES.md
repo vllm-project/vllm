@@ -1657,3 +1657,44 @@ correctif ne couvre pas tous les chemins : recommander alors (c), retirer le tie
 
 **Retrait de l'image** dès qu'une release amont porte un correctif équivalent (suivre #62615,
 #60729, #54914). Le correctif est proposé en amont (commentaire avec le diff).
+
+## 24/10 20:01Z — Q32 : `--no-scheduler-reserve-full-isl` retiré (GO user « Go », ~19:58Z)
+
+**Constat.** Après le correctif tierpin, plus d'assert, mais le moteur étouffait sous charge :
+**66 préemptions en ~66 min** (génération 18:49Z), KV GPU ~95 %, fenêtres de décodage sous
+1 tok/s, timeouts de condensation. 5-6 conversations de ~200K tokens étaient admises en même
+temps pour 750 747 tokens de KV, puis se préemptaient mutuellement (re-prefill en boucle).
+
+**Cause.** Le profil portait `--no-scheduler-reserve-full-isl`. Le défaut vLLM (`True`) n'admet
+une requête en attente que si **son prompt entier** tient dans le KV
+(`allocate_slots(full_sequence_must_fit=…)`). Le scheduler est FCFS avec blocage en tête de file :
+la première requête qui ne tient pas arrête l'admission du pas. Désactivé, il suffit que la
+**1re tranche** (8192) tienne, et la régulation se fait par préemption. Le flag vient de l'import
+1:1 de la config canonique Genesis le 16/05 (commit `e425dc66ca`, prévue pour 2 séquences
+simultanées). Avec le KV de 1,2M et 2-7 % d'occupation de l'époque, le garde-fou ne jouait jamais.
+Il n'a jamais été réévalué sur Swift.
+
+**Ce qu'on attend du défaut.** Les requêtes en surnombre **attendent en file**, contexte au chaud
+dans les tiers RAM/fs, au lieu d'entrer et de se préempter. Le débit par requête baisse, mais on
+évite l'effondrement (arbitrage user : « tout le monde attende un peu et que la vitesse soit
+diminuée disons de moitié … plutôt que divisée par cent »). Le levier suivant reste en réserve,
+**non appliqué** (un changement à la fois) : `--watermark`, une fraction de blocs gardée libre à
+l'admission (défaut 0.0).
+
+**Déploiement.**
+- Profil : ligne retirée + commentaire d'en-tête. `docker compose config -q` OK, 0 occurrence dans
+  le rendu.
+- Snapshot avant : `.tmp/pre_q32_metrics.txt` (génération 18:49Z, ~66 min). Préemptions 66,
+  succès stop 128 / length 49, 0 abort, 0 error.
+- Recreate `up -d --no-deps vllm-medium-swift15-27b` à 20:01:47Z, StartedAt 20:01:52Z, health 200
+  à **20:04:54Z** (3 min, cache de compilation chaud).
+- Gates : `scheduler_reserve_full_isl` absent des « non-default args » ; génération réelle
+  « Quatre » ; KV **750 747** ; 0 `not found in cache` ; VRAM 20 488 / 19 562 MiB ; RC 0.
+- `/dev/shm` 48G (77 %) → purge bornée au StartedAt, 7 fichiers, 24,63 GiB → **24G, 39 %**.
+
+**Mesure à faire** (cycles suivants, à charge comparable) : préemptions ≈ 0, aucune fenêtre sous
+1 tok/s, pas de hausse des 500, temps d'attente en file (`vllm:request_queue_time_seconds`).
+
+**Rollback** : remettre la ligne `--no-scheduler-reserve-full-isl \` après `--async-scheduling \`,
+puis `docker compose -f myia_vllm/configs/docker/profiles/medium-swift15-27b-fstier.yml --env-file
+myia_vllm/.env up -d --no-deps vllm-medium-swift15-27b`.

@@ -12,6 +12,13 @@
 #      promotion fs->RAM évince un bloc RAM déjà compté HIT. Un primaire plus
 #      grand réduit la pression d'éviction (effet NON mesuré). 200K tokens
 #      ≈ 4,6 GiB en nvfp4 : 8 GiB en tient < 2, 24 GiB ~5.
+#      24/10 19:59Z : --no-scheduler-reserve-full-isl RETIRÉ (Q32, GO user).
+#      Constante héritée du profil Genesis de mai (KV 1,2M, occupation 2-7 % :
+#      le garde-fou ne jouait jamais), jamais réévaluée sur Swift. Désactivé, le
+#      scheduler admet une requête dès que sa 1re tranche (8192) tient, puis
+#      régule par préemption : 5-6 conversations ~200K pour 750K de KV, 66
+#      préemptions en 66 min. Défaut vLLM (True) = admission seulement si le
+#      prompt entier tient ; les autres attendent, contexte au chaud en RAM/fs.
 #   2. --kv-transfer-config : spec_name=TieringOffloadingSpec + secondary_tiers
 #      fs root=/kv-tier-fs — la synthèse _post_init_kv_transfer_config fait un
 #      .update() de kv_connector_extra_config (config/vllm.py:1097) : nos clés
@@ -147,7 +154,6 @@ services:
           --distributed-executor-backend mp \
           --disable-custom-all-reduce \
           --async-scheduling \
-          --no-scheduler-reserve-full-isl \
           --default-chat-template-kwargs '{"preserve_thinking":true,"reasoning_effort":"medium"}' \
           --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"repetition_penalty":1.0}' \
           --middleware error_source_capture.ErrorSourceCapture
