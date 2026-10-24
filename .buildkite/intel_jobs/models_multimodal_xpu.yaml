@@ -29,8 +29,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install av &&
     cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k qwen2 || true &&
-    pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_common.py -m core_model -k qwen2 || true &&
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_ultravox.py -m core_model || true'
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 2: qwen3 + gemma'
   key: multi-modal-models-standard-2-qwen3-gemma-2
   device: intel_gpu
@@ -59,9 +59,9 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k qwen3 or gemma || true &&
-    pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model || true &&
-    pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_common.py -m core_model -k 'qwen3 or gemma' || true &&
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model || true &&
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model || true'
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 3: llava + qwen2_vl'
   key: multi-modal-models-standard-3-llava-qwen2-vl-2
   device: intel_gpu
@@ -88,8 +88,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k not qwen2 and not qwen3 and not gemma || true &&
-    pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_common.py -m core_model -k not qwen2 and not qwen3 and not gemma || true &&
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model || true'
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper'
   key: multi-modal-models-standard-4-other-whisper-2
   device: intel_gpu
@@ -105,6 +105,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
@@ -119,10 +120,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install vllm[audio] || true && 
     cd tests &&
-    pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing || true &&
-    pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model || true &&
-    pytest models/multimodal/generation/test_memory_leak.py -m core_model || true &&
-    cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing || true &&
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model || true &&
+    pytest --continue-on-collection-errors models/multimodal/generation/test_memory_leak.py -m core_model || true &&
+    cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest --continue-on-collection-errors -v -s tests/models/multimodal/generation/test_whisper.py -m core_model || true'
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Processor Shard %N'
   key: multi-modal-processor-2
   device: intel_gpu
@@ -139,6 +140,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -178,8 +180,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd .buildkite/lm-eval-harness &&
-    pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1 || true'
-- label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)'
+    pytest --continue-on-collection-errors -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1 || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)'
   key: multi-modal-models-extended-generation-1-2
   device: intel_gpu
   optional: true
@@ -206,9 +208,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install av matplotlib ftfy &&
     cd tests &&
-    pytest -v -s models/multimodal/generation -m not core_model --ignore models/multimodal/generation/test_common.py || true &&
-    pytest -v -s models/multimodal/test_mapping.py || true'
-- label: ':nvidia: (H200 MIG 35GB) Multimodal Models (PPL)'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation -m not core_model --ignore models/multimodal/generation/test_common.py || true &&
+    pytest --continue-on-collection-errors-v -s models/multimodal/test_mapping.py || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)'
   key: multi-modal-models-extended-ppl
   device: intel_gpu
   optional: true
@@ -232,7 +234,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation_ppl_test/ || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation_ppl_test/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 2) Shard %N'
   key: multi-modal-models-extended-generation-2
   device: intel_gpu
@@ -248,6 +250,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -258,8 +261,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m split(group=0) and not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 3)'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_common.py -m split(group=0) and not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 3)'
   key: multi-modal-models-extended-generation-3
   device: intel_gpu
   optional: true
@@ -283,7 +286,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model --deselect="models/multimodal/generation/test_common.py::test_custom_inputs_models[llava_onevision-test_case4]" || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model --deselect="models/multimodal/generation/test_common.py::test_custom_inputs_models[llava_onevision-test_case4]" || true'
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling) Shard %N'
   key: multi-modal-models-extended-pooling
   device: intel_gpu
@@ -310,4 +313,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install av matplotlib ftfy &&
     cd tests &&
-    pytest -v -s models/multimodal/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'

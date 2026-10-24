@@ -50,7 +50,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/ -maxdepth 1 -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
+    find compile/ -maxdepth 1 -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest --continue-on-collection-errors -s -v '\''{}'\'' || true'
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Compilation / Dynamic Shapes'
   key: pytorch-compilation-dynamic-shapes
   device: intel_gpu
@@ -73,7 +73,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v compile/dynamic_shapes/ || true'
+    pytest --continue-on-collection-errors -s -v compile/dynamic_shapes/ || true'
 - label: ':nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases'
   key: pytorch-compilation-unit-tests-h100
   device: intel_gpu
@@ -122,7 +122,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/h100/ -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
+    find compile/h100/ -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest --continue-on-collection-errors -s -v '\''{}'\'' || true'
 - label: ':nvidia: (L4) PyTorch Compilation Passes'
   key: pytorch-compilation-passes-unit-tests
   device: intel_gpu
@@ -173,7 +173,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v compile/passes --ignore compile/passes/distributed || true'
+    pytest --continue-on-collection-errors -s -v compile/passes --ignore compile/passes/distributed || true'
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Fullgraph'
   key: pytorch-fullgraph-test
   device: intel_gpu
@@ -223,7 +223,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
+    find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -print0 | xargs -0 -I{} pytest --continue-on-collection-errors -s -v '\''{}'\'' || true'
 - label: ':nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility'
   key: pytorch-fullgraph-cudagraph-l4-compatibility
   device: intel_gpu
@@ -273,7 +273,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v compile/fullgraph/test_full_cudagraph.py || true'
+    pytest --continue-on-collection-errors -s -v compile/fullgraph/test_full_cudagraph.py || true'
 - label: ':nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check'
   key: pytorch-nightly-dependency-override-check
   device: intel_gpu

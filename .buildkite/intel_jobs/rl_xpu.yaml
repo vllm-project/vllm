@@ -29,6 +29,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s entrypoints/rl/weight_transfer || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/rl/weight_transfer || true &&
     export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer || true'

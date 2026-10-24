@@ -28,7 +28,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language -m core_model and (not slow_test) || true'
+    pytest --continue-on-collection-errors -v -s models/language -m 'core_model and (not slow_test)' || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
   key: language-models-tests-extra-standard
   device: intel_gpu
@@ -45,6 +45,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -57,7 +58,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language -m core_model and slow_test --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/language -m 'core_model and slow_test' --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N'
   key: language-models-tests-hybrid
   device: intel_gpu
@@ -86,7 +87,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (L4) Granite Language Model Compatibility'
   key: language-models-tests-granite-l4-compatibility
   device: intel_gpu
@@ -115,7 +116,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
+    pytest --continue-on-collection-errors -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation) %N'
   key: language-models-test-extended-generation
   device: intel_gpu
@@ -148,8 +149,8 @@ steps:
     sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py || true &&
     MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src || true &&
     CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' || true &&
-    pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (H200 MIG 18GB) Language Models (PPL)'
+    pytest --continue-on-collection-errors -v -s models/language/generation -m (not core_model) and (not hybrid_model) --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)'
   key: language-models-test-ppl
   device: intel_gpu
   timeout_in_minutes: 30
@@ -174,7 +175,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/generation_ppl_test || true'
+    pytest --continue-on-collection-errors -v -s models/language/generation_ppl_test || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) %N'
   key: language-models-test-extended-pooling
   device: intel_gpu
@@ -202,7 +203,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB) %N'
   key: language-models-test-mteb
   device: intel_gpu
@@ -219,6 +220,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/language/pooling_mteb_test
   source_file_dependencies:
@@ -230,4 +232,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install peft &&
     cd tests &&
-    pytest -v -s models/language/pooling_mteb_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s models/language/pooling_mteb_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'

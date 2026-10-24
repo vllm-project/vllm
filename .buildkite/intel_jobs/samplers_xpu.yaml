@@ -30,8 +30,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers -k not test_beam_search_passes_multimodal_data || true &&
-    VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers -k not test_beam_search_passes_multimodal_data || true'
+    VLLM_USE_FLASHINFER_SAMPLER=0 pytest --continue-on-collection-errors -v -s samplers -k not test_beam_search_passes_multimodal_data || true &&
+    VLLM_USE_FLASHINFER_SAMPLER=1 pytest --continue-on-collection-errors -v -s samplers -k not test_beam_search_passes_multimodal_data || true'
 - label: ':nvidia: (H200 MIG 35GB) Samplers Multimodal Beam Search'
   key: samplers-multimodal-beam-search
   device: intel_gpu
@@ -52,7 +52,6 @@ steps:
   - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
@@ -60,5 +59,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data || true &&
-    VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data || true'
+    VLLM_USE_FLASHINFER_SAMPLER=0 pytest --continue-on-collection-errors -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data || true &&
+    VLLM_USE_FLASHINFER_SAMPLER=1 pytest --continue-on-collection-errors -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data || true'

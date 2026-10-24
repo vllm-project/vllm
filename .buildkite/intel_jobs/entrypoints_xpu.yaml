@@ -2,7 +2,7 @@ group: Entrypoints XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (H200) Initialized Snapshot E2E'
+- label: ':nvidia: (H200) [Nightly] Initialized Snapshot E2E'
   key: initialized-snapshot-e2e
   device: intel_gpu
   timeout_in_minutes: 60
@@ -50,17 +50,20 @@ steps:
   _raw_old_commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
   source_file_dependencies:
   - vllm/entrypoints
   - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s entrypoints/unit_tests || true &&
-    pytest -v -s entrypoints/launchers || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/unit_tests || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/launchers || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/common || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)'
   key: entrypoints-integration-llm
   device: intel_gpu
@@ -76,6 +79,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
@@ -90,9 +94,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode || true &&
-    pytest -v -s entrypoints/llm/test_generate.py || true &&
-    pytest -v -s entrypoints/llm/offline_mode || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/llm/test_generate.py || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/llm/offline_mode || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N'
   key: entrypoints-integration-api-server
   device: intel_gpu
@@ -124,9 +128,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc; fi || true &&
-    pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/workspace/vllm pytest --continue-on-collection-errors -v -s entrypoints/serve/dev/rpc; fi || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API completion)'
   key: entrypoints-integration-api-server-openai-completion
   device: intel_gpu
@@ -155,8 +159,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py || true &&
-    pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)'
   key: entrypoints-integration-api-server-openai-chat_completion
   device: intel_gpu
@@ -185,7 +189,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/openai/chat_completion || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/openai/chat_completion || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)'
   key: entrypoints-integration-api-server-generate
   device: intel_gpu
@@ -220,11 +224,11 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s tool_use || true &&
-    pytest -v -s entrypoints/tool_parsers || true &&
-    pytest -v -s entrypoints/generate || true &&
-    pytest -v -s entrypoints/anthropic || true &&
-    pytest -v -s entrypoints/cohere || true'
+    pytest --continue-on-collection-errors -v -s tool_use || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/tool_parsers || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/generate || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/anthropic || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/cohere || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)'
   key: entrypoints-integration-responses-api
   device: intel_gpu
@@ -251,7 +255,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s entrypoints/openai/responses || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/openai/responses || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)'
   key: entrypoints-integration-speech_to_text
   device: intel_gpu
@@ -281,7 +285,7 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     pip install vllm[audio] || true &&
     cd tests &&
-    pytest -v -s entrypoints/speech_to_text || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/speech_to_text || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)'
   key: entrypoints-integration-multimodal
   device: intel_gpu
@@ -311,7 +315,7 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     pip install vllm[audio] || true &&
     cd tests &&
-    pytest -v -s entrypoints/multimodal || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/multimodal || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)'
   key: entrypoints-integration-pooling
   device: intel_gpu
@@ -340,7 +344,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/pooling || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/pooling || true'
 - label: ':nvidia: (H200 MIG 18GB) OpenAI API Correctness'
   key: openai-api-correctness
   device: intel_gpu
@@ -365,4 +369,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s entrypoints/openai/correctness/ || true'
+    pytest --continue-on-collection-errors -s entrypoints/openai/correctness/ || true'
