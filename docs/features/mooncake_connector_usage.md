@@ -82,6 +82,27 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
+## Decode-to-prefill KV reuse
+
+In multi-turn serving the next turn's prompt starts with the previous prompt plus the tokens the decoder just generated. Only the decoder has KV for those tokens, so the prefiller normally recomputes them. With both instances on `kv_role="kv_both"`, a router can have the prefiller pull that KV from the decoder instead, over the same transfer engine. The feature is off unless the router sets the keys below in `kv_transfer_params`.
+
+1. **Decode leg of turn t.** Besides the usual pull from the prefiller (`do_remote_prefill`), set `do_remote_decode: true`, `transfer_id: H` and `hold_kv: true`. When the request finishes, by stop or by `max_tokens`, the decoder keeps its KV blocks (and, for hybrid Mamba/GDN models, the final recurrent state) for transfer `H` instead of freeing them.
+2. **Prefill leg of turn t+1.** If the new prompt starts with exactly the `L` tokens of a held request (its prompt and all generated tokens but the last), set `do_remote_prefill: true`, `pull_transfer_id: H`, `remote_engine_id` and `remote_bootstrap_addr` of the decoder, `remote_num_tokens: L` and `remote_prefix_hash`. Keep `do_remote_decode` and `transfer_id` as usual. The prefiller loads the `L` tokens, computes only the rest, and then sends to the decoder as usual.
+
+| Key | Meaning |
+| --- | ------- |
+| `hold_kv` | Keep a finished decode request's KV for a later pull. Not applied to aborted requests. |
+| `hold_timeout_s` | Free an unpulled hold after this many seconds. Default: `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`. Other sends are unaffected. |
+| `pull_transfer_id` | Transfer id to pull, so one request can both pull from and send to the decoder. Default: `transfer_id`. |
+| `remote_num_tokens` | Load exactly this many leading prompt tokens from the remote. |
+| `remote_prefix_hash` | `remote_prefix_hash(prompt_token_ids, remote_num_tokens)` from `mooncake_connector`: a blake2b digest of the tokens as `int64`. On a mismatch the prompt is computed locally. |
+
+Notes:
+
+- Prefix caching cannot serve this for hybrid models: recurrent-state checkpoints are written only during prefill, so a decoder never has a cache hit on tokens it generated. Holding the finished request keeps the exact state.
+- The prompt must contain the generated tokens exactly. Chat templates that rewrite history, for example by dropping reasoning content, prevent reuse.
+- A hold occupies decoder KV memory until it is pulled or times out. Keep `hold_timeout_s` just above the expected gap between turns.
+
 ## Prometheus metrics
 
 The following Prometheus metrics are exported when MooncakeConnector is active, each with the standard `model_name` and `engine` labels:
