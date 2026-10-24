@@ -443,6 +443,8 @@ The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base 
 
 A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
 
+An adapter with LoRA weights on a layer that vLLM cannot apply LoRA to, such as `bert.pooler.dense` in BERT models, fails to load with a `ValueError` instead of running without those weights.
+
 ## Token-Classification LoRA Adapters
 
 For token-classification models that support LoRA, use `pooling_task="token_classify"` with `LLM.encode`.
