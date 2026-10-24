@@ -64,6 +64,9 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
+# A cache reset fence held this long is reported once.
+_RESET_FENCE_WARN_S = 60
+
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
@@ -629,6 +632,12 @@ class OffloadingConnectorScheduler:
         # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
         # active jobs.
         self._stale_job_threshold: int = 0
+        # Jobs flushed by a cache reset -> worker reports still due. Their
+        # chunks are released at once, but a worker may still write them (a
+        # late DMA) until it reports, so the manager holds promotions, which
+        # could fill a released chunk, meanwhile.
+        self._reset_fence: dict[int, int] = {}
+        self._reset_fence_since = 0.0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -1944,6 +1953,18 @@ class OffloadingConnectorScheduler:
     def _build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Every step reaches here, including the empty steps a held fence
+        # keeps the engine taking when no request is left.
+        if (
+            self._reset_fence
+            and time.monotonic() - self._reset_fence_since > _RESET_FENCE_WARN_S
+        ):
+            logger.warning_once(
+                "KV offloading: workers have not reported %d jobs a cache "
+                "reset flushed for over %d s; promotions stay held",
+                len(self._reset_fence),
+                _RESET_FENCE_WARN_S,
+            )
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
@@ -2013,8 +2034,11 @@ class OffloadingConnectorScheduler:
         step-scoped acquire here would never reach build_connector_meta's
         release and would hold the manager for good -- which is precisely the
         state an idle engine settles into.
+
+        A cache reset fence also keeps it stepping: the flush must reach the
+        workers and their reports come back before promotions resume.
         """
-        if self._jobs:
+        if self._jobs or self._reset_fence:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2068,6 +2092,15 @@ class OffloadingConnectorScheduler:
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
+                if job_id in self._reset_fence:
+                    self._reset_fence[job_id] -= count
+                    if self._reset_fence[job_id] <= 0:
+                        del self._reset_fence[job_id]
+                        if not self._reset_fence:
+                            self.manager.hold_promotions(False)
+                            logger.info(
+                                "KV offloading: promotions resume after the cache reset"
+                            )
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
@@ -2227,6 +2260,16 @@ class OffloadingConnectorScheduler:
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
+        if self._jobs and self.manager.hold_promotions(True):
+            self._reset_fence.update(
+                (job_id, job.pending_count) for job_id, job in self._jobs.items()
+            )
+            self._reset_fence_since = time.monotonic()
+            logger.info(
+                "KV offloading: promotions held until workers report %d jobs "
+                "flushed by the cache reset",
+                len(self._reset_fence),
+            )
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
 
