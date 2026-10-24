@@ -1121,6 +1121,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.block_tables,
                         self.attn_groups,
                         self.kv_cache_config,
+                        self.cudagraph_manager.capture_stream,
                     )
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):

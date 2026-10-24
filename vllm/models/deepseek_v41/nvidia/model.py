@@ -881,6 +881,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
+                lambda: any(i < cut for i in self.aux_hidden_state_layers),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
