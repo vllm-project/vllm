@@ -10,8 +10,8 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 
 ## How It Works
 
-1. The trainer and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction). The trainer is rank 0; workers start at `rank_offset` (1).
-2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
+1. Trainer sources and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction). Source ranks occupy `[0, rank_offset)` and workers follow them.
+2. Each source broadcasts its weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
 The workers' `update_weights` and the trainer's broadcast run at the same time —
@@ -66,8 +66,8 @@ engine.send_weights()   # once per sync
 `trainer_init` drives the whole handshake: it kicks off the inference side's
 `init_weight_transfer_engine` (through the client) on a side thread while opening
 the trainer's own rank-0 endpoint, since both ends must rendezvous together. It
-builds the worker's init info itself, with `rank_offset=1` and the same packed
-params, so the two sides cannot disagree.
+builds the worker's init info itself, with the number of source ranks as
+`rank_offset` and the same packed params, so the two sides cannot disagree.
 
 `send_weights()` then drives `start_weight_update`, `update_weights` — run
 concurrently with the broadcast — and `finish_weight_update`, and returns only
@@ -81,12 +81,35 @@ once every transfer has drained.
 | `master_port` | — | Rendezvous port |
 | `world_size` | — | Full trainer + worker NCCL group size |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
+| `num_source_ranks` | `1` | Number of trainer sources in the NCCL communicator |
+| `source_rank` | `None` | Source rank for this process; trainer rank 0 defaults to source 0 |
+| `coordination_port` | `None` | Trainer-only metadata rendezvous; required with multiple sources |
 | `packed` | `True` | Use packed broadcasting |
 | `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
 | `packed_num_buffers` | 2 | Number of rotating buffers (double/triple buffering) |
 
 `packed` defaults to `True` here. The worker-side default is `False`, but it only
 applies when no trainer ships a value — which, on this path, never happens.
+
+### Multiple Sources
+
+Set `num_source_ranks` to the number of disjoint trainer sources and assign each
+source root a unique `source_rank`. Source rank 0 drives the control plane.
+Every source root joins the transfer communicator, exchanges its whole-model
+metadata and `held_names()` ownership over `coordination_port`, and participates
+in each broadcast. The ownership sets must form a disjoint partition of the
+metadata. Initialize and call `send_weights()` on all source roots concurrently.
+
+Trainer processes that only participate in source-side gathers leave
+`source_rank=None`; they do not join the transfer communicator.
+
+A source failure during an update is fatal for the transfer. The failing
+source raises immediately, but other source roots and inference workers can stay
+blocked in that update's broadcasts, so tear down the trainer job and restart or
+re-initialize the inference engine before transferring again.
+
+[`rlhf_nccl_multi_source.py`](../../../examples/rl/rlhf_nccl_multi_source.py)
+shows two disjoint trainer sources updating one tensor-parallel inference engine.
 
 ### Packed Tensor Broadcasting
 
@@ -140,7 +163,7 @@ round. So the worker remembers the list:
 | `update_info` you send | What the worker loads |
 | ---------------------- | --------------------- |
 | `names`, `dtype_names`, `shapes` filled in | Exactly these parameters. The worker also saves this list. |
-| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model. |
+| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model from the same `src`. |
 | All three lists empty, nothing saved yet | Nothing. |
 
 Rules to remember:
@@ -187,11 +210,14 @@ rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_
   before any other collective.
 
 Each sync: `POST /start_weight_update`, then `POST /update_weights` with
-`{"update_info": {"names", "dtype_names", "shapes"}}` **in the background**
-while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
-`dtype_names` are `torch` attribute names (`"bfloat16"`); `shapes` are full
-checkpoint shapes. From the second sync on, send `{"update_info": {}}` if the
-parameters did not change; see
+`{"update_info": {"names", "dtype_names", "shapes", "src"}}` **in the
+background** while the selected source broadcasts in `names` order, then
+`POST /finish_weight_update`. `src` is optional and defaults to `0`; it must
+identify a source rank below `rank_offset`. Separate update calls within one
+start/finish lifecycle can select different sources. `dtype_names` are `torch`
+attribute names (`"bfloat16"`); `shapes` are full checkpoint shapes. From the
+second sync on, send `{"update_info": {}}` (or `{"update_info": {"src": k}}`)
+if the parameters did not change; see
 [Metadata is sent once, then reused](#metadata-is-sent-once-then-reused).
 
 - Unpacked: one broadcast per tensor.
@@ -274,6 +300,7 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 ## Examples
 
 - [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
+- [Multi-source NCCL weight syncing](../../../examples/rl/rlhf_nccl_multi_source.py) - Two disjoint trainer sources update one TP2 inference engine within a single lifecycle
 - [NCCL weight syncing from a trainer that does not import vLLM](../../../examples/rl/rlhf_http_nccl_no_vllm.py) - `torch` + `requests` only, `nccl_unique_id_b64` rendezvous; see [Trainer Without vLLM over HTTP](#trainer-without-vllm-over-http)
 - [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
 - [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
