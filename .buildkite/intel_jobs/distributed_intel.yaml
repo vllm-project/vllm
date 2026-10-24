@@ -20,8 +20,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/executor/
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
