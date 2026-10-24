@@ -235,6 +235,10 @@ class RankLocalStoreLayout(StoreLayout):
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        # Bytes at the start of each block that are stored: up to the last
+        # byte of the group's data, skipping e.g. the padding of a Mamba state
+        # up to the attention page size.
+        self.block_used_len: list[int] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -264,44 +268,63 @@ class RankLocalStoreLayout(StoreLayout):
 
     def set_block_len(self, block_lens: list[int]) -> None:
         self.block_len = block_lens
+        self.block_used_len = list(block_lens)
 
     def register_kv_caches(
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
     ) -> None:
-        seen_region_ptrs: set[int] = set()
+        region_index: dict[int, int] = {}
         base_addrs: list[int] = []
         block_lens: list[int] = []
+        used_lens: list[int] = []
+
+        def add_region(addr: int, block_len: int, used_len: int) -> None:
+            assert 0 < used_len <= block_len
+            index = region_index.get(addr)
+            if index is None:
+                region_index[addr] = len(base_addrs)
+                base_addrs.append(addr)
+                block_lens.append(block_len)
+                used_lens.append(used_len)
+            else:
+                # Several views can share a region (e.g. the layers of a
+                # block-outermost buffer); keep the bytes up to the last one.
+                used_lens[index] = max(used_lens[index], used_len)
+
         for cache in kv_caches:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             storage_len = storage.nbytes()
+            block_bytes = cache[0].numel() * cache.element_size()
             if not is_non_overlapping_and_dense(cache[0]):
+                # Each head region keeps the whole block stride.
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
                     assert is_non_overlapping_and_dense(head_cache[0])
-                    region_addr = head_cache.data_ptr()
-                    if region_addr in seen_region_ptrs:
-                        continue
-                    seen_region_ptrs.add(region_addr)
-                    base_addrs.append(region_addr)
-                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
+                    head_stride = head_cache.stride(0) * head_cache.element_size()
+                    add_region(head_cache.data_ptr(), head_stride, head_stride)
             elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
-                if storage_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(storage_addr)
-                base_addrs.append(storage_addr)
-                block_lens.append(storage_len // num_blocks)
+                # Block-outermost buffer: each block holds every layer, so the
+                # whole storage is one region. In block 0 this layer's data
+                # starts at cache.data_ptr() - storage_addr and spans
+                # block_bytes, so the block is used up to that end; the
+                # region keeps the end of its last layer.
+                add_region(
+                    storage_addr,
+                    storage_len // num_blocks,
+                    cache.data_ptr() - storage_addr + block_bytes,
+                )
             else:
-                region_addr = cache.data_ptr()
-                if region_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(region_addr)
-                base_addrs.append(region_addr)
-                block_lens.append(cache.stride(0) * cache.element_size())
+                add_region(
+                    cache.data_ptr(),
+                    cache.stride(0) * cache.element_size(),
+                    block_bytes,
+                )
         self.kv_caches_base_addr = base_addrs
         self.block_len = block_lens
+        self.block_used_len = used_lens
 
     def prepare_values(
         self,
@@ -320,6 +343,10 @@ class RankLocalStoreLayout(StoreLayout):
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
         )
+        used = np.asarray(
+            [self.block_used_len[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
         n = len(chunks)
         starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
         spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
@@ -331,7 +358,9 @@ class RankLocalStoreLayout(StoreLayout):
         )
         addrs = base[None, :] + bids[:, None] * blen[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
-        sizes = blen[None, :] * block_counts[:, None]
+        # A chunk spanning several consecutive blocks also copies the
+        # padding between them.
+        sizes = blen[None, :] * (block_counts[:, None] - 1) + used[None, :]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
     def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
@@ -342,7 +371,7 @@ class RankLocalStoreLayout(StoreLayout):
                 for index, base_addr in enumerate(self.kv_caches_base_addr)
             ],
             [
-                self.block_len[index % length]
+                self.block_used_len[index % length]
                 for index in range(len(self.kv_caches_base_addr))
             ],
         )

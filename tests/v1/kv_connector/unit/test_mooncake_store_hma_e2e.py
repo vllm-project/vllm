@@ -3,6 +3,7 @@
 """End-to-end save->lookup test for MooncakeStoreConnector on a hybrid
 (SWA + Full) attention config, using a dict-backed mock store."""
 
+import ctypes
 import sys
 import threading
 import types
@@ -42,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.utils import allocate_kv_cache
 
 
 class _DictStore:
@@ -149,6 +151,33 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     return worker
 
 
+def _register_with_fake_threads(worker, kv_caches):
+    """Register kv_caches without starting the transfer threads."""
+
+    def _fake_thread_init(*args, **kwargs):
+        """Mock thread that sets all threading.Event args so waits don't block."""
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, threading.Event):
+                v.set()
+        m = MagicMock()
+        m.start = lambda: None
+        return m
+
+    with (
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreSendingThread",
+            side_effect=_fake_thread_init,
+        ),
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreRecvingThread",
+            side_effect=_fake_thread_init,
+        ),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+
 def test_e2e_swa_plus_full_save_then_lookup_hits():
     """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
@@ -201,28 +230,13 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         "L1": dense_kv_cache_views(raw_swa, swa, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
-    def _fake_thread_init(*args, **kwargs):
-        """Mock thread that sets all threading.Event args so waits don't block."""
-        for v in list(args) + list(kwargs.values()):
-            if isinstance(v, threading.Event):
-                v.set()
-        m = MagicMock()
-        m.start = lambda: None
-        return m
+    _register_with_fake_threads(worker, kv_caches)
 
-    with (
-        patch.object(
-            mooncake_store_worker,
-            "KVCacheStoreSendingThread",
-            side_effect=_fake_thread_init,
-        ),
-        patch.object(
-            mooncake_store_worker,
-            "KVCacheStoreRecvingThread",
-            side_effect=_fake_thread_init,
-        ),
-    ):
-        worker.register_kv_caches(kv_caches)
+    # Each group's store values hold only its own layer.
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+        [raw_full.data_ptr()],
+        [raw_swa.data_ptr()],
+    ]
 
     # Now build a real sending thread (no .start()) over the worker's token_dbs
     # and the dict-backed store, so _handle_request runs synchronously.
@@ -281,6 +295,91 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     # (the pre-fix arithmetic clamp would have returned 48 and livelocked
     # on load failure -> recompute -> same lookup).
     assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 0
+
+
+def test_hybrid_mamba_values_hold_only_group_states():
+    """Hybrid groups overlay one allocation. A Mamba group's values hold only
+    its own layers' states: not the layer slot only attention uses, and not
+    the padding of each state up to the attention page. Restoring the value
+    brings back the states."""
+    attn = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+    )
+    page = attn.page_size_bytes
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4, 8), (2, 8)),
+        dtypes=(torch.float32, torch.float16),
+        page_size_padded=page,
+        mamba_cache_mode="align",
+    )
+    assert mamba.state_content_size_bytes == 160 < page
+    num_layers, num_blocks = 3, 4
+
+    def tensor(layers):
+        return KVCacheTensor(
+            size=num_layers * num_blocks * page,
+            layers=layers,
+            layer_stride=num_blocks * page,
+            block_stride=page,
+        )
+
+    cfg = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[tensor(["A0", "A1", "A2"]), tensor(["M0", "M1"])],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["A0", "A1", "A2"], attn),
+            KVCacheGroupSpec(["M0", "M1"], mamba),
+        ],
+    )
+    worker = _build_worker_with_dict_store(
+        _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
+    )
+    kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), KVCacheLayout.LBNHC)
+    # Like a Mamba backend, view each layer's page as its two states, here
+    # with a gap between them.
+    for name in ("M0", "M1"):
+        page_view = kv_caches[name]
+        kv_caches[name] = [
+            page_view[..., :128].view(torch.float32),
+            page_view[..., 136:160].view(torch.float16),
+        ]
+    _register_with_fake_threads(worker, kv_caches)
+
+    states = [state for name in ("M0", "M1") for state in kv_caches[name]]
+    state_lens = [state[0].numel() * state.element_size() for state in states]
+    attn_db, mamba_db = worker.token_dbs
+    attn_layout, mamba_layout = attn_db.store_layout, mamba_db.store_layout
+    assert attn_layout.block_used_len == [page] * num_layers
+    assert mamba_layout.kv_caches_base_addr == [s.data_ptr() for s in states]
+    assert mamba_layout.block_used_len == state_lens
+
+    raw = torch.empty(0, dtype=torch.int8).set_(kv_caches["A0"].untyped_storage())
+    raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
+    before = raw.clone()
+    addrs, sizes = mamba_db.prepare_value_for_block(2)
+    saved = [ctypes.string_at(addr, size) for addr, size in zip(addrs, sizes)]
+    # The value is each state of block 2 in turn.
+    assert saved == [
+        state[2].contiguous().view(torch.int8).numpy().tobytes() for state in states
+    ]
+
+    # Clobber block 2 of every layer slot, then load the saved value: only the
+    # Mamba states come back; the gap, the padding and slot A2 keep the clobber.
+    def block_2(addr, length):
+        start = addr - raw.data_ptr() + 2 * page
+        return slice(start, start + length)
+
+    for name in ("A0", "A1", "A2"):
+        raw[block_2(kv_caches[name].data_ptr(), page)] = 7
+    expected = raw.clone()
+    for state, length in zip(states, state_lens):
+        expected[block_2(state.data_ptr(), length)] = before[
+            block_2(state.data_ptr(), length)
+        ]
+    for addr, data in zip(addrs, saved):
+        ctypes.memmove(addr, data, len(data))
+    assert torch.equal(raw, expected)
 
 
 def test_recv_skips_swa_blocks_before_window():
