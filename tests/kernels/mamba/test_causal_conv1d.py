@@ -499,3 +499,58 @@ def test_causal_conv1d_update_invalid_accepted_count_is_fail_closed(
 
     torch.testing.assert_close(result, torch.zeros_like(result))
     torch.testing.assert_close(conv_state, state_before)
+
+
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason="CPU kernel for causal_conv1d_update ignores num_accepted_tokens.",
+)
+@pytest.mark.parametrize(("num_accepted", "query_len"), [(5, 3), (5, 2), (4, 3)])
+def test_causal_conv1d_update_accepts_previous_count_above_query_length(
+    num_accepted: int, query_len: int
+):
+    """A shorter verify step still reads the previous step's accepted history."""
+    device = DEVICE
+    dim, width, max_query_len = 64, 4, 5
+    state_len = width - 1 + max_query_len - 1
+    conv_state = (
+        torch.arange(3 * dim * state_len, device=device, dtype=torch.float32)
+        .reshape(3, dim, state_len)
+        .remainder(17)
+        + 1
+    )
+    state_before = conv_state.clone()
+    x = torch.arange(query_len * dim, device=device, dtype=torch.float32).reshape(
+        query_len, dim
+    )
+    weight = torch.ones(dim, width, device=device)
+    history = state_before[1, :, num_accepted - 1 : num_accepted + width - 2]
+    expected = (
+        causal_conv1d_ref(
+            x.T.unsqueeze(0),
+            weight,
+            initial_states=history.unsqueeze(0),
+            activation=None,
+        )[0]
+        .squeeze(0)
+        .T
+    )
+
+    result = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        conv_state_indices=torch.tensor([1], dtype=torch.int32, device=device),
+        num_accepted_tokens=torch.tensor(
+            [num_accepted], dtype=torch.int32, device=device
+        ),
+        query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
+        max_query_len=max_query_len,
+        out=torch.empty_like(x),
+    )
+
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    expected_state = state_before.clone()
+    retained = torch.cat([history[:, 1:], x.T], dim=-1)
+    expected_state[1, :, : retained.shape[1]] = retained
+    torch.testing.assert_close(conv_state, expected_state, rtol=0, atol=0)
