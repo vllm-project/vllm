@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.utils import replace_parameter
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -59,9 +60,8 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
         # Load-time dequant path: weights are already BF16/FP16 (>= 2-byte), so
         # run a plain linear -- no per-step dequant. (MXFP8 weights are 1-byte.)
         if weight.element_size() >= 2:
-            # F.linear requires x and weight share a dtype; .to() is a no-op when
-            # they already match (e.g. both BF16).
-            output = torch.nn.functional.linear(x, weight.to(x.dtype), bias)
+            # Use the platform GEMM, as an unquantized layer would.
+            output = dispatch_unquantized_gemm()(layer, x, weight.to(x.dtype), bias)
             return output.to(x.dtype)
 
         # Fallback: weights still in MXFP8 -- dequant on the fly (other archs /
