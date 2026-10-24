@@ -1714,6 +1714,19 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
+            self.parallel_config.enable_fault_tolerance
+            and not self.parallel_config.disable_nccl_for_dp_synchronization
+        ):
+            # FT only supports DP allreduce over the CPU group: recovery
+            # rebuilds only the cpu group, so a device-group (NCCL) sync
+            # would hang after reinit.
+            logger.info_once(
+                "Disabling NCCL for DP synchronization because "
+                "fault tolerance is enabled.",
+            )
+            self.parallel_config.disable_nccl_for_dp_synchronization = True
+
+        if (
             self.observability_config.per_request_spec_decode_metrics != "none"
             and self.speculative_config is None
         ):

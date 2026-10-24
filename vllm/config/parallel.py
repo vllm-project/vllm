@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -465,7 +464,7 @@ class ParallelConfig:
 
     enable_fault_tolerance: bool = False
     """Enable fault tolerance for detailed error recovery,
-    such as scaling down fault DPEngineCore.
+    such as scaling down faulty DPEngineCores.
     """
 
     fault_tolerance_config: FaultToleranceConfig = Field(
@@ -661,6 +660,18 @@ class ParallelConfig:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
 
+    @property
+    def effective_cpu_distributed_timeout(self) -> timedelta | None:
+        """The timeout cpu groups operate with right now: the configured
+        value, except under FT before steady state, where group timeouts
+        are deferred because uneven rank startup would trip them."""
+        if self.enable_fault_tolerance:
+            from vllm.distributed.utils import steady_state_entered
+
+            if not steady_state_entered():
+                return None
+        return self.cpu_distributed_timeout
+
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
@@ -728,6 +739,10 @@ class ParallelConfig:
             stateless_init_torch_distributed_process_group,
         )
 
+        # Under FT, startup-created groups get no configured timeout: uneven
+        # rank startup would trip it. The sentinel applies it after startup.
+        timeout = self.effective_cpu_distributed_timeout
+
         max_retries = 5
         last_exc: Exception | None = None
         for _ in range(max_retries):
@@ -742,7 +757,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    timeout=self.cpu_distributed_timeout,
+                    timeout=timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
