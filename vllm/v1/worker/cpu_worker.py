@@ -239,6 +239,20 @@ class CPUWorker(Worker):
                     "`--kv-cache-memory-bytes` or VLLM_CPU_KVCACHE_SPACE."
                 )
             if requested_memory_for_kv > available_memory:
+                # Largest reservation the node can still back right now.
+                fitting = math.floor(
+                    (consumed_memory + available_memory)
+                    / memory_status.total_memory
+                    * 100
+                )
+                remedy = "reduce CPU memory used by other processes."
+                if fitting / 100 * memory_status.total_memory > consumed_memory:
+                    remedy = (
+                        "decrease `--gpu-memory-utilization` to at most "
+                        f"{fitting / 100:.2f}, set the KV cache size explicitly "
+                        "with `--kv-cache-memory-bytes` or "
+                        f"VLLM_CPU_KVCACHE_SPACE, or {remedy}"
+                    )
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
@@ -246,7 +260,9 @@ class CPUWorker(Worker):
                     f" allocation is less than requested memory for kv "
                     f"({format_gib(requested_memory_for_kv)}/"
                     f"{format_gib(self.requested_cpu_memory)} GiB). "
-                    "Reduce CPU memory used by other processes."
+                    "On the CPU backend, the `--gpu-memory-utilization` flag "
+                    "controls the fraction of CPU memory reserved (despite its "
+                    f"name). To resolve: {remedy}"
                 )
             kv_cache_size = requested_memory_for_kv
             msg = (
