@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 import mmap
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from vllm.config import (
 )
 from vllm.config.attention import HiSparseConfig
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
@@ -54,6 +56,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     SparseCacheRole,
@@ -1703,6 +1706,187 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
     assert unified_draft_spec.page_size_bytes == target_spec.page_size_bytes
+
+
+def test_unify_kv_cache_page_size_scales_block_before_padding():
+    """Per-token-head scales add 8 B per head, so Gemma 4's full layers (2 heads
+    x 1032 B) no longer divide its SWA page (8 heads x 520 B). The padded full
+    block should hold as many tokens as fit, like the fp8 2:1 case does."""
+    full = replace(
+        new_kv_cache_spec(num_kv_heads=2, head_size=512, dtype=torch.float8_e4m3fn),
+        state_content_bytes=2 * 512 + 8,
+    )
+    swa = replace(
+        new_sliding_window_spec(
+            num_kv_heads=8, head_size=256, dtype=torch.float8_e4m3fn
+        ),
+        state_content_bytes=2 * 256 + 8,
+    )
+    unify = kv_cache_planning.unify_kv_cache_spec_page_size
+
+    unified = unify({"full": full, "swa": swa})
+    assert unified["swa"] == swa
+    assert unified["full"].block_size == 32
+    assert unified["full"].page_size_bytes == swa.page_size_bytes
+
+    # Padded pages cannot be split, so a 16-token-max kernel keeps 16.
+    fixed_kernel = replace(full, block_stride_alignment=MultipleOf(16))
+    assert unify({"full": fixed_kernel, "swa": swa})["full"].block_size == 16
+
+    # 80 and 64 fit too, but only 48 keeps the scheduler LCM at 48.
+    swa_48 = replace(swa, block_size=48, state_content_bytes=440)
+    assert unify({"full": full, "swa": swa_48})["full"].block_size == 48
+
+
+def test_unify_kv_cache_page_size_keeps_scheduler_block_with_two_padded_kinds():
+    """Two padded full attention kinds (a target and a drafter) can each grow
+    to a multiple of the largest-page block yet reach a large lcm together (48
+    and 32 give 96). The pair is chosen as a whole, so the scheduler block
+    stays at the largest chosen block."""
+    swa = replace(
+        new_sliding_window_spec(num_kv_heads=1, sliding_window=128),
+        state_content_bytes=1000,
+    )
+    full = replace(new_kv_cache_spec(num_kv_heads=1), state_content_bytes=330)
+    draft = replace(new_kv_cache_spec(num_kv_heads=1), state_content_bytes=490)
+
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+        {"swa": swa, "full": full, "draft": draft}
+    )
+
+    assert unified["full"].block_size == 32
+    assert unified["draft"].block_size == 32
+    assert all(s.page_size_bytes == swa.page_size_bytes for s in unified.values())
+
+
+@pytest.mark.parametrize("mamba_block_size", [2912, 262144])
+def test_unify_kv_cache_page_size_keeps_primary_scheduler_block_for_drafter(
+    mamba_block_size,
+):
+    """A bf16 drafter next to a hybrid nvfp4 target: 816 tokens would
+    fill the page best but make the scheduler block 148,512. 416 divides the
+    primary 2912-token block, so the scheduler block stays 2912. Without
+    prefix caching the Mamba block is max_model_len; it must not lift the
+    bound or make the plan depend on it."""
+    full = replace(
+        new_kv_cache_spec(block_size=2912, num_kv_heads=1), state_content_bytes=1152
+    )
+    mamba = new_mamba_spec(
+        block_size=mamba_block_size, page_size_padded=full.page_size_bytes
+    )
+    draft = replace(new_kv_cache_spec(num_kv_heads=1), state_content_bytes=4096)
+
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+        {"full": full, "mamba": mamba, "draft": draft}
+    )
+
+    assert unified["full"] == full
+    assert unified["mamba"] == mamba
+    assert unified["draft"].block_size == 416
+    assert unified["draft"].page_size_bytes == full.page_size_bytes
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        new_sliding_window_spec(num_kv_heads=1, sliding_window=2048),
+        SinkFullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float32,
+            sink_len=64,
+        ),
+    ],
+)
+def test_unify_kv_cache_page_size_keeps_padded_block_of_other_specs(draft):
+    """Only plain full attention grows before padding; other specs may tie their
+    block size to a model constant (e.g. Inkling's conv state, static sinks)."""
+    full = replace(
+        new_kv_cache_spec(block_size=2912, num_kv_heads=1), state_content_bytes=1152
+    )
+    draft = replace(draft, state_content_bytes=4096)
+
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+        {"full": full, "draft": draft}
+    )
+
+    assert unified["draft"] == replace(draft, page_size_padded=full.page_size_bytes)
+
+
+def _gemma4_31b_dflash_tp2_specs() -> dict[str, KVCacheSpec]:
+    """Per-rank specs of Gemma-4-31B with a DFlash drafter at TP2 under
+    fp8_per_token_head: content is K + V data plus one fp32 scale each."""
+
+    def pth(spec, head_size):
+        return replace(spec, state_content_bytes=2 * head_size + 8)
+
+    fp8 = torch.float8_e4m3fn
+    swa = pth(
+        new_sliding_window_spec(
+            num_kv_heads=8, head_size=256, dtype=fp8, sliding_window=1024
+        ),
+        256,
+    )
+    full = pth(new_kv_cache_spec(num_kv_heads=2, head_size=512, dtype=fp8), 512)
+    draft_swa = pth(
+        new_sliding_window_spec(
+            num_kv_heads=4, head_size=128, dtype=fp8, sliding_window=2048
+        ),
+        128,
+    )
+    draft_full = pth(new_kv_cache_spec(num_kv_heads=4, head_size=128, dtype=fp8), 128)
+    specs = {f"swa.{i}": swa for i in range(50)}
+    specs |= {f"full.{i}": full for i in range(10)}
+    specs |= {f"draft_swa.{i}": draft_swa for i in range(4)}
+    specs["draft_full"] = draft_full
+    return specs
+
+
+def test_unify_kv_cache_page_size_gemma4_dflash_grows_both_full_kinds():
+    """Gemma-4-31B + DFlash at TP2 pads two full attention kinds. Alone they
+    would grow to 32 and 48 (lcm 96); together they take 32 and 32, so the
+    scheduler block matches today's fp8 layout's 32."""
+    specs = _gemma4_31b_dflash_tp2_specs()
+
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(specs)
+
+    assert unified["full.0"].block_size == 32
+    assert unified["draft_full"].block_size == 32
+    assert unified["draft_swa.0"] == replace(
+        specs["draft_swa.0"], page_size_padded=specs["swa.0"].page_size_bytes
+    )
+    assert math.lcm(*(s.block_size for s in unified.values())) == 32
+
+
+@pytest.mark.parametrize(
+    "max_model_len,max_num_batched_tokens,async_scheduling",
+    [(4096, 2048, False), (32768, 8192, True)],
+)
+def test_kv_cache_layer_specs_depend_only_on_specs(
+    max_model_len, max_num_batched_tokens, async_scheduling
+):
+    """Prefill and decode instances often differ in these settings yet must
+    agree on every layer's block and page size for KV transfer."""
+    specs = _gemma4_31b_dflash_tp2_specs()
+    reference = kv_cache_planning.unify_kv_cache_spec_page_size(specs)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    config.scheduler_config.async_scheduling = async_scheduling
+
+    groups = get_kv_cache_groups(config, specs)
+
+    layer_specs = {
+        name: (group.kv_cache_spec.block_size, group.kv_cache_spec.page_size_bytes)
+        for group in groups
+        for name in group.layer_names
+        if name in specs
+    }
+    assert layer_specs == {
+        name: (spec.block_size, spec.page_size_bytes)
+        for name, spec in reference.items()
+    }
 
 
 def test_unify_hybrid_kv_cache_specs():
