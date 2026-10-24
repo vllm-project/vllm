@@ -106,6 +106,38 @@ class KVCacheBlocks:
             return None
         return tuple([blk.block_id for blk in group] for group in groups)
 
+    def get_block_ids_with_generations(
+        self,
+        *,
+        group_ids: Sequence[int] | None = None,
+    ) -> tuple[list[tuple[int, int] | None], ...]:
+        """Return physical block IDs with allocator-issued generations.
+
+        Identity is scoped by connector session, KV-cache group and owning
+        pool; generations are arbitrary-precision process-local integers.
+        ``None`` represents a null padding block or a block not issued by its
+        allocator. A generation changes when ``BlockPool`` reuses a slot for a
+        new writer, while cached read-only references retain the identity of
+        their contents.
+
+        This identity does not prove that DMA has physically terminated and
+        does not authorize a connector to release or reuse a block early.
+        """
+        groups = (
+            self.blocks
+            if group_ids is None
+            else tuple(self.blocks[group_id] for group_id in group_ids)
+        )
+        return tuple(
+            [
+                None
+                if block.is_null or block.allocation_generation == 0
+                else (block.block_id, block.allocation_generation)
+                for block in group
+            ]
+            for group in groups
+        )
+
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         assert len(self.blocks) == 1, "Only one group is supported"
@@ -754,6 +786,32 @@ class KVCacheManager:
             num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
+
+    def get_block_ids_and_generations_for_computed_tokens(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+    ) -> tuple[tuple[list[int], ...], tuple[list[tuple[int, int] | None], ...]]:
+        """Get finish-time block IDs and their allocator identities."""
+        blocks = self.get_blocks(request_id)
+        block_ids = blocks.get_block_ids()
+        identities = blocks.get_block_ids_with_generations()
+        clipped_ids: list[list[int]] = []
+        clipped_identities: list[list[tuple[int, int] | None]] = []
+        for group, ids, group_identities in zip(
+            self.kv_cache_config.kv_cache_groups, block_ids, identities
+        ):
+            spec = group.kv_cache_spec
+            if not isinstance(spec, AttentionSpec) or isinstance(
+                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
+            ):
+                clipped_ids.append(ids)
+                clipped_identities.append(group_identities)
+                continue
+            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            clipped_ids.append(ids[:num_valid_blocks])
+            clipped_identities.append(group_identities[:num_valid_blocks])
+        return tuple(clipped_ids), tuple(clipped_identities)
 
     def estimate_cached_tokens(self, request: Request) -> int:
         """Estimate the number of tokens cached by the request."""

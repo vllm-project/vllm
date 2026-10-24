@@ -3216,16 +3216,22 @@ class Scheduler(SchedulerInterface):
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
-        block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
+        (
+            block_ids,
+            block_identities,
+        ) = self.kv_cache_manager.get_block_ids_and_generations_for_computed_tokens(
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,
         )
         partial_tail_delay = False
         if finished_partial_tails:
-            partial_tail_delay = self.connector.register_finished_partial_tail(
-                request,
-                block_ids,
-                finished_partial_tails,
+            partial_tail_delay = (
+                self.connector.register_finished_partial_tail_with_generations(
+                    request,
+                    block_ids,
+                    block_identities,
+                    finished_partial_tails,
+                )
             )
 
         if not isinstance(self.connector, SupportsHMA):
@@ -3234,12 +3240,16 @@ class Scheduler(SchedulerInterface):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            delay_free, kv_xfer_params = self.connector.request_finished(
-                request, block_ids[0]
+            delay_free, kv_xfer_params = (
+                self.connector.request_finished_with_generations(
+                    request, block_ids[0], block_identities[0]
+                )
             )
         else:
-            delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
-                request, block_ids
+            delay_free, kv_xfer_params = (
+                self.connector.request_finished_all_groups_with_generations(
+                    request, block_ids, block_identities
+                )
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 

@@ -382,13 +382,38 @@ def test_kv_cache_config_selects_prefix_cacheable_groups():
 def test_kv_cache_blocks_selects_requested_groups():
     blocks = KVCacheBlocks(
         (
-            [KVCacheBlock(1)],
-            [KVCacheBlock(2)],
-            [KVCacheBlock(3)],
+            [KVCacheBlock(1, allocation_generation=11)],
+            [KVCacheBlock(2, allocation_generation=12)],
+            [KVCacheBlock(3, allocation_generation=13)],
         )
     )
 
     assert blocks.get_block_ids(group_ids=(0, 2)) == ([1], [3])
+    assert blocks.get_block_ids_with_generations(group_ids=(0, 2)) == (
+        [(1, 11)],
+        [(3, 13)],
+    )
+
+
+def test_kv_cache_block_identities_are_group_scoped_and_null_explicit():
+    null = KVCacheBlock(0, allocation_generation=0)
+    null.is_null = True
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(1, allocation_generation=7), null],
+            [KVCacheBlock(1, allocation_generation=7)],
+        )
+    )
+
+    assert blocks.get_block_ids_with_generations() == (
+        [(1, 7), None],
+        [(1, 7)],
+    )
+
+    legacy_hash = make_block_hash_with_group_id(BlockHash(b"legacy"), 0)
+    legacy = KVCacheBlock(4, 0, legacy_hash)
+    assert legacy.block_hash == legacy_hash
+    assert legacy.allocation_generation == 0
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -1119,12 +1119,20 @@ def test_finished_partial_tail_uses_table_source_once():
 
 def test_connector_finish_registers_partial_tail_before_cleanup():
     class _Connector(SupportsHMA):
-        def register_finished_partial_tail(self, request, block_ids, offloads):
-            self.registered = (request, block_ids, offloads)
+        def register_finished_partial_tail_with_generations(
+            self, request, block_ids, identities, offloads
+        ):
+            self.registered = (request, block_ids, identities, offloads)
             return True
 
-        def request_finished_all_groups(self, request, block_ids):
+        def request_finished_all_groups_with_generations(
+            self, request, block_ids, identities
+        ):
+            self.finished = (request, block_ids, identities)
             return False, None
+
+        def request_finished_all_groups(self, request, block_ids):
+            raise AssertionError("generation-bearing finish hook was bypassed")
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = _Connector()
@@ -1135,10 +1143,14 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
     scheduler.kv_cache_manager.finalize_partial_tail_offloads.return_value = [
         (1, 9, 12)
     ]
-    scheduler.kv_cache_manager.get_block_ids_for_computed_tokens.return_value = (
-        [3],
-        [9],
+    finish_blocks = (
+        ([3], [9]),
+        ([(3, 31)], [(9, 91)]),
     )
+    finish_method = (
+        scheduler.kv_cache_manager.get_block_ids_and_generations_for_computed_tokens
+    )
+    finish_method.return_value = finish_blocks
     request = SimpleNamespace(
         request_id="0",
         num_computed_tokens=12,
@@ -1153,7 +1165,13 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
     assert scheduler.connector.registered == (
         request,
         ([3], [9]),
+        ([(3, 31)], [(9, 91)]),
         [(1, 9, 12)],
+    )
+    assert scheduler.connector.finished == (
+        request,
+        ([3], [9]),
+        ([(3, 31)], [(9, 91)]),
     )
     scheduler.kv_cache_manager.remove_skipped_blocks.assert_called_once()
 

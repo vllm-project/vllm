@@ -174,6 +174,41 @@ def test_register_finished_partial_tail_notifies_every_connector():
     )
 
 
+def test_generation_finish_hooks_notify_every_connector():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    first.request_finished_with_generations.return_value = (True, None)
+    second.request_finished_with_generations.return_value = (False, None)
+    first.register_finished_partial_tail_with_generations.return_value = True
+    second.register_finished_partial_tail_with_generations.return_value = False
+    connector._connectors = [first, second]
+    connector._extra_async_saves = {}
+    connector._requests_to_connector = {}
+    request = MagicMock(request_id="request")
+    block_ids = [1, 2]
+    identities = [(1, 11), (2, 12)]
+
+    assert connector.request_finished_with_generations(
+        request, block_ids, identities
+    ) == (True, None)
+    for child in (first, second):
+        child.request_finished_with_generations.assert_called_once_with(
+            request, block_ids, identities
+        )
+
+    grouped_ids = (block_ids,)
+    grouped_identities = (identities,)
+    offloads = [(0, 2, 16)]
+    assert connector.register_finished_partial_tail_with_generations(
+        request, grouped_ids, grouped_identities, offloads
+    )
+    for child in (first, second):
+        child.register_finished_partial_tail_with_generations.assert_called_once_with(
+            request, grouped_ids, grouped_identities, offloads
+        )
+
+
 @pytest.fixture
 def mc() -> MultiConnector:
     """MultiConnector using two mocked connectors."""

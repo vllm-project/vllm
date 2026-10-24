@@ -597,6 +597,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             lambda c: c.request_finished(request, blocks),
         )
 
+    def request_finished_with_generations(
+        self,
+        request: "Request",
+        block_ids: list[int],
+        block_identities: list[tuple[int, int] | None],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self._aggregate_request_finished(
+            request,
+            lambda c: c.request_finished_with_generations(
+                request, block_ids, block_identities
+            ),
+        )
+
     def register_finished_partial_tail(
         self,
         request: "Request",
@@ -605,6 +618,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> bool:
         accepted = [
             c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
+            for c in self._connectors
+        ]
+        return any(accepted)
+
+    def register_finished_partial_tail_with_generations(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        block_identities: tuple[list[tuple[int, int] | None], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        accepted = [
+            c.register_finished_partial_tail_with_generations(
+                request, block_ids, block_identities, partial_tail_offloads
+            )
             for c in self._connectors
         ]
         return any(accepted)
@@ -625,6 +653,28 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             request,
             lambda c: cast(SupportsHMA, c).request_finished_all_groups(
                 request, block_ids
+            ),
+        )
+
+    def request_finished_all_groups_with_generations(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        block_identities: tuple[list[tuple[int, int] | None], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if not self._all_support_hma:
+            assert len(block_ids) == len(block_identities) == 1, (
+                "HMA with multiple kv_cache_groups requires all "
+                "sub-connectors to support HMA"
+            )
+            return self.request_finished_with_generations(
+                request, block_ids[0], block_identities[0]
+            )
+
+        return self._aggregate_request_finished(
+            request,
+            lambda c: cast(SupportsHMA, c).request_finished_all_groups_with_generations(
+                request, block_ids, block_identities
             ),
         )
 

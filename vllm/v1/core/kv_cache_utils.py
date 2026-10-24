@@ -170,6 +170,9 @@ class KVCacheBlock:
     pool: "BlockPool | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
+    # Identity of this writable allocation within the owning pool and group.
+    # Read-only references keep the generation of the contents they reference.
+    allocation_generation: int = field(default=0, kw_only=True)
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
@@ -217,6 +220,7 @@ class KVCacheBlock:
         return (
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
+            f"allocation_generation={self.allocation_generation}, "
             f"_block_hash={self._block_hash!r}, "
             f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
             f"prev_free_block={prev_block_id}, "
