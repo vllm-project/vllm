@@ -5,6 +5,8 @@ needs every CTA resident at once."""
 
 import ctypes
 import functools
+import os
+from pathlib import Path
 
 import regex as re
 
@@ -81,3 +83,13 @@ def active_workgroups_per_cu(compiled, name: str, threads: int) -> int:
     finally:
         hip.hipModuleUnload(module)
     return count.value
+
+
+def _writable_flydsl_cache() -> None:
+    """AITER points FlyDSL at its bundled read-only cache."""
+    cur = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR")
+    if cur and os.access(cur, os.W_OK):
+        return
+    path = Path.home() / ".flydsl" / "cache"
+    path.mkdir(parents=True, exist_ok=True)
+    os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(path)

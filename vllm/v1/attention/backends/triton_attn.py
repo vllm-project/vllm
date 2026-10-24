@@ -90,6 +90,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    use_aiter_prefill: bool = False
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -148,6 +149,31 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        self.use_aiter_prefill = False
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        target_config = (
+            vllm_config.speculative_config.target_model_config
+            if vllm_config.speculative_config is not None
+            else model_config
+        )
+        if (
+            current_platform.is_rocm()
+            and kernel_config is not None
+            and kernel_config.monokernel
+            and getattr(
+                getattr(target_config, "hf_text_config", None), "model_type", None
+            )
+            == "minimax_m3_text"
+            and vllm_config.parallel_config.tensor_parallel_size == 4
+            and self.num_heads_q == 16
+            and self.num_heads_kv == 1
+            and self.headdim == 128
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+            and vllm_config.scheduler_config.max_num_seqs <= 8
+        ):
+            # Long-context TP4 decode otherwise leaves most MI355X CUs idle.
+            self.num_par_softmax_segments = 256
+            self.use_aiter_prefill = True
         # On SM120, batches whose 16-segment decode grid under-fills the SMs use
         # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
         # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
@@ -259,6 +285,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            use_aiter_prefill=self.use_aiter_prefill,
         )
         if self.max_seqs_64_segments > 0 and (
             self.max_seqs_64_segments < seq_lens.shape[0]
@@ -689,6 +716,50 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+
+        if (
+            attn_metadata.use_aiter_prefill
+            and max_seqlen_q >= 64
+            and attn_metadata.causal is True
+            and mm_prefix_range_tensor is None
+            and attn_metadata.rswa_window is None
+            and self.chunk_lookback == -1
+            and not self.use_alibi_sqrt
+            and output_scale is None
+            and output.dtype in (torch.bfloat16, torch.float16)
+        ):
+            from aiter.ops.triton.unified_attention import (
+                unified_attention as aiter_unified_attention,
+            )
+
+            prefill_query = query[:num_actual_tokens]
+            if prefill_query.dtype == self.fp8_dtype:
+                # ATOM uses BF16 queries and probabilities for cached prefill.
+                prefill_query = (prefill_query.float() * layer._q_scale).to(
+                    output.dtype
+                )
+            aiter_unified_attention(
+                q=prefill_query,
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=None,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+                sinks=self.sinks,
+                shuffled_kv_cache=False,
+            )
+            return output
 
         unified_attention(
             q=query[:num_actual_tokens],

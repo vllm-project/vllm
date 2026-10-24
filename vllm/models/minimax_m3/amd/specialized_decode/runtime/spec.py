@@ -103,7 +103,10 @@ def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
     if not config.kernel_config.monokernel:
         return None
     layers = config.model_config.hf_text_config.num_hidden_layers
-    spec = replace(DECODE_CONFIG, last_layer=layers - 1)
+    spec = replace(
+        DECODE_CONFIG,
+        last_layer=layers - 1,
+    )
     reasons = spec.refusal_reasons(config)
     if reasons:
         raise ValueError(

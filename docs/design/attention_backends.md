@@ -205,6 +205,96 @@ attends only to those blocks; index keys live in a separate side cache.
 
 --8<-- "gen:table-minimax"
 
+### MiniMax M3 specialized decode on MI355X
+
+`--monokernel` enables a fused sparse-layer pipeline on TP4 MI355X deployments of
+`amd/MiniMax-M3-MXFP4`, with dedicated, unpartitioned 256-CU GPUs. It requires
+`--moe-backend aiter`, FP8 KV and index
+caches, block size 128, and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
+Decode steps with at most 16
+physical token rows use the fused launch, including EAGLE3 verification and
+FULL graph replay. Other steps run the standard layers.
+
+Both attention projections must use online per-channel FP8 quantization.
+For example, add these options to a TP4 deployment:
+
+```bash
+--monokernel --moe-backend aiter --kv-cache-dtype fp8 --block-size 128 \
+--attention-config '{"indexer_kv_dtype":"fp8"}' \
+--quantization-config '{"targets":{"*self_attn*qkv_proj":"fp8_per_channel","*self_attn*o_proj":"fp8_per_channel"}}'
+```
+
+The MonoKernel implementation fuses normalization, FP8 projections, the
+indexer, sparse attention, and the MoE. Adapted from
+[ATOM](https://github.com/ROCm/ATOM/tree/e543f331c78028dfa6ed63987c4fae919734c898/atom/models/minimax_m3/mono),
+it uses group-of-32 MXFP8 activations for the MXFP4 experts, BF16 router
+weights and logits, and a BF16 rotary table, matching ATOM's precision choices.
+The fused-layer design and kernel implementation originate in ATOM. AMD's
+copyright notices and the original MIT license are retained; the
+[source provenance](https://github.com/vllm-project/vllm/blob/7404351f7634cbb329fcda31b6b6902274968118/vllm/models/minimax_m3/amd/specialized_decode/README.md#atom-provenance)
+maps the ported files to their upstream sources. The kernels and their runtime
+live in vLLM; ATOM is not a runtime dependency.
+The existing FlyDSL and AITER packing utilities are still required. Prefill,
+the first three dense layers, and decode steps above 16 physical rows use the
+standard implementation. Native weights and caches remain available for those
+steps.
+
+The previous FFN-only MonoKernel has been removed. `--monokernel` now uses
+this full-layer implementation; there is no mode selector. Existing deployments
+must configure FP8 attention projections before enabling it.
+
+With `--attention-backend TRITON_ATTN`, TP4, FP8 KV caches, and at most eight
+sequences, MonoKernel uses AITER unified attention for dense prefills of at
+least 64 query tokens, with BF16 queries and probabilities as in ATOM.
+Quantized queries are dequantized before this attention call. Short queries
+retain the Triton decode kernel with 256 softmax segments.
+
+For long text prompts, `VLLM_USE_FASTOKENS=1` selects the optional `fastokens`
+BPE backend for Hugging Face tokenizers. Install `fastokens>=0.2.0` before
+enabling it. This setting also applies to tokenizers used with MonoKernel.
+
+For an EAGLE3 draft, also set `"quantization":"fp8_per_channel"` inside
+`--speculative-config` to quantize its linears. The target's
+`--quantization-config` does not configure the draft model.
+
+The evaluated fastokens and EAGLE3 configuration uses `--max-num-seqs 2`.
+Higher sequence limits changed generation behavior in model evaluations,
+including reasoning that reached the output-token limit.
+
+This recipe was evaluated with the 102-case MiniMax verifier and
+AgentX at client concurrency one and four on TP4 MI355X. It uses three EAGLE3
+draft tokens and real rejection sampling:
+
+```bash
+uv pip install fastokens==0.2.0
+export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_FASTOKENS=1
+export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1
+export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+export VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1
+export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+export VLLM_USE_BREAKABLE_CUDAGRAPH=0 OMP_NUM_THREADS=1
+
+vllm serve amd/MiniMax-M3-MXFP4 \
+  --tensor-parallel-size 4 --distributed-executor-backend mp \
+  --language-model-only --trust-remote-code --monokernel --moe-backend aiter \
+  --kv-cache-dtype fp8 --block-size 128 --attention-backend TRITON_ATTN \
+  --attention-config '{"indexer_kv_dtype":"fp8"}' \
+  --quantization-config '{"targets":{"*self_attn*qkv_proj":"fp8_per_channel","*self_attn*o_proj":"fp8_per_channel","*mlp.gate_up_proj":"fp8_per_channel","*mlp.down_proj":"fp8_per_channel"}}' \
+  --kernel-config '{"enable_jit_warmup":false}' \
+  --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"quantization":"fp8_per_channel"}' \
+  --max-model-len 1048576 --max-num-seqs 2 --max-num-batched-tokens 32768 \
+  --gpu-memory-utilization 0.95 --enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,20,22,24,26,28,30,32,34,36,40,48,56,64]}' \
+  --default-chat-template-kwargs '{"thinking_mode":"enabled"}' \
+  --enable-auto-tool-choice --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3
+```
+
+For the AgentX performance comparison only, the speculative configuration also
+used `"rejection_sample_method":"synthetic"` and
+`"synthetic_acceptance_rates":[1.0,0.78,0.0]`, matching the reference benchmark.
+The model evaluation used real rejection sampling as shown above.
+
 ## MLA (Multi-head Latent Attention) Backends
 
 MLA uses separate backends for prefill and decode phases.

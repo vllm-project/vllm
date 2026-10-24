@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 import torch
 
@@ -19,37 +19,13 @@ from .caches import CacheBinding, TensorIdentity, checked_cache_bindings
 from .guards import model_refusals
 from .routing import decide_step
 from .spec import DecodeConfig
-from .weights import MonoLayerWeights
 
-FAULT_MESSAGE = "MiniMax-M3 FFN launch error word set; the step is discarded"
+FAULT_MESSAGE = "MiniMax-M3 launch error word set; the step is discarded"
 
 LayerKernel = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor | None],
     tuple[torch.Tensor, torch.Tensor],
 ]
-
-
-class KernelExecutor(Protocol):
-    # whether the launches read the KV caches (bound through ``bind``)
-    uses_caches: bool
-    # the sticky device error word every launch checks and sets
-    fault_word: torch.Tensor
-
-    def layer(self, layer_id: int) -> LayerKernel | None: ...
-
-    def begin_step(self, slots: torch.Tensor) -> None: ...
-
-    def bind(self, layer_id: int, binding: CacheBinding) -> None: ...
-
-    def health(self) -> Any: ...
-
-    def abort(self) -> None: ...
-
-    def after_step(self) -> None: ...
-
-    def output_step(self) -> None: ...
-
-    def close(self) -> None: ...
 
 
 def tp_agree(ok: bool) -> bool:
@@ -96,9 +72,6 @@ class SpecializedDecode:
                 "MiniMax-M3 specialized decode model unsupported: "
                 + ("; ".join(reasons) or "refused on another TP rank")
             )
-        self.weights = {
-            layer.layer_id: MonoLayerWeights.from_layer(layer) for layer in self.layers
-        }
         self.executor = executor(self) if callable(executor) else executor
         self._cache_identities: dict[int, dict[str, TensorIdentity]] = {}
         self._closed = False
@@ -107,19 +80,15 @@ class SpecializedDecode:
 
     @classmethod
     def build(cls, model, config: DecodeConfig) -> SpecializedDecode:
-        from .executor import FfnExecutor
+        from .layer_executor import LayerExecutor
 
         return cls(
             model,
             config,
-            lambda decode: FfnExecutor(
-                decode.layers, decode.weights, config.widths, config.tp_size
-            ),
+            lambda decode: LayerExecutor(decode.layers, config.widths, config.tp_size),
         )
 
     def bind_caches(self) -> None:
-        if not self.executor.uses_caches:
-            return
         failure: Exception | None = None
         bindings: dict[int, CacheBinding] = {}
         try:

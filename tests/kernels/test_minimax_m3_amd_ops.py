@@ -47,7 +47,10 @@ from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
-from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
+from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (  # noqa: E402
+    _num_warps,
+    gemma_fused_add_rmsnorm_fp8,
+)
 
 DEVICE = "cuda"
 EPS = 1e-6
@@ -121,6 +124,31 @@ def test_gemma_fused_add_rmsnorm(shape, dtype):
     assert _relerr(got_out, ref_out) < 5e-3
     # residual_out is the pre-norm sum (x + res): bit-for-bit identical cast.
     assert torch.equal(got_res, ref_res)
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "rows,strided", [(1, False), (4, False), (16, False), (4, True)]
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_norm_fp8_preserves_separate_rounding(rows, strided, dtype):
+    """Fusing quantization preserves the BF16/FP16 norm boundary bit for bit."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    torch.manual_seed(1234)
+    cols = 6144
+    x = torch.randn(rows, cols * (2 if strided else 1), device=DEVICE, dtype=dtype)
+    residual = torch.randn_like(x)
+    if strided:
+        x, residual = x[:, ::2], residual[:, ::2]
+    weight = torch.randn(cols, device=DEVICE, dtype=dtype) * 0.1
+    normalized, want_res = gemma_fused_add_rmsnorm(x, residual, weight, EPS)
+    want, want_scale = rocm_aiter_ops.per_token_quant(normalized, torch.float8_e4m3fn)
+    got, scale, res = gemma_fused_add_rmsnorm_fp8(x, residual, weight, EPS)
+    assert torch.equal(res, want_res)
+    assert torch.equal(scale, want_scale)
+    assert torch.equal(got.view(torch.uint8), want.view(torch.uint8))
 
 
 @torch.inference_mode()
