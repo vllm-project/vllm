@@ -142,6 +142,9 @@ class DeepseekV4MLP(nn.Module):
         # Block scale for the preshuffled gate_up weight; None = not preshuffled.
         self._gateup_scale: torch.Tensor | None = None
 
+        self._swiglu_limit = 0.0 if swiglu_limit is None else float(swiglu_limit)
+        self._reduce_results = reduce_results
+
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
@@ -188,9 +191,45 @@ class DeepseekV4MLP(nn.Module):
             )
         else:
             gate_up, _ = self.gate_up_proj(x)
+        fused = self._fused_quant_down(gate_up)
+        if fused is not None:
+            return fused
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+    def _fused_quant_down(self, gate_up: torch.Tensor) -> torch.Tensor | None:
+        if gate_up.dim() != 2 or not gate_up.is_contiguous():
+            return None
+        n_half = gate_up.shape[-1] // 2
+        if n_half < 128 or n_half % 128 != 0:
+            return None
+        if self._reduce_results:
+            return None
+        fp8_linear = getattr(
+            getattr(self.down_proj, "quant_method", None), "fp8_linear", None
+        )
+        if fp8_linear is None or not getattr(fp8_linear, "use_bpreshuffle", False):
+            return None
+
+        from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+
+        from vllm.models.deepseek_v4.amd.rocm import (
+            apply_pre_quantized_block_scaled_mm,
+        )
+
+        x_fp8, x_scale = fused_clamp_act_mul(
+            gate_up,
+            swiglu_limit=self._swiglu_limit,
+            activation="silu",
+            dtype_quant=current_platform.fp8_dtype(),
+            transpose_scale=True,
+            quant_block_size=128,
+            scale_dtype_fmt="fp32",
+        )
+        x_scale = x_scale.view(n_half // 128, gate_up.shape[0]).t()
+
+        return apply_pre_quantized_block_scaled_mm(self.down_proj, x_fp8, x_scale)
 
 
 def _use_heterogeneous_fhmoe(num_tokens: int) -> bool:
