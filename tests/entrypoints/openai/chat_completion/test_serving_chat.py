@@ -580,6 +580,7 @@ class MockParallelConfig:
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
+    kv_transfer_config: object | None = None
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -3169,7 +3170,11 @@ def test_make_request_with_harmony_rejects_invalid_kv_transfer_prompt_token_ids(
 @pytest.mark.parametrize("ids", [[], [-1], [1.5], [1.0], ["1"], [True], "abc", 5])
 async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
     """``kv_transfer_params`` is untyped, so the ids are checked on reuse."""
-    serving_chat = _build_serving_chat(_build_mock_engine())
+    mock_engine = _build_mock_engine()
+    # The reuse gate runs before the shape checks; a decode-side server has a
+    # connector, so give the mock one to keep exercising the shape errors.
+    mock_engine.renderer.config.kv_transfer_config = object()
+    serving_chat = _build_serving_chat(mock_engine)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -3178,6 +3183,48 @@ async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
     )
     with pytest.raises(VLLMValidationError, match="non-negative integers"):
         await serving_chat.render_chat_request(request)
+
+
+@pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_rejected_without_kv_connector():
+    """Without a KV connector the forwarded ids must not replace the prompt.
+
+    The reuse contract is disaggregated serving; on a plain server the ids
+    would silently take over from the rendered messages (#62307).
+    """
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+    with pytest.raises(VLLMValidationError, match="KV transfer connector"):
+        await serving_chat.render_chat_request(request)
+
+
+@pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_reused_with_kv_connector():
+    """With a connector configured, well-formed ids skip templating and tokenization."""
+    mock_engine = _build_mock_engine()
+    mock_engine.renderer.config.kv_transfer_config = object()
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert conversation == []
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
 
 
 @pytest.mark.asyncio
@@ -3193,6 +3240,7 @@ async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector
 ):
     """A render-time 400 on a decode request notifies the KV connector."""
     mock_engine = _build_mock_engine()
+    mock_engine.renderer.config.kv_transfer_config = object()
     mock_engine.notify_kv_transfer_request_rejected = AsyncMock()
     serving_chat = _build_serving_chat(mock_engine)
     serving_chat.has_kv_connector = True
