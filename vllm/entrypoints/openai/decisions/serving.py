@@ -9,7 +9,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
-from .adapters import input_text, make_answer, make_read_question
+from .adapters import input_text, make_answer
 from .protocol import (
     DecisionRequest,
     DecisionResponse,
@@ -68,7 +68,7 @@ class OpenAIServingDecisions(BaseServingDecisions):
                     f"questions: at most {self.limits.max_questions} for this model"
                 )
             questions = [
-                make_read_question(i, question, self.limits.max_options)
+                self.strategy.make_question(i, question)
                 for i, question in enumerate(request.questions)
             ]
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]

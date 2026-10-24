@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -44,11 +45,15 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.config import get_hf_file_to_dict
 from vllm.utils.math_utils import round_up
 
+from .adapters import make_read_question
+from .protocol import ChoiceQuestion, DecisionQuestion, PredicateQuestion
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
+    Option,
     Question,
     StructuredDecisionError,
     label_softmax,
@@ -169,6 +174,14 @@ class ReadStrategy(ABC):
     def render_state(self, state: Any) -> str:
         """The request's state as the model reads it."""
         return state_text(state)
+
+    def supports_openai_decisions(self) -> bool:
+        """Whether this strategy implements the public Decisions schema."""
+        return self.task == "generate"
+
+    def make_question(self, index: int, question: DecisionQuestion) -> Question:
+        """Translate an API question without changing existing read formats."""
+        return make_read_question(index, question, self.limits().max_options)
 
     def num_requests(self, questions: list[Question], joint: bool = False) -> int:
         """The engine requests a decision takes."""
@@ -1237,6 +1250,9 @@ class D3Strategy(ReadStrategy):
             return self.EMPTY_STATE
         return state_text(state)
 
+    def _temperature(self, q: Question) -> float:
+        return self.temperature
+
     def _options(self, q: Question) -> tuple[list[str], list[int]]:
         """Each option's line in the model's order, and the index of each of
         ``q.options`` in that order."""
@@ -1430,7 +1446,7 @@ class D3Strategy(ReadStrategy):
         reads = []
         for q, ids, code_logits in zip(questions, prompt_ids, logits):
             texts, order = self._options(q)
-            scaled = [v / self.temperature for v in code_logits[: len(texts)]]
+            scaled = [v / self._temperature(q) for v in code_logits[: len(texts)]]
             probs = label_softmax(scaled)
             reads.append(
                 QuestionRead(
@@ -1444,7 +1460,220 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class StartLuxStrategy(D3Strategy):
+    """Text-only, one-pass StartLux v1 / Instant reads through native pooling.
+
+    Reuse the code-readout transport, but preserve StartLux's trained prompt,
+    label ordering and per-type temperatures. This does not implement wide
+    choices, images, none-check passes or AutoThink's generation pipeline.
+    """
+
+    modalities = frozenset()
+    SYSTEM_PROMPT = (
+        "Apply the criterion to the evidence. Choose exactly one listed option. "
+        "Answer with its letter only."
+    )
+    THINK_OFF_SUFFIX = "<think>\n\n</think>\n\n"
+    ANNOTATE_MIN = 8
+
+    def supports_openai_decisions(self) -> bool:
+        return True
+
+    def __init__(self, context: ReadContext):
+        ReadStrategy.__init__(self, context)
+        config = context.engine_client.model_config
+        decision = get_hf_file_to_dict(
+            "decision_config.json", config.model, config.revision
+        )
+        if not decision:
+            raise ValueError("StartLux requires decision_config.json")
+        self.codes = list(LABELS)
+        self.temperatures = {
+            kind: float(decision["temperature_by_type"][kind])
+            for kind in ("choice", "noul", "score")
+        }
+        if any(not math.isfinite(t) or t <= 0 for t in self.temperatures.values()):
+            raise ValueError("StartLux temperatures must be finite and positive")
+        self.max_model_len = config.max_model_len
+        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+        probe = self._chat_prompt("s", "q", ["A) yes", "B) no"])
+        prefix = self._tokens(probe)
+        ids = []
+        for letter in self.codes:
+            encoded = self._tokens(letter)
+            if len(encoded) != 1 or self._tokens(probe + letter) != prefix + encoded:
+                raise ValueError("StartLux letters must be single reply tokens")
+            ids.append(encoded[0])
+        if len(set(ids)) != len(ids) or ids != decision["letter_token_ids"]:
+            raise ValueError("StartLux checkpoint and tokenizer letter IDs disagree")
+
+    def _temperature(self, q: Question) -> float:
+        return self.temperatures[q.type.name]
+
+    def make_question(self, index: int, question: DecisionQuestion) -> Question:
+        # Preserve the trained question type: flattening everything to choice
+        # loses score/predicate temperatures and their distinct prompt format.
+        if isinstance(question, PredicateQuestion):
+            kind = "noul"
+            options = [Option("no"), Option("yes")]
+        elif isinstance(question, ChoiceQuestion):
+            kind = "choice"
+            options = [
+                Option(
+                    c.value if isinstance(c.value, str) else json.dumps(c.value),
+                    c.description,
+                )
+                for c in question.choices
+            ]
+        else:
+            kind = "score"
+            options = [
+                Option(
+                    f"{level.label}: {level.description}"
+                    if level.description and level.description != level.label
+                    else level.label
+                )
+                for level in question.levels
+            ]
+        result = Question(
+            id=str(index),
+            type=QUESTION_TYPES[kind],
+            instructions=question.instructions,
+            options=tuple(options),
+            labels=LABELS[: len(options)],
+        )
+        self._options(result)
+        return result
+
+    def render_state(self, state: Any) -> str:
+        def annotate(value: Any) -> Any:
+            if isinstance(value, list):
+                items = [annotate(v) for v in value]
+                if len(items) >= self.ANNOTATE_MIN:
+                    return [
+                        {"_index": i, **v}
+                        if isinstance(v, dict)
+                        else {"_index": i, "value": v}
+                        for i, v in enumerate(items)
+                    ]
+                return items
+            if isinstance(value, dict):
+                return {k: annotate(v) for k, v in value.items()}
+            return value
+
+        if isinstance(state, str):
+            return state
+        if state is None or state == {} or state == []:
+            return ""
+        return json.dumps(annotate(state), ensure_ascii=False)
+
+    def _options(self, q: Question) -> tuple[list[str], list[int]]:
+        kind = q.type.name
+        if kind not in ("choice", "noul", "score"):
+            raise StructuredDecisionError(f"Unsupported StartLux type: {kind}")
+        if not 2 <= len(q.options) <= len(self.codes):
+            raise StructuredDecisionError(
+                "StartLux one-pass reads need 2 to 26 options"
+            )
+        if kind == "score" and len(q.options) > self.MAX_SCORE_LEVELS:
+            raise StructuredDecisionError("StartLux scores have at most 10 levels")
+        names = [o.name for o in q.options]
+        descriptions = [
+            o.description.strip() if o.description else None for o in q.options
+        ]
+        if kind == "score":
+            descriptions = names
+            names = [str(i) for i in range(len(names))]
+        order = list(range(len(names)))
+        if kind == "noul":
+            if names == ["no", "yes"]:
+                names.reverse()
+                descriptions.reverse()
+                order.reverse()
+            elif names != ["yes", "no"]:
+                raise StructuredDecisionError("StartLux noul requires yes/no options")
+        if any(not n.strip() or "\n" in n or "\r" in n or len(n) > 200 for n in names):
+            raise StructuredDecisionError(
+                "StartLux option names must be nonempty single lines"
+            )
+        if len(set(names)) != len(names):
+            raise StructuredDecisionError("Duplicate StartLux option name")
+        hide_names = (
+            kind == "choice"
+            and all(descriptions)
+            and all(
+                re.fullmatch(
+                    r"(?:\(?[A-Za-z][\).]?|\(?\d{1,3}[\).]?"
+                    r"|option[_ ]?\d{1,3}|opt[_ ]?\d{1,3})",
+                    n,
+                    re.I,
+                )
+                for n in names
+            )
+        )
+        texts = []
+        for name, description in zip(names, descriptions):
+            same = (
+                description
+                and re.sub(r"[\s_\-]+", " ", description).strip().lower()
+                == re.sub(r"[\s_\-]+", " ", name).strip().lower()
+            )
+            texts.append(
+                description
+                if hide_names
+                else name
+                if not description or same
+                else f"{name}: {description}"
+            )
+        return texts, order
+
+    def _chat_prompt(self, state: str, instructions: str, lines: list[str]) -> str:
+        prompt = self.tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": "Evidence:\n"
+                    + (state if state.strip() else "(none)")
+                    + "\n\nQuestion: "
+                    + instructions.strip()
+                    + "\nOptions:\n"
+                    + "\n".join(lines),
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        if not isinstance(prompt, str) or not prompt.endswith(self.THINK_OFF_SUFFIX):
+            raise StructuredDecisionError(
+                "StartLux tokenizer lacks the thinking-off prefix"
+            )
+        return prompt
+
+    def _prompt(self, state: str, q: Question, media: Sequence[str]) -> str:
+        if media:
+            raise StructuredDecisionError(
+                "StartLux native one-pass reads are text-only"
+            )
+        texts, _ = self._options(q)
+        instructions = q.instructions.strip()
+        if not instructions:
+            if q.type.name != "noul":
+                raise StructuredDecisionError(
+                    "StartLux choice/score instructions are required"
+                )
+            instructions = "Which answer fits the evidence?"
+        return self._chat_prompt(
+            state,
+            instructions,
+            [f"{letter}) {text}" for letter, text in zip(self.codes, texts)],
+        )
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "StartLuxDecisionForSequenceClassification": StartLuxStrategy,
+    "StartLuxDecisionMoeForSequenceClassification": StartLuxStrategy,
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "D3ForSequenceClassification": D3Strategy,

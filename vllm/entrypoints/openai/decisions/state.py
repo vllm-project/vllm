@@ -37,7 +37,7 @@ def init_decisions_state(
     except ValueError:
         return None
 
-    if strategy.task == "generate":
+    if strategy.supports_openai_decisions():
         state.openai_serving_decisions = OpenAIServingDecisions(
             state.openai_serving_models,
             strategy,

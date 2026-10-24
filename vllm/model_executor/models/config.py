@@ -977,6 +977,18 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class StartLuxDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        mode = getattr(model_config.hf_config, "jev_prompt_attention", "causal")
+        if mode not in ("causal", "bidirectional"):
+            raise ValueError(f"Unsupported StartLux prompt attention: {mode!r}")
+        # Full-attention layers read the complete Instant prompt. Recurrent
+        # layers retain their causal update rule.
+        model_config.hf_config.is_causal = mode == "causal"
+        model_config.hf_text_config.is_causal = mode == "causal"
+
+
 class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1260,6 +1272,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "StartLuxDecisionForSequenceClassification": StartLuxDecisionConfig,
+    "StartLuxDecisionMoeForSequenceClassification": StartLuxDecisionConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
