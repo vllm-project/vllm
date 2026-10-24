@@ -183,31 +183,37 @@ accounting code is unchanged.
 
 ## Pipeline parallelism and hybrid KV caches
 
-The pull connector requires the local and remote workers to expose a
-congruent list of KV regions — region *i* here corresponds to region
-*i* there. That assumption breaks under pipeline parallelism (PP)
-combined with a hybrid (HMA) KV layout:
+A peer's KV regions do not line up with the local ones by index under
+pipeline parallelism (PP) or a hybrid (HMA) KV layout:
 
 * a PP-sharded prefiller (**P**) holds only a slice of the model's
   layers while the `PP=1` decoder (**D**) holds them all, so region
   counts differ;
-* with HMA, several layer names are pooled into one region and the layer
-  that represents a pooled region can differ between P and D.
+* with HMA, layers of several cache groups can share one region, and
+  which layers share a region can differ between P and D.
 
-`NixlPushConnector` handles this for PP-sharded producers by routing
-**by layer name** instead of by region index. Each
-worker advertises which layer names back each of its NIXL regions in the
-handshake metadata (`NixlAgentMetadata.region_members`). A producer that
-needs layer routing derives its transfer layer order once, when it
-registers its KV caches, and every transfer it issues uses that order.
-`add_remote_agent` then selects exactly the remote regions this stage
-owns and reorders them to match, so both sides stay paired regardless of
-how each remote rank happens to order its metadata.
+Both connectors therefore pair regions **by layer**, for every peer. Each
+worker advertises which layers back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). On the
+handshake, `_pair_regions` looks each layer up on both sides and records
+one pair (remote region, local region, cache group) per layer,
+deduplicated; a layer registered as two regions (K and V apart) pairs
+them in order. The remote descriptor list keeps only the remote regions
+that pair, and a transfer reads or writes each pair at its cache group's
+blocks. A region shared by several groups thus transfers once per group
+it holds a layer of, from one descriptor list.
 
-Addresses, block lengths, strides, and per-region capacities follow the same
-layer order. Descriptor offsets use each layer's region capacity, so P and
-D need not allocate the same number of blocks. Physical allocations are still
-registered once, even when multiple layers share them.
+```text
+D (PP=1):  region 0 = [L0, L0.swa]   region 1 = [L1]   region 2 = [L2]
+P stage 1: region 0 = [L2]
+
+pairs (remote, local, group) on P: (2, 0, 0)  ->  D's region 2 only
+```
+
+Region capacities stay per region on both sides, so P and D need not
+allocate the same number of blocks. Physical allocations are still
+registered once, even when multiple layers share them. Mamba layouts,
+whose layers span several sub-regions alike on both sides, pair by index.
 
 Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
 pages of every layer for one block in a single row. A PP stage holds only its
@@ -219,24 +225,24 @@ P (stage 2), block b: | L3 | L4 | L5 |
 ```
 
 `PP=1` peers transfer whole rows. They also advertise where each layer's page
-sits in the row (`NixlAgentMetadata.packed_member_layouts`), so a PP producer
-writes each of its pages to the matching slot in D's row. Page sizes must
-match; offsets, row strides, and block counts may differ. Because PP stages can
-list the same attention backends in a different order, packed push compares the
-sorted set of backend names during the handshake. Pull mode is unchanged.
+sits in the row (`NixlAgentMetadata.packed_member_layouts`). A PP producer
+registers one region per layer, so it views each of D's rows as one region per
+layer and pairs its pages with those. Page sizes must match; offsets, row
+strides, and block counts may differ. Because PP stages can list the same
+attention backends in a different order, packed push compares the sorted set of
+backend names during the handshake.
 
-Invariants enforced when the remote regions are aligned:
+Invariants enforced when pairing:
 
-* every locally owned layer must be advertised exactly once by the
-  remote; a missing layer fails the handshake rather than silently
-  leaving that layer's KV stale, and remote-only layers (owned by other
-  PP stages) are ignored;
-* a remote that omits layer metadata while the local layout requires
-  layer routing fails the handshake instead of falling back to
-  region-index routing;
-* layer order is a property of the local layout alone, so the same local
-  source descriptors serve every remote engine and TP rank; only the
-  remote descriptor list is rebuilt per rank.
+* the remote must hold every local layer; a missing layer fails the
+  handshake rather than silently leaving that layer's KV stale. Layers
+  only the remote holds are skipped on a PP stage (other stages own
+  them) and fail the handshake otherwise;
+* a remote that does not advertise its layers fails the handshake
+  instead of falling back to pairing by index;
+* a layer must span the same number of regions on both sides;
+* every TP rank of one remote engine must pair the same way;
+* a layer in different cache groups on P and D is refused by push.
 
 Decode-side PP is unsupported because completions are counted per
 consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
