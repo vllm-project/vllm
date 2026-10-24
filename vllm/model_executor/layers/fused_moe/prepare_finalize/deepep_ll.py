@@ -222,6 +222,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def supports_async(self) -> bool:
         return True
 
+    def supports_rank_synchronous_token_staging(self) -> bool:
+        return True
+
     def prepare_async(
         self,
         a1: torch.Tensor,
@@ -299,6 +302,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             use_fp8=self.use_fp8_dispatch,
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
+            # Slime's rollout/training alignment uses the DeepEP-align_fp8
+            # compatibility switch here.  It selects scalar_rn inside the
+            # special LL kernel so its FP8 q/scales match the official
+            # post-dispatch quantizer used by normal training DeepEP.
+            align_fp8_quantization=True,
             **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
             **(
                 dict(x_global_scale=qc_a1_gscale_or_scale)

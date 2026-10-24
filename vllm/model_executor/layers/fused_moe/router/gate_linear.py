@@ -279,6 +279,17 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # Keep the BI router on one GEMM family across decode and prefill.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and self._router_gemm_no_bias
+            and self.weight.dtype == torch.bfloat16
+            and self.out_dtype == torch.float32
+            and x.dtype == torch.bfloat16
+        ):
+            return self._return(torch.mm(x, self.weight.T, out_dtype=torch.float32))
+
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
         # any dims w/ K divisible by 8)
         if (

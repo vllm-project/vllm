@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -17,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    silu_mul_fp8_quant_masked_triton,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     get_fp8_min_max,
@@ -31,10 +35,19 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
+    supports_deep_gemm_batch_invariance,
 )
 from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
+
+
+def _expected_m_with_actual_floor(
+    estimated_m: int,
+    expert_num_tokens: torch.Tensor,
+) -> int:
+    actual_m = int(expert_num_tokens.max().item())
+    return max(estimated_m, round_up(actual_m, 16))
 
 
 def scales_shape_stride_dtype(
@@ -78,11 +91,14 @@ def _silu_mul_fp8_quant_deep_gemm(
     stride_ys_g,
     # Stride for counts (elements)
     stride_counts_e,
+    # SwiGLU clamp limit (swiglu_limit); only read when HAS_CLAMP
+    clamp_limit,
     # Numeric params ------------------------------------------------------
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     ceil_ue8m0: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -115,6 +131,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
+        if HAS_CLAMP:
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit)
+
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
 
@@ -137,10 +157,20 @@ def persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    clamp_limit: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+    `clamp_limit` is the model's SwiGLU limit (``swiglu_limit``): when set,
+    the gate is clamped to ``(-inf, clamp_limit]`` and the up projection to
+    ``[-clamp_limit, clamp_limit]`` before the activation, exactly as the
+    dense DeepGemmExperts quantizers do.
+
+    Under ``VLLM_BATCH_INVARIANT`` on CUDA the work is done by a Triton kernel
+    that shares its arithmetic with the dense quantizers, so a token produces
+    the same bytes whether it is quantized on the dense (DeepGemmExperts) or
+    the masked (BatchedDeepGemmExperts) path.
     We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
     be a parallelization factor for persistent_masked_m_silu_mul_quant over the
     hidden dimension.
@@ -211,10 +241,29 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path below.
-    if current_platform.is_cuda() and current_platform.has_device_capability(80):
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        # Batch invariance: the same token must quantize to identical bytes on
+        # the dense and the masked path, so reuse the dense kernels' Triton
+        # arithmetic instead of the bf16 C++ kernel.
+        silu_mul_fp8_quant_masked_triton(
+            y,
+            tokens_per_expert,
+            y_q,
+            y_s,
+            use_ue8m0=ceil_ue8m0,
+            clamp_limit=clamp_limit,
+            group_size=group_size,
+        )
+    elif current_platform.is_cuda() and current_platform.has_device_capability(80):
+        # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path
+        # below. A negative clamp_limit disables the clamp in the kernel.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0
+            y,
+            tokens_per_expert,
+            y_q,
+            y_s,
+            ceil_ue8m0,
+            -1.0 if clamp_limit is None else float(clamp_limit),
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
@@ -270,10 +319,12 @@ def persistent_masked_m_silu_mul_quant(
             f32_strides[1],
             f32_strides[2],
             stride_cnt_e,
+            0.0 if clamp_limit is None else float(clamp_limit),
             eps,
             fp8_min,
             fp8_max,
             ceil_ue8m0,
+            HAS_CLAMP=clamp_limit is not None,
             BLOCK=group_size,
             NUM_STAGES=4,
             num_warps=1,
@@ -288,9 +339,7 @@ def persistent_masked_m_silu_mul_quant(
             y_s_u8 = (y_s_cont.view(torch.int32) >> 23).to(torch.uint8)
             if i32_pad > 0:
                 y_s_u8 = torch.nn.functional.pad(y_s_u8, (0, i32_pad))
-            # y_s has shape (E, T, G//4) with stride (T*G//4, 1, T)
             packed = y_s_u8.view(torch.int32)
-            # Copy with matching strides
             for e_idx in range(E_dim):
                 nt = tokens_per_expert[e_idx].item()
                 if nt > 0:
@@ -319,6 +368,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         )
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -327,6 +377,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return supports_deep_gemm_batch_invariance()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -412,6 +466,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         estimate = min(max_tokens_per_expert, estimate)
         return estimate
 
+    @eager_break_during_capture
     def apply(
         self,
         output: torch.Tensor,
@@ -447,11 +502,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        expected_m = self.estimate_expected_m(
-            global_num_experts=global_num_experts,
-            max_tokens_per_expert=max_num_tokens,
-            topk=topk_ids.size(-1),
-        )
+        # Use the static padded capacity for tuning. Reading the live expert
+        # maximum with .item() synchronizes the CPU and invalidates CUDA Graph
+        # capture; the value only selects a DeepGEMM launch shape and does not
+        # change the masked rows or numerical computation.
+        expected_m = max_num_tokens
 
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
@@ -466,6 +521,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
+            clamp_limit=self.activation_config.clamp_limit,
         )
 
         fp8_m_grouped_gemm_nt_masked(
