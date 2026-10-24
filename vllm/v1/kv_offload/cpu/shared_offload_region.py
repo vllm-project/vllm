@@ -127,15 +127,18 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
-        rows = max(1, cdiv(num_chunks, max(1, num_segments)))
+        alignment = 2 << 20 if num_chunks == 1 else self._row_stride
+        segment_bytes = round_up(
+            cdiv(self.total_size_bytes, max(1, num_segments)), alignment
+        )
         # (path, offset, length) per file.
         self._segments = [
             (
                 f"{self.mmap_path}.{i}" if i else self.mmap_path,
-                row * self._row_stride,
-                min(rows, num_chunks - row) * self._row_stride,
+                offset,
+                min(segment_bytes, self.total_size_bytes - offset),
             )
-            for i, row in enumerate(range(0, max(num_chunks, 1), rows))
+            for i, offset in enumerate(range(0, self.total_size_bytes, segment_bytes))
         ]
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
