@@ -17,9 +17,9 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
         RoutedExperts,
     )
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
@@ -177,6 +177,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             convert_to_fp8_moe_kernel_format,
             make_fp8_moe_kernel,
         )
+
+        if self.fp8_backend == Fp8MoeBackend.HUMMING:
+            self._stage_humming_quantized_weights(layer, w13, w2, w13_scale, w2_scale)
 
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
