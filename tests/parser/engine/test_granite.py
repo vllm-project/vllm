@@ -22,6 +22,29 @@ TOOL_STRING = "<tool_call>"
 
 _GRANITE_VOCAB = {TOOL_TOKEN: 49154}
 
+_NAME_EXTRACTION_CASES = [
+    pytest.param(
+        '{"arguments": {"name": "Alice"}, "name": "get_weather"}',
+        {"name": "Alice"},
+        id="nested-name",
+    ),
+    pytest.param(
+        '{"arguments": {"people": [{"name": "Alice"}]}, "name": "get_weather"}',
+        {"people": [{"name": "Alice"}]},
+        id="name-in-array",
+    ),
+    pytest.param(
+        r'{"name": "get_\u0077eather", "arguments": {"city": "SF"}}',
+        {"city": "SF"},
+        id="escaped-name",
+    ),
+    pytest.param(
+        r'{"\u006eame": "get_weather", "arguments": {"city": "SF"}}',
+        {"city": "SF"},
+        id="escaped-key",
+    ),
+]
+
 
 @pytest.fixture
 def mock_tokenizer():
@@ -188,6 +211,15 @@ class TestNonStreaming:
         assert [t.name for t in tools] == ["get_weather"]
         assert json.loads(tools[0].arguments) == {"city": "SF"}
 
+    @pytest.mark.parametrize("marker", [TOOL_TOKEN, TOOL_STRING])
+    @pytest.mark.parametrize("body,expected_args", _NAME_EXTRACTION_CASES)
+    def test_top_level_tool_name(
+        self, parser, mock_request, marker, body, expected_args
+    ):
+        _, _, tools = parser.parse(f"{marker} [{body}]", mock_request)
+        assert [tool.name for tool in tools] == ["get_weather"]
+        assert json.loads(tools[0].arguments) == expected_args
+
     def test_marker_without_array_is_not_a_tool_call(self, parser, mock_request):
         # A non-array body after the marker (malformed) yields no tool call.
         text = f'{TOOL_TOKEN} {{"name": "func", "arguments": {{}}}}'
@@ -196,6 +228,47 @@ class TestNonStreaming:
 
 
 class TestStreaming:
+    @pytest.mark.parametrize("chunk_size", [1, 3, 1000])
+    @pytest.mark.parametrize("marker", [TOOL_TOKEN, TOOL_STRING])
+    @pytest.mark.parametrize("body,expected_args", _NAME_EXTRACTION_CASES)
+    def test_top_level_tool_name(
+        self, parser, mock_request, marker, body, expected_args, chunk_size
+    ):
+        results = _stream(parser, mock_request, f"{marker} [{body}]", chunk_size)
+        assert _collect_names(results) == ["get_weather"]
+        assert json.loads(_collect_args(results)[0]) == expected_args
+
+    @pytest.mark.parametrize("marker", [TOOL_TOKEN, TOOL_STRING])
+    def test_name_waits_for_closing_quote(self, parser, mock_request, marker):
+        results = []
+        for text in (
+            f'{marker} [{{"name": "get_',
+            'weather", "arguments": {"city": "San',
+        ):
+            results.append(
+                parser.parse_delta(
+                    text,
+                    [token_id for token_id, _ in _tokenize(text)],
+                    mock_request,
+                    finished=False,
+                )
+            )
+        assert _collect_names(results[:1]) == []
+        assert _collect_names(results) == ["get_weather"]
+        assert _collect_args(results)[0] == '{"city": "San'
+
+        tail = ' Francisco"}}]'
+        results.append(
+            parser.parse_delta(
+                tail,
+                [token_id for token_id, _ in _tokenize(tail)],
+                mock_request,
+                finished=True,
+            )
+        )
+        assert _collect_names(results) == ["get_weather"]
+        assert json.loads(_collect_args(results)[0]) == {"city": "San Francisco"}
+
     @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 11])
     def test_parallel_calls_chunk_invariance(self, parser, mock_request, chunk_size):
         text = (
