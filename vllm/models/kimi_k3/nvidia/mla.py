@@ -83,7 +83,7 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_key_concat_ds_mla_insert,
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_kv_concat,
-    fused_mla_kv_concat_quant_fp8,
+    fused_mla_kv_pack_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
@@ -797,9 +797,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self, kv_nope: torch.Tensor, k_pe: torch.Tensor, use_fp8_prefill: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pack one DCP context chunk's ``(k, v)`` with the fused kernels."""
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         if use_fp8_prefill:
-            return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+            return fused_mla_kv_pack_quant_fp8(
+                kv_nope, k_pe, nope_dim=self.qk_nope_head_dim
+            )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return fused_mla_kv_concat(k_nope, k_pe), v
 
     def _compute_prefill_context(
@@ -812,9 +814,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         Per chunk the impl gathers the paged latent, up-projects it, then casts
         and concatenates K (and casts V) in two or three more launches. Here that
         tail is one fused kernel per chunk -- ``fused_mla_kv_concat`` for a bf16
-        query, ``fused_mla_kv_concat_quant_fp8`` when the query is fp8 -- reading
-        the strided ``kv_b_proj`` output in place and writing a contiguous key, so
-        only the gather and ``kv_b_proj`` remain.
+        query, ``fused_mla_kv_pack_quant_fp8`` when the query is fp8 (FlashInfer's
+        ``concat_mla_kv_quant_fp8`` on Blackwell, vLLM's
+        ``fused_mla_kv_concat_quant_fp8`` elsewhere) -- reading the strided
+        ``kv_b_proj`` output in place and writing a contiguous key, so only the
+        gather and ``kv_b_proj`` remain.
 
         The impl's query cast is gone as well: ``q`` already carries
         ``prefill.q_data_type`` because the new-token epilogue quantized it. The
@@ -861,11 +865,15 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = gathered[..., self.kv_lora_rank :]
             if fp8_prefill:
-                k, v = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+                k, v = fused_mla_kv_pack_quant_fp8(
+                    kv_nope, k_pe, nope_dim=self.qk_nope_head_dim
+                )
             else:
+                k_nope, v = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
                 k = fused_mla_kv_concat(k_nope, k_pe)
             attn_output, attn_lse = prefill_backend.run_prefill_context_chunk(
                 chunk=chunk, q=q[chunk.token_slice], k=k, v=v, out=out
