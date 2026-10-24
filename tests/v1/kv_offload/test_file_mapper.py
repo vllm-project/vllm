@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -12,7 +14,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.file_mapper import FileMapper, ShardedFileMapper
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -326,3 +328,122 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+# ---------------------------------------------------------------------------
+# ShardedFileMapper tests
+# ---------------------------------------------------------------------------
+
+
+def make_sharded_mapper(**kwargs) -> ShardedFileMapper:
+    config = OffloadingConfig(
+        groups=tuple(
+            OffloadingGroupConfig(
+                tokens_per_block=tokens_per_block,
+                layer_names=(layer_name,),
+                group_id=group_id,
+            )
+            for group_id, (tokens_per_block, layer_name) in enumerate(
+                kwargs.get("groups", ())
+            )
+        ),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=False,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(
+            name=kwargs.get("model_name", "test-model"),
+            dtype=kwargs.get("dtype", "float16"),
+        ),
+        cache=OffloadingCacheConfig(
+            tokens_per_hash=kwargs.get("tokens_per_hash", 16),
+            blocks_per_chunk=kwargs.get("blocks_per_chunk", 1),
+        ),
+        parallel=OffloadingParallelConfig(
+            rank=kwargs.get("rank", 0),
+            world_size=kwargs.get("world_size", 1),
+            tp_size=kwargs.get("tp_size", 1),
+            pp_size=kwargs.get("pp_size", 1),
+            pcp_size=kwargs.get("pcp_size", 1),
+            dcp_size=kwargs.get("dcp_size", 1),
+            data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
+            is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
+        ),
+        replicated_layout=kwargs.get("replicated_layout", False),
+        canonical_layout=kwargs.get("canonical_layout", False),
+        kv_cache_layout=kwargs.get("kv_cache_layout", "LBNHC"),
+    )
+    spec = MagicMock(spec=OffloadingSpec)
+    spec.config = config
+    return ShardedFileMapper.from_offloading_spec(
+        root_dir=kwargs.get("root_dir", ["/tmp/root0", "/tmp/root1"]),
+        offloading_spec=spec,
+        blocks_per_file=config.cache.blocks_per_chunk,
+        parallel_agnostic=kwargs.get("parallel_agnostic", False),
+        path_sharding=kwargs.get("path_sharding", "by_block_hash"),
+    )
+
+
+def test_sharded_file_mapper_shards_by_block_hash():
+    roots = ["/tmp/r0", "/tmp/r1", "/tmp/r2", "/tmp/r3"]
+    sfm = make_sharded_mapper(root_dir=roots)
+    assert sfm.num_shards == 4
+    assert len(sfm.get_config_file_paths()) == 4
+
+    # Keys whose integer values modulo 4 are 0, 1, 2, 3
+    for idx in range(4):
+        key = make_offload_key(idx.to_bytes(8, "big"), 0)
+        assert sfm.get_shard_index(key) == idx
+        assert sfm.get_file_name(key).startswith(roots[idx])
+
+
+def test_sharded_file_mapper_group_by_shard():
+    roots = ["/tmp/r0", "/tmp/r1"]
+    sfm = make_sharded_mapper(root_dir=roots)
+
+    # key 0 -> shard 0, key 1 -> shard 1, key 2 -> shard 0
+    keys = [make_offload_key(i.to_bytes(8, "big"), 0) for i in [0, 1, 2]]
+    chunk_ids = [10, 20, 30]
+    chunk_size = 4096
+
+    groups = sfm.group_by_shard(keys, chunk_ids, chunk_size)
+    assert len(groups) == 2
+
+    # Shard 0 has original indices [0, 2]
+    paths0, offsets0, indices0 = groups[0]
+    assert indices0 == [0, 2]
+    assert offsets0 == [10 * chunk_size, 30 * chunk_size]
+    assert all(p.startswith(roots[0]) for p in paths0)
+
+    # Shard 1 has original index [1]
+    paths1, offsets1, indices1 = groups[1]
+    assert indices1 == [1]
+    assert offsets1 == [20 * chunk_size]
+    assert all(p.startswith(roots[1]) for p in paths1)
+
+
+def test_sharded_file_mapper_validation():
+    with pytest.raises(ValueError, match="root_dirs must contain non-empty"):
+        make_sharded_mapper(root_dir=[])
+
+    with pytest.raises(ValueError, match="root_dirs paths must be distinct"):
+        make_sharded_mapper(root_dir=["/tmp/r0", "/tmp/r0"])
+
+    with pytest.raises(ValueError, match="path_sharding must be 'by_block_hash'"):
+        make_sharded_mapper(root_dir=["/tmp/r0", "/tmp/r1"], path_sharding="invalid")
+
+
+def test_file_mapper_single_root_group_by_shard():
+    fm = make_mapper_from_offloading_spec(root_dir="/tmp/single")
+    assert fm.num_shards == 1
+    assert len(fm.get_config_file_paths()) == 1
+
+    keys = [make_offload_key(i.to_bytes(8, "big"), 0) for i in [0, 1]]
+    groups = fm.group_by_shard(keys, [5, 6], 4096)
+    assert len(groups) == 1
+    paths, offsets, indices = groups[0]
+    assert indices == [0, 1]
+    assert offsets == [5 * 4096, 6 * 4096]
+    assert all(p.startswith("/tmp/single") for p in paths)
