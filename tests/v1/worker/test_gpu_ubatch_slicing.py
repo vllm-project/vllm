@@ -9,6 +9,7 @@ the same microbatches, so the main test here pins V2's slicing against V1's
 threaded execution of the microbatches.
 """
 
+import os
 import threading
 from contextlib import nullcontext
 from dataclasses import replace
@@ -895,19 +896,23 @@ def test_captured_split_survives_a_replay_with_enough_requests():
 
 
 def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True,
-            all2all_backend="deepep_low_latency",
-            dbo_decode_token_threshold=DECODE_THRESHOLD,
-            dbo_prefill_token_threshold=PREFILL_THRESHOLD,
-        ),
-        compilation_config=CompilationConfig(
-            cudagraph_mode=CUDAGraphMode.FULL,
-            cudagraph_capture_sizes=capture_sizes,
-        ),
-    )
+    # The manager under test is model runner V2's, so resolve the config for it.
+    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}):
+        vllm_config = VllmConfig(
+            model_config=ModelConfig(
+                model="facebook/opt-125m", dtype="float16", seed=0
+            ),
+            parallel_config=ParallelConfig(
+                enable_dbo=True,
+                all2all_backend="deepep_low_latency",
+                dbo_decode_token_threshold=DECODE_THRESHOLD,
+                dbo_prefill_token_threshold=PREFILL_THRESHOLD,
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.FULL,
+                cudagraph_capture_sizes=capture_sizes,
+            ),
+        )
     with patch.object(
         cudagraph_utils,
         "get_pp_group",
@@ -917,7 +922,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             vllm_config,
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
-            decode_query_len=1,
+            decode_query_lens={1: vllm_config.scheduler_config.max_num_seqs},
             ubatch_runner=cast(UBatchRunner, object()),
         )
     manager._graphs_captured = True

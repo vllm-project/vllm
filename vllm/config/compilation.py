@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import enum
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -48,6 +49,56 @@ class CompilationMode(enum.IntEnum):
     VLLM_COMPILE = 3
     """Custom vLLM Inductor-based backend with caching, piecewise compilation,
     shape specialization, and custom passes."""
+
+
+def decode_cudagraph_capture_shapes(
+    sizes: Iterable[int], query_lens: Mapping[int, int], max_tokens: int
+) -> list[tuple[int, int]]:
+    """The `(num_reqs, query_len)` uniform decode graphs for the request counts
+    `sizes`, for each query length up to the most requests it maps to and
+    `max_tokens` tokens. A batch pads to the smallest graph that holds it, so
+    the first size above a limit is captured at the limit and larger ones are
+    unreachable."""
+    sizes = sorted(set(sizes))
+    shapes: set[tuple[int, int]] = set()
+    for q, max_reqs in query_lens.items():
+        limit = min(max_reqs, max_tokens // q)
+        reachable = sizes[: bisect.bisect_left(sizes, limit) + 1]
+        shapes.update((min(n, limit), q) for n in reachable if limit >= 1)
+    return sorted(shapes, key=lambda shape: (shape[1], shape[0]))
+
+
+def prefill_cudagraph_capture_grid(max_tokens: int, dense_head: bool = False):
+    """The token-count grid up to `max_tokens`: 1, 2, 4 (every count up to 32
+    with `dense_head`), then every 8 up to 256, 16 up to 1024, 256 up to 4096
+    and 512 beyond. Up to 1024 tokens it matches the default sizes of
+    `VllmConfig._set_cudagraph_sizes`, which step by 16 above it."""
+    head = range(1, 33) if dense_head else (1, 2, 4)
+    grid = {
+        *head,
+        *range(8, 256, 8),
+        *range(256, 1024, 16),
+        *range(1024, 4096, 256),
+        *range(4096, max_tokens, 512),
+    }
+    return (
+        sorted({s for s in grid if s < max_tokens} | {max_tokens}) if max_tokens else []
+    )
+
+
+def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
+    """The request-count grid up to `max_requests`: every count up to 32, then a
+    step that doubles each time the count doubles (2 up to 64, 4 up to 128...)."""
+    grid = list(range(1, 33))
+    low, step = 32, 2
+    while low < max_requests:
+        grid += range(low + step, 2 * low + 1, step)
+        low, step = 2 * low, 2 * step
+    return (
+        sorted({n for n in grid if n < max_requests} | {max_requests})
+        if max_requests
+        else []
+    )
 
 
 class CUDAGraphMode(enum.Enum):
@@ -404,6 +455,14 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
         - [`max_cudagraph_capture_size`]
         [vllm.config.CompilationConfig.max_cudagraph_capture_size]
+        - [`prefill_cudagraph_capture_token_sizes`]
+        [vllm.config.CompilationConfig.prefill_cudagraph_capture_token_sizes]
+        - [`max_prefill_cudagraph_capture_tokens`]
+        [vllm.config.CompilationConfig.max_prefill_cudagraph_capture_tokens]
+        - [`decode_cudagraph_capture_request_sizes`]
+        [vllm.config.CompilationConfig.decode_cudagraph_capture_request_sizes]
+        - [`max_decode_cudagraph_capture_requests`]
+        [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
@@ -651,7 +710,52 @@ class CompilationConfig:
     cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment]
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
-    - list[int]: capture sizes are specified as given."""
+    - list[int]: capture sizes are specified as given.
+
+    Deprecated with model runner V2, which takes
+    `prefill_cudagraph_capture_token_sizes` and
+    `decode_cudagraph_capture_request_sizes` instead. Set there, these token
+    counts are the prefill sizes and, rounded up to whole requests of the target
+    model's query length, the decode sizes. After config resolution it holds the
+    token count of every captured graph."""
+    prefill_cudagraph_capture_token_sizes: list[int] | None = None
+    """Token counts of the CUDA graphs for prefill batches: every batch that is
+    not a uniform decode batch, i.e. one with a prefill or with requests of
+    different query lengths, and every batch when `cudagraph_mode` is FULL or
+    PIECEWISE. Decode batches under adaptive verification are the exception;
+    see `decode_cudagraph_capture_request_sizes`. `[]` captures none, and sizes
+    above `max_num_batched_tokens` are dropped. None (default): the token-count
+    grid up to `max_prefill_cudagraph_capture_tokens`."""
+    max_prefill_cudagraph_capture_tokens: int | None = Field(default=None, ge=0)
+    """Largest token count of a prefill CUDA graph. None (default): 8192 on SM100
+    GPUs, otherwise the platform's default `max_cudagraph_capture_size`; at most
+    `max_num_batched_tokens`. More and wider graphs take memory from the KV
+    cache and lengthen startup."""
+    decode_cudagraph_capture_request_sizes: list[int] | None = None
+    """Request counts of the FULL CUDA graphs for uniform decode batches, whose
+    requests all have the same query length `q`: `1 + num_speculative_tokens`
+    for the target model, 1 for draft decodes. A runner captures `n` requests as
+    `n * q` tokens, for each `n` up to the most requests its batches have and
+    `max_num_batched_tokens // q`. One-token draft decodes (EAGLE, EAGLE3, MTP)
+    extend these past their widest up to `max_num_seqs`. `[]` captures none.
+    None (default): the request-count grid up to
+    `max_decode_cudagraph_capture_requests`.
+
+    With adaptive verification, the target model's decode batches mix query
+    lengths, so they take token-keyed FULL graphs instead: the token-count grid
+    up to `max_decode_cudagraph_capture_requests * (1 + num_speculative_tokens)`
+    tokens. Only that cap counts for them, read as a token budget, not these
+    request counts, which then set the draft decode graphs alone."""
+    max_decode_cudagraph_capture_requests: int | None = Field(default=None, ge=0)
+    """Largest request count of a decode CUDA graph; with adaptive verification
+    it also sets the decode token budget (see
+    `decode_cudagraph_capture_request_sizes`). None (default): `max_num_seqs` on
+    SM100 GPUs, otherwise the most requests that the platform's default
+    `max_cudagraph_capture_size` holds at the target model's query lengths.
+    Graphs no wider than the widest prefill graph mostly reuse its memory in the
+    shared graph pool. Wider graphs, and FULL graphs of
+    models with large per-token buffers (e.g. DeepSeek's indexer at a long
+    `max_model_len`), take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
@@ -708,6 +812,11 @@ class CompilationConfig:
     scenarios with small max_num_seqs, and limits capture of large graphs that
     increase startup time and memory usage. Uniform decode sizes are appended
     only within this default ceiling.
+
+    Deprecated with model runner V2, which takes
+    `max_prefill_cudagraph_capture_tokens` (tokens) and
+    `max_decode_cudagraph_capture_requests` (requests) instead. After config
+    resolution it holds the token count of the widest captured graph.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -1496,10 +1605,8 @@ class CompilationConfig:
         # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
         # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
         # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # Will be removed in the near future when we have separate cudagraph capture
-        # sizes for decode and mixed prefill-decode.
-        # MRV2 handles cudagraph capture sizing in cudagraph_utils.py
-        # and doesn't need below: https://github.com/vllm-project/vllm/pull/45953
+        # MRV2 takes separate uniform decode and mixed capture sizes and doesn't
+        # need below: https://github.com/vllm-project/vllm/pull/45953
         if (
             not use_v2_model_runner
             and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL

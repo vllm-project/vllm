@@ -27,11 +27,19 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.math_utils import cdiv
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
+from .compilation import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    decode_cudagraph_capture_grid,
+    decode_cudagraph_capture_shapes,
+    prefill_cudagraph_capture_grid,
+)
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
@@ -694,6 +702,79 @@ class VllmConfig:
         the failure this property exists to prevent.
         """
         return 1 + self.num_speculative_tokens
+
+    def get_decode_cudagraph_query_lens(self, decode_query_len: int) -> dict[int, int]:
+        """Map each uniform decode query length of a target-shaped runner, whose
+        widest is `decode_query_len`, to the most requests its batches have.
+
+        Dynamic speculative decoding drafts as many tokens as its schedule gives
+        the batch size, so a query length only runs up to the largest batch size
+        that drafts its number of tokens.
+        """
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        speculative_config = self.speculative_config
+        num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or num_new_sampled_tokens <= 0
+        ):
+            return {decode_query_len: max_num_seqs}
+        from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+
+        dense_schedule = build_dynamic_sd_schedule_lookup(
+            speculative_config.num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=max_num_seqs,
+            vllm_num_speculative_tokens=self.num_speculative_tokens,
+        )
+        # By ascending batch size, so each query length keeps its widest batch.
+        return {
+            k + num_new_sampled_tokens: batch_size
+            for batch_size, k in enumerate(dense_schedule)
+            if batch_size > 0
+        }
+
+    def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
+        """Request counts of the FULL graphs of one-token draft decodes, the
+        draft steps after the first of EAGLE, EAGLE3 and single-module MTP: the
+        decode request counts, extended past their widest by the request-count
+        grid up to `max_num_seqs`. The target's decode cap can be far lower:
+        off SM100 its default is 512 / (1 + K) requests, 64 at K=7. Above it
+        the K - 1 draft steps would run eagerly and pay their host launch time
+        on every step, while their graphs are small. Empty without such steps
+        or decode graphs."""
+        speculative_config = self.speculative_config
+        sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
+        if (
+            not sizes
+            or speculative_config is None
+            or self.num_speculative_tokens < 2
+            or speculative_config.method not in ("eagle", "eagle3", "mtp")
+            or (
+                speculative_config.use_multi_module_mtp()
+                and not speculative_config.use_gemma4_mtp()
+            )
+        ):
+            return []
+        grid = decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
+        return sorted({*sizes, *(n for n in grid if n > max(sizes))})
+
+    def get_varlen_decode_cudagraph_token_sizes(
+        self, decode_query_len: int
+    ) -> list[int]:
+        """Token counts of the FULL decode graphs for adaptive verification,
+        whose decode batches mix query lengths up to `decode_query_len`: the
+        token-count grid up to `max_decode_cudagraph_capture_requests` requests
+        of `decode_query_len` tokens each."""
+        max_requests = self.compilation_config.max_decode_cudagraph_capture_requests
+        assert max_requests is not None
+        return prefill_cudagraph_capture_grid(
+            min(
+                max_requests * decode_query_len,
+                self.scheduler_config.max_num_batched_tokens,
+            ),
+            self.performance_mode == "interactivity",
+        )
 
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
@@ -2435,6 +2516,20 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
+            legacy_sizes = (
+                max_cudagraph_capture_size is not None
+                or self.compilation_config.cudagraph_capture_sizes is not None
+            )
+            try:
+                target_query_lens = self.get_decode_cudagraph_query_lens(
+                    self.uniform_decode_query_len
+                )
+            except ValueError:
+                # Validation lives elsewhere; an invalid dynamic speculative
+                # decoding schedule keeps the single static width.
+                target_query_lens = {
+                    self.uniform_decode_query_len: self.scheduler_config.max_num_seqs
+                }
             # Decode sizes to cover, in tokens. Populated only when the default
             # is computed here, so an explicit capture range is left exactly as
             # configured.
@@ -2477,48 +2572,9 @@ class VllmConfig:
 
                     # Dynamic speculative decoding picks the draft width from
                     # the batch size, so a decode step is only uniform within a
-                    # tier and each tier needs its own sizes. Scaling by the
-                    # widest one alone leaves the narrower tiers short: the
-                    # manager rounds a capture size up to a multiple of the
-                    # tier's query length and drops it once the implied request
-                    # count exceeds max_num_seqs, so at query length 3 sizes
-                    # built from 17 stop covering at 227 of 256 requests.
-                    decode_tiers = [(decode_query_len, max_num_seqs)]
-                    speculative_config = self.speculative_config
-                    if (
-                        speculative_config is not None
-                        and speculative_config.uses_dynamic_speculative_decoding()
-                    ):
-                        from vllm.v1.spec_decode.dynamic.utils import (
-                            build_dynamic_sd_schedule_lookup,
-                        )
-
-                        schedule = (
-                            speculative_config.num_speculative_tokens_per_batch_size
-                        )
-                        assert schedule is not None
-                        # Read the tiers off the dense lookup the scheduler
-                        # runs on, so the clamp against num_speculative_tokens
-                        # and the carry-forward through gaps and the tail
-                        # cannot drift from it. Validation lives elsewhere; an
-                        # invalid schedule keeps the single-tier default.
-                        try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
-                                schedule,
-                                vllm_max_batch_size=max_num_seqs,
-                                vllm_num_speculative_tokens=self.num_speculative_tokens,
-                            )
-                        except ValueError:
-                            pass
-                        else:
-                            # Ascending batch size, so the last write per
-                            # query length is the widest batch running at it.
-                            widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
-                            ):
-                                widest_batch[num_spec + 1] = batch_size
-                            decode_tiers = list(widest_batch.items())
+                    # tier, and each tier needs its own sizes up to the widest
+                    # batch running at it.
+                    decode_tiers = list(target_query_lens.items())
 
                     uniform_decode_sizes = sorted(
                         {
@@ -2628,6 +2684,7 @@ class VllmConfig:
                 )
             # always write back the final sizes
             self.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+            self._split_cudagraph_capture_sizes(legacy_sizes, target_query_lens)
 
         else:
             # no cudagraph in use
@@ -2636,6 +2693,173 @@ class VllmConfig:
 
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
+
+    def _split_cudagraph_capture_sizes(
+        self, legacy_sizes: bool, target_query_lens: dict[int, int]
+    ) -> None:
+        """Resolve the prefill (token) and decode (request) CUDA graph capture
+        sizes, each from its own sizes, cap or default and never from the
+        other's, and record every graph's token count in
+        `cudagraph_capture_sizes` and `max_cudagraph_capture_size`.
+
+        Args:
+            legacy_sizes: The deprecated `cudagraph_capture_sizes` or
+                `max_cudagraph_capture_size` was set before resolution.
+            target_query_lens: The target model's decode query lengths, each
+                mapped to the most requests its batches have.
+
+        """
+        compilation_config = self.compilation_config
+        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        max_prefill_tokens = compilation_config.max_prefill_cudagraph_capture_tokens
+        decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
+        max_decode_requests = compilation_config.max_decode_cudagraph_capture_requests
+        uses_split_sizes = any(
+            x is not None
+            for x in (
+                prefill_sizes,
+                max_prefill_tokens,
+                decode_sizes,
+                max_decode_requests,
+            )
+        )
+        if not self.use_v2_model_runner:
+            if uses_split_sizes:
+                raise ValueError(
+                    "prefill_cudagraph_capture_token_sizes, "
+                    "decode_cudagraph_capture_request_sizes and their max_* caps "
+                    "need model runner V2."
+                )
+            return
+        if legacy_sizes and not uses_split_sizes:
+            logger.warning_once(
+                "cudagraph_capture_sizes and max_cudagraph_capture_size are "
+                "deprecated with model runner V2. Set the token counts of prefill "
+                "CUDA graphs with prefill_cudagraph_capture_token_sizes or "
+                "max_prefill_cudagraph_capture_tokens, and the request counts of "
+                "decode CUDA graphs with decode_cudagraph_capture_request_sizes or "
+                "max_decode_cudagraph_capture_requests."
+            )
+        from vllm.platforms import current_platform
+
+        shared_sizes = compilation_config.cudagraph_capture_sizes
+        shared_max = compilation_config.max_cudagraph_capture_size
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        # On SM100, unset kinds default to wider grids; elsewhere, and with the
+        # deprecated fields, they default to the shared sizes resolved above.
+        wide_defaults = (
+            not legacy_sizes and current_platform.is_device_capability_family(100)
+        )
+
+        def explicit(
+            sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
+        ):
+            kept = sorted({s for s in sizes if 1 <= s <= limit})
+            if len(kept) < len(set(sizes)):
+                logger.warning(
+                    "Dropping %s from %s: outside [1, %d].",
+                    sorted(set(sizes) - set(kept)),
+                    name,
+                    limit,
+                )
+            if cap is not None and kept and kept[-1] > cap:
+                raise ValueError(f"{name} holds {kept[-1]}, above {cap_name}={cap}.")
+            return kept
+
+        if prefill_sizes is not None:
+            prefill_sizes = explicit(
+                prefill_sizes,
+                max_num_tokens,
+                max_prefill_tokens,
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+            )
+        elif max_prefill_tokens is not None or wide_defaults:
+            prefill_sizes = prefill_cudagraph_capture_grid(
+                min(
+                    8192 if max_prefill_tokens is None else max_prefill_tokens,
+                    max_num_tokens,
+                ),
+                self.performance_mode == "interactivity",
+            )
+        else:
+            prefill_sizes = list(shared_sizes)
+
+        if decode_sizes is not None:
+            decode_sizes = explicit(
+                decode_sizes,
+                max_num_seqs,
+                max_decode_requests,
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            )
+        elif max_decode_requests is not None or wide_defaults:
+            decode_sizes = decode_cudagraph_capture_grid(
+                max_num_seqs
+                if max_decode_requests is None
+                else min(max_decode_requests, max_num_seqs)
+            )
+        else:
+            # The request counts each target query length rounds the shared sizes
+            # up to within the shared bound.
+            decode_sizes = sorted(
+                {
+                    min(cdiv(s, q), max_num_seqs)
+                    for s in shared_sizes
+                    for q in target_query_lens
+                    if cdiv(s, q) * q <= shared_max
+                }
+            )
+        compilation_config.prefill_cudagraph_capture_token_sizes = prefill_sizes
+        compilation_config.max_prefill_cudagraph_capture_tokens = max(
+            prefill_sizes, default=0
+        )
+        compilation_config.decode_cudagraph_capture_request_sizes = decode_sizes
+        compilation_config.max_decode_cudagraph_capture_requests = max(
+            decode_sizes, default=0
+        )
+
+        # The target's query lengths, and one token per request (draft decodes).
+        query_lens = {**target_query_lens, 1: max_num_seqs}
+        token_sizes = set(prefill_sizes)
+        token_sizes.update(
+            n * q
+            for n, q in decode_cudagraph_capture_shapes(
+                decode_sizes, query_lens, max_num_tokens
+            )
+        )
+        token_sizes.update(
+            n
+            for n, _ in decode_cudagraph_capture_shapes(
+                self.get_draft_decode_cudagraph_request_sizes(),
+                {1: max_num_seqs},
+                max_num_tokens,
+            )
+        )
+        speculative_config = self.speculative_config
+        if speculative_config is not None and (
+            speculative_config.enable_adaptive_verification
+        ):
+            token_sizes.update(
+                self.get_varlen_decode_cudagraph_token_sizes(
+                    self.uniform_decode_query_len
+                )
+            )
+        # A resolved config holds matching sizes; re-resolving it must pass.
+        if legacy_sizes and uses_split_sizes and shared_sizes != sorted(token_sizes):
+            raise ValueError(
+                "The deprecated cudagraph_capture_sizes and "
+                "max_cudagraph_capture_size cannot be combined with the prefill and "
+                "decode CUDA graph capture sizes; set only the latter."
+            )
+        compilation_config.cudagraph_capture_sizes = sorted(token_sizes)
+        compilation_config.max_cudagraph_capture_size = max(token_sizes, default=0)
+        if not token_sizes:
+            logger.info_once(
+                "No CUDA graph capture sizes are left; setting cudagraph_mode to NONE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     def _set_compile_ranges(self):
         """Set the compile ranges for the compilation config."""
