@@ -604,6 +604,7 @@ class MoRIIOConnectorScheduler:
             # allocate_slots reserves drafter lookahead in addition to those.
             max_decode_tail_tokens += vllm_config.num_speculative_tokens
         self._max_decode_tail_blocks = cdiv(max_decode_tail_tokens, attn_block_size)
+        self._attn_block_size = attn_block_size
         self.engine_id: EngineId = engine_id
 
         self._is_hma_required = (
@@ -1064,11 +1065,11 @@ class MoRIIOConnectorScheduler:
                                         f"local={len(mamba_block_groups)}, "
                                         f"remote={len(remote_mamba_groups)}"
                                     )
-                                local_attn = attn_block_ids
-                                local_attn, remote_attn = self._align_read_blocks(
-                                    local_attn,
+                                local_attn, remote_attn = self._select_read_attention(
+                                    request,
+                                    num_external_tokens,
+                                    attn_block_ids,
                                     remote_attn,
-                                    self._max_decode_tail_blocks,
                                 )
                                 aligned_local_mamba: list[list[int]] = []
                                 aligned_remote_mamba: list[list[int]] = []
@@ -1488,6 +1489,36 @@ class MoRIIOConnectorScheduler:
             for group_id in self._mamba_group_ids
         ]
         return attn, mamba_groups
+
+    def _select_read_attention(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+    ) -> tuple[list[int], list[int]]:
+        """Select missing pages from complete P/D attention block tables."""
+        # READ imports through N-1; D computes the final prompt token. Use the
+        # final allocation count, not a prior lookup or receive-page hashes.
+        remote_end = request.num_prompt_tokens - 1
+        local_end = remote_end - num_external_tokens
+        first_block = local_end // self._attn_block_size
+        end_block = cdiv(remote_end, self._attn_block_size)
+        if not (
+            0 <= local_end < remote_end
+            and end_block <= len(local_block_ids)
+            and end_block <= len(remote_block_ids)
+        ):
+            raise MoRIIOError(
+                "MoRIIO hybrid READ attention tables do not cover "
+                f"token range [{local_end}, {remote_end}): "
+                f"local={len(local_block_ids)}, remote={len(remote_block_ids)}, "
+                f"block_size={self._attn_block_size}"
+            )
+        return (
+            local_block_ids[first_block:end_block],
+            remote_block_ids[first_block:end_block],
+        )
 
     @staticmethod
     def _align_read_blocks(
