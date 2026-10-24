@@ -1696,11 +1696,12 @@ class MooncakeConnectorWorker:
                 else MooncakeXferResponseStatus.FINISH
             )
             ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
+            unavailable_reqs: list[ReqId] = []
             for task in done:
                 d_req_id, send_meta = task.result()
                 del pending_reqs[d_req_id]
                 # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
+                if self.reqs_need_send.get(send_meta.transfer_id) is send_meta:
                     # Mark it sending to avoid expiration.
                     send_meta.sending += 1
                     if not send_meta.need_send:
@@ -1709,7 +1710,7 @@ class MooncakeConnectorWorker:
                         )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
-                    # Otherwise (expired, very unlikely), just forget it.
+                    unavailable_reqs.append(d_req_id)
                     logger.warning(
                         "Request %s expired before sending on P side.", d_req_id
                     )
@@ -1726,6 +1727,14 @@ class MooncakeConnectorWorker:
                 local_regions,
                 remote_regions,
             )
+            if unavailable_reqs:
+                err_reqs = [*err_reqs, *unavailable_reqs]
+                unavailable_msg = "Prefill request cancelled or expired before KV send."
+                err_msg = (
+                    unavailable_msg
+                    if err_msg is None
+                    else f"{err_msg}; {unavailable_msg}"
+                )
             err_req_set = set(err_reqs)
             ok_ready_reqs = [
                 (d_req_id, send_meta)
@@ -2711,9 +2720,10 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
-                assert not send_meta.ready.is_set()
+            cancelled_meta = self.reqs_need_send.pop(transfer_id, None)
+            if cancelled_meta is not None:
+                assert not cancelled_meta.ready.is_set()
+                cancelled_meta.ready.set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
