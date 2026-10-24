@@ -4,6 +4,7 @@
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -27,6 +28,16 @@ _CHUNK_SIZE = 64 * 1024
 
 class _MediaHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        if self.path == "/missing":
+            self.send_error(404)
+            return
+        if self.path == "/truncated":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(_SMALL_BODY) + 1))
+            self.end_headers()
+            self.wfile.write(_SMALL_BODY)
+            self.close_connection = True
+            return
         body = _LARGE_BODY if "large" in self.path else _SMALL_BODY
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -289,6 +300,52 @@ async def test_get_bytes_allows_body_within_limit(
     try:
         actual = await connection.async_get_bytes(f"{local_media_server}/small")
         assert actual == _SMALL_BODY
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+@pytest.mark.parametrize("existing", [True, False])
+@pytest.mark.parametrize("async_download", [True, False])
+@pytest.mark.asyncio
+async def test_download_http_error_preserves_destination(
+    local_media_server: str, tmp_path: Path, existing: bool, async_download: bool
+) -> None:
+    destination = tmp_path / "asset.bin"
+    if existing:
+        destination.write_bytes(_SMALL_BODY)
+    connection = HTTPConnection()
+
+    try:
+        with pytest.raises((requests.HTTPError, aiohttp.ClientResponseError)):
+            if async_download:
+                await connection.async_download_file(
+                    f"{local_media_server}/missing", destination
+                )
+            else:
+                connection.download_file(f"{local_media_server}/missing", destination)
+        if existing:
+            assert destination.read_bytes() == _SMALL_BODY
+        else:
+            assert not destination.exists()
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_download_removes_partial_file(
+    local_media_server: str, tmp_path: Path
+) -> None:
+    destination = tmp_path / "asset.bin"
+    connection = HTTPConnection()
+
+    try:
+        with pytest.raises(aiohttp.ClientPayloadError):
+            await connection.async_download_file(
+                f"{local_media_server}/truncated", destination
+            )
+        assert not destination.exists()
     finally:
         if connection._async_client is not None:
             await connection._async_client.close()
