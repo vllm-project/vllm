@@ -50,7 +50,12 @@ def _normalize_messages(
                 if part_type in ("text", "input_text", "output_text"):
                     _reject_image_placeholder(block.get("text"))
                     parts.append(block.get("text", ""))
-                elif part_type in ("image_url", "input_image", "image_pil"):
+                elif part_type in (
+                    "image_url",
+                    "input_image",
+                    "image_pil",
+                    "image_embeds",
+                ):
                     parts.append(IMAGE_PLACEHOLDER)
                     image_indices.append(image_idx)
                     image_idx += 1
@@ -136,6 +141,6 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
 class DeepseekV41Tokenizer(TokenizerLike):
     @classmethod
-    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
+    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:  # type: ignore[override]
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v41_tokenizer(tokenizer))
