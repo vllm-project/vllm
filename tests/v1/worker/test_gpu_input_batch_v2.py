@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the V2 model runner's InputBatch (vllm.v1.worker.gpu.input_batch)."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -12,9 +14,50 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.parametrize("query_len", [1, 2, 8])
+@pytest.mark.parametrize("context_len", [0, 1024, 16384])
+@pytest.mark.parametrize("num_blocks", [7, 64])
+def test_dummy_mamba_verification_has_valid_states(query_len, context_len, num_blocks):
+    buffers = InputBuffers(4, 32, device=torch.device("cpu"))
+    batch = InputBatch.make_dummy(4, 4 * query_len, buffers)
+    table = torch.zeros((4, 16), dtype=torch.int32)
+    blocks = SimpleNamespace(input_block_tables=[table], block_sizes=[16384])
+    set_dummy_context(
+        batch, blocks, context_len, num_blocks, 32768, mamba_group_ids=[0]
+    )
+    first_column = (context_len + query_len - 1) // 16384
+    states = table[:, first_column : first_column + query_len]
+    sources = states.gather(1, batch.query_start_loc.diff().long()[:, None] - 1)
+    assert torch.all(sources > 0)
+    assert torch.all((states > 0) & (states < num_blocks))
+    if num_blocks == 64:
+        assert states.unique().numel() == states.numel()
+
+
+def test_dummy_mamba_mixed_split_executes_fresh_prefills():
+    buffers = InputBuffers(4, 64, device=torch.device("cpu"))
+    split = np.array([8, 8, 24, 24], dtype=np.int32)
+    batch = InputBatch.make_dummy(4, 64, buffers, num_scheduled_tokens=split)
+    table = torch.zeros((4, 8), dtype=torch.int32)
+    blocks = SimpleNamespace(input_block_tables=[table], block_sizes=[16384])
+    set_dummy_context(
+        batch, blocks, 1024, 64, 16384, mamba_group_ids=[0], decode_query_len=8
+    )
+    assert batch.num_scheduled_tokens.tolist() == split.tolist()
+    assert batch.is_prefilling_np.tolist() == [False, False, True, True]
+    assert batch.has_prefill and not batch.decode_graph_eligible
+    assert batch.num_computed_tokens_np.tolist() == [1024, 1024, 0, 0]
+    assert batch.seq_lens.tolist() == [1032, 1032, 24, 24]
+    assert batch.prefill_len_np.tolist() == [0, 0, 24, 24]
+    assert batch.num_draft_tokens_per_req.tolist() == [7, 7, 0, 0]
+    assert batch.num_draft_tokens == 14
+    assert batch.positions[[0, 8, 16, 40]].tolist() == [1024, 1024, 0, 0]
+    assert torch.all((table > 0) & (table < 64))
 
 
 @pytest.mark.parametrize(

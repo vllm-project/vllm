@@ -841,6 +841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = False,
         uniform_decode: bool = False,
         context_len: int = 0,
+        num_scheduled_tokens_per_req: list[int] | None = None,
         skip_eplb: bool = False,
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
@@ -881,13 +882,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             f"({self.max_num_tokens})"
         )
 
-        # Distribute the remainder evenly so no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        if num_scheduled_tokens_per_req is not None and (
+            sum(num_scheduled_tokens_per_req) == num_tokens
+            and len(num_scheduled_tokens_per_req) <= num_reqs
+        ):
+            # An explicit split, for callers that need the dummy batch to have a
+            # specific shape rather than a uniform one (e.g. adaptive
+            # verification profiling a mixed decode/prefill step). The clamps
+            # above can lower num_tokens or num_reqs for the draft budget; a
+            # pinned split that no longer fits them is stale, so it gives way to
+            # the even split for the shape that will actually run.
+            assert not uniform_decode
+            num_tokens_per_request = list(num_scheduled_tokens_per_req)
+            num_reqs = len(num_tokens_per_request)
+            assert all(n > 0 for n in num_tokens_per_request)
+        else:
+            # Distribute the remainder evenly so no dummy request exceeds
+            # ceil(num_tokens / num_reqs) <= max_model_len tokens.
 
-        num_tokens_per_request = [
-            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
-            for i in range(num_reqs)
-        ]
+            num_tokens_per_request = [
+                num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+                for i in range(num_reqs)
+            ]
 
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
@@ -1305,7 +1321,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
 
         if dummy_run:
-            # Dummy batches are uniform by construction.
+            # Dummy batches are uniform unless the caller pinned a split, and
+            # get_uniform_decode_token_count returns None for those.
             return None, get_uniform_decode_token_count(
                 num_reqs, num_toks, max_query_len, decode_graph_eligible=True
             )
@@ -1862,11 +1879,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # Honour the caller's split when cudagraph dispatch did not pad or
+            # reshape the batch; otherwise the shape belongs to the descriptor
+            # and make_dummy falls back to its even split.
+            dummy_split = None
+            if dummy_num_reqs == num_reqs and batch_desc.num_tokens == num_toks:
+                dummy_split = np.fromiter(
+                    scheduler_output.num_scheduled_tokens.values(),
+                    dtype=np.int32,
+                    count=num_reqs,
+                )
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                num_scheduled_tokens=dummy_split,
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
@@ -1896,6 +1924,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.kv_cache_config.num_blocks,
                         self.max_model_len,
                         input_block_tables=block_tables,
+                        mamba_group_ids=[
+                            i
+                            for i, groups in enumerate(self.attn_groups)
+                            if groups and isinstance(groups[0].kv_cache_spec, MambaSpec)
+                        ],
+                        decode_query_len=self.decode_query_len,
                     )
 
         if self.dcp_size > 1 and not (dummy_run and skip_attn_for_dummy_run):

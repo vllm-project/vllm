@@ -132,7 +132,14 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        num_scheduled_tokens: np.ndarray | None = None,
     ) -> "InputBatch":
+        """Build a dummy batch of *num_tokens* over *num_reqs* requests.
+
+        The tokens are spread evenly unless *num_scheduled_tokens* pins an
+        explicit per-request split, which callers use when the uniform shape
+        would not be one the scheduler can produce.
+        """
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
@@ -142,21 +149,30 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        # Distribute the remainder evenly so that no dummy request exceeds
+        # seq_len equals to query_len. Without an explicit split, distribute the
+        # remainder evenly so that no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
-        # accept any split with non-empty slots, so this shape works for them
-        # too; attention metadata is built from the promised max_query_len.
-        base_tokens = num_tokens // num_reqs
-        num_extra = num_tokens % num_reqs
-        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
-        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
-        if num_extra > 0:
-            num_scheduled_tokens[-num_extra:] += 1
+        # accept any split with non-empty slots, so either shape works for them;
+        # attention metadata is built from the promised max_query_len.
+        if num_scheduled_tokens is None:
+            base_tokens = num_tokens // num_reqs
+            num_extra = num_tokens % num_reqs
+            max_split = base_tokens + (num_extra > 0)
+            assert max_query_len is None or max_split <= max_query_len
+            num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+            if num_extra > 0:
+                num_scheduled_tokens[-num_extra:] += 1
+            input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+            input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
+        else:
+            num_scheduled_tokens = num_scheduled_tokens.astype(np.int32, copy=True)
+            assert num_scheduled_tokens.shape == (num_reqs,)
+            assert num_scheduled_tokens.min() > 0
+            max_split = int(num_scheduled_tokens.max())
+            assert max_query_len is None or max_split <= max_query_len
+            input_buffers.seq_lens[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        # seq_len equals to query_len
-        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
-        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -228,6 +244,8 @@ def set_dummy_context(
     num_kv_blocks: int,
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
+    mamba_group_ids: Sequence[int] = (),
+    decode_query_len: int | None = None,
 ) -> None:
     """Give each dummy request context_len of context, for profiling step cost
     and for DCP FULL cudagraph capture."""
@@ -237,36 +255,58 @@ def set_dummy_context(
         # Attention-free models have no KV context to fabricate.
         return
     num_reqs = input_batch.num_reqs
-    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
-    context_len = max(min(context_len, max_model_len - query_len), 0)
-    if not context_len:
-        return
+    query_lens = input_batch.max_query_len or input_batch.num_scheduled_tokens
+    if mamba_group_ids and decode_query_len is not None:
+        set_dummy_mamba_metadata(input_batch, decode_query_len)
+    context_lens = np.minimum(context_len, max_model_len - query_lens).clip(min=0)
+    context_lens = np.where(input_batch.is_prefilling_np, 0, context_lens)
+    context_tensor = torch.from_numpy(context_lens)
 
     # Decode-like shape: each request continues after context_len
     # already-computed tokens.
-    input_batch.seq_lens += context_len
-    input_batch.seq_lens_cpu_upper_bound += context_len
-    input_batch.num_computed_tokens_np.fill(context_len)
-    input_batch.num_computed_prefill_tokens_np.fill(context_len)
+    input_batch.seq_lens += context_tensor.to(input_batch.seq_lens.device)
+    input_batch.seq_lens_cpu_upper_bound += context_tensor
+    input_batch.num_computed_tokens_np[:] = context_lens
+    input_batch.num_computed_prefill_tokens_np[:] = context_lens
     local_pos = np.arange(input_batch.num_tokens, dtype=np.int64) - np.repeat(
         input_batch.query_start_loc_np[:-1], input_batch.num_scheduled_tokens
     )
-    input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
+    positions = local_pos + np.repeat(context_lens, input_batch.num_scheduled_tokens)
+    input_batch.positions.copy_(torch.from_numpy(positions))
 
-    seq_len = context_len + query_len
-    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
-        num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
+    seq_len = int(input_batch.seq_lens_cpu_upper_bound.max())
+    max_query_len = int(input_batch.num_scheduled_tokens.max())
+    for group_id, (block_table, block_size) in enumerate(
+        zip(input_block_tables, block_tables.block_sizes)
+    ):
+        is_mamba = group_id in mamba_group_ids
+        num_blocks = cdiv(seq_len, block_size)
+        if is_mamba:
+            num_blocks += max_query_len - 1
+        num_blocks = min(num_blocks, block_table.shape[1])
+        first_block = int(is_mamba)
+        if is_mamba and num_kv_blocks <= 1:
+            raise ValueError("Dummy Mamba context requires a non-null state block")
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = (
-            torch.arange(
-                num_reqs * num_blocks,
-                dtype=block_table.dtype,
-                device=block_table.device,
-            )
-            % num_kv_blocks
+        block_ids = torch.arange(
+            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
         )
+        block_ids %= num_kv_blocks - first_block
+        block_ids += first_block
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
+
+
+def set_dummy_mamba_metadata(batch: InputBatch, decode_query_len: int) -> None:
+    query_lens = batch.num_scheduled_tokens
+    prefills = query_lens > decode_query_len
+    drafts = np.where(prefills, 0, query_lens - 1).astype(np.int32)
+    batch.is_prefilling_np[:] = prefills
+    batch.has_prefill = bool(prefills.any())
+    batch.decode_graph_eligible = not batch.has_prefill
+    batch.prefill_len_np[:] = np.where(prefills, query_lens, 0)
+    batch.num_draft_tokens_per_req = drafts
+    batch.num_draft_tokens = int(drafts.sum())
 
 
 @triton.jit
