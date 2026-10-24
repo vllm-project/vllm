@@ -257,6 +257,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.num_sms = envs.VLLM_DEEPEP_HIGH_THROUGHPUT_NUM_SMS
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -298,6 +299,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        # DeepEP's SM count is global; without DBO nothing else sets it.
+        deep_ep.Buffer.set_num_sms(self.num_sms)
         return handle
 
     def set_num_sms(self, num_sms: int):
