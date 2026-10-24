@@ -19,7 +19,7 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s v1/attention
   source_file_dependencies:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
@@ -29,5 +29,30 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/attention --ignore v1/attention/test_cuda_backend_probe_errors.py --ignore v1/attention/test_sparse_indexer_decode_seq_lens.py --ignore v1/attention/test_kpool_tail_slot_mapping.py --ignore v1/attention/test_deepseek_v4_rocm_adaptive.py --continue-on-collection-errors || true'
-
+    pytest --continue-on-collection-errors -v -s v1/attention || true'
+- label: ':nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA'
+  key: flashinfer-nvfp4-xqa-dgx-spark
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness
+  source_file_dependencies:
+  - vllm/v1/attention/backends/flashinfer.py
+  - tests/v1/attention/test_attention_backends.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness || true'

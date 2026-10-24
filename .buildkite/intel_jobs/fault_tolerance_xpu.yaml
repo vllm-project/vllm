@@ -21,6 +21,7 @@ steps:
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/fault_tolerance/test_engine_core_sentinel.py
   - pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py
   source_file_dependencies:
   - vllm/v1/fault_tolerance/
@@ -28,7 +29,9 @@ steps:
   - vllm/entrypoints/serve/fault_tolerance/
   - vllm/distributed/elastic_ep/
   - vllm/distributed/device_communicators/
+  - vllm/distributed/kv_transfer/
   - vllm/v1/engine/
+  - vllm/v1/executor/
   - vllm/v1/worker/
   - tests/v1/fault_tolerance/
   - tests/v1/distributed/test_external_lb_dp.py
@@ -37,4 +40,5 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'
+    pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_engine_core_sentinel.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'

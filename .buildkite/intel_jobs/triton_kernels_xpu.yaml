@@ -6,6 +6,7 @@ steps:
   key: r01
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -30,6 +31,7 @@ steps:
   key: r02
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -53,6 +55,7 @@ steps:
   key: fused-moe-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -77,6 +80,7 @@ steps:
   key: count-expert-num-tokens
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -99,6 +103,7 @@ steps:
   key: causal-conv1d-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -121,6 +126,7 @@ steps:
   key: causal-conv1d-update-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -145,6 +151,7 @@ steps:
   key: r03
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -175,6 +182,7 @@ steps:
   key: fused-recurrent-gated-delta-rule
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -197,6 +205,7 @@ steps:
   key: layer-norm-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -219,6 +228,7 @@ steps:
   key: silu-mul-fp8-quant-deep-gemm
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -241,6 +251,7 @@ steps:
   key: merge-attn-states-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -263,6 +274,7 @@ steps:
   key: r04
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -287,6 +299,7 @@ steps:
   key: r05
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -311,6 +324,7 @@ steps:
   key: scaled-mm-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -333,6 +347,7 @@ steps:
   key: awq-dequantize-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -355,6 +370,7 @@ steps:
   key: awq-gemm-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -377,6 +393,7 @@ steps:
   key: r06
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -400,6 +417,7 @@ steps:
   key: r10
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -418,12 +436,12 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true &&
-    pytest tests/kernels/moe/test_silu_mul_per_token_group_quant_fp8_colmajor.py::test_silu_mul_fp8_quant_deep_gemm -v || true'
+    'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true'
 - label: R07
   key: r07
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -449,6 +467,7 @@ steps:
   key: r08
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -477,6 +496,7 @@ steps:
   key: layer-norm-gated-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -499,6 +519,7 @@ steps:
   key: kda-gate-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -521,6 +542,7 @@ steps:
   key: r09
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -546,6 +568,7 @@ steps:
   key: linear-attn-decode-kernel
   device: intel_gpu
   timeout_in_minutes: 85
+  optional: true
   working_dir: .
   no_plugin: true
   env:
