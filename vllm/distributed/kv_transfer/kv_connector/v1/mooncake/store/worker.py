@@ -125,6 +125,32 @@ def _replicate_config_supports_group_ids(
     return hasattr(replicate_config, "group_ids")
 
 
+def _configure_dfs_replicas(
+    config: MooncakeStoreConfig,
+    replicate_config: Any,
+    extra_config: dict[str, Any],
+) -> None:
+    if not config.enable_dfs:
+        if "replica_num" in extra_config:
+            raise ValueError(
+                'replica_num requires "enable_dfs": true in the Mooncake config'
+            )
+        return
+    if not hasattr(replicate_config, "dfs_replica_num"):
+        raise RuntimeError(
+            "enable_dfs requires a Mooncake version whose ReplicateConfig "
+            "supports dfs_replica_num"
+        )
+    replica_num = extra_config.get("replica_num", 1)
+    # replica_num=0 places the object only in DFS.
+    if type(replica_num) is not int or replica_num < 0:
+        raise ValueError(
+            f"replica_num must be a non-negative integer, got {replica_num!r}"
+        )
+    replicate_config.replica_num = replica_num
+    replicate_config.dfs_replica_num = 1
+
+
 def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
@@ -1412,6 +1438,8 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_config()
+        self.store_replicate_config = ReplicateConfig()
+        _configure_dfs_replicas(store_config, self.store_replicate_config, extra_config)
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
@@ -1423,7 +1451,6 @@ class MooncakeStoreWorker:
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
-        self.store_replicate_config = ReplicateConfig()
         self.enable_group_semantics = (
             str(extra_config.get("enable_group_semantics", "False")).strip().lower()
             == "true"
@@ -1442,16 +1469,23 @@ class MooncakeStoreWorker:
 
         logger.info(
             "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
-            "preferred_segment=%s, enable_offload=%s, tenant_id=%s)",
+            "preferred_segment=%s, enable_offload=%s, tenant_id=%s, "
+            "enable_dfs=%s, replica_num=%s)",
             store_config.mode,
             store_config.global_segment_size,
             store_config.local_buffer_size,
             preferred_segment or "<none>",
             store_config.enable_offload,
             store_config.tenant_id,
+            store_config.enable_dfs,
+            extra_config.get("replica_num", 1),
         )
         if store_config.mode == "embedded":
-            if store_config.enable_offload and preferred_segment is None:
+            if (
+                store_config.enable_offload
+                and not store_config.enable_dfs
+                and preferred_segment is None
+            ):
                 logger.warning(
                     "enable_offload is set in embedded mode without "
                     "preferred_segment; SSD tier will only see puts that "
@@ -1464,18 +1498,25 @@ class MooncakeStoreWorker:
                     preferred_segment,
                 )
         elif (
-            store_config.mode == "standalone-store" and not store_config.enable_offload
+            store_config.mode == "standalone-store"
+            and not store_config.enable_offload
+            and not store_config.enable_dfs
         ):
             logger.warning(
                 "standalone-store mode without enable_offload: large prefills "
                 "may exceed the owner DirectIO budget."
             )
 
-        self.disk_offload_buffer_budget_bytes = (
-            DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES
-            if store_config.enable_offload
-            else None
-        )
+        # DFS stages reads in this client; local SSD reads use the owner's buffer.
+        # Mooncake reads an SSD replica before a DFS one, so with both enabled a
+        # GET must fit the smaller buffer. This is a per-GET limit, not a
+        # reservation across concurrent receivers.
+        budgets = []
+        if store_config.enable_dfs:
+            budgets.append(store_config.local_buffer_size)
+        if store_config.enable_offload:
+            budgets.append(DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES)
+        self.disk_offload_buffer_budget_bytes = min(budgets) if budgets else None
 
         # Start lookup server on rank 0 for scheduler-side prefix queries
         self.lookup_server: LookupKeyServer | None = None
@@ -1491,6 +1532,12 @@ class MooncakeStoreWorker:
         # Pool of load-receive threads
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
+        if store_config.enable_dfs and self.num_recv_threads > 1:
+            logger.warning(
+                "Mooncake DFS loads from %d receive threads share one client "
+                "buffer and may exhaust it; use VLLM_MOONCAKE_LOAD_RECV_THREADS=1.",
+                self.num_recv_threads,
+            )
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()

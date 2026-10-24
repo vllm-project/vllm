@@ -64,6 +64,9 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
 - `tenant_id`: Optional Mooncake tenant namespace. Producers and consumers
   that should share store data must use the same tenant id. Default:
   `"default"`.
+- `enable_dfs`: When `true`, also store KV in Mooncake's shared distributed
+  file system (DFS) tier, such as 3FS. See [DFS Tier](#dfs-tier). Default:
+  `false`.
 
 Set the config path via environment variable:
 
@@ -232,6 +235,30 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+### DFS Tier
+
+Mooncake can keep a replica of each object in a shared distributed file system
+(DFS) such as 3FS. Set up the Master and clients as described in the
+[Mooncake DFS deployment guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md):
+start `mooncake_master` with `MOONCAKE_ENABLE_DFS=1`, and give the Master and
+every vLLM process the same `MOONCAKE_DFS_*` layout. vLLM processes also need
+`MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=distributed_storage_backend` and
+`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` set to an existing writable directory,
+which Mooncake checks even though DFS data lives under `MOONCAKE_DFS_ROOT_DIR`.
+
+Then set `"enable_dfs": true` in the JSON config; `enable_offload` is not
+needed. Each object gets one DFS replica plus `replica_num` memory replicas,
+set in `kv_connector_extra_config` (default `1`). `replica_num: 0` stores KV
+only in DFS, so DFS eviction removes it, and needs a Mooncake Master with
+[kvcache-ai/Mooncake#4637](https://github.com/kvcache-ai/Mooncake/pull/4637).
+
+DFS supports only the default tenant and is not available to the cross-encoder
+cache. DFS loads are split to fit `local_buffer_size`, which all receive
+threads share, so keep `VLLM_MOONCAKE_LOAD_RECV_THREADS=1`. With
+`enable_offload` also set, loads are split to fit the smaller of
+`local_buffer_size` and the SSD owner's 1280 MB staging buffer, because Mooncake
+reads an SSD replica before a DFS replica.
+
 ### Tenant Isolation
 
 Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
@@ -278,6 +305,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `replica_num` (int): Memory replicas per object when `enable_dfs` is set; `0` stores KV only in DFS. Only accepted with `enable_dfs`. Default: `1`.
 - `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
