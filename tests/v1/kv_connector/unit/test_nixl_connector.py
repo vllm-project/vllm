@@ -2510,6 +2510,7 @@ def recv_worker():
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
     worker._recving_transfers = defaultdict(list)
+    worker._read_deadlines = {}
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._handshake_lock = threading.RLock()
@@ -3362,7 +3363,8 @@ class TestPeerReplacement:
         block_size = maybe_update_block_size(16)
 
         config = create_vllm_config(
-            kv_connector_extra_config={"engine_ttl": 0}, block_size=block_size
+            kv_connector_extra_config={"engine_ttl": 0, "decoder_kv_blocks_ttl": 1},
+            block_size=block_size,
         )
         config.kv_transfer_config.kv_buffer_device = "cpu"
         platform = SimpleNamespace(
@@ -3729,6 +3731,44 @@ class TestPeerReplacement:
         self.transport.make_prepped_xfer.assert_not_called()
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert "old" in self.worker._handshake_futures
+
+    def test_stalled_read_rejects_new_reads_until_it_finishes(self, monkeypatch):
+        self._connect("healthy", host="other-host")
+        self.worker.start_load_kv(self._request("healthy", req_id="done"))
+        assert self.worker.get_transfer_results().finished_recving == {"done"}
+        self.transport.check_xfer_state.return_value = "PROC"
+        self.worker.start_load_kv(self._request("old"))
+        self.worker.get_transfer_results()
+        clock = time.perf_counter
+        # Past decoder_kv_blocks_ttl only: still reads.
+        monkeypatch.setattr(time, "perf_counter", lambda: clock() + 2)
+        self.worker.start_load_kv(self._request("old", req_id="old-req-2"))
+        assert self.transport.make_prepped_xfer.call_count == 3
+
+        # Past stalled_read_timeout (480 s): rejected in the same step.
+        monkeypatch.setattr(time, "perf_counter", lambda: clock() + 481)
+        self.transport.make_prepped_xfer.reset_mock()
+        self.worker.start_load_kv(self._request("old", req_id="blocked"))
+        self.worker.start_load_kv(self._request("healthy"))
+        self.transport.make_prepped_xfer.assert_called_once()
+        assert self.worker.get_transfer_results().failed_recving == {"blocked"}
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self.transport.check_xfer_state.return_value = "DONE"
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req", "old-req-2", "healthy-req"}
+        assert not result.failed_recving
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    def test_stalled_read_is_ignored_with_zero_timeout(self, monkeypatch):
+        self.worker._stalled_read_timeout = 0
+        self.transport.check_xfer_state.return_value = "PROC"
+        self.worker.start_load_kv(self._request("old"))
+        clock = time.perf_counter
+        monkeypatch.setattr(time, "perf_counter", lambda: clock() + 10**6)
+        self.worker.get_transfer_results()
+        self.worker.start_load_kv(self._request("old", req_id="next"))
+        assert self.transport.make_prepped_xfer.call_count == 2
 
 
 def test_transfer_topology_unregister():
