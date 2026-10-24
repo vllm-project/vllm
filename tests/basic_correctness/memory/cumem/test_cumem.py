@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import gc
 
 import pytest
@@ -70,6 +71,26 @@ def test_python_error():
         # when the allocator is woken up, it should raise an error
         # because we don't have enough memory
         allocator.wake_up()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Uses the CUDA allocator ABI"
+)
+@create_new_process_for_each_test("fork")
+def test_allocation_after_driver_error():
+    """A rejected native allocation must not poison the next CuMem allocation."""
+    allocator = get_mem_allocator_instance()
+    torch.cuda.init()
+    native = ctypes.CDLL(cumem.lib_name)
+    native.my_malloc.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
+    native.my_malloc.restype = ctypes.c_void_p
+    # A zero-sized VA reservation fails before allocating physical memory.
+    assert native.my_malloc(0, torch.accelerator.current_device_index(), None) is None
+
+    with allocator.use_memory_pool():
+        tensor = torch.ones(1024, dtype=torch.uint8, device=DEVICE_TYPE)
+    assert tensor.data_ptr() in allocator.pointer_to_data
+    assert torch.all(tensor == 1)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
