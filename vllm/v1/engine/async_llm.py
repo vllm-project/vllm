@@ -679,14 +679,14 @@ class AsyncLLM(EngineClient):
                 errored = True
             finally:
                 queue._input_stream_task = None
-                if not cancelled:
+                if not cancelled and not errored:
                     if any_added:
                         # Send empty final request to indicate that inputs have
-                        # finished. Don't send if cancelled or if the session
-                        # already finished (aborted or errored).
+                        # finished. Don't send if the session already finished
+                        # or was aborted.
                         if self.output_processor.has_request(internal_req_id):
                             await self._add_request(final_req, None, None, 0, queue)
-                    elif not errored:
+                    else:
                         queue.put(STREAM_FINISHED)
 
         # Ensure output handler is running.
