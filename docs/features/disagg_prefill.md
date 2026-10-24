@@ -17,7 +17,7 @@ Two main reasons:
 
 ## Usage example
 
-Now supports 9 types of connectors:
+Now supports 10 types of connectors:
 
 - **ExampleConnector**: refer to [examples/disaggregated/example_connector/run.sh](../../examples/disaggregated/example_connector/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
 - **LMCacheConnectorV1**: refer to [examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission. LMCache also offers a multi-process (MP) mode via `LMCacheMPConnector`, where a standalone `lmcache server` holds the KV cache shared by one or more vLLM instances; see the [LMCache examples](../../examples/disaggregated/lmcache/README.md) and the [LMCache docs](https://docs.lmcache.ai) for setup.
@@ -28,6 +28,7 @@ Now supports 9 types of connectors:
   ```
 
 - **MooncakeConnector**: refer to [examples/disaggregated/mooncake_connector/run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh) for the example usage of MooncakeConnector disaggregated prefilling. For detailed usage guide, see [MooncakeConnector Usage Guide](mooncake_connector_usage.md). For multimodal encoder-cache transfer, see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
+- **ConnexConnector**: pull-based P/D transfer over [Connex](https://github.com/HeterInfra/connex) (connex-rs or Mooncake data plane) with prefill-side holds, so requests survive decode-instance failures and P/D pools can change at run time. See [ConnexConnector Usage Guide](connex_connector_usage.md).
 - **MoRIIOConnector** (ROCm only): see [MoRI-IO Usage Guide](moriio_connector_usage.md) for example usage and detailed documentation.
 - **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
 
