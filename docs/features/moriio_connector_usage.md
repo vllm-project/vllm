@@ -144,6 +144,12 @@ For DSpark, configure the same draft model on both instances through `--speculat
 
 Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
 
+### Kimi-K3 specialized decode
+
+Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
+
+Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
+
 ### Different prefill and decode TP sizes
 
 In WRITE mode, the prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. Each prefill rank writes its shard into the decode ranks that hold it:

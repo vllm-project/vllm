@@ -68,6 +68,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     UVAOffloadConfig,
     VllmConfig,
+    WatchdogConfig,
     WeightTransferConfig,
     get_attr_docs,
 )
@@ -464,6 +465,12 @@ _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
 )
 
 
+_IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
+    "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
+    "removed. It will be removed in v0.34.0."
+)
+
+
 _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
@@ -508,7 +515,7 @@ class EngineArgs:
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
-    kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
+    kv_cache_dtype: CacheDType | str = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
@@ -790,6 +797,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_backend: str = ModelConfig.sleep_mode_backend
     sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
@@ -853,6 +861,8 @@ class EngineArgs:
 
     shutdown_timeout: int = 0
 
+    watchdog_config: WatchdogConfig = get_field(VllmConfig, "watchdog_config")
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
@@ -905,6 +915,9 @@ class EngineArgs:
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
+        if isinstance(self.watchdog_config, dict):
+            self.watchdog_config = WatchdogConfig(**self.watchdog_config)
 
         from vllm.config.quantization import resolve_quantization_config
 
@@ -1032,6 +1045,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+        )
+        model_group.add_argument(
+            "--sleep-mode-backend", **model_kwargs["sleep_mode_backend"]
         )
         model_group.add_argument(
             "--sleep-mode-offload-cudagraph",
@@ -1890,6 +1906,7 @@ class EngineArgs:
             "--aux-output-config", **vllm_kwargs["aux_output_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
+        vllm_group.add_argument("--watchdog-config", **vllm_kwargs["watchdog_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -2030,6 +2047,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
@@ -2801,6 +2819,8 @@ class EngineArgs:
 
             # Set the attribute
             setattr(kernel_config.ir_op_priority, op_name, op_priority)
+        if any(asdict(kernel_config.ir_op_priority).values()):
+            logger.warning_once(_IR_OP_PRIORITY_DEPRECATION_MESSAGE)
 
         load_config = self.create_load_config()
 
@@ -2891,6 +2911,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            watchdog_config=self.watchdog_config,
             shutdown_timeout=self.shutdown_timeout,
         )
 
