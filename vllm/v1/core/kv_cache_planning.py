@@ -801,8 +801,9 @@ def _promote_local_kv_cache_specs(
                 spec,
                 target_cls,
                 # Promoted specs allocate blocks for all tokens and never free
-                # below the window, so the trailing-edge extension is moot.
-                drop=("extra_retained_tokens",),
+                # below the window, so the trailing-edge extension and the
+                # window-bounded prefix replay are both moot.
+                drop=("extra_retained_tokens", "bounded_replay"),
                 block_size=block_size,
                 page_size_padded=promoted_page_size_padded(spec, block_size),
             )
