@@ -1,0 +1,58 @@
+group: Attention XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (H100) V1 Attention'
+  key: v1-attention-h100-mi300
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s v1/attention
+  source_file_dependencies:
+  - vllm/config/attention.py
+  - vllm/model_executor/layers/attention
+  - vllm/v1/attention
+  - tests/v1/attention
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/attention || true'
+- label: ':nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA'
+  key: flashinfer-nvfp4-xqa-dgx-spark
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness
+  source_file_dependencies:
+  - vllm/v1/attention/backends/flashinfer.py
+  - tests/v1/attention/test_attention_backends.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness || true'

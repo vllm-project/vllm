@@ -1,0 +1,338 @@
+group: Models - Basic XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (H200 MIG 18GB) Basic Models (Initialization)'
+  key: basic-models-tests-initialization-2
+  device: intel_gpu
+  timeout_in_minutes: 25
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  - pytest -v -s models/test_beam_construction.py
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  - tests/models/test_beam_construction.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/test_initialization.py::test_can_initialize_small_subset || true &&
+    pytest --continue-on-collection-errors -v -s models/test_beam_construction.py || true'
+- label: ':nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N'
+  key: basic-models-tests-extra-initialization
+  device: intel_gpu
+  timeout_in_minutes: 30
+  parallelism: 14
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install open-clip-torch --no-deps &&
+    cd tests &&
+    pytest -v -s models/test_initialization.py -k not test_can_initialize_small_subset --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[DFlashLagunaForCausalLM]" --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[MistralLarge3ForCausalLM]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 35GB) Basic Models (Other)'
+  key: basic-models-tests-other
+  device: intel_gpu
+  timeout_in_minutes: 38
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - tests/models/test_terratorch.py
+  - tests/models/transformers/test_backend.py
+  - tests/models/test_registry.py
+  - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_deepseek_v41_decoder_replay_layers.py
+  - tests/models/test_deepseek_v41_replay_batch.py
+  - tests/models/test_deepseek_v41_pcp.py
+  - tests/models/test_deepseek_v41_pipeline.py
+  - tests/models/transformers/test_layer_registry_e2e.py
+  - tests/models/test_deepseek_v41_replay_start.py
+  - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_muse_spark_rocm_loading.py
+  - tests/models/test_muse_spark_logits_local.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py || true'
+- label: ':nvidia: (B200) Inkling'
+  key: inkling-unit-tests-b200
+  device: intel_gpu
+  timeout_in_minutes: 40
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/inkling
+  source_file_dependencies:
+  - vllm/models/inkling/
+  - vllm/cute_utils/
+  - cmake/external_projects/tml_fa4.cmake
+  - tests/models/inkling/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/inkling || true'
+- label: ':nvidia: (B200) Flint'
+  key: flint-unit-tests-b200
+  device: intel_gpu
+  timeout_in_minutes: 30
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - uv pip install --system 'gguf>=0.19.0'
+  - pytest -v -s models/flint
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'uv pip install "gguf\>=0.19.0" || true &&
+    cd tests &&
+    pytest --continue-on-collection-errors -v -s models/flint || true'
+- label: ':nvidia: (B200) Kimi K3'
+  key: kimi-k3-unit-tests-b200
+  device: intel_gpu
+  timeout_in_minutes: 40
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - csrc/kimi_k3/
+  - tests/models/kimi_k3/
+  - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py || true'
+- label: ':nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache'
+  key: kimi-k3-prefix-cache-4xb200
+  device: intel_gpu
+  timeout_in_minutes: 75
+  num_devices: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 24+
+  automatic_shard: true
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - vllm/v1/core/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+  - vllm/distributed/mooncake_store.py
+  - vllm/v1/simple_kv_offload/
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/layers/mamba/
+  - tests/models/kimi_k3/test_prefix_cache.py
+  - .buildkite/scripts/install-kv-connectors.sh
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/kimi_k3/test_prefix_cache.py || true'
+- label: ':nvidia: (H200) Step5'
+  key: step5-unit-tests
+  device: intel_gpu
+  timeout_in_minutes: 20
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/step5
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/step5 || true'
+- label: ':nvidia: (H200) GLM5Next'
+  key: glm5next-unit-tests
+  device: intel_gpu
+  timeout_in_minutes: 20
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/glm5next
+  source_file_dependencies:
+  - vllm/models/glm5next/
+  - tests/models/glm5next/
+  - vllm/model_executor/layers/mamba/checkpoint.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/glm5next || true'
+- label: ':nvidia: (H200) Qwen4 Exp'
+  key: qwen4-exp-unit-tests
+  device: intel_gpu
+  timeout_in_minutes: 40
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
+  - pytest -v -s models/qwen4_exp/test_ple.py
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/model_executor/layers/mamba/checkpoint.py
+  - tests/models/qwen4_exp/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py || true &&
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_ple.py || true'
+- label: ':nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode'
+  key: dsv41-nvidia-specialized-decode-4xb200
+  device: intel_gpu
+  timeout_in_minutes: 40
+  num_devices: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 24+
+  _raw_old_commands:
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/nvidia/
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/common/
+  - vllm/v1/worker/gpu/model_states/
+  - vllm/model_executor/layers/fused_moe/config.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - tests/distributed/test_custom_all_reduce.py
+  - tests/kernels/test_engram.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py || true &&
+    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py || true &&
+    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py || true'
