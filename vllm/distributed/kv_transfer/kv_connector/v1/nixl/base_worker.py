@@ -293,9 +293,12 @@ class NixlBaseConnectorWorker:
         Each Nx5 strided desc covers one region, so slicing it slices every block.
         """
         fa_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
-        fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
+        fa_num_splits = (
+            len(plan.source_ranks_per_group[fa_idx]) if fa_idx is not None else 1
+        )
 
         starts = self._strided_desc_starts(src_blocks_data)
         num_descs = int(src_blocks_data[:, 4].sum())
@@ -2205,7 +2208,8 @@ class NixlBaseConnectorWorker:
             "Remote KV cache base addresses must not be empty."
         )
         fa_group_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
         region_num_blocks = nixl_agent_meta.region_num_blocks or [
             nixl_agent_meta.num_blocks
@@ -2228,6 +2232,8 @@ class NixlBaseConnectorWorker:
 
             # REPLICATE reads the whole block once at offset 0; SPLIT gathers
             # its head slice from each source rank at a per-rank offset.
+            # Without an attention group (e.g. Mamba-only) no FA desc is ever
+            # read, but each must still fit in one remote block.
             if replicated:
                 num_reads, rank_offset = 1, 0
             else:
@@ -2236,7 +2242,11 @@ class NixlBaseConnectorWorker:
                     if local_region in self._head_sharded_draft_regions
                     else plan
                 )
-                num_reads = len(region_plan.source_ranks_per_group[fa_group_idx])
+                num_reads = (
+                    len(region_plan.source_ranks_per_group[fa_group_idx])
+                    if fa_group_idx is not None
+                    else len(region_plan.all_source_ranks)
+                )
                 rank_offset = region_plan.rank_offset_factor * remote_kv_block_len
             local_block_len = local_block_len // num_reads
 
