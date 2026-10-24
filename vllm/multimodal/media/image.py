@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import torch
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -146,6 +149,35 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return safe_to_dense(tensor, parameter="image_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
+        # np.load trusts the array header and materializes the full declared
+        # shape before reading any data, so a tiny payload can allocate
+        # gigabytes. Validate the declared size against the embed decode
+        # budget before loading (same invariant as safe_to_dense).
+        with BytesIO(data) as header_buffer:
+            version = np.lib.format.read_magic(header_buffer)
+            if version == (1, 0):
+                shape, _, dtype = np.lib.format.read_array_header_1_0(header_buffer)
+            elif version == (2, 0):
+                shape, _, dtype = np.lib.format.read_array_header_2_0(header_buffer)
+            else:
+                raise VLLMValidationError(
+                    f"`image_embeds` uses unsupported numpy array "
+                    f"format version {version}.",
+                    parameter="image_embeds",
+                )
+            max_bytes = envs.VLLM_MAX_EMBED_DECODE_BYTES
+            if max_bytes > 0:
+                declared_bytes = math.prod(shape) * dtype.itemsize
+                if declared_bytes > max_bytes:
+                    raise VLLMValidationError(
+                        f"`image_embeds` declares shape {tuple(shape)}, "
+                        f"which would allocate {declared_bytes} bytes "
+                        f"({declared_bytes / MiB_bytes:.0f} MiB), exceeding "
+                        f"the {max_bytes} byte limit. Set "
+                        f"VLLM_MAX_EMBED_DECODE_BYTES to increase this limit.",
+                        parameter="image_embeds",
+                        value=declared_bytes,
+                    )
         with BytesIO(data) as buffer:
             return torch.from_numpy(np.load(buffer))
 
