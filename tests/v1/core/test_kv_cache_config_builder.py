@@ -202,7 +202,7 @@ class TestProjectionPreservesGroupMetadata:
         group.is_eagle_group = False
         group.host_resident = True
         group.enable_kv_transfer = False
-        group.role = KVCacheGroupRole.HISPARSE_SOURCE
+        group.role = KVCacheGroupRole.HISPARSE_HOST
 
         projected = _project_kv_cache_groups_to_worker(
             [group], {"layer1": spec, "layer2": spec}
@@ -211,7 +211,7 @@ class TestProjectionPreservesGroupMetadata:
         p = projected[0]
         assert p.host_resident is True
         assert p.enable_kv_transfer is False
-        assert p.role is KVCacheGroupRole.HISPARSE_SOURCE
+        assert p.role is KVCacheGroupRole.HISPARSE_HOST
         assert p.layer_names == ["layer1", "layer2"]
 
 

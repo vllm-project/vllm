@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NVIDIA HiSparse resident, host, and hot-cache data plane."""
+"""NVIDIA HiSparse device, host, and hot-cache data plane."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, current_stream
 from vllm.v1.attention.backend import max_decode_query_len
-from vllm.v1.hisparse.types import SparseKVResidencyUpdate
+from vllm.v1.hisparse.types import HiSparseResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
@@ -514,30 +514,30 @@ class HiSparsePrefillStagingPlan:
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
-    # Host rows with a GPU-resident copy (adopted shadow pages): the flat
-    # resident-cache row to read instead of DMAing from host, -1 for misses.
+    # Host rows with a device copy (revived GPU copies): the flat
+    # device-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
     gpu_source_key: tuple[int, int] | None = None
 
     def ensure_gpu_sources(
         self,
-        resident_state_rows: torch.Tensor,
+        device_state_rows: torch.Tensor,
         state_indices: torch.Tensor,
-        resident_block_size: int,
+        device_block_size: int,
     ) -> None:
-        """Resolve which staged rows can be served from the resident cache.
+        """Resolve which staged rows can be served from the device cache.
 
-        ``resident_state_rows`` is a resident group's persistent table by
+        ``device_state_rows`` is a device group's persistent table by
         request state row and ``state_indices`` holds each staged request's
-        state row. Computed once per plan and resident group (every layer in
-        the group shares the table); non-null resident pages become
+        state row. Computed once per plan and device group (every layer in
+        the group shares the table); non-null device pages become
         miss_mask=0 rows gathered device-to-device by ``gather_prefill_cache``.
         """
-        source_key = (resident_state_rows.data_ptr(), resident_block_size)
+        source_key = (device_state_rows.data_ptr(), device_block_size)
         if self.gpu_source_key == source_key:
             return
         block_size = self.block_size
-        if resident_block_size <= 0 or block_size % resident_block_size != 0:
+        if device_block_size <= 0 or block_size % device_block_size != 0:
             return
         device = self.row_ids.device
         num_unique = self.row_ids.shape[1] // block_size
@@ -546,11 +546,11 @@ class HiSparsePrefillStagingPlan:
         num_rows, num_cols = new_bt.shape
         if num_rows == 0 or state_indices.shape[0] < num_rows:
             return
-        resident_block_table = resident_state_rows.index_select(
+        device_block_table = device_state_rows.index_select(
             0, state_indices[:num_rows].clamp(min=0)
         )
         # One representative (row, col) per unique host block: any request
-        # referencing the block holds an equivalent (refcounted) resident view.
+        # referencing the block holds an equivalent (refcounted) device view.
         flat_pos = torch.arange(num_rows * num_cols, device=device)
         rep = torch.full(
             (num_unique,), num_rows * num_cols, device=device, dtype=torch.int64
@@ -558,27 +558,26 @@ class HiSparsePrefillStagingPlan:
         rep.scatter_reduce_(
             0, new_bt.reshape(-1), flat_pos, reduce="amin", include_self=True
         )
-        rep_row = (rep // num_cols).clamp(max=resident_block_table.shape[0] - 1)
+        rep_row = (rep // num_cols).clamp(max=device_block_table.shape[0] - 1)
         rep_col = rep % num_cols
-        pages_per_block = block_size // resident_block_size
+        pages_per_block = block_size // device_block_size
         res_pos = rep_col[:, None] * pages_per_block + torch.arange(
             pages_per_block, device=device
         )
-        res_cols = resident_block_table.shape[1]
+        res_cols = device_block_table.shape[1]
         res_blocks = torch.where(
             res_pos < res_cols,
             torch.gather(
-                resident_block_table.to(torch.int64)[rep_row],
+                device_block_table.to(torch.int64)[rep_row],
                 1,
                 res_pos.clamp(max=max(res_cols - 1, 0)),
             ),
             torch.zeros_like(res_pos),
         )
         offsets = torch.arange(block_size, device=device)
-        per_off_block = res_blocks[:, offsets // resident_block_size]
+        per_off_block = res_blocks[:, offsets // device_block_size]
         gpu_rows = (
-            per_off_block * resident_block_size
-            + (offsets % resident_block_size)[None, :]
+            per_off_block * device_block_size + (offsets % device_block_size)[None, :]
         )
         # Block id 0 is the null block in both id spaces.
         valid_rows = self.row_ids.view(num_unique, block_size) >= 0
@@ -772,7 +771,7 @@ class HiSparseRuntime:
         index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
-        self.resident_source_index = -1
+        self.device_group_index = -1
         self.request_state_indices: torch.Tensor | None = None
         self.shared_host_region: SharedOffloadRegion | None = None
 
@@ -838,7 +837,7 @@ class HiSparseRuntime:
         self,
         kv_cache: torch.Tensor,
         plan: HiSparsePrefillStagingPlan,
-        resident_cache: torch.Tensor | None = None,
+        device_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Gather this runtime's host cache using a shared staging plan."""
         if kv_cache.shape[1] != plan.block_size:
@@ -857,11 +856,11 @@ class HiSparseRuntime:
             dtype=kv_cache.dtype,
             device=plan.block_table.device,
         )
-        if plan.gpu_row_ids is not None and resident_cache is not None:
+        if plan.gpu_row_ids is not None and device_cache is not None:
             gpu_rows = plan.gpu_row_ids[0].to(torch.long)
             src = gpu_rows.clamp_min(0)
-            resident_block_size = resident_cache.shape[1]
-            rows = resident_cache[src // resident_block_size, src % resident_block_size]
+            device_block_size = device_cache.shape[1]
+            rows = device_cache[src // device_block_size, src % device_block_size]
             if rows.dtype != staged.dtype:
                 rows = rows.contiguous().view(staged.dtype)
             staged.view(-1, row_width).copy_(rows)
@@ -937,10 +936,10 @@ class HiSparseRuntime:
         self._swap_step += 1
         return slice(start, stop)
 
-    def _resolve_residency(
+    def _launch_residency_kernel(
         self,
         *,
-        resident: HiSparseCacheHandle | None = None,
+        device_handle: HiSparseCacheHandle | None = None,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -1002,9 +1001,9 @@ class HiSparseRuntime:
             swap_host_physical_rows,
             swap_device_physical_rows,
             swap_counts,
-            resident.block_table if resident is not None else None,
-            resident.view.block_size
-            if resident is not None and resident.view is not None
+            device_handle.block_table if device_handle is not None else None,
+            device_handle.view.block_size
+            if device_handle is not None and device_handle.view is not None
             else 0,
             0,
         )
@@ -1023,7 +1022,7 @@ class HiSparseRuntime:
     def _resolve_and_stage_group(
         self,
         *,
-        resident: HiSparseCacheHandle,
+        device_handle: HiSparseCacheHandle,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         logical_topk_indices: torch.Tensor,
@@ -1049,8 +1048,8 @@ class HiSparseRuntime:
             request_ids.masked_fill_(
                 group.row_indices[:num_tokens] >= num_valid_rows, -1
             )
-            self._resolve_residency(
-                resident=resident,
+            self._launch_residency_kernel(
+                device_handle=device_handle,
                 req_id_per_token=request_ids,
                 block_table=block_table,
                 topk_indices=logical_topk_indices,
@@ -1061,7 +1060,7 @@ class HiSparseRuntime:
                 valid_counts_out=valid_counts_out,
             )
             runtimes = [self]
-            if resident.decode_batch:
+            if device_handle.decode_batch:
                 runtimes.extend(group.followers)
             for runtime in runtimes:
                 runtime._swap_rows(shared_rows)
@@ -1087,10 +1086,10 @@ class HiSparseRuntime:
         current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
-    def swap_in(
+    def resolve_residency(
         self,
         *,
-        resident: HiSparseCacheHandle,
+        device_handle: HiSparseCacheHandle,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         logical_topk_indices: torch.Tensor,
@@ -1110,7 +1109,7 @@ class HiSparseRuntime:
 
         if self.is_group_leader:
             self._resolve_and_stage_group(
-                resident=resident,
+                device_handle=device_handle,
                 req_id_per_token=req_id_per_token,
                 block_table=block_table,
                 logical_topk_indices=logical_topk_indices,
@@ -1137,13 +1136,13 @@ class HiSparseRuntime:
 
 def update_hisparse_residency(
     residency: torch.Tensor,
-    updates: Mapping[str, SparseKVResidencyUpdate],
+    updates: Mapping[str, HiSparseResidencyUpdate],
     request_ids: Sequence[str],
     request_state_indices: torch.Tensor,
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[state rows, resident groups, pages]``: the GPU block of
+    ``residency`` is ``[state rows, device groups, pages]``: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
@@ -1174,7 +1173,7 @@ def update_hisparse_residency(
 
 
 class HiSparseCacheHandle:
-    """Attention-facing handle for resident KV and sparse offload state."""
+    """Attention-facing handle for device KV and sparse offload state."""
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
         self.view: PagedCacheView | None = None
@@ -1185,7 +1184,7 @@ class HiSparseCacheHandle:
         self.runtime = runtime
         self.dummy_batch = False
         self.decode_batch = False
-        self.all_context_pages_resident = True
+        self.all_context_pages_on_device = True
         self.num_actual_tokens = 0
         self.num_decode_tokens = 0
         self.req_id_per_token: torch.Tensor | None = None
@@ -1221,7 +1220,7 @@ class HiSparseCacheHandle:
         )
 
     def batch_block_table(self) -> torch.Tensor:
-        """Resident rows by this step's batch row, for the prefill paths."""
+        """Device rows by this step's batch row, for the prefill paths."""
         if self._batch_block_table is None:
             assert self.block_table is not None
             indices = self.runtime.request_state_indices
@@ -1273,7 +1272,7 @@ class HiSparseCacheHandle:
         self.block_table = block_table
         self.slot_mapping = slot_mapping
 
-    def swap_in(
+    def resolve_residency(
         self,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
@@ -1285,8 +1284,8 @@ class HiSparseCacheHandle:
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
     ) -> HiSparseTopKResult:
-        return self.runtime.swap_in(
-            resident=self,
+        return self.runtime.resolve_residency(
+            device_handle=self,
             req_id_per_token=req_id_per_token[: logical_topk_indices.shape[0]],
             block_table=block_table,
             logical_topk_indices=logical_topk_indices,
@@ -1305,9 +1304,9 @@ def initialize_hisparse_runtime_buffers(
 ) -> None:
     """Allocate the request state shared by every HiSparse runtime."""
     assert cache_handles
-    resident = cache_handles[0].view
-    assert resident is not None
-    device = resident.cache.device
+    device_view = cache_handles[0].view
+    assert device_view is not None
+    device = device_view.cache.device
     request_state_indices = torch.full(
         (max_num_reqs,), -1, dtype=torch.int32, device=device
     )
@@ -1359,7 +1358,7 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
-        "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
+        "Enabled experimental HiSparse HMA hot buffers: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,

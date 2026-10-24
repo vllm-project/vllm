@@ -28,7 +28,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    HiSparseResidentSpec,
+    HiSparseDeviceSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -734,7 +734,7 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
     )
     page = spec.page_size_bytes
-    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    device_spec = HiSparseDeviceSpec(block_size=2, page_size=page)
     device_size = 4 * page
     config = KVCacheConfig(
         num_blocks=4,
@@ -755,7 +755,7 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
             ),
             KVCacheTensor(
                 size=device_size,
-                layers=["resident"],
+                layers=["device"],
                 layer_stride=device_size,
                 block_stride=page,
             ),
@@ -763,7 +763,7 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         kv_cache_groups=[
             KVCacheGroupSpec(["source"], spec, host_resident=True),
             KVCacheGroupSpec(["indexer"], spec),
-            KVCacheGroupSpec(["resident"], resident_spec),
+            KVCacheGroupSpec(["device"], device_spec),
         ],
     )
     host_buffers: list[torch.Tensor] = []
@@ -788,7 +788,7 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         == host_buffers[0].untyped_storage().data_ptr()
     )
     assert caches["indexer"].shape[0] == 4
-    backing = caches["resident"]
+    backing = caches["device"]
     assert backing.dtype == torch.int8 and backing.numel() >= device_size
     assert (
         backing.untyped_storage().data_ptr()

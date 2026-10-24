@@ -852,7 +852,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
-            if num_decode_tokens < q.shape[0] and cache.all_context_pages_resident:
+            if num_decode_tokens < q.shape[0] and cache.all_context_pages_on_device:
                 physical_topk, lengths = index_group.convert_logical_to_physical_topk(
                     self.index_group_index,
                     topk_indices,

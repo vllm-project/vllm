@@ -26,8 +26,8 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseDeviceSpec,
     HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
@@ -2213,11 +2213,11 @@ class SinkFullAttentionManager(FullAttentionManager):
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
 
 
-class HiSparseSourceManager(FullAttentionManager):
+class HiSparseHostManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
     Every page gets a host block: allocation fails when the host pool cannot
-    back it, so each GPU-resident page can be written back and later reclaimed.
+    back it, so each device page can be written back and later released.
     """
 
     coordinator: "HiSparseCoordinator | None" = None
@@ -2318,7 +2318,7 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        self.coordinator.publish_when_ready(
+        self.coordinator.publish_when_durable(
             request,
             num_tokens,
             retention_interval,
@@ -2347,7 +2347,7 @@ class HiSparseSourceManager(FullAttentionManager):
 
 
 class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
-    """Base for ephemeral groups whose host source owns prefix caching."""
+    """Base for ephemeral groups whose host group owns prefix caching."""
 
     coordinator: "HiSparseCoordinator | None" = None
 
@@ -2378,17 +2378,17 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
 
 class HiSparseHotManager(_HiSparseAuxiliaryManager):
-    """Allocate a hot region only after a request acquires CPU-only history."""
+    """Allocate a hot buffer only after a request acquires CPU-only history."""
 
     def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.blocks_per_request = kv_cache_spec.blocks_per_request
-        self.hot_required: set[str] = set()
+        self.hot_buffer_requests: set[str] = set()
 
-    def require_hot(self, request_id: str) -> None:
-        self.hot_required.add(request_id)
+    def request_hot_buffer(self, request_id: str) -> None:
+        self.hot_buffer_requests.add(request_id)
 
-    def has_hot(self, request_id: str) -> bool:
+    def has_hot_buffer(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
 
     def get_num_blocks_to_allocate(
@@ -2403,14 +2403,14 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         prefill_end: int = 0,
     ) -> int:
         assert not new_computed_blocks
-        # A hot region is needed to read host-backed history: an external
+        # A hot buffer is needed to read host-backed history: an external
         # import, a new request resuming a host prefix, or one already asked
         # to transition. Running requests keep their earlier answer.
         host_import = total_computed_tokens > num_local_computed_tokens
         resumes_host_prefix = (
             num_local_computed_tokens > 0 and request_id not in self.num_cached_block
         )
-        if host_import or resumes_host_prefix or request_id in self.hot_required:
+        if host_import or resumes_host_prefix or request_id in self.hot_buffer_requests:
             return self.get_num_required_blocks(request_id)
         return 0
 
@@ -2430,8 +2430,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         assert not new_computed_blocks
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
-        if num_local_computed_tokens > 0 or not self.coordinator.resident_managers:
-            self.require_hot(request_id)
+        if num_local_computed_tokens > 0 or not self.coordinator.device_managers:
+            self.request_hot_buffer(request_id)
 
     def allocate_external_computed_blocks(
         self,
@@ -2440,14 +2440,14 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        self.require_hot(request_id)
+        self.request_hot_buffer(request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
-        if request_id not in self.hot_required:
+        if request_id not in self.hot_buffer_requests:
             return []
         req_blocks = self.req_to_blocks[request_id]
         num_new_blocks = self.blocks_per_request - len(req_blocks)
@@ -2458,16 +2458,16 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         return new_blocks
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        self.hot_required.discard(request_id)
+        self.hot_buffer_requests.discard(request_id)
         return super().pop_blocks_for_free(request_id)
 
 
-class HiSparseResidentManager(_HiSparseAuxiliaryManager):
-    """Track GPU-resident pages for otherwise host-backed KV."""
+class HiSparseDeviceManager(_HiSparseAuxiliaryManager):
+    """Track device pages for otherwise host-backed KV."""
 
     max_admission_blocks_per_request: int
 
-    def __init__(self, kv_cache_spec: HiSparseResidentSpec, **kwargs) -> None:
+    def __init__(self, kv_cache_spec: HiSparseDeviceSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.residency_changes: dict[str, dict[int, KVCacheBlock]] = {}
 
@@ -2489,7 +2489,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             # replay on a full prompt hit. Only earlier pages stay host-only.
             imported_pages = cdiv(total_computed_tokens, self.block_size)
             existing = len(self.req_to_blocks.get(request_id, ()))
-            needs_tail = self.get_resident_page(request_id, imported_pages - 1) is None
+            needs_tail = self.get_device_page(request_id, imported_pages - 1) is None
             return int(needs_tail) + max(
                 cdiv(num_tokens, self.block_size) - max(imported_pages, existing), 0
             )
@@ -2514,7 +2514,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         tail_page = (num_tokens - 1) // self.block_size
         if len(blocks) <= tail_page:
             blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
-        if self.get_resident_page(request_id, tail_page) is None:
+        if self.get_device_page(request_id, tail_page) is None:
             blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
@@ -2531,7 +2531,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
-        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+        self.coordinator.record_host_prefix_hit(request_id, num_host_pages)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -2553,48 +2553,45 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
 
-    def adopt_resident_page(
-        self, request_id: str, block_idx: int, block: KVCacheBlock
+    def revive_device_page(
+        self, request_id: str, page_idx: int, block: KVCacheBlock
     ) -> bool:
         """Point a null prefix page at a pinned GPU copy of its contents."""
         blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
+        if blocks is None or page_idx >= len(blocks):
             return False
-        if self.get_resident_page(request_id, block_idx) is not None:
+        if self.get_device_page(request_id, page_idx) is not None:
             return False
-        self.residency_changes.setdefault(request_id, {})[block_idx] = block
+        self.residency_changes.setdefault(request_id, {})[page_idx] = block
         return True
 
-    def drop_resident_page(
-        self, request_id: str, block_idx: int
-    ) -> KVCacheBlock | None:
+    def drop_device_page(self, request_id: str, page_idx: int) -> KVCacheBlock | None:
         """Stop reading a page from the GPU; return the block it was read from."""
-        block = self.get_resident_page(request_id, block_idx)
+        block = self.get_device_page(request_id, page_idx)
         if block is not None:
             changes = self.residency_changes.setdefault(request_id, {})
-            changes[block_idx] = self._null_block
+            changes[page_idx] = self._null_block
         return block
 
-    def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
+    def get_device_page(self, request_id: str, page_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
+        if blocks is None or page_idx >= len(blocks):
             return None
-        block = blocks[block_idx]
+        block = blocks[page_idx]
         changes = self.residency_changes.get(request_id)
         if changes:
-            block = changes.get(block_idx, block)
+            block = changes.get(page_idx, block)
         return None if block.is_null else block
 
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
         """The request's row from ``start`` with residency changes applied. Unlike
-        ``get_resident_page``, host-only pages stay as the null block."""
+        ``get_device_page``, host-only pages stay as the null block."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
         changes = self.residency_changes.get(request_id)
         if not changes:
             return blocks
         return [
-            changes.get(block_idx, block)
-            for block_idx, block in enumerate(blocks, start)
+            changes.get(page_idx, block) for page_idx, block in enumerate(blocks, start)
         ]
 
 
@@ -2634,7 +2631,7 @@ def get_manager_for_kv_cache_spec(
     # FullAttentionSpec sizing without a separate admission cap.
     if isinstance(
         kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseDeviceSpec),
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
@@ -2649,7 +2646,7 @@ def get_manager_for_kv_cache_spec(
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
     KVCacheSpecRegistry.register_role_manager(
-        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
+        KVCacheGroupRole.HISPARSE_HOST, HiSparseHostManager
     )
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
@@ -2662,9 +2659,9 @@ def register_all_kvcache_specs(vllm_config):
         uniform_type_base_spec=HiSparseHotSpec,
     )
     KVCacheSpecRegistry.register(
-        HiSparseResidentSpec,
-        HiSparseResidentManager,
-        uniform_type_base_spec=HiSparseResidentSpec,
+        HiSparseDeviceSpec,
+        HiSparseDeviceManager,
+        uniform_type_base_spec=HiSparseDeviceSpec,
     )
 
     KVCacheSpecRegistry.register(

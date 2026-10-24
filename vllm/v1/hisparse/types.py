@@ -9,19 +9,19 @@ ACTIVE_TAIL_PAGES = 2
 
 
 @dataclass(frozen=True)
-class SparseKVPageTransfer:
+class HiSparsePageTransfer:
     """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
     host_block_id: int
-    resident_block_ids: tuple[int, ...]
-    after_forward: bool
-    restore: bool = False
+    device_block_ids: tuple[int, ...]
+    runs_after_forward: bool
+    is_restore: bool = False
 
 
 @dataclass(frozen=True)
-class SparseKVRowMirror:
-    """Mirror one contiguous resident-row span into the host cache."""
+class HiSparseRowMirror:
+    """Mirror one contiguous device-row span into the host cache."""
 
     source_starts: tuple[int, ...]
     destination_start: int
@@ -29,8 +29,8 @@ class SparseKVRowMirror:
 
 
 @dataclass(frozen=True)
-class SparseKVResidencyUpdate:
-    """GPU block ids of some of a request's resident pages, per resident group.
+class HiSparseResidencyUpdate:
+    """GPU block ids of some of a request's device pages, per device group.
     A null block id means the page is read from the host."""
 
     pages: list[int]
@@ -38,7 +38,7 @@ class SparseKVResidencyUpdate:
 
 
 @dataclass
-class SparseKVOffloadCommand:
+class HiSparseTransferCommand:
     """Opaque scheduler-to-worker command for one model step."""
 
-    page_transfers: list[SparseKVPageTransfer]
+    page_transfers: list[HiSparsePageTransfer]

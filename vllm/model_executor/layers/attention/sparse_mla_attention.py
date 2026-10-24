@@ -804,7 +804,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
         if (
             num_decode_tokens >= num_tokens
-            or index_group.cache(layer_index).all_context_pages_resident
+            or index_group.cache(layer_index).all_context_pages_on_device
         ):
             physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
                 layer_index,
