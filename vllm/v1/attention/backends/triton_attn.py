@@ -207,6 +207,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
+        if vllm_config.speculative_config is not None:
+            logger.warning_once(
+                "Speculative decoding is enabled: decode steps carry "
+                "max_seqlen_q > 1, which excludes them from the segmented 3D "
+                "flash-decoding path of the Triton unified attention kernel. "
+                "Decode runs on the 2D path, whose throughput degrades as "
+                "context grows (see "
+                "https://github.com/vllm-project/vllm/issues/48076). Consider "
+                "disabling speculation for long-context serving, or an "
+                "attention backend that supports speculation as decode."
+            )
         self.rswa_window = model_config.rswa_window
         # R-SWA restages prefix lengths in build(), which the no-op
         # update_draft_decode_metadata() does not refresh.
