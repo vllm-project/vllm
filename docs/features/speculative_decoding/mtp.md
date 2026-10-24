@@ -83,3 +83,16 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+- `"prune_draft_prefill_attention": true` in `--speculative-config` (off by
+  default, Model Runner V2) makes the draft prefill compute attention only for
+  the one row per request it samples, instead of for every scheduled token,
+  which saves most of the draft's prefill attention in mixed prefill/decode
+  batches. It is accepted only with `"method": "mtp"` and a single MTP module
+  (not Gemma 4 or multi-module MTP). It applies to MTP heads with a single
+  attention layer (and no other attention or state layers) on the FlashInfer
+  backend with XQA or trtllm-gen decode (`"attention_backend": "FLASHINFER"`
+  selects it for the draft), without prefill or decode context parallelism;
+  otherwise vLLM logs a warning and keeps full attention. Draft prefills that
+  replay a full CUDA graph (all-decode steps) always use full attention. The
+  target still verifies every draft token, and the sampled rows change only in
+  floating-point reduction order, so only the acceptance length can move.

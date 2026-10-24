@@ -481,6 +481,18 @@ class SpeculativeConfig:
     platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
     W4A16 kernel. The target verifies with its own head, so only the
     acceptance length can change. Model Runner V2 only."""
+    prune_draft_prefill_attention: bool = False
+    """MTP draft prefill: compute attention only for the row each request
+    samples, as one decode launch over that row's causal KV, instead of for
+    every scheduled token. KV-cache writes still cover every token. Only for
+    method "mtp" with a single MTP module (not Gemma 4 or multi-module MTP);
+    other methods are rejected. Applies to drafts with exactly one attention
+    layer and no other attention or state layers, on the FlashInfer backend with
+    XQA or trtllm-gen decode, without prefill or decode context parallelism;
+    otherwise it logs a warning and keeps full attention. Draft prefills that
+    replay a full CUDA graph always use full attention. The sampled rows'
+    outputs can differ from full prefill attention in floating-point reduction
+    order, so only the acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1919,6 +1931,14 @@ class SpeculativeConfig:
                     "draft_lm_head_quantization needs the lm_head to run in the "
                     f"model dtype, got head_dtype={draft.head_dtype}."
                 )
+
+        if self.prune_draft_prefill_attention and (
+            self.method != "mtp" or self.use_gemma4_mtp() or self.use_multi_module_mtp()
+        ):
+            raise ValueError(
+                "prune_draft_prefill_attention needs method 'mtp' with a single "
+                "MTP module (not Gemma 4 or multi-module MTP)."
+            )
 
         if self.num_speculative_tokens <= 0:
             raise ValueError(
