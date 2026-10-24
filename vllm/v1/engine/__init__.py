@@ -41,6 +41,25 @@ EEP_NOTIFICATION_CALL_ID = -1
 FT_STATUS_CALL_ID = -2
 
 
+class CheckpointState(enum.StrEnum):
+    """Process checkpoint lifecycle of an engine. It serves only while
+    RUNNING, and may go through the cycle any number of times."""
+
+    RUNNING = "running"
+    # Draining, then releasing what a checkpoint must not contain.
+    PREPARING = "preparing"
+    # Safe to capture.
+    PREPARED = "prepared"
+    # Bringing back what preparing released.
+    RESUMING = "resuming"
+    FAILED = "failed"
+
+    @property
+    def is_restored(self) -> bool:
+        """Whether released state is back, so memory may wake and scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESUMING)
+
+
 class EEPNotificationType(enum.Enum):
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
