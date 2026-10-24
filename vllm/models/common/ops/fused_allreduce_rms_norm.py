@@ -37,6 +37,11 @@ def fused_allreduce_rms_norm(
     if tp_size == 1:
         return norm(hidden_states, residual)
 
+    # The fused kernel reads norm.weight directly, bypassing adapter forward().
+    if not getattr(norm, "supports_fused_allreduce_rms_norm", True):
+        reduced = tensor_model_parallel_all_reduce(hidden_states)
+        return norm(reduced, residual)
+
     if flashinfer_trtllm_fused_allreduce_norm is not None:
         ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
         if ok:
