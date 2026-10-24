@@ -102,7 +102,7 @@ struct scalar<c10::BFloat16> {
                                          *((bf16x2_t*)(&(V3))), V0, false); \
   }
 
-// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cu).
+// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cuh).
 // row_shr within 16-lane rows, then cross-row __shfl_xor.
 // Result accumulates in lane (THRDS - 1).
 #if defined(__HIP__GFX1X__)
