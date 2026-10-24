@@ -176,10 +176,11 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("Requires four GPUs with NVLink multicast")
-    multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_all_reduce_mhc_matches_unfused_path(monkeypatch, tp_size):
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Requires {tp_size} GPUs")
+    multi_process_parallel(monkeypatch, tp_size, 1, _all_reduce_mhc)
 
 
 @pytest.mark.parametrize(
