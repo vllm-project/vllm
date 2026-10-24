@@ -34,10 +34,12 @@ You can see the complete list of supported parameters on the [OpenAI-Compatible 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
 `--structured-outputs-config.backend` flag to `vllm serve`. The default backend is `auto`,
-which will try to choose an appropriate backend based on the details of the
-request. You may also choose a specific backend, along with
-some options. A full set of options is available in the `vllm serve --help`
-text.
+which selects one backend for the whole server from its tokenizer: `guidance` for
+Tekken-based Mistral tokenizers and `xgrammar` otherwise. It does not fall back to
+another backend per request, so a constraint the selected backend cannot enforce
+is rejected; choose a backend explicitly to use features only it supports. You may
+also choose a specific backend, along with some options. A full set of options is
+available in the `vllm serve --help` text.
 
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 

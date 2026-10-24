@@ -311,54 +311,41 @@ def test_unhandled_spec_is_a_validation_error(validate):
 
 
 @pytest.mark.parametrize(
-    "schema, expected_backend",
+    "schema",
     [
         # multipleOf is unsupported by xgrammar.
-        (
-            {
-                "type": "object",
-                "properties": {"n": {"type": "integer", "multipleOf": 2}},
-            },
-            "guidance",
-        ),
-        (
-            {
-                "type": "object",
-                "properties": {"n": {"type": ["number", "null"], "multipleOf": 3}},
-            },
-            "guidance",
-        ),
-        (
-            {
-                "type": ["string", "null"],
-                "pattern": "^a+$",
-                "maxLength": 2,
-            },
-            "guidance",
-        ),
-        # patternProperties + properties is also unsupported by guidance.
-        (
-            {
-                "type": "object",
-                "properties": {"a": {"type": "string"}},
-                "patternProperties": {"^a$": {"type": "string"}},
-            },
-            "outlines",
-        ),
+        {
+            "type": "object",
+            "properties": {"n": {"type": "integer", "multipleOf": 2}},
+        },
+        # patternProperties + properties is unsupported by xgrammar and guidance.
+        {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "patternProperties": {"^a$": {"type": "string"}},
+        },
     ],
 )
-def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend):
-    """`auto` falls back on rejection, so it must catch what the validators raise."""
-    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
-    # trick to create tokenizer that guidance backend accepts
+def test_auto_backend_rejects_schema_without_fallback(schema):
+    """`auto` resolves from the tokenizer, not the request: EngineCore compiles
+    every request with one backend, so a per-request fallback would make the
+    outcome depend on which request reached the engine first."""
     tokenizer = object.__new__(TokenizersBackend)
+    assert _validate_auto(JSON_SCHEMA, tokenizer)._backend == "xgrammar"
+    with pytest.raises(VLLMValidationError, match="not supported by xgrammar"):
+        _validate_auto(schema, tokenizer)
+
+
+def _validate_auto(schema, tokenizer) -> StructuredOutputsParams:
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
     params._validate_structured_outputs(
         _StubModelConfig(is_diffusion=False),
         StructuredOutputsConfig(backend="auto"),
         tokenizer=tokenizer,
     )
     assert params.structured_outputs is not None
-    assert params.structured_outputs._backend == expected_backend
+    assert params.structured_outputs._backend_was_auto
+    return params.structured_outputs
 
 
 # ================================================
@@ -449,6 +436,18 @@ class TestValidateStructuredOutputs:
                 )
             params = self._validate_guidance(self._make_tokenizer(tokenizer_id))
             assert params.structured_outputs._backend == "guidance"
+
+        def test_auto_selects_guidance_for_tekken_mistral(self, monkeypatch):
+            monkeypatch.setattr(
+                mistral_tokenizers, "MistralTokenizer", self._StubVllmMistralTokenizer
+            )
+            monkeypatch.setattr(
+                backend_guidance,
+                "validate_guidance_grammar",
+                lambda *_args, **_kwargs: None,
+            )
+            tokenizer = self._make_tokenizer("vllm-mistral-tekken")
+            assert _validate_auto(JSON_SCHEMA, tokenizer)._backend == "guidance"
 
     class TestPR49625Regression:
         def test_manager_rejects_mixed_structured_output_backends(self, monkeypatch):

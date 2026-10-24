@@ -17,6 +17,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -266,6 +267,21 @@ def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
 
 def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
     return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
+
+
+def _auto_structured_outputs_backend(
+    tokenizer: TokenizerLike,
+) -> StructuredOutputsBackend:
+    """Resolve `auto` from the tokenizer alone, so every request on a server
+    selects the same backend: EngineCore compiles all requests with one."""
+    # The Mistral tool parser generates Lark grammars for Tekken Mistral
+    # tokenizers. llguidance takes the tokenizer from mistral-common and never
+    # lets a regex match a special token. The xgrammar backend declares no
+    # special tokens for Mistral tokenizers, so a regex like `.` can match
+    # `[TOOL_CALLS]` or `[INST]` as plain text.
+    if is_mistral_tokenizer(tokenizer) and tokenizer.is_tekken:
+        return "guidance"
+    return "xgrammar"
 
 
 class SamplingParams(
@@ -1321,7 +1337,6 @@ class SamplingParams(
 
         from vllm.v1.structured_output.backend_guidance import (
             GuidanceBackend,
-            has_guidance_unsupported_json_features,
             validate_guidance_grammar,
         )
         from vllm.v1.structured_output.backend_lm_format_enforcer import (
@@ -1331,7 +1346,12 @@ class SamplingParams(
             validate_structured_output_request_outlines,
         )
         from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
-        from vllm.v1.structured_output.utils import grammar_is_likely_lark
+
+        if backend == "auto":
+            backend = _auto_structured_outputs_backend(tokenizer)
+            self.structured_outputs._backend = backend
+            # Remember that this backend was set automatically
+            self.structured_outputs._backend_was_auto = True
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -1371,75 +1391,6 @@ class SamplingParams(
                     "backends or tokenizer_mode='hf' instead."
                 )
             validate_structured_output_request_lm_format_enforcer(self)
-        elif (
-            backend == "auto"
-            and is_mistral_tokenizer(tokenizer)
-            and tokenizer.is_tekken
-            and self.structured_outputs.grammar
-            and grammar_is_likely_lark(self.structured_outputs.grammar)
-        ):
-            # Lark grammars for Tekken Mistral tokenizers, including the ones
-            # the Mistral tool parser generates, go to guidance. llguidance
-            # takes the tokenizer from mistral-common and never lets a regex
-            # match a special token. The xgrammar backend declares no special
-            # tokens for Mistral tokenizers, so a regex like `.` can match
-            # `[TOOL_CALLS]` or `[INST]` as plain text.
-            validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
-            self.structured_outputs._backend = "guidance"
-            self.structured_outputs._backend_was_auto = True
-        else:
-            # NOTE: backend must be "auto" here, because we have
-            # checked supported_backends above.
-            # In this mode, we set opinionated defaults based on what we think
-            # will satisfy the most use cases without having to worry about
-            # this setting. We include fallback behavior here, but not with any
-            # other setting where a specific backend was specified.
-            try:
-                validate_xgrammar_grammar(self)
-                self.structured_outputs._backend = "xgrammar"
-            except VLLMValidationError:
-                # The request either failed validation
-                # or includes some jsonschema feature(s) that
-                # are not supported in xgrammar.
-
-                skip_guidance = _is_non_tekken_mistral(tokenizer)
-
-                # Check if schema has features unsupported by guidance
-                so_params = self.structured_outputs
-                if not skip_guidance and so_params.json:
-                    if isinstance(so_params.json, str):
-                        try:
-                            schema = json_mod.loads(so_params.json)
-                        except json_mod.JSONDecodeError as e:
-                            raise VLLMValidationError(
-                                "Invalid JSON grammar specification."
-                            ) from e
-                    else:
-                        schema = so_params.json
-                    skip_guidance = has_guidance_unsupported_json_features(schema)
-
-                if skip_guidance:
-                    # Fall back to outlines for non-Tekken Mistral tokenizers or
-                    # schemas containing features unsupported by guidance.
-                    validate_structured_output_request_outlines(self)
-                    self.structured_outputs._backend = "outlines"
-                else:
-                    # Fall back to guidance by default.
-                    if not GuidanceBackend.is_tokenizer_supported(tokenizer):
-                        raise VLLMValidationError(
-                            "No compatible structured output backend was found for "
-                            "this request. XGrammar rejected the constraint, and "
-                            "Guidance does not support this tokenizer. Configure a "
-                            "fast tokenizer or select a compatible backend explicitly."
-                        ) from None
-                    validate_guidance_grammar(
-                        self,
-                        tokenizer=_get_llg_tokenizer(tokenizer),
-                    )
-                    self.structured_outputs._backend = "guidance"
-            # Remember that this backend was set automatically
-            self.structured_outputs._backend_was_auto = True
-
         # Run post-init validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
         self.structured_outputs.__post_init__()
