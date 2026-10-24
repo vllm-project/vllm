@@ -532,12 +532,16 @@ def test_sparse_backend_decode_correctness(
     monkeypatch,
     block_stride_rows: int | None = None,
 ):
-    if qk_rope_head_dim == 0 and (
-        backend_cls != FlashMLASparseBackend
-        or kv_cache_dtype not in ("auto", "fp8_ds_mla")
-        or torch.cuda.get_device_capability()[0] != 9
+    if (
+        qk_rope_head_dim == 0
+        and not current_platform.is_rocm()
+        and (
+            backend_cls != FlashMLASparseBackend
+            or kv_cache_dtype not in ("auto", "fp8_ds_mla")
+            or torch.cuda.get_device_capability()[0] != 9
+        )
     ):
-        pytest.skip("NoPE sparse MLA is served by FlashMLA on SM90 only")
+        pytest.skip("NoPE sparse MLA is served by FlashMLA on SM90 or ROCm only")
     if (
         batch_name == "large_q_pure_prefill"
         and backend_cls == FlashMLASparseBackend
@@ -753,6 +757,13 @@ def test_sparse_backend_decode_correctness(
                 scale=kv_cache_scale,
             )
             k_pe_full = k_pe_squeezed.unsqueeze(1)
+        elif current_platform.is_rocm() and kv_cache_dtype == "fp8":
+            # Per-tensor FP8 cache: compare against the values the cache holds.
+            fp8_dtype = current_platform.fp8_dtype()
+            kv_c_full, k_pe_full = (
+                ((x.float() / k_scale).to(fp8_dtype).float() * k_scale).to(dtype)
+                for x in (kv_c_full, k_pe_full)
+            )
 
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
         ql_nope = torch.einsum("qnh,lnh->qnl", q_nope, W_UK)
