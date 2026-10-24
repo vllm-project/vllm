@@ -37,6 +37,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     get_sentence_transformers_activation_fn,
+    is_cross_encoder_activation_overridden,
     is_encoder_decoder,
     iter_rope_parameters,
     mrope_num_dims,
@@ -795,15 +796,13 @@ class ModelConfig:
 
             # Sentence Transformers v6 saves the CrossEncoder activation outside
             # config.json; put it where the classifier activation lookup reads it,
-            # unless hf_overrides already set the activation explicitly.
-            overrides = self.hf_overrides if isinstance(self.hf_overrides, dict) else {}
-            act_fn_overridden = "sbert_ce_default_activation_function" in overrides or (
-                "activation_fn" in (overrides.get("sentence_transformers") or {})
-            )
-            if not act_fn_overridden and (
+            # unless hf_overrides already changed the activation.
+            if (
                 act_fn := get_sentence_transformers_activation_fn(
                     self.model, self.revision
                 )
+            ) and not is_cross_encoder_activation_overridden(
+                self.hf_config, self.model, self.revision
             ):
                 self.hf_config.sentence_transformers = {
                     **(getattr(self.hf_config, "sentence_transformers", None) or {}),

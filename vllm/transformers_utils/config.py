@@ -1482,6 +1482,23 @@ def get_sentence_transformers_activation_fn(
     return activation_fn if isinstance(activation_fn, str) else None
 
 
+def is_cross_encoder_activation_overridden(
+    hf_config: PreTrainedConfig,
+    model: str | Path,
+    revision: str | None = None,
+) -> bool:
+    """Whether `hf_overrides` changed the CrossEncoder activation that
+    `config.json` declares, through a dict or a callable."""
+    saved = get_hf_file_to_dict("config.json", model, revision) or {}
+    return (
+        (getattr(hf_config, "sentence_transformers", None) or {}).get("activation_fn")
+        != (saved.get("sentence_transformers") or {}).get("activation_fn")
+    ) or (
+        getattr(hf_config, "sbert_ce_default_activation_function", None)
+        != saved.get("sbert_ce_default_activation_function")
+    )
+
+
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
     return {
         param_name: info

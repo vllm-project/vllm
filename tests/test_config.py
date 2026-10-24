@@ -2453,18 +2453,25 @@ def test_get_sentence_transformers_activation_fn(tmp_path, st_config, expected):
 _SIGMOID = "torch.nn.modules.activation.Sigmoid"
 
 
+def _sigmoid_override(hf_config):
+    hf_config.sentence_transformers = {"activation_fn": _SIGMOID}
+    return hf_config
+
+
 @pytest.mark.parametrize(
     ("hf_overrides", "expected"),
     [
         ({}, PoolerIdentity),
         ({"sentence_transformers": {"activation_fn": _SIGMOID}}, PoolerClassify),
         ({"sbert_ce_default_activation_function": _SIGMOID}, PoolerClassify),
+        (_sigmoid_override, PoolerClassify),
     ],
 )
 def test_sentence_transformers_cross_encoder_activation_fn(hf_overrides, expected):
     """Sentence Transformers v6 saves the CrossEncoder activation (here
     Identity) in config_sentence_transformers.json instead of config.json.
-    An explicit hf_overrides activation still takes precedence."""
+    An explicit hf_overrides activation, as a dict or a callable, still takes
+    precedence."""
     model_config = ModelConfig(
         "tomaarsen/ettin-encoder-150m-reranker-msmarco524k-1e-4-20261014",
         hf_overrides=hf_overrides,
