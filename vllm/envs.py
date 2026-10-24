@@ -60,6 +60,10 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_DSA_CANDIDATE_GATHER_DECODE: bool = False
+    VLLM_DSA_CANDIDATE_GATHER_FORCE: bool = False
+    VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO: int = 1
+    VLLM_DSA_CANDIDATE_GATHER_MIN_ROWS: int = 1
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
@@ -1093,6 +1097,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Experimental SM90 candidate-only decode scoring. Unsupported shapes
+    # fall back to dense; without FORCE, workload gates also apply.
+    "VLLM_DSA_CANDIDATE_GATHER_DECODE": lambda: bool(
+        int(os.getenv("VLLM_DSA_CANDIDATE_GATHER_DECODE", "0"))
+    ),
+    # Validation only: bypass workload gates, including during FULL graph
+    # capture. Requires DECODE=1; platform/format checks still apply. Small
+    # batches and short contexts may regress. Set before starting workers.
+    "VLLM_DSA_CANDIDATE_GATHER_FORCE": lambda: bool(
+        int(os.getenv("VLLM_DSA_CANDIDATE_GATHER_FORCE", "0"))
+    ),
+    # Optional workload gates for candidate gather. Their profitable values
+    # are hardware-dependent; defaults impose only shape-level lower bounds.
+    # Dense scoring costs scale with rows x context while candidate scoring is
+    # dominated by a per-step fixed cost, so the crossover tracks the product
+    # ``rows * context / candidate_width`` rather than context alone.
+    "VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO": lambda: int(
+        os.getenv("VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO", "1")
+    ),
+    # Decode rows include speculative rows.
+    "VLLM_DSA_CANDIDATE_GATHER_MIN_ROWS": lambda: int(
+        os.getenv("VLLM_DSA_CANDIDATE_GATHER_MIN_ROWS", "1")
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
