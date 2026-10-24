@@ -616,3 +616,50 @@ def test_finish_requests_frees_slots_in_sorted_order():
     GPUModelRunner.finish_requests(fake_runner, scheduler_output)
     assert removed == sorted(removed)
     assert set(removed) == {"req-a", "req-b", "req-c", "req-d", "req-e"}
+
+
+def test_dummy_sampler_run_profiles_rank_without_local_reqs():
+    """A rank that owns no dummy request must still run its sampler once in
+    the profile run, because it can own a real request later. It must not
+    issue a collective beyond the shared all-to-all."""
+    from vllm.v1.worker.gpu import model_runner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    tp_size, vocab_size, padded_vocab_size = 2, 10, 16
+    empty_local_batch = SimpleNamespace(num_reqs=0)
+    one_row_batch = SimpleNamespace(num_reqs=1)
+    shard_sampler_inputs = mock.Mock(
+        return_value=(
+            empty_local_batch,
+            torch.zeros(0, dtype=torch.int64),
+            None,
+            SimpleNamespace(),
+        )
+    )
+    fake_runner = SimpleNamespace(
+        input_buffers=object(),
+        batch_sharder=SimpleNamespace(shard_sampler_inputs=shard_sampler_inputs),
+        model=SimpleNamespace(
+            compute_logits_local=lambda h: h.new_zeros(
+                h.shape[0], padded_vocab_size // tp_size
+            )
+        ),
+        vocab_size=vocab_size,
+        sampler=mock.Mock(),
+    )
+    make_dummy = mock.Mock(side_effect=[SimpleNamespace(), one_row_batch])
+    all_to_all_logits = mock.Mock(
+        side_effect=lambda shard, _: shard.new_zeros(0, padded_vocab_size)
+    )
+    with (
+        mock.patch.object(model_runner.InputBatch, "make_dummy", make_dummy),
+        mock.patch.object(model_runner, "all_to_all_logits", all_to_all_logits),
+    ):
+        GPUModelRunner._dummy_sampler_run(fake_runner, torch.randn(3, 4))
+
+    all_to_all_logits.assert_called_once()
+    make_dummy.assert_called_with(1, 1, fake_runner.input_buffers)
+    fake_runner.sampler.assert_called_once()
+    logits, input_batch = fake_runner.sampler.call_args.args
+    assert logits.shape == (1, vocab_size)
+    assert input_batch is one_row_batch
