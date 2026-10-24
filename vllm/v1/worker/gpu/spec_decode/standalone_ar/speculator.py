@@ -9,7 +9,6 @@ from vllm.compilation.backends import set_model_tag
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -17,16 +16,19 @@ from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
+)
+from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
-logger = init_logger(__name__)
 
-
-class StandaloneARSpeculator(DraftModelSpeculator):
+class StandaloneARSpeculator(AutoRegressiveSpeculator):
     """Standalone autoregressive (AR) drafting with a separate smaller LM.
 
     Unlike Eagle, the draft model runs fully independently of the target model.
@@ -36,6 +38,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
 
     # Standalone AR drafting needs one extra slot per request for correction.
     num_extra_query_per_req = 1
+    draft_seq_len_offset = 1
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -44,16 +47,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         # Standalone AR drafting doesn't do per-batch adjustment; cap at max.
         self.draft_max_seq_len = self.max_model_len
 
-        self.last_token_indices = torch.zeros(
-            self.max_num_reqs, dtype=torch.int64, device=device
-        )
         # GPU-side arange for decode query_start_loc initialisation.
         self.arange_gpu = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device=device
         )
-        # Scalar step counter used as column index into draft_logits.
-        self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
-
         _expanded_max = self.max_num_tokens + self.max_num_reqs
         self.expanded_input_ids = torch.zeros(
             _expanded_max, dtype=torch.int32, device=device
@@ -63,12 +60,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         )
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
-
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        pass  # CUDA graph not yet supported for standalone AR speculator.
-
-    def capture(self) -> None:
-        pass  # CUDA graph not yet supported for standalone AR speculator.
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -134,6 +125,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        cudagraph_manager: SpeculatorCudaGraphManager | None = None,
     ) -> torch.Tensor:
         num_tokens = input_ids.shape[0]
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
@@ -141,15 +134,17 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
-            hidden_states = self.model(  # type: ignore[misc]
-                input_ids=input_ids,
-                positions=positions,
-            )
+            model_inputs = dict(input_ids=input_ids, positions=positions)
+            if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+                assert cudagraph_manager is not None
+                hidden_states = cudagraph_manager.run_pw_graph(self.model, model_inputs)
+            else:
+                hidden_states = self.model(**model_inputs)  # type: ignore[misc]
         if isinstance(hidden_states, tuple):
             hidden_states = hidden_states[0]
         return hidden_states
@@ -164,87 +159,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         adjusted_lens = qsl[1 : num_reqs + 1] - qsl[:num_reqs] - num_rejected[:num_reqs]
         return qsl[:num_reqs] + adjusted_lens - 1
 
-    def _prefill(
-        self,
-        input_batch: InputBatch,
-        num_rejected: torch.Tensor,
-        last_sampled: torch.Tensor,
-        num_reqs: int,
-        skip_attn: bool,
-        num_tokens_across_dp: torch.Tensor | None,
+    def _sample_prefill_drafts(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor, num_reqs: int
     ) -> None:
-        if skip_attn:
-            src_tokens = input_batch.num_tokens
-            self.last_token_indices[:num_reqs] = self._accepted_last_indices(
-                input_batch, num_rejected, num_reqs
-            )
-            hidden_states = self._run_model(
-                input_batch.input_ids[:src_tokens],
-                input_batch.positions[:src_tokens],
-                None,
-                None,
-                num_tokens_across_dp,
-            )
-            positions_buf = input_batch.positions
-        else:
-            block_tables = self.block_tables
-            kv_cache_config = self.kv_cache_config
-            assert block_tables is not None
-            assert kv_cache_config is not None
-
-            total_expanded = prepare_prefill_inputs(
-                input_buffers=self.input_buffers,
-                input_batch=input_batch,
-                last_sampled=last_sampled,
-                num_rejected=num_rejected,
-                expanded_input_ids=self.expanded_input_ids,
-                expanded_positions=self.expanded_positions,
-                last_token_indices=self.last_token_indices,
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.max_model_len,
-            )
-
-            prefill_slot_mappings = block_tables.compute_slot_mappings(
-                input_batch.idx_mapping,
-                self.input_buffers.query_start_loc[: num_reqs + 1],
-                self.expanded_positions[:total_expanded],
-                total_expanded,
-                out=self.expanded_slot_mappings,
-            )
-            qsl_np = input_batch.query_start_loc_np
-            query_start_loc_cpu_expanded = (
-                torch.from_numpy(qsl_np[: num_reqs + 1]).int()
-                + torch.from_numpy(self.arange_np[: num_reqs + 1]).int()
-            )
-            prefill_attn_md = self._build_attn_metadata(
-                batch_desc=BatchExecutionDescriptor(
-                    cg_mode=CUDAGraphMode.NONE,
-                    num_tokens=total_expanded,
-                    num_reqs=num_reqs,
-                ),
-                num_reqs=num_reqs,
-                query_start_loc_np=query_start_loc_cpu_expanded.numpy(),
-                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                step=0,
-                slot_mappings=prefill_slot_mappings,
-            )
-            prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
-                prefill_slot_mappings, kv_cache_config
-            )
-            hidden_states = self._run_model(
-                self.expanded_input_ids[:total_expanded],
-                self.expanded_positions[:total_expanded],
-                prefill_attn_md,
-                prefill_slot_maps_by_layer,
-                num_tokens_across_dp,
-            )
-            positions_buf = self.expanded_positions
-
-        last_indices = self.last_token_indices[:num_reqs]
-        self.current_draft_step.fill_(0)
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
-            hidden_states[last_indices],
-            positions_buf[last_indices],
+            hidden_states[self.last_token_indices[:num_reqs]],
+            positions[self.last_token_indices[:num_reqs]],
             self.idx_mapping[:num_reqs],
             self.temperature,
             self.seeds,
@@ -252,14 +172,37 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             self.draft_logits,
         )
 
-    def _multi_step_decode(
+    def _prefill(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
+        assert self.prefill_cudagraph_manager is not None
+        hidden_states = self._run_model(
+            self.expanded_input_ids[:num_tokens],
+            self.expanded_positions[:num_tokens],
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            self.prefill_cudagraph_manager,
+        )
+        self._sample_prefill_drafts(hidden_states, self.expanded_positions, num_reqs)
+
+    def _prepare_decode_inputs(
         self,
         input_batch: InputBatch,
         num_rejected: torch.Tensor,
         num_reqs: int,
         skip_attn: bool,
-        num_tokens_across_dp: torch.Tensor | None,
+        batch_desc: BatchExecutionDescriptor,
     ) -> None:
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
         if skip_attn:
             last_positions = input_batch.positions[
                 self._accepted_last_indices(input_batch, num_rejected, num_reqs)
@@ -267,86 +210,73 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         else:
             last_positions = self.expanded_positions[self.last_token_indices[:num_reqs]]
 
-        self.input_buffers.positions[:num_reqs].copy_(last_positions)
-        # The decode loop increments seq_lens BEFORE each forward.
-        # Initial seq_lens = target_seq_lens - num_rejected + 1.
-        # Step 1 forward uses      target_seq_lens - num_rejected + 2.
-        # Step 2 forward uses      target_seq_lens - num_rejected + 3.
+        self.input_buffers.input_ids[:num_reqs_padded].copy_(
+            self.draft_tokens[:num_reqs_padded, 0].int()
+        )
+        self.input_buffers.positions[:num_reqs].copy_(
+            torch.clamp(last_positions + 1, max=self.max_model_len - 1)
+        )
+        # The expanded prefill includes the correction token, then decode
+        # advances once before its first forward.
         self.input_buffers.seq_lens[:num_reqs].copy_(
             torch.clamp(
-                input_batch.seq_lens[:num_reqs] - num_rejected[:num_reqs].int() + 1,
+                input_batch.seq_lens[:num_reqs] - num_rejected[:num_reqs].int() + 2,
                 max=self.max_model_len,
             )
         )
-        self.input_buffers.query_start_loc[: num_reqs + 1].copy_(
-            self.arange_gpu[: num_reqs + 1]
+
+        if num_reqs_padded > num_reqs:
+            self.input_buffers.seq_lens[num_reqs:num_reqs_padded].zero_()
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
+        query_start_loc[: num_reqs + 1].copy_(self.arange_gpu[: num_reqs + 1])
+        if num_reqs_padded > num_reqs:
+            query_start_loc[num_reqs + 1 :].fill_(num_reqs)
+
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        num_speculative_steps: int,
+    ) -> None:
+        hidden_states = self._run_model(
+            self.input_buffers.input_ids[:num_tokens_padded],
+            self.input_buffers.positions[:num_tokens_padded],
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            self.decode_cudagraph_manager,
+        )
+        draft_tokens = self.sample_draft(
+            hidden_states[:num_reqs],
+            self.input_buffers.positions[:num_reqs],
+            self.idx_mapping[:num_reqs],
+            self.temperature,
+            self.seeds,
+            self.current_draft_step,
+            self.draft_logits,
         )
 
-        idx_mapping = input_batch.idx_mapping
-
-        for step in range(1, self.num_speculative_steps):
-            self.input_buffers.input_ids[:num_reqs].copy_(
-                self.draft_tokens[:num_reqs, step - 1].int()
-            )
-            torch.clamp(
-                self.input_buffers.positions[:num_reqs] + 1,
-                max=self.max_model_len - 1,
-                out=self.input_buffers.positions[:num_reqs],
-            )
-            # Increment seq_lens BEFORE the forward so the attention reads from
-            # the KV slot written by the previous step.
-            torch.clamp(
-                self.input_buffers.seq_lens[:num_reqs] + 1,
-                max=self.max_model_len,
-                out=self.input_buffers.seq_lens[:num_reqs],
-            )
-
-            decode_attn_md = None
-            step_slot_maps_by_layer = None
-            if not skip_attn:
-                block_tables = self.block_tables
-                kv_cache_config = self.kv_cache_config
-                assert block_tables is not None
-                assert kv_cache_config is not None
-                q_start = self.input_buffers.query_start_loc[: num_reqs + 1]
-                positions = self.input_buffers.positions[:num_reqs]
-                step_slot_mappings = block_tables.compute_slot_mappings(
-                    idx_mapping, q_start, positions, num_reqs
-                )
-                step_slot_maps_by_layer = build_slot_mappings_by_layer(
-                    step_slot_mappings, kv_cache_config
-                )
-                decode_attn_md = self._build_uniform_attn_metadata(
-                    batch_desc=BatchExecutionDescriptor(
-                        cg_mode=CUDAGraphMode.NONE,
-                        num_tokens=num_reqs,
-                        num_reqs=num_reqs,
-                        uniform_token_count=1,
-                    ),
-                    num_reqs=num_reqs,
-                    num_query_per_req=1,
-                    seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                    # Include the correction token inserted during prefill.
-                    step=step + 1,
-                )
-            hidden_states = self._run_model(
-                self.input_buffers.input_ids[:num_reqs],
-                self.input_buffers.positions[:num_reqs],
-                decode_attn_md,
-                step_slot_maps_by_layer,
-                num_tokens_across_dp,
-            )
-
-            self.current_draft_step.fill_(step)
-            self.draft_tokens[:num_reqs, step] = self.sample_draft(
-                hidden_states[:num_reqs],
-                self.input_buffers.positions[:num_reqs],
-                self.idx_mapping[:num_reqs],
-                self.temperature,
-                self.seeds,
-                self.current_draft_step,
-                self.draft_logits,
-            )
+        self.draft_tokens[:num_reqs].scatter_(
+            1,
+            self.current_draft_step.expand(num_reqs, 1),
+            draft_tokens.unsqueeze(1),
+        )
+        self.input_buffers.input_ids[:num_reqs].copy_(draft_tokens.int())
+        torch.clamp(
+            self.input_buffers.positions[:num_reqs] + 1,
+            max=self.max_model_len - 1,
+            out=self.input_buffers.positions[:num_reqs],
+        )
+        torch.clamp(
+            self.input_buffers.seq_lens[:num_reqs] + 1,
+            max=self.max_model_len,
+            out=self.input_buffers.seq_lens[:num_reqs],
+        )
 
     @torch.inference_mode()
     def propose(
@@ -372,11 +302,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         assert self.model is not None
 
         num_reqs = input_batch.num_reqs
+        if num_speculative_tokens is None:
+            num_speculative_tokens = self.num_speculative_steps
         skip_attn = dummy_run and skip_attn_for_dummy_run
         num_tokens_across_dp = (
             dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
         )
-
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
         # buffers so sample_draft can read them without extra slicing.
         self._copy_request_inputs(
@@ -384,26 +315,115 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
+        self.current_draft_step.zero_()
 
-        self._prefill(
-            input_batch,
-            num_rejected,
-            last_sampled,
-            num_reqs,
-            skip_attn,
-            num_tokens_across_dp,
-        )
+        if skip_attn:
+            src_tokens = input_batch.num_tokens
+            self.last_token_indices[:num_reqs] = self._accepted_last_indices(
+                input_batch, num_rejected, num_reqs
+            )
+            hidden_states = self._run_model(
+                input_batch.input_ids[:src_tokens],
+                input_batch.positions[:src_tokens],
+                None,
+                None,
+                num_tokens_across_dp,
+            )
+            self._sample_prefill_drafts(hidden_states, input_batch.positions, num_reqs)
+        else:
+            total_expanded = prepare_prefill_inputs(
+                input_buffers=self.input_buffers,
+                input_batch=input_batch,
+                last_sampled=last_sampled,
+                num_rejected=num_rejected,
+                expanded_input_ids=self.expanded_input_ids,
+                expanded_positions=self.expanded_positions,
+                last_token_indices=self.last_token_indices,
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+            )
+            max_query_len = int(input_batch.num_scheduled_tokens.max())
+            uniform_token_count = get_uniform_decode_token_count(
+                num_reqs,
+                total_expanded,
+                max_query_len + self.num_extra_query_per_req,
+                input_batch.decode_graph_eligible,
+            )
+            # Standalone AR prefill adds a correction-token slot per request,
+            # so it needs a separate DP sync for the expanded batch.
+            prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
+                self.prefill_cudagraph_manager,
+                num_reqs,
+                total_expanded,
+                uniform_token_count=uniform_token_count,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                need_eager=is_profile,
+            )
+            num_tokens_across_dp = (
+                prefill_batch_sync.num_tokens_across_dp
+                if prefill_batch_sync is not None
+                else None
+            )
 
-        if self.num_speculative_steps == 1:
+            block_tables = self.block_tables
+            assert block_tables is not None
+            num_tokens = prefill_batch_desc.num_tokens
+            num_reqs_padded = prefill_batch_desc.num_reqs or num_reqs
+
+            query_start_loc_cpu = (
+                input_batch.query_start_loc_np[: num_reqs + 1]
+                + self.arange_np[: num_reqs + 1]
+            )
+            slot_mappings = block_tables.compute_slot_mappings(
+                self.idx_mapping[:num_reqs_padded],
+                self.input_buffers.query_start_loc[: num_reqs_padded + 1],
+                self.expanded_positions[:num_tokens],
+                num_tokens,
+                out=self.expanded_slot_mappings,
+            )
+            prefill_attn_md = self._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=prefill_batch_desc,
+                query_start_loc_np=query_start_loc_cpu,
+                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                step=1,
+                slot_mappings=slot_mappings,
+            )
+            kv_cache_config = self.kv_cache_config
+            assert kv_cache_config is not None
+            prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+            if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
+                assert self.prefill_cudagraph_manager is not None
+                self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
+            else:
+                self._prefill(
+                    prefill_batch_desc.num_reqs or num_reqs,
+                    prefill_batch_desc.num_tokens,
+                    prefill_attn_md,
+                    prefill_slot_maps_by_layer,
+                    num_tokens_across_dp,
+                    prefill_batch_desc.cg_mode,
+                )
+        if num_speculative_tokens <= 1:
+            if num_speculative_tokens == 0:
+                self.draft_tokens[:num_reqs].fill_(-1)
+                return self.draft_tokens[:num_reqs]
             return self.draft_tokens[:num_reqs, :1]
 
-        self._multi_step_decode(
+        self._decode(
             input_batch,
             num_rejected,
             num_reqs,
             skip_attn,
-            num_tokens_across_dp,
+            dp_sync_state,
+            input_batch.seq_lens_cpu_upper_bound,
+            is_profile,
+            num_speculative_tokens,
         )
 
         return self.draft_tokens[:num_reqs]
