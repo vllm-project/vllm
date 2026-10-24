@@ -65,6 +65,8 @@ class NoSignalServer(uvicorn.Server):
         super().__init__(config)
         self.peer_loads = peer_loads
         self._accept_tasks: set[asyncio.Task] = set()
+        self._listen_tasks: set[asyncio.Task] = set()
+        self._listen_sockets: list[socket.socket] = []
         self._connecting = 0
 
     @contextlib.contextmanager
@@ -90,15 +92,32 @@ class NoSignalServer(uvicorn.Server):
         if not self.started:  # lifespan startup failed (uvicorn < 0.50)
             return
         self._publish_load()
+        self._listen_sockets = list(sockets)
         for sock in sockets:
             sock.listen(self.config.backlog)
             sock.setblocking(False)
-            self._track(self._accept(sock))
+            self._listen_tasks.add(self._track(self._accept(sock)))
 
-    def _track(self, coro) -> None:
+    def _track(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._accept_tasks.add(task)
         task.add_done_callback(self._accept_tasks.discard)
+        task.add_done_callback(self._listen_tasks.discard)
+        return task
+
+    def stop_accepting(self) -> None:
+        """Close the listeners and idle connections; in-flight requests finish."""
+        logger.info_once("[shutdown] API server: no longer accepting new connections")
+        if self.peer_loads is not None:
+            self.peer_loads[0][self.peer_loads[1]] = _NOT_ACCEPTING
+        for task in self._listen_tasks:
+            task.cancel()
+        for sock in self._listen_sockets:
+            sock.close()
+        for server in getattr(self, "servers", ()):
+            server.close()
+        for connection in list(self.server_state.connections):
+            connection.shutdown()
 
     async def _accept(self, sock: socket.socket) -> None:
         loop = asyncio.get_running_loop()
@@ -261,9 +280,13 @@ async def serve_http(
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    # Sent by the multi-API-server launcher before it drains the engines.
+    loop.add_signal_handler(signal.SIGUSR1, server.stop_accepting)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
+
+        server.stop_accepting()
 
         if engine_client is not None:
             timeout = engine_client.vllm_config.shutdown_timeout

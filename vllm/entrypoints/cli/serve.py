@@ -394,14 +394,22 @@ def run_multi_api_server(args: argparse.Namespace):
             timeout = vllm_config.shutdown_timeout
             shutdown_by = time.monotonic() + timeout
             logger.info("Waiting up to %d seconds for processes to exit", timeout)
+            # Stop accepting (API servers via SIGUSR1, the launcher's own copy of
+            # the socket below), then drain the engines, then stop the API
+            # servers: stopping them first would close their engine sockets and
+            # fail every in-flight request before the engines could drain.
+            stop_accepting = getattr(api_server_manager, "stop_accepting", None)
+            if callable(stop_accepting):
+                stop_accepting()
+        sock.close()
 
         def to_timeout(deadline: float | None) -> float | None:
             return (
                 deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
             )
 
-        api_server_manager.shutdown(timeout=timeout)
         if local_engine_manager:
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
+        api_server_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
