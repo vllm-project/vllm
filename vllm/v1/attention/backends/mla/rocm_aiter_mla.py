@@ -49,7 +49,13 @@ from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
     expand_context,
     gather_compressed_context,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_decode_attention import (
+    decode_attention_fwd,
+    decode_attention_fwd_verify,
+    select_verify_config,
+    verify_num_kv_splits,
+    warmup_decode_attention_fwd_verify,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
@@ -212,6 +218,98 @@ def _aiter_mla_native_h24_supported() -> bool:
     )
 
 
+@functools.cache
+def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) -> bool:
+    """Whether AITER's FP8 persistent MLA decode leaves V unscaled at a shape.
+
+    gfx942's (gqa 16, qseqlen 4) FP8 kernel applies kv_scale to the scores but
+    not to V, so its output is short by exactly kv_scale. Measured on a tiny
+    causal block with kv_scale 2 rather than assumed per arch, so a fixed
+    AITER build turns the correction off by itself.
+    """
+    try:
+        from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
+        from aiter.mla import mla_decode_fwd
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        gen = torch.Generator(device=device).manual_seed(0)
+        kv_len, head_dim, kv_lora_rank, scale = 64, 576, 512, 576**-0.5
+        q_dtype = dtypes.fp8 if q_fp8 else dtypes.bf16
+        q = torch.randn(qlen, num_heads, head_dim, device=device, generator=gen)
+        q = (q * 0.5).to(q_dtype)
+        kv = torch.randn(kv_len, head_dim, device=device, generator=gen)
+        kv = (kv * 0.5).to(dtypes.fp8)
+        qo_indptr = torch.tensor([0, qlen], dtype=torch.int32, device=device)
+        kv_indptr = torch.tensor([0, kv_len], dtype=torch.int32, device=device)
+        kv_indices = torch.arange(kv_len, dtype=torch.int32, device=device)
+        last_page_len = torch.ones(1, dtype=torch.int32, device=device)
+        work = [
+            torch.empty(size, dtype=dtype, device=device)
+            for size, dtype in get_mla_metadata_info_v1(
+                1, qlen, num_heads, q_dtype, dtypes.fp8, is_sparse=False, fast_mode=True
+            )
+        ]
+        get_mla_metadata_v1(
+            qo_indptr,
+            kv_indptr,
+            last_page_len,
+            num_heads,
+            1,
+            True,
+            work[0],
+            work[2],
+            work[1],
+            work[3],
+            work[4],
+            work[5],
+            page_size=1,
+            kv_granularity=16,
+            max_seqlen_qo=qlen,
+            uni_seqlen_qo=qlen,
+            fast_mode=True,
+            dtype_q=q_dtype,
+            dtype_kv=dtypes.fp8,
+        )
+        out = torch.empty(
+            qlen, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        )
+        one = torch.ones(1, dtype=torch.float32, device=device)
+        mla_decode_fwd(
+            q,
+            kv.view(-1, 1, 1, head_dim),
+            out,
+            qo_indptr,
+            kv_indptr,
+            kv_indices,
+            last_page_len,
+            qlen,
+            sm_scale=scale,
+            logit_cap=0.0,
+            q_scale=one,
+            kv_scale=one * 2,
+            causal=True,
+            work_meta_data=work[0],
+            work_indptr=work[1],
+            work_info_set=work[2],
+            reduce_indptr=work[3],
+            reduce_final_map=work[4],
+            reduce_partial_map=work[5],
+        )
+        k = kv.float() * 2
+        scores = torch.einsum("qhd,kd->qhk", q.float(), k) * scale
+        visible = torch.arange(kv_len, device=device)[None, :] <= (
+            torch.arange(qlen, device=device)[:, None] + kv_len - qlen
+        )
+        scores = scores.masked_fill(~visible[:, None, :], float("-inf"))
+        ref = torch.einsum("qhk,kd->qhd", scores.softmax(-1), k[:, :kv_lora_rank])
+        err_scaled = (out.float() - ref).abs().max().item()
+        err_unscaled = (out.float() - ref / 2).abs().max().item()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("AITER FP8 MLA V-scale probe failed: %s", exc)
+        return False
+    return err_unscaled < 0.05 < err_scaled
+
+
 def _aiter_mla_non_causal_asm_kernels() -> bool:
     """Whether this arch ships non-causal MLA decode ASM kernels.
 
@@ -351,6 +449,76 @@ def _triton_dcp_verify_num_kv_splits(
         cdiv(_BATCH_OCCUPANCY_MULTIPLIER * sm_count, programs_per_split)
     )
     return min(_compute_num_kv_splits(max_seq_len, sm_count), occupancy_splits)
+
+
+def _asm_causal_verify_unsupported(
+    decode_num_heads: int,
+    mtp_decode_qlen: int,
+    kv_cache_dtype: str,
+    dcp_world_size: int,
+) -> bool:
+    """Whether CDNA3's asm decode has no correct kernel for causal verify past
+    qlen 4: its persistent kernels stop at qseqlen 4 (bf16, and FP8 below 128
+    heads) and its non-persistent entries are not usable here
+    (ROCm/aiter#5679). DCP verify keeps its row-view and cprr routes.
+    """
+    if dcp_world_size > 1:
+        return False
+    if mtp_decode_qlen <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN:
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() != 3:
+        return False
+    if is_quantized_kv_cache(kv_cache_dtype):
+        return AiterMLAHelper.get_actual_mla_num_heads(decode_num_heads) != 128
+    return True
+
+
+def _triton_verify_num_kv_splits(
+    max_seq_len: int, num_reqs: int, qlen: int, num_heads: int, sm_count: int
+) -> int:
+    """KV split cap for the folded verify kernel at this launch shape.
+
+    Depends only on values that are static for a captured graph; the kernel
+    lengthens the splits of shorter requests at runtime.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        return 1
+    # Must agree with the launch config decode_attention_fwd_verify selects.
+    cfg = select_verify_config(num_reqs, qlen, num_heads)
+    return verify_num_kv_splits(
+        max_seq_len,
+        num_reqs,
+        qlen,
+        num_heads,
+        sm_count,
+        block_h=cfg["BLOCK_H"],
+        occupancy=cfg.get("occupancy", 1.0),
+        min_work_per_split=cfg["MIN_SPLIT_LEN"],
+    )
+
+
+def _reserve_triton_verify_workspace(
+    max_num_reqs: int,
+    qlen: int,
+    num_heads: int,
+    max_seq_len: int,
+    kv_lora_rank: int,
+    sm_count: int,
+) -> None:
+    """Reserve the folded verify kernel's split scratch before warmup."""
+    if not is_workspace_manager_initialized():
+        return
+    # Fewer requests may take more splits, so size for the largest product.
+    max_req_splits = max(
+        reqs
+        * _triton_verify_num_kv_splits(max_seq_len, reqs, qlen, num_heads, sm_count)
+        for reqs in range(1, max_num_reqs + 1)
+    )
+    current_workspace_manager().get_simultaneous(
+        ((max_req_splits * qlen, num_heads, kv_lora_rank + 1), torch.float32),
+    )
 
 
 def _reserve_triton_dcp_verify_workspace(
@@ -656,6 +824,14 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_decode: bool = False
     # Small-head non-DCP multi-token verify uses Gluon's native MTP entry.
     use_gluon_verify: bool = False
+    # Nonzero when this batch takes the Triton verify kernel: its KV split cap.
+    triton_verify_num_kv_splits: int = 0
+    # Real KV lengths for varlen verify (``seq_lens`` holds padded ones).
+    triton_verify_real_seq_lens: torch.Tensor | None = None
+    # Every verify length the Triton kernel can see; warmed up on first use.
+    triton_verify_qlens: tuple[int, ...] = ()
+    # The FP8 asm kernel for this batch leaves V unscaled; scale by k_scale.
+    fp8_v_scale_fix: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
     varlen_q_rows: torch.Tensor | None = None
@@ -1121,6 +1297,55 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dcp_local_max_seq_len,
                 self.mla_dims.kv_lora_rank,
                 current_platform.num_compute_units(),
+            )
+
+        # FP8 verify lengths whose asm kernel leaves V unscaled.
+        self._fp8_v_scale_fix_qlens: frozenset[int] = frozenset()
+        if (
+            is_quantized_kv_cache(self._kv_cache_dtype_str)
+            and self.dcp_world_size == 1
+            and self._mtp_decode_qlen > 1
+        ):
+            heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+            self._fp8_v_scale_fix_qlens = frozenset(
+                qlen
+                for qlen in range(2, min(self._mtp_decode_qlen, 4) + 1)
+                if _aiter_fp8_mla_decode_drops_v_scale(
+                    heads, qlen, self._kv_cache_dtype_str == "fp8"
+                )
+            )
+
+        # Verify past qlen 4 with no correct asm kernel takes the Triton one.
+        self._use_triton_verify = _asm_causal_verify_unsupported(
+            self._decode_num_heads,
+            self._mtp_decode_qlen,
+            self._kv_cache_dtype_str,
+            self.dcp_world_size,
+        )
+        # Split cap bound; must be static for full CUDA graphs.
+        self._triton_verify_max_seq_len = vllm_config.model_config.max_model_len
+        self._sm_count = current_platform.num_compute_units()
+        self._triton_verify_qlens: tuple[int, ...] = ()
+        if self._use_triton_verify:
+            self._triton_verify_qlens = tuple(
+                range(
+                    AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN + 1,
+                    self._mtp_decode_qlen + 1,
+                )
+            )
+            logger.info_once(
+                "ROCM_AITER_MLA: causal verify past %d tokens uses the Triton "
+                "verify kernel; the AITER asm decode has no correct kernel "
+                "for it on this GPU.",
+                AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN,
+            )
+            _reserve_triton_verify_workspace(
+                max_num_reqs,
+                self._mtp_decode_qlen,
+                self._decode_num_heads,
+                self._triton_verify_max_seq_len,
+                self.mla_dims.kv_lora_rank,
+                self._sm_count,
             )
 
     def _init_fp8_prefill_ps_buffers(
@@ -1611,12 +1836,41 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 asm_selected=self._asm_dcp_verify,
             )
 
-        # Row-view DCP verify carries its own per-row page table, so the
-        # flat per-token view is dead work for it. Leave the buffer alone and
-        # hand the metadata None, so a future reader cannot pick up whatever
-        # the previous batch left behind.
+        # forward_mqa serves Gluon verify first, and Gluon needs the flat
+        # page indices this route skips.
+        use_triton_verify = (
+            self._use_triton_verify
+            and causal
+            and not use_gluon_verify
+            and max_qo_len > AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
+        )
+        triton_verify_num_kv_splits = 0
+        if use_triton_verify:
+            # The kernel assumes every request carries max_qo_len query rows;
+            # varlen verify gathers q to that layout in forward_mqa.
+            assert varlen_decode or num_decode_tokens == num_reqs * max_qo_len, (
+                num_decode_tokens,
+                num_reqs,
+                max_qo_len,
+            )
+            triton_verify_num_kv_splits = _triton_verify_num_kv_splits(
+                (
+                    self._triton_verify_max_seq_len
+                    if self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    else max_seq_len
+                ),
+                num_reqs,
+                int(max_qo_len),
+                self._decode_num_heads,
+                self._sm_count,
+            )
+
+        # Row-view DCP verify and the folded Triton verify read block tables
+        # directly, so the flat per-token view is dead work for them. Leave the
+        # buffer alone and hand the metadata None, so a future reader cannot
+        # pick up whatever the previous batch left behind.
         paged_kv_indices = None
-        if not _is_row_view_dcp_route(dcp_route):
+        if not _is_row_view_dcp_route(dcp_route) and not use_triton_verify:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.paged_kv_indices.fill_(-1)
 
@@ -1703,8 +1957,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not use_gluon_decode
             and not use_gluon_verify
             and not _is_row_view_dcp_route(dcp_route)
+            and not use_triton_verify
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
-            # gfx950 fold is absent; the non-persistent entry covers it. fp8
+            # gfx950 fold is absent; the non-persistent entry covers it on
+            # gfx950, and CDNA3 takes the Triton verify above. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
             # A non-causal block keeps it too: what the fold drops past qlen 4
             # is the block's causal staircase, which a non-causal block does
@@ -1835,6 +2091,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             ),
             use_gluon_decode=use_gluon_decode,
             use_gluon_verify=use_gluon_verify,
+            triton_verify_num_kv_splits=triton_verify_num_kv_splits,
+            triton_verify_qlens=self._triton_verify_qlens,
+            fp8_v_scale_fix=(
+                has_persistent_metadata
+                and self.dcp_world_size == 1
+                and int(max_qo_len) in self._fp8_v_scale_fix_qlens
+            ),
+            triton_verify_real_seq_lens=(
+                seq_lens_device if use_triton_verify and varlen_decode else None
+            ),
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
             varlen_q_rows=varlen_q_rows,
@@ -2280,6 +2546,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
         self._sm_count = current_platform.num_compute_units()
+        self._triton_verify_warmed_up = False
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -2762,6 +3029,78 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         return output, lse
 
+    def _forward_triton_verify(
+        self,
+        q_mla: torch.Tensor,
+        decode: AiterMLADecodeMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        """Causal verify past qlen 4 where no asm decode kernel is correct.
+
+        One Triton program covers a block of a request's (verify token, head)
+        rows, so each KV tile is read once for all of them, and each row is
+        bounded by its own causal window. A graph padding request (or a
+        varlen tail past its real length) comes back as zeros.
+        """
+        assert decode.max_qo_len is not None
+        num_rows, num_heads = q_mla.shape[:2]
+        output = torch.empty(
+            num_rows,
+            num_heads,
+            self.kv_lora_rank,
+            dtype=decode.attn_out_dtype,
+            device=q_mla.device,
+        )
+        # Only the DCP merge would read the LSE; the kernel writes it anyway.
+        lse = torch.empty(num_rows, num_heads, dtype=torch.float32, device=q_mla.device)
+        num_kv_splits = decode.triton_verify_num_kv_splits
+        logits_shape = (num_rows, num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        if is_workspace_manager_initialized():
+            (attn_logits,) = current_workspace_manager().get_simultaneous(
+                (logits_shape, torch.float32),
+            )
+        else:
+            attn_logits = torch.empty(
+                logits_shape, dtype=torch.float32, device=q_mla.device
+            )
+        paged_kv = kv_c_and_k_pe_cache.unsqueeze(2)
+        if (
+            not self._triton_verify_warmed_up
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._triton_verify_warmed_up = True
+            warmup_decode_attention_fwd_verify(
+                q_mla,
+                paged_kv,
+                output,
+                lse,
+                decode.block_table,
+                decode.triton_verify_real_seq_lens is not None,
+                decode.triton_verify_qlens,
+                attn_logits,
+                self.scale,
+                paged_kv.size(1),
+                k_scale=layer._k_scale,
+            )
+        decode_attention_fwd_verify(
+            q_mla,
+            paged_kv,
+            paged_kv[..., : self.kv_lora_rank],
+            output,
+            lse,
+            decode.block_table,
+            decode.seq_lens,
+            decode.triton_verify_real_seq_lens,
+            decode.max_qo_len,
+            attn_logits,
+            num_kv_splits,
+            self.scale,
+            paged_kv.size(1),
+            k_scale=layer._k_scale,
+        )
+        return output
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -2892,6 +3231,18 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 min_kv_seq_len=decode.min_kv_seq_len,
             )
             return o, None
+
+        if decode.triton_verify_num_kv_splits:
+            q_mla = torch.cat(q, dim=-1) if isinstance(q, tuple) else q
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and q_mla.dtype != torch.bfloat16
+            ):
+                q_mla = q_mla.to(torch.bfloat16) * layer._q_scale
+            return (
+                self._forward_triton_verify(q_mla, decode, kv_c_and_k_pe_cache, layer),
+                None,
+            )
 
         dcp_route = decode.dcp_route
         if dcp_route is _DCPDecodeRoute.TRITON:
@@ -3038,6 +3389,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 causal=attn_metadata.causal,
                 **mla_kwargs,
             )
+            if decode.fp8_v_scale_fix:
+                o.mul_(layer._k_scale)
 
         if asm_dcp_heads > self._decode_num_heads:
             # Keep a view: a post-kernel copy races the symm-mem a2a combine.

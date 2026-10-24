@@ -128,6 +128,9 @@ def _builder(
         # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         _use_triton_dcp_verify=False,
+        _use_triton_verify=False,
+        _triton_verify_qlens=(),
+        _fp8_v_scale_fix_qlens=frozenset(),
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
             kernel_block_size
@@ -511,6 +514,8 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
         paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
+        fp8_v_scale_fix=False,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         g_kv_indptr=None,
@@ -575,6 +580,8 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
+        fp8_v_scale_fix=False,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         has_persistent_metadata=False,
@@ -802,6 +809,8 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             ),
             use_gluon_decode=False,
             use_gluon_verify=False,
+            triton_verify_num_kv_splits=0,
+            fp8_v_scale_fix=False,
             dcp_route=rocm_aiter_mla._DCPDecodeRoute.SEGMENTED,
             dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
@@ -935,6 +944,11 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
+    # The probe is cached per process; running it against the stub aiter
+    # would leave a wrong answer for later tests.
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_fp8_mla_decode_drops_v_scale", lambda *args: False
+    )
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
