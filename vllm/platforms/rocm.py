@@ -509,12 +509,17 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    # An explicit AITER MHA opt-in (VLLM_ROCM_USE_AITER=1 on CDNA, see
+    # is_mha_enabled) must outrank ROCM_ATTN, which is otherwise picked
+    # whenever it is valid (#46596). ROCM_ATTN stays right behind it so
+    # configs AITER FA rejects (e.g. head sizes outside 64/128/256) keep
+    # falling back to it.
+    if rocm_aiter_ops.is_mha_enabled():
+        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
-    if rocm_aiter_ops.is_mha_enabled():
-        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
