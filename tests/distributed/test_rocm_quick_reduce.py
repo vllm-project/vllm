@@ -74,9 +74,12 @@ def _quick_allreduce_worker(
     quant_level: str,
     dtype_name: str,
     cast_bf16: bool,
+    max_size_mb: int | None = None,
 ):
     os.environ["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] = quant_level
     os.environ["VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16"] = "1" if cast_bf16 else "0"
+    if max_size_mb is not None:
+        os.environ["VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB"] = str(max_size_mb)
     _log(
         f"worker start: rank={rank} quant={quant_level} "
         f"dtype={dtype_name} cast_bf16={cast_bf16}"
@@ -103,14 +106,23 @@ def _quick_allreduce_worker(
         num_elements = 8 * MB if dtype_name == "float16" else 4 * MB
 
         dtype = getattr(torch, dtype_name)
-        inp = torch.ones(num_elements, dtype=dtype, device=device)
+        inp = torch.full((num_elements,), rank + 1, dtype=dtype, device=device)
 
         assert qar.should_quick_allreduce(inp)
         if cast_bf16:
             assert qar.use_fp16_kernels
 
-        out = qar.quick_all_reduce(inp)
-        assert torch.allclose(out, inp * WORLD_SIZE, atol=2.5, rtol=0.1)
+        expected = WORLD_SIZE * (WORLD_SIZE + 1) / 2
+        for _ in range(20 if max_size_mb is not None else 1):
+            out = qar.quick_all_reduce(inp)
+            if max_size_mb is not None:
+                torch.testing.assert_close(
+                    out, torch.full_like(inp, expected), atol=0, rtol=0
+                )
+            else:
+                assert torch.allclose(
+                    out, torch.full_like(inp, expected), atol=2.5, rtol=0.1
+                )
         _log(
             f"worker complete: rank={rank} quant={quant_level} "
             f"dtype={dtype_name} num_elements={num_elements} "
@@ -128,6 +140,7 @@ def _run_two_gpu_quick_allreduce_test(
     quant_level: str,
     dtype_name: str,
     cast_bf16: bool,
+    max_size_mb: int | None = None,
 ):
     _log(
         f"launch 2-GPU case: quant={quant_level} "
@@ -140,7 +153,7 @@ def _run_two_gpu_quick_allreduce_test(
     for rank in range(WORLD_SIZE):
         proc = ctx.Process(
             target=_quick_allreduce_worker,
-            args=(rank, port, quant_level, dtype_name, cast_bf16),
+            args=(rank, port, quant_level, dtype_name, cast_bf16, max_size_mb),
         )
         proc.start()
         procs.append(proc)
@@ -151,6 +164,14 @@ def _run_two_gpu_quick_allreduce_test(
     _log(
         f"finished 2-GPU case: quant={quant_level} "
         f"dtype={dtype_name} cast_bf16={cast_bf16}"
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_quick_allreduce_four_gib_phase_stride():
+    """Small reductions must remain correct with a 4 GiB phase capacity."""
+    _run_two_gpu_quick_allreduce_test(
+        quant_level="FP", dtype_name="float16", cast_bf16=False, max_size_mb=4096
     )
 
 
