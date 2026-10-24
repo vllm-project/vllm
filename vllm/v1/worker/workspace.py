@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable, Hashable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
 from itertools import accumulate
 from math import prod
 from typing import TypeVar, cast
@@ -46,6 +47,15 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
         _workspace_lane.reset(token)
 
 
+@dataclass
+class _RetainedRegion:
+    """The tail span of a scratch workspace last handed out by get_retained."""
+
+    key: Hashable
+    start: int
+    intact: bool
+
+
 class WorkspaceManager:
     """Manager for workspace allocation.
 
@@ -72,6 +82,9 @@ class WorkspaceManager:
         )
         self._persistent_resources: list[dict[Hashable, object]] = [
             {} for _ in self._current_workspaces
+        ]
+        self._retained: list[_RetainedRegion | None] = [
+            None for _ in self._current_workspaces
         ]
         self._locked: bool = False
 
@@ -198,6 +211,9 @@ class WorkspaceManager:
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
         current_workspace = self._ensure_workspace_size(total_bytes)
+        retained = self._retained[self._get_workspace_id()]
+        if retained is not None and total_bytes > retained.start:
+            retained.intact = False
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -205,6 +221,43 @@ class WorkspaceManager:
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
+
+    def get_retained(
+        self, key: Hashable, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> tuple[torch.Tensor, bool]:
+        """Get a scratch view at the end of the workspace that can outlive requests.
+
+        ``get_simultaneous`` hands out views from the start of the workspace, so
+        requests smaller than the workspace leave its end alone. This view spans
+        the last bytes of the workspace, and the returned flag says whether they
+        still hold what the previous ``get_retained`` left there: that call used
+        the same key and size, no ``get_simultaneous`` request since reached into
+        the span, and the workspace was not reallocated in between. What the
+        bytes mean is the caller's to track; only the latest key is remembered.
+
+        Args:
+            key: Identifies the caller; another key's call takes the span over.
+            shape: Shape of the view.
+            dtype: Dtype of the view.
+
+        Returns:
+            The view and whether its contents are intact.
+
+        """
+        num_bytes = _compute_bytes(shape, dtype)
+        workspace_id = self._get_workspace_id()
+        current_workspace = self._ensure_workspace_size(num_bytes)
+        start = (current_workspace.numel() - num_bytes) // 256 * 256
+        previous = self._retained[workspace_id]
+        intact = (
+            previous is not None
+            and previous.intact
+            and previous.key == key
+            and previous.start == start
+        )
+        self._retained[workspace_id] = _RetainedRegion(key, start, intact=True)
+        view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
+        return view, intact
 
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
@@ -252,6 +305,7 @@ class WorkspaceManager:
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
             self._current_workspaces[workspace_id] = None
+            self._retained[workspace_id] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger
