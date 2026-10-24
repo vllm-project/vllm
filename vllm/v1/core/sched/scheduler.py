@@ -1171,10 +1171,11 @@ class Scheduler(SchedulerInterface):
                                 request, max_cache_hit_length
                             )
 
-                        connector_prefix_cache_queries = (
-                            request.num_tokens - num_new_local_computed_tokens
-                        )
-                        connector_prefix_cache_hits = num_external_computed_tokens
+                        if not request.skip_reading_prefix_cache:
+                            connector_prefix_cache_queries = (
+                                request.num_tokens - num_new_local_computed_tokens
+                            )
+                            connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
