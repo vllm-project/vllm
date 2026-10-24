@@ -8,6 +8,7 @@ import numpy as np
 import pybase64
 import torch
 from PIL import Image
+from PIL.BlpImagePlugin import BLPFormatError
 
 import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
@@ -94,8 +95,16 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
-        # Pillow raises SyntaxError (not OSError) for broken PNG chunks.
-        except (OSError, Image.UnidentifiedImageError, SyntaxError) as e:
+        # Pillow raises SyntaxError (not OSError) for broken PNG chunks,
+        # RuntimeError from the AVIF decoder, and BLPFormatError (a
+        # NotImplementedError) for bad BLP data.
+        except (
+            OSError,
+            Image.UnidentifiedImageError,
+            SyntaxError,
+            RuntimeError,
+            BLPFormatError,
+        ) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
         io_config = None
