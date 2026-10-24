@@ -69,6 +69,78 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("m,width", [(1, 259), (1, 2560), (4, 2560)])
+@pytest.mark.parametrize("block_h", [256, 512, 1024, 4096])
+@torch.inference_mode()
+def test_bf16_decode_shared_gate_matches_materialized_bf16(m, width, block_h):
+    from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
+        bf16_shared_expert_gate,
+    )
+
+    set_random_seed(0)
+    x = torch.randn(m, width, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn_like(x[:1]) / width**0.5
+    shared = torch.randn_like(x)
+    expected = F.linear(x, weight).sigmoid() * shared
+    actual = bf16_shared_expert_gate(x, weight, shared, block_h)
+    torch.testing.assert_close(actual, expected, rtol=0.016, atol=0.001)
+    relative_l2 = (actual.float() - expected.float()).norm() / expected.float().norm()
+    assert relative_l2 < 0.003
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "weight_values,shared_value",
+    [([0.5625, 0.005859375], 1.0), ([1.0, 0.0], 2.25)],
+    ids=["logit_rounding", "sigmoid_rounding"],
+)
+@torch.inference_mode()
+def test_bf16_decode_shared_gate_preserves_intermediate_rounding(
+    weight_values, shared_value
+):
+    """Exact two-term dots isolate rounding from different reduction orders."""
+    from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
+        bf16_shared_expert_gate,
+    )
+
+    x = torch.zeros(1, 2560, device="cuda", dtype=torch.bfloat16)
+    x[0, :2] = 1
+    weight = torch.zeros_like(x)
+    weight[0, :2] = torch.tensor(weight_values, device=x.device, dtype=x.dtype)
+    shared = torch.full_like(x, shared_value)
+    expected = F.linear(x, weight).sigmoid() * shared
+    fp32_intermediates = (
+        F.linear(x.float(), weight.float()).sigmoid() * shared.float()
+    ).bfloat16()
+    assert not torch.equal(expected, fp32_intermediates)
+    actual = bf16_shared_expert_gate(x, weight, shared)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@torch.inference_mode()
+def test_bf16_decode_shared_gate_graph_reads_updated_inputs():
+    from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
+        bf16_shared_expert_gate,
+    )
+
+    x = torch.ones(4, 2560, device="cuda", dtype=torch.bfloat16)
+    weight = torch.zeros_like(x[:1])
+    shared = torch.randn_like(x)
+    bf16_shared_expert_gate(x, weight, shared)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = bf16_shared_expert_gate(x, weight, shared)
+    for value in (0.0, 80.0, -80.0):
+        weight[0, 0] = value
+        graph.replay()
+        expected = F.linear(x, weight).sigmoid() * shared
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    opcheck(torch.ops.vllm.bf16_decode_shared_gate, (x, weight, shared, 256))
+
+
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
     captured: dict[str, torch.Tensor] = {}
 
