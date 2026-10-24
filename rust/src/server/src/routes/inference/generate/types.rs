@@ -103,6 +103,9 @@ pub(super) struct GenerateResponseChoice {
     /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
     /// set on the terminal response, as Python `numpy2base64` encodes them.
     pub routed_experts: Option<String>,
+    /// Base64 `.npy` raw int32 rows `[tokens, sources, topk]` on the terminal output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexer_topk: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
@@ -119,6 +122,9 @@ pub(super) struct GenerateResponseStreamChoice {
     /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
     /// set on the terminal response, as Python `numpy2base64` encodes them.
     pub routed_experts: Option<String>,
+    /// Base64 `.npy` raw int32 rows `[tokens, sources, topk]` on the terminal output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexer_topk: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     /// Set on the final chunk only; covers the whole output.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,

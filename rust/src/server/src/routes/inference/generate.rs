@@ -240,6 +240,7 @@ async fn generate_chunk_stream(
                             .as_deref()
                             .map(npy_base64)
                             .transpose()?,
+                        indexer_topk: output.indexer_topk.as_deref().map(npy_base64).transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions: output.weight_versions,
                     }],
@@ -350,6 +351,7 @@ fn collect_generate(
             stop_reason,
             token_ids: collected.token_ids,
             routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
+            indexer_topk: collected.indexer_topk.as_ref().map(npy_base64).transpose()?,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
             weight_versions: collected.weight_versions,
         }],
@@ -663,6 +665,7 @@ mod tests {
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
+                indexer_topk: None,
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -682,6 +685,7 @@ mod tests {
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
+                indexer_topk: None,
                 timestamps: Default::default(),
             }),
         ]);
@@ -771,6 +775,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
             timestamps: Default::default(),
         }
     }
@@ -948,6 +953,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
         };
 
         let response = collect_generate(
@@ -967,13 +973,22 @@ mod tests {
 
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
+        assert!(
+            serde_json::to_value(&response).unwrap()["choices"][0]
+                .get("indexer_topk")
+                .is_none()
+        );
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
     #[test]
-    fn routed_experts_match_numpy2base64() {
+    fn aux_output_rows_match_numpy2base64() {
         // Expected values are numpy2base64 of the same arrays.
         let cases = [
+            (
+                WireNdArray::from_i32(vec![2, 1, 2], vec![8, -1, 2, 0]).unwrap(),
+                "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoIAAAA/////wIAAAAAAAAA",
+            ),
             (
                 // np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
                 WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect()),
@@ -1054,6 +1069,7 @@ mod tests {
             spec_decode_metrics: Some(metrics.clone()),
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
         };
 
         let response = collect_generate(
@@ -1148,6 +1164,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
         };
 
         let response = collect_generate(
@@ -1185,6 +1202,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
             prompt_token_ids,
         };
 
@@ -1264,6 +1282,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            indexer_topk: None,
         };
 
         let response = collect_generate(

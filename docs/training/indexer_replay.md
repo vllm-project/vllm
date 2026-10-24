@@ -98,8 +98,14 @@ allocations and later output accumulation can change the available memory.
 Capture buffers and bounded snapshots are allocated before KV memory planning.
 
 MRV2 generate runner and prefix caching are required. Existing AuxOutput limits
-on PP, DCP/PCP, adaptive verification and remote PD still apply. Rust retains the
-raw engine wire field; Rust HTTP delivery is not implemented. SHM keeps its
-immutable first-writer behavior. CUDA Graph, real TP/DP, model quality and
-performance require later validation; no tests or model evaluations were run
-for this implementation at the user's request.
+on PP, DCP/PCP, adaptive verification and remote PD still apply. Rust's token
+frontend accepts `sampling_params.indexer_topk_prompt_start` on
+`/inference/v1/generate`, independently of the routed-expert offset. Its LLM
+facade accumulates raw rows across engine updates and stream intervals; the
+terminal choice/chunk carries the same base64 NumPy array as Python. Disabled
+or absent Indexer data omits the field. Rust Chat/Completions artifact delivery
+is not implemented, matching its existing routed-expert support boundary.
+SHM keeps its immutable first-writer behavior. CUDA Graph, real TP/DP, model
+quality and performance require later validation. Rust compilation and route
+regressions require a Unix Rust environment; they have not run on the local
+Windows host.

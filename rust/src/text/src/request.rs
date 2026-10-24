@@ -151,6 +151,8 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
+    /// Number of prompt tokens to skip from returned raw Indexer TopK rows.
+    pub indexer_topk_prompt_start: Option<u32>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -195,6 +197,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
+            indexer_topk_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,
         }

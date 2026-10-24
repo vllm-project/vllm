@@ -162,6 +162,8 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// Number of prompt tokens to skip from returned raw Indexer TopK rows.
+    pub indexer_topk_prompt_start: u32,
     /// Number of newly generated tokens to batch into each streamed output.
     /// The first and final outputs are always emitted immediately. Engine-core
     /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
@@ -201,6 +203,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            indexer_topk_prompt_start: 0,
             stream_interval: None,
         }
     }
@@ -258,6 +261,7 @@ mod tests {
         assert_eq!(sampling.seed, None);
         assert_eq!(sampling.max_tokens, 16);
         assert_eq!(sampling.min_tokens, 0);
+        assert_eq!(sampling.indexer_topk_prompt_start, 0);
         assert_eq!(sampling.min_p, 0.0);
         assert_eq!(sampling.frequency_penalty, 0.0);
         assert_eq!(sampling.presence_penalty, 0.0);

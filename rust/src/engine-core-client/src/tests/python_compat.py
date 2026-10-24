@@ -49,6 +49,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
     routed_experts_prompt_start: int = 0
+    indexer_topk_prompt_start: int = 0
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -185,6 +186,7 @@ request = EngineCoreRequest(
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
         routed_experts_prompt_start=1,
+        indexer_topk_prompt_start=2,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,
@@ -623,3 +625,18 @@ print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
 print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
+indexer_rows = np.array([8, -1, 2, 0], dtype=np.int32).reshape(2, 1, 2)
+indexer_outputs = msgspec.structs.replace(
+    outputs,
+    outputs=[
+        msgspec.structs.replace(
+            outputs.outputs[0],
+            indexer_topk=[
+                indexer_rows.dtype.str,
+                list(indexer_rows.shape),
+                msgspec.msgpack.Ext(3, indexer_rows.tobytes()),
+            ],
+        )
+    ],
+)
+print(msgspec.msgpack.encode(indexer_outputs).hex())

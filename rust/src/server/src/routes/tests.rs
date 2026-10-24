@@ -40,6 +40,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -5396,29 +5397,43 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                 assert_eq!(request.external_req_id.as_deref(), Some("raw-req"));
                 assert!(request.request_id.starts_with("raw-req-"));
                 assert_ne!(request.request_id, "raw-req");
+                assert_eq!(
+                    request.sampling_params.as_ref().unwrap().indexer_topk_prompt_start,
+                    1
+                );
 
                 send_outputs(
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
-                            request_output_with_logprobs(
-                                &request.request_id,
-                                vec![33],
-                                None,
-                                None,
-                                Some(sample_logprobs_for_token(33, 34)),
-                                Some(prompt_logprobs_for_tokens(&[11, 22])),
-                            ),
-                            request_output_with_logprobs_and_kv(
-                                &request.request_id,
-                                vec![44],
-                                Some(EngineCoreFinishReason::Stop),
-                                None,
-                                Some(sample_logprobs_for_token(44, 45)),
-                                None,
-                                Some(json!({"connector": "x"})),
-                                None,
-                            ),
+                            EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
+                                )),
+                                ..request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![33],
+                                    None,
+                                    None,
+                                    Some(sample_logprobs_for_token(33, 34)),
+                                    Some(prompt_logprobs_for_tokens(&[11, 22])),
+                                )
+                            },
+                            EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![2, 0]).unwrap(),
+                                )),
+                                ..request_output_with_logprobs_and_kv(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Stop),
+                                    None,
+                                    Some(sample_logprobs_for_token(44, 45)),
+                                    None,
+                                    Some(json!({"connector": "x"})),
+                                    None,
+                                )
+                            },
                         ],
                         ..Default::default()
                     }
@@ -5463,7 +5478,8 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                         "sampling_params": {
                             "max_tokens": 2,
                             "logprobs": 1,
-                            "prompt_logprobs": 1
+                            "prompt_logprobs": 1,
+                            "indexer_topk_prompt_start": 1
                         }
                     })
                     .to_string(),
@@ -5478,6 +5494,10 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
+    assert_eq!(
+        json["choices"][0]["indexer_topk"],
+        "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoIAAAA/////wIAAAAAAAAA"
+    );
     assert_eq!(json["request_id"], "raw-req");
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
@@ -5522,22 +5542,32 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
-                            request_output_with_logprobs(
-                                &request.request_id,
-                                vec![33],
-                                None,
-                                None,
-                                Some(sample_logprobs_for_token(33, 34)),
-                                None,
-                            ),
-                            request_output_with_logprobs(
-                                &request.request_id,
-                                vec![44],
-                                Some(EngineCoreFinishReason::Stop),
-                                None,
-                                Some(sample_logprobs_for_token(44, 45)),
-                                None,
-                            ),
+                            EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
+                                )),
+                                ..request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![33],
+                                    None,
+                                    None,
+                                    Some(sample_logprobs_for_token(33, 34)),
+                                    None,
+                                )
+                            },
+                            EngineCoreOutput {
+                                indexer_topk: Some(Box::new(
+                                    WireNdArray::from_i32(vec![1, 1, 2], vec![2, 0]).unwrap(),
+                                )),
+                                ..request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Stop),
+                                    None,
+                                    Some(sample_logprobs_for_token(44, 45)),
+                                    None,
+                                )
+                            },
                         ],
                         ..Default::default()
                     }
@@ -5608,6 +5638,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(payloads.len(), 4, "{text}");
 
     let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
+    assert!(first["choices"][0].get("indexer_topk").is_none());
     assert_eq!(first["request_id"], "raw-stream");
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
@@ -5621,6 +5652,10 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(first["usage"]["completion_tokens"], 1);
 
     let second: serde_json::Value = serde_json::from_str(payloads[1]).expect("second chunk json");
+    assert_eq!(
+        second["choices"][0]["indexer_topk"],
+        "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoIAAAA/////wIAAAAAAAAA"
+    );
     assert_eq!(second["choices"][0]["token_ids"], json!([44]));
     assert_eq!(second["choices"][0]["finish_reason"], "stop");
     assert_eq!(second["usage"]["completion_tokens"], 2);
