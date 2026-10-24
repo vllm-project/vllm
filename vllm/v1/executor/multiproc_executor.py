@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
@@ -429,8 +430,8 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc(
+    def execute_dummy_batch(self) -> LoRALoadEvent | None:
+        return self.collective_rpc(
             "execute_dummy_batch",
             unique_reply_rank=self.output_rank,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
