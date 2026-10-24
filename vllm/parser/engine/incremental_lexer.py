@@ -107,6 +107,7 @@ class IncrementalLexer:
         self.content_terminal = content_terminal
         self.buffer = ""
         self._token_counts: list[int] = []
+        self.pending_token_count = 0
 
         self._literal_strings = shape.literal_strings
         self._max_literal_len = shape.max_literal_len
@@ -118,6 +119,7 @@ class IncrementalLexer:
     def reset(self) -> None:
         self.buffer = ""
         self._token_counts.clear()
+        self.pending_token_count = 0
 
     def feed(
         self,
@@ -125,7 +127,13 @@ class IncrementalLexer:
         token_texts: tuple[str, ...] = (),
         token_count: int = 0,
     ) -> list[LexToken]:
+        if not text:
+            # The eventual text may complete a buffered control marker.
+            self.pending_token_count += token_count
+            return []
         char_token_counts = self._char_token_counts(text, token_texts, token_count)
+        char_token_counts[0] += self.pending_token_count
+        self.pending_token_count = 0
         if not self.buffer and self._has_only_literals and self._literal_first_chars:
             for ch in text:
                 if ch in self._literal_first_chars:
@@ -146,6 +154,9 @@ class IncrementalLexer:
             )
             self.buffer = ""
             self._token_counts.clear()
+        if self.pending_token_count:
+            tokens.append(LexToken(self.content_terminal, "", self.pending_token_count))
+            self.pending_token_count = 0
         return tokens
 
     @staticmethod
