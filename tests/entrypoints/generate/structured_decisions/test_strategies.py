@@ -255,6 +255,17 @@ def test_labels_start_the_reply(qwen):
         reply_label_ids(tokenizer, tokenizer.encode("team:"))
 
 
+def test_empty_encoding_is_not_a_label():
+    # A checkpoint missing its tokenizer files encodes all text to nothing.
+    tokenizer = SimpleNamespace(
+        get_added_vocab=lambda: {"<|im_start|>": 1},
+        decode=lambda ids: "",
+        encode=lambda text, add_special_tokens: [],
+    )
+    with pytest.raises(ValueError, match="not one distinct token"):
+        reply_label_ids(tokenizer, [1])
+
+
 @pytest.mark.parametrize(
     "model_name,reply_start",
     [
