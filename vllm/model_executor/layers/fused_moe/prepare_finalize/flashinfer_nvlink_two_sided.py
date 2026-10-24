@@ -14,9 +14,10 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
-def get_local_sizes():
+def get_local_sizes() -> list[int] | None:
     dp_metadata = get_forward_context().dp_metadata
-    assert dp_metadata is not None
+    if dp_metadata is None:  # PCP with DP=1
+        return None
     return dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
@@ -124,7 +125,7 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
 def flashinfer_alltoall_dispatch(
     all2all_manager: All2AllManagerBase,
-    global_num_tokens_cpu: list[int],
+    global_num_tokens_cpu: list[int] | None,
     x: torch.Tensor,
     gs: torch.Tensor,
     topk_ids: torch.Tensor,
