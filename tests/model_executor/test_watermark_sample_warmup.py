@@ -237,6 +237,52 @@ def test_dedup_none_also_warms_the_mask_free_specialization(
             assert "temperatures" not in call
 
 
+def test_red_green_warms_its_sampler_and_verification_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red-green samples with the fused kernel, forwarding the sampler's fp64
+    setting with and without a skip mask; speculative decoding also launches
+    the bias kernel, which verifies drafts against the biased logits."""
+    calls: dict[str, list[dict]] = {"sample": [], "bias": []}
+
+    def fake_sample(logits, contexts, key, *args, **kwargs):
+        calls["sample"].append({"logits": logits, "key": key, **kwargs})
+        return torch.zeros(logits.shape[0], dtype=torch.int64)
+
+    def fake_bias(logits, contexts, key, *args, **kwargs):
+        calls["bias"].append({"logits": logits, "key": key, **kwargs})
+        return logits.float()
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.watermark.philox_red_green_sample", fake_sample
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.watermark.philox_green_bias", fake_bias
+    )
+    config = WatermarkConfig(
+        key=MASTER_KEY, algorithm="red_green", deduplicate_contexts="none"
+    )
+
+    watermark_sample_warmup(_worker(config, use_fp64_gumbel=True))
+
+    assert _variants(calls["sample"]) == {
+        (MASTER_KEY, dtype, with_skip_mask)
+        for dtype in (torch.bfloat16, torch.float32)
+        for with_skip_mask in (True, False)
+    }
+    assert all(call["use_fp64"] for call in calls["sample"])
+    assert calls["bias"] == []
+
+    worker = _worker(config, speculative=True)
+    worker.vllm_config.speculative_config = object()
+    watermark_sample_warmup(worker)
+
+    assert _variants(calls["bias"]) == {
+        (MASTER_KEY, torch.bfloat16, True),
+        (MASTER_KEY, torch.float32, True),
+    }
+
+
 def test_warmup_argument_dtypes_match_the_runtime_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
