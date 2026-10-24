@@ -129,8 +129,11 @@ def test_fused_decode_feeds_zero_positions_to_kernel(monkeypatch) -> None:
 
     calls = []
     cache_ops = ModuleType("aiter.ops.cache")
-    cache_ops.fused_qk_rope_concat_and_cache_mla = lambda *args, **kwargs: (
-        calls.append(args)
+    monkeypatch.setattr(
+        cache_ops,
+        "fused_qk_rope_concat_and_cache_mla",
+        lambda *args, **kwargs: calls.append(args),
+        raising=False,
     )
     monkeypatch.setitem(sys.modules, "aiter", ModuleType("aiter"))
     monkeypatch.setitem(sys.modules, "aiter.ops", ModuleType("aiter.ops"))
