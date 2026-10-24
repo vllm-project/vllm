@@ -28,6 +28,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -411,4 +412,17 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
     )
