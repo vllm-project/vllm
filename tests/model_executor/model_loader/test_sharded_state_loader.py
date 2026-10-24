@@ -337,6 +337,62 @@ def test_save_model_part_split(monkeypatch, tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    "pattern,num_params",
+    [
+        ("model-rank-{rank}.safetensors", 2),
+        ("model-rank-{rank}-part-{{part}}.safetensors", 2),
+        ("model-rank-{rank}-part-{part!s:.1}.safetensors", 11),
+    ],
+)
+def test_save_model_rejects_colliding_parts(monkeypatch, tmp_path, pattern, num_params):
+    """Part filenames must be distinct before any checkpoint is overwritten."""
+    _mock_pp_group(monkeypatch, 1)
+    model = torch.nn.ParameterList(
+        [torch.nn.Parameter(torch.tensor([float(i)])) for i in range(num_params)]
+    )
+    filename = ShardedStateLoader._render_default_pattern(pattern, part=0)
+    existing = tmp_path / filename
+    existing.write_bytes(b"existing checkpoint")
+
+    with pytest.raises(ValueError, match="distinct.*part"):
+        ShardedStateLoader.save_model(model, str(tmp_path), pattern=pattern, max_size=4)
+
+    assert existing.read_bytes() == b"existing checkpoint"
+    assert list(tmp_path.iterdir()) == [existing]
+
+
+@pytest.mark.parametrize(
+    "pattern,max_size",
+    [
+        (None, 4),
+        ("custom-rank-{rank}-part-{part}.safetensors", 4),
+        ("model-rank-{rank}.safetensors", None),
+        ("model-rank-{rank}.safetensors", 8),
+    ],
+)
+def test_save_model_cpu_roundtrip(monkeypatch, tmp_path, pattern, max_size):
+    """Split and single-file checkpoints preserve every tensor exactly."""
+    from vllm.config.load import LoadConfig
+
+    _mock_pp_group(monkeypatch, 1)
+    model = torch.nn.Linear(1, 1)
+    ShardedStateLoader.save_model(
+        model, str(tmp_path), pattern=pattern, max_size=max_size
+    )
+    restored = torch.nn.Linear(1, 1)
+    loader = ShardedStateLoader(
+        LoadConfig(
+            load_format="sharded_state", model_loader_extra_config={"pattern": pattern}
+        )
+    )
+    loader.load_weights(
+        restored, SimpleNamespace(model=str(tmp_path), model_weights=None)
+    )
+    for key, tensor in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], tensor, rtol=0, atol=0)
+
+
 def test_save_model_rejects_bad_pattern_before_overwrite(monkeypatch, tmp_path):
     """An unsafe pattern is rejected before any shard file is written."""
     _mock_pp_group(monkeypatch, 2, pp_rank=1, tp_rank=0, tp_world_size=2)
