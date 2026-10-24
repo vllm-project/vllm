@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
+from vllm.config.speculative import pard2_is_target_dependent
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
 
@@ -19,6 +20,9 @@ def requires_aux_hidden_states(spec_config: SpeculativeConfig) -> bool:
             or {}
         )
         return eagle_config.get("use_aux_hidden_state", True)
+    if spec_config.method == "pard2":
+        # Target-independent PARD-2 drafts from embeddings alone.
+        return pard2_is_target_dependent(spec_config.draft_model_config.hf_config)
     return spec_config.method in ("dflash", "dspark", "extract_hidden_states")
 
 
