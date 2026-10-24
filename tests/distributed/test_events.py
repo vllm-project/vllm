@@ -5,6 +5,7 @@ import time
 
 import msgspec
 import pytest
+import zmq
 
 from vllm.distributed.kv_events import (
     EventBatch,
@@ -30,6 +31,31 @@ class SampleBatch(EventBatch):
     """Test event batch for publisher testing."""
 
     events: list[EventSample]
+
+
+class _BlockingSocketProxy:
+    def __init__(self, socket: zmq.Socket) -> None:
+        self.socket = socket
+        self.send_entered = threading.Event()
+        self.release_send = threading.Event()
+        self.close_called = threading.Event()
+        self.send_error: Exception | None = None
+        self.close_thread_id: int | None = None
+
+    def send_multipart(self, frames: tuple[bytes, ...]) -> None:
+        self.send_entered.set()
+        if not self.release_send.wait(timeout=10):
+            raise TimeoutError("test did not release the blocked ZMQ send")
+        try:
+            self.socket.send_multipart(frames)
+        except Exception as exc:
+            self.send_error = exc
+            raise
+
+    def close(self, linger: int = 0) -> None:
+        self.close_thread_id = threading.get_ident()
+        self.close_called.set()
+        self.socket.close(linger=linger)
 
 
 def create_test_events(count: int) -> SampleBatch:
@@ -204,6 +230,46 @@ def test_high_volume(publisher, subscriber):
 
     seqs = [seq for seq, _ in received]
     assert sorted(seqs) == seqs, "Sequence numbers should be in order"
+
+
+def test_shutdown_leaves_socket_cleanup_to_publisher_thread():
+    """Shutdown must not close a socket during an in-flight send."""
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    publisher = ZmqEventPublisher(
+        data_parallel_rank=0,
+        endpoint=f"inproc://bug6-shutdown-{time.time_ns()}",
+    )
+    publisher.SHUTDOWN_TIMEOUT = 0.05
+    raw_socket = publisher._pub
+    assert raw_socket is not None
+    proxy = _BlockingSocketProxy(raw_socket)
+    publisher._pub = proxy  # type: ignore[assignment]
+
+    try:
+        publisher.publish(create_test_events(1))
+        assert proxy.send_entered.wait(timeout=5)
+
+        publisher.shutdown()
+
+        assert publisher._thread.is_alive()
+        assert not proxy.close_called.is_set()
+
+        proxy.release_send.set()
+        publisher._thread.join(timeout=5)
+
+        assert not publisher._thread.is_alive()
+        assert proxy.close_called.is_set()
+        assert proxy.close_thread_id == publisher._thread.ident
+        assert proxy.send_error is None
+        assert publisher._pub is None
+    finally:
+        proxy.release_send.set()
+        if publisher._running:
+            publisher.shutdown()
+        publisher._thread.join(timeout=5)
+        if not raw_socket.closed:
+            raw_socket.close(linger=0)
 
 
 def test_null_publisher():
