@@ -150,8 +150,9 @@ def test_context_attention(
             sliding_window_k=None,
         )
 
-    # Compare outputs
-    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+    # Compare outputs. Float32 must match IEEE precision, not TF32.
+    tol = 1e-4 if dtype == torch.float32 else 1e-2
+    torch.testing.assert_close(o, o_ref, rtol=tol, atol=tol)
 
 
 @pytest.mark.parametrize("B", [4])
