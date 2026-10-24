@@ -81,11 +81,20 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
         if quant_config._is_mxfp8(weight_quant):
+            if input_quant is not None and not quant_config._is_mxfp8(input_quant):
+                raise ValueError(
+                    "For MXFP8 weights, input quantization must also be "
+                    "MXFP8 format or None for MXFP8 weight-only, "
+                    f"found {input_quant}"
+                )
             from .compressed_tensors_moe_w8a8_mxfp8 import (
                 CompressedTensorsW8A8Mxfp8MoEMethod,
             )
 
-            return CompressedTensorsW8A8Mxfp8MoEMethod(layer.moe_config)
+            return CompressedTensorsW8A8Mxfp8MoEMethod(
+                layer.moe_config,
+                use_a16=(input_quant is None),
+            )
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             valid_format_and_bits = (
