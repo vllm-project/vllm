@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -117,7 +117,7 @@ class KVCacheBlocks:
         return [
             [
                 block.block_id
-                for block in group
+                for block in trim_null_head(group)
                 if block.block_hash is None and not block.is_null
             ]
             for group in self.blocks
@@ -261,12 +261,16 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+    def get_computed_blocks(
+        self, request: Request, max_cache_hit_length: int | None = None
+    ) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            max_cache_hit_length: Upper bound on the hit length. Defaults to
+                ``request.num_tokens - 1``.
 
         Returns:
             A tuple containing:
@@ -292,7 +296,8 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        if max_cache_hit_length is None:
+            max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -321,7 +326,7 @@ class KVCacheManager:
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def get_computed_blocks_for_connector(
-        self, request: Request
+        self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
@@ -348,20 +353,22 @@ class KVCacheManager:
             and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
+        if max_cache_hit_length is None:
+            max_cache_hit_length = request.num_tokens - 1
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes, max_cache_hit_length
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
             # that every group agrees on.
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
         blocks = self.create_kv_cache_blocks(computed)
@@ -381,6 +388,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -413,6 +421,8 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            skip_zeroing_group_ids: Groups whose external-token blocks will be
+                written by an async load and must not be zeroed concurrently.
 
         Blocks layout:
         ```
@@ -512,6 +522,10 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
+        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
+        # extends it to resumed requests replaying their output tokens.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -525,6 +539,7 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
+                prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
@@ -559,6 +574,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            prefill_end=prefill_end,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -580,6 +596,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -679,39 +696,9 @@ class KVCacheManager:
         return True
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Calculate the number of common prefix blocks for each kv cache group.
-
-        The function selects a running request and iterates through its blocks.
-        A block is considered a common prefix block if ALL requests with
-        allocated KV cache share it (i.e., ref_cnt equals the number of entries
-        in req_to_blocks).
-
-        NOTE(woosuk): The number of requests with allocated KV cache is **greater
-        than or equal to** the number of requests scheduled in the current step.
-        This is because having allocated KV cache only indicates that:
-        1. The request has not yet finished, and
-        2. The request holds its blocks unfreed.
-
-        While all scheduled requests must have allocated KV cache, the inverse
-        is not necessarily true. There may be requests with allocated KV cache
-        that are not scheduled in the current step.
-
-        This can result in an edge case where the number of common prefix blocks
-        is 0, even though all scheduled requests share a common prefix. This
-        occurs because there may be unscheduled requests that do not share the
-        common prefix. Currently, this case cannot be easily detected, so the
-        function returns 0 in such cases.
-
-        Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
-
-        Returns:
-            list[int]: The number of common prefix blocks for each kv cache
-            group.
-
-        """
-        return self.coordinator.get_num_common_prefix_blocks(running_request_id)
+        """Deprecated: cascade attention has been removed. Always returns 0
+        for each KV cache group. Kept for out-of-tree schedulers."""
+        return [0] * self.num_kv_cache_groups
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
@@ -855,20 +842,6 @@ class KVCacheManager:
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
-        return ids
-
-    def get_zeroing_block_ids_in_range(
-        self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
-        """The request's block ids covering [start_token, end_token), from
-        the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            if mgr.records_new_block_ids:
-                start_idx = start_token // mgr.block_size
-                end_idx = cdiv(end_token, mgr.block_size)
-                blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
         return ids
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
