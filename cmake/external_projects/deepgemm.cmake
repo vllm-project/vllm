@@ -44,7 +44,49 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
+  # Reuse a checkout from an earlier configure only while it is the pinned
+  # commit. One with local changes, or at a commit no remote has, is kept.
+  set(_deepgemm_reuse FALSE)
   if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
+    set(_deepgemm_reuse TRUE)
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS "${_deepgemm_src}/.git")
+      set(_deepgemm_git "${GIT_EXECUTABLE}" -C "${_deepgemm_src}")
+      execute_process(
+        COMMAND ${_deepgemm_git} rev-parse HEAD
+        OUTPUT_VARIABLE _deepgemm_head OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+      execute_process(
+        COMMAND ${_deepgemm_git} rev-parse --verify --quiet
+                "${_DEEPGEMM_UPSTREAM_TAG}^{commit}"
+        OUTPUT_VARIABLE _deepgemm_pin OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+      if(NOT _deepgemm_head STREQUAL _deepgemm_pin)
+        execute_process(
+          COMMAND ${_deepgemm_git} status --porcelain --untracked-files=no
+          OUTPUT_VARIABLE _deepgemm_dirty OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        execute_process(
+          COMMAND ${_deepgemm_git} for-each-ref --count=1 --contains HEAD
+                  refs/remotes
+          OUTPUT_VARIABLE _deepgemm_remote_ref OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        if(_deepgemm_dirty OR NOT _deepgemm_remote_ref)
+          message(WARNING "DeepGEMM checkout ${_deepgemm_src} is at "
+            "${_deepgemm_head}, not the pinned ${_DEEPGEMM_UPSTREAM_TAG}, but "
+            "has local changes or unpushed commits, so it is used as is. "
+            "Remove it to fetch the pin, or set DEEPGEMM_SRC_DIR.")
+        else()
+          message(STATUS "DeepGEMM checkout is at ${_deepgemm_head}, "
+            "fetching the pinned ${_DEEPGEMM_UPSTREAM_TAG}")
+          file(REMOVE_RECURSE "${_deepgemm_src}" "${_deepgemm_sub}")
+          set(_deepgemm_reuse FALSE)
+        endif()
+      endif()
+    endif()
+  endif()
+
+  if(_deepgemm_reuse)
     set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
     set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
   else()
