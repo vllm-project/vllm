@@ -85,6 +85,13 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     system = {"role": "system", "content": ""}
                     conversation.insert(0, system)
                 system["tools"] = tools
+            # Reference encoding.py: a continued assistant message has no EOS.
+            if (
+                kwargs.get("continue_final_message")
+                and conversation
+                and conversation[-1]["role"] == "assistant"
+            ):
+                conversation[-1]["wo_eos"] = True
 
             thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
             if "thinking" not in kwargs and "enable_thinking" not in kwargs:
