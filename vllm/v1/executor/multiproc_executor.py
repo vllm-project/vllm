@@ -1150,6 +1150,7 @@ class WorkerProc:
         while True:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
+            del output
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
