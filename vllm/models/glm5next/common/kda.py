@@ -722,6 +722,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     recurrent_state=recurrent_state,
                 )
             else:
+                # The builder precomputes FLA chunk metadata on the host,
+                # sparing chunk_kda a GPU->CPU sync. It covers
+                # non_spec_query_start_loc except in a non-spec batch with
+                # decodes, which it builds prefill-only (GDN peels decodes off;
+                # KDA chunks them with the prefills).
+                chunk_metadata_matches = (
+                    spec_sequence_masks is not None
+                    or attn_metadata_narrowed.num_decodes == 0
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -741,6 +750,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
+                    chunk_indices=(
+                        attn_metadata_narrowed.chunk_indices
+                        if chunk_metadata_matches
+                        else None
+                    ),
+                    chunk_offsets=(
+                        attn_metadata_narrowed.chunk_offsets
+                        if chunk_metadata_matches
+                        else None
+                    ),
                 )
             # Init cache
             scatter_states(
