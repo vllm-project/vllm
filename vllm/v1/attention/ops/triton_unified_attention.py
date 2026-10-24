@@ -429,7 +429,9 @@ def kernel_unified_attention(
         tile_mask = seq_offset < max_seq_prefix_len
 
         physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE,
+            mask=(seq_offset // BLOCK_SIZE) < cdiv_fn(seq_len, BLOCK_SIZE),
+            other=0,
         ).to(tl.int64)
 
         if USE_TD:
