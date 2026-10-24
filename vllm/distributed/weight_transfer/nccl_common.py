@@ -9,6 +9,8 @@ sparse engine does not have to subclass the dense one.
 """
 
 import socket
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -123,6 +125,17 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     only the mode actually in use. Shared by the dense and sparse trainer
     engines so the two cannot drift."""
     return {key: value for key, value in asdict(init_info).items() if value is not None}
+
+
+def run_trainer_rendezvous(
+    *, init_worker: Callable[[], None], init_trainer: Callable[[], None]
+) -> None:
+    # Workers and trainer must enter the rendezvous concurrently, so run the
+    # worker initialization RPC in a thread while opening the trainer endpoint.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(init_worker)
+        init_trainer()
+        future.result()
 
 
 class NCCLRendezvous(Protocol):

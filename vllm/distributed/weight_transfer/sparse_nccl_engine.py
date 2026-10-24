@@ -30,6 +30,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    run_trainer_rendezvous,
     worker_init_payload,
     worker_init_process_group,
 )
@@ -230,6 +231,20 @@ class SparseNCCLTrainerWeightTransferEngine(
         self.model_update_group: PyNcclCommunicator | None = None
 
     @classmethod
+    def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
+        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
+        # Sparse transfers are never packed, so the worker keeps the unpacked
+        # defaults on its init info.
+        worker_init_info = NCCLWeightTransferInitInfo(
+            master_address=init_info.master_address,
+            master_port=init_info.master_port,
+            rank_offset=1,
+            world_size=init_info.world_size,
+        )
+
+        return worker_init_payload(worker_init_info)
+
+    @classmethod
     def trainer_init(
         cls,
         init_info: SparseNCCLTrainerInitInfo,
@@ -241,28 +256,13 @@ class SparseNCCLTrainerWeightTransferEngine(
         if not engine.is_sender:
             return engine
 
-        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
-        # Sparse transfers are never packed, so the worker keeps the unpacked
-        # defaults on its init info.
-        worker_init_info = NCCLWeightTransferInitInfo(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            rank_offset=1,
-            world_size=init_info.world_size,
+        payload = cls._build_worker_init_payload(init_info)
+        run_trainer_rendezvous(
+            init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
+            init_trainer=lambda: setattr(
+                engine, "model_update_group", open_trainer_endpoint(init_info)
+            ),
         )
-
-        # The inference workers block inside init_weight_transfer_engine waiting
-        # for the NCCL rendezvous, so we kick that off on a side thread while we
-        # open the trainer endpoint (rank 0); both sides must rendezvous together.
-        with ThreadPoolExecutor(max_workers=1) as exe:
-            future = exe.submit(
-                engine.client.init_weight_transfer_engine,
-                worker_init_payload(worker_init_info),
-            )
-            # Open the trainer endpoint as NCCL rank 0 on the current device
-            # (the init info satisfies the helper's rendezvous protocol).
-            engine.model_update_group = open_trainer_endpoint(init_info)
-            future.result()  # surface any inference-side init error
 
         return engine
 
