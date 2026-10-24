@@ -740,3 +740,103 @@ relayer au propriétaire si ça continue, ce n'est pas un cron vLLM.
 - `docker logs` a **manqué des échantillons** (un intervalle de 60 s au lieu
   de 30) : toujours calculer le débit sur le `dt` réel, jamais sur la cadence
   supposée.
+
+## 2026-10-24 04:41Z — le tier fs bascule en lecture ; 6 × 400 inexpliqués mais instrumentés
+
+**Moteur** : `StartedAt 02:10:33Z`, **2 h 30 sans restart**, RC=0, health 200
+en 3,8 ms, OOM 0, 3 conteneurs Up. 4 `WEDGE fail 1/2` (02:25:44, 02:28:48,
+03:55:24, 04:39:13) tous RECOVERED, **0 WEDGE-BUSY** : la charge est retombée
+(4,6 req/min sur 6 h) et la porte n'a rien eu à arbitrer. Cache préfixe
+**71,4 %** (64,08 M / 89,81 M tokens depuis le boot). Préemptions 8 (inchangé
+depuis le boot — pas de saturation KV). VRAM 21 491 / 20 650 MiB, GPU 2
+8 378 MiB (CoursIA). `/dev/shm` 17 G (26 %), sous le seuil.
+
+### ★ Le tier fs est passé en lecture — la pathologie du 21/10 est inversée
+
+Compteurs cumulés depuis le boot (un seul moteur, aucune ambiguïté de
+génération), fenêtre 2 h 25 :
+
+| Mesure | Valeur | Débit |
+|---|---|---|
+| `read_bytes{tier=1:fs}` | **282,4 GB** | 32,5 MB/s |
+| `write_bytes{tier=1:fs}` | **190,9 GB** | 21,9 MB/s |
+| `chunk_queries{tier=1:fs}` | 21 138 | — |
+| `chunk_hits{tier=1:fs}` | **10 748 (50,8 %)** | — |
+| `read_time` / `write_time` | 109,8 s / 628,3 s | — |
+
+Le **ratio lecture/écriture vaut 1,48:1**, là où le 21/10 il était de 1:18
+(39,8 GB écrits pour 6,9 GB relus). Le tier n'est donc plus un puits
+d'écriture : il **sert**. Preuve indépendante dans le log moteur à 02:48:07Z :
+`External prefix cache hit rate: 93,1 %`. C'est la réponse directe à
+l'inquiétude d'usure disque du 21/10 — le disque écrit autant, mais il rend.
+
+À noter pour ne pas sur-lire : `read_time` (0,5 s de moyenne par tranche) et
+`lookup_async_delay` (17 931 s / 20 328 = **882 ms de moyenne**) mesurent des
+distributions à queue lourde, pas un régime homogène — la médiane reste basse.
+
+### Plafond 96 GiB exercé, et le terme contraignant a changé
+
+Passage du pruneur à **04:20:02Z** : `bytes_total 133,86 GB` (124,7 GiB),
+`over cap 30,78 GB`, **1 173 fichiers supprimés**, `errors_count 0`,
+`elapsed_s 18,2`. Croissance nette **14,3 GiB/h** → rétention ~6-7 h.
+Le terme qui mord est désormais **`max_gib` lui-même** : marge C: **173,3 Go**,
+marge invité 227,5 Go, plafond 96 GiB. Le disque n'est plus le limiteur.
+
+**Conséquence de méthode** : je n'ai PAS relevé le plafond une seconde fois.
+La question ouverte n'est pas « plus de place » mais « la rétention
+est-elle le facteur limitant », et aucune mesure ne le dit encore. C'est
+l'A/B du tier fs (Q28, module `lru_fs_tier.py` prêt, PR #158) qui doit
+trancher. Une hausse à l'aveugle aurait consommé la marge de Maintenance
+sans preuve qu'elle achète quoi que ce soit.
+
+### ★ 6 × HTTP 400 non expliqués — signature #431, cause NON établie
+
+Tous de la même forme : `path=/v1/chat/completions`, UA `Bun/1.3.14`
+(front hub), `90.65.170.144`, clé MEDIUM, corps **712 K → 1,01 Mo**,
+session Claude Code (system prompt « You are NOT Claude »).
+
+| Heure UTC | Corps (o) |
+|---|---|
+| 23:47:27 / 23:47:30 | 958 062 (**paire = retry**) |
+| 00:06:21 | 1 007 885 |
+| 01:57:04 | 712 403 |
+| 02:48:06 / 02:48:16 | 942 554 (**paire = retry**) |
+
+**Ce que la mesure dit** : sur la même fenêtre, 31 réponses **200** dépassent
+900 K o et la plus grosse atteint **945 341 o**. Donc ce n'est **pas** une
+frontière de taille : 945 K passe, 942 K échoue. L'hypothèse « contexte trop
+long » reste la plus plausible (le nombre de tokens, pas d'octets, décide),
+mais **elle n'est pas prouvée** : vLLM ne journalise pas le motif d'un 4xx à
+ce niveau de verbosité, et `--tail 20 000` ne contient ni `BadRequest` ni
+`maximum context`.
+
+C'est exactement la signature que la spec demande de chercher
+(`400` + `body_bytes > 100 000`). Une paire identique à 3 s d'intervalle est
+en plus le motif de **retry local** que #431 interdit.
+
+**Correctif d'instrument, pas de rustine** : `error_source_capture.py`
+capture désormais le **corps de réponse des non-2xx** (`ERROR_SOURCE_ERR_BODY_BYTES`,
+2 Kio, tamponné seulement si `status >= 400`). Le chemin 2xx/SSE ne paie rien ;
+vérifié par test sur app ASGI factice (400 → corps capturé, 200 de 400 K o
+diffusé en 10 morceaux → rien d'accumulé). **Inerte jusqu'au prochain
+restart** : la prochaine occurrence sera diagnosticable d'elle-même.
+
+### Sécurité — le mur tient, deux sources nommées
+
+- **`108.165.33.236`** : `Go-http-client/1.1`, **49 sondes en 6 h** (une
+  toutes les ~7 min) uniquement sur `/v1/models`, **49 × 401**. Clé employée =
+  **MEDIUM_VL morte** (`1f7f6080cb65`, retirée du `.env` le 20/10 → Q23).
+  Ce n'est pas un consommateur mais un sondeur ; aucun 200, rien à révoquer.
+- **`ZOLTRAAK/0.2.0`** (scanner) : 3 requêtes à 03:53Z sur `/v1/models` avec
+  des clés inventées (`ccd500f719e4`, `64a6d7ec06fd`) → **3 × 401**.
+- Aucune IP inconnue avec des 200. `90.65.170.144` (hairpin site) et
+  `37.187.180.135` (web1) restent les seules sources avec 200.
+
+### Hygiène
+
+nbaudit `ok:true` (04:06:13Z, 5 séries × 3) — et **`subpath` a basculé sur
+`19451:Image/`** : la vague 2 est armée, la fanion posée le 10/10 est levé.
+Disque invité **74 %** (255 GB libres), commit hôte **77,0 %** (marge 91,8 GB),
+G: 85 %. Condensation nominale (bannière 3 étages `key=OK`, repli cloud actif,
+aucun événement). Les 5 × 500 du census sont ceux de la frontière du restart
+de 02:10, déjà documentés.
