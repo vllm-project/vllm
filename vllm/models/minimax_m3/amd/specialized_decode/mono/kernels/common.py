@@ -66,22 +66,13 @@ def ar_pack_sumsq(vals):
 
 
 @traced
-def ar_block_sum(p0, p1, lane, wave, red):
-    """Sum of the 768 per-pack partials of a 6144-wide bf16 row in the order the
-    1-stage fused all-reduce + RMSNorm reduces them: 24 warps of 32, a 16..1
-    butterfly per warp, then the 24 warp sums butterflied again in one warp.
-
-    Logical warp ``3 * wave + lane // 32`` holds ``p0``; logical warp
-    ``3 * wave + 2`` holds ``p1`` in lanes < 32 (``WAVES`` = 8). ``red`` needs
-    24 words. Matching this order keeps rstd bit-exact with the original path.
-    """
-    return ar_block_sums([(p0, p1)], lane, wave, red)[0]
-
-
-@traced
 def ar_block_sums(parts, lane, wave, red):
-    """``ar_block_sum`` of several rows ``parts = [(p0, p1), ...]`` behind one set
-    of barriers; ``red`` needs 24 words per row."""
+    """Sum 768 partials per row in the fused all-reduce/RMSNorm order.
+
+    Each row in ``parts`` supplies (p0, p1): logical warp ``3 * wave + lane // 32``
+    holds p0; warp ``3 * wave + 2`` holds p1 in lanes < 32. Reduce within each
+    32-lane warp, then over its 24 warp sums; ``red`` needs 24 words per row.
+    """
     bs = [
         (butterfly(p0, (16, 8, 4, 2, 1)), butterfly(p1, (16, 8, 4, 2, 1)))
         for p0, p1 in parts

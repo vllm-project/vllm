@@ -66,8 +66,6 @@ def _gemma_fused_add_rmsnorm_kernel(
     stride_rcol,
     eps,
     BLOCK_N: tl.constexpr,
-    scale_ptr=None,
-    QUANT_FP8: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, BLOCK_N)
@@ -89,20 +87,11 @@ def _gemma_fused_add_rmsnorm_kernel(
     rstd = 1.0 / tl.sqrt(var + eps)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     out = s * rstd * (1.0 + w)
-    if QUANT_FP8:
-        out = out.to(x_ptr.dtype.element_ty).to(tl.float32)
-        scale = tl.max(tl.where(mask, tl.abs(out), 0.0), axis=0) * (1.0 / 448.0)
-        inverse = tl.inline_asm_elementwise(
-            "v_rcp_f32 $0, $1",
-            constraints="=v,v",
-            args=[scale],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
-        tl.store(scale_ptr + row, scale)
-        out = out * inverse
-    tl.store(out_ptr + row * n_cols + cols, out, mask=mask)
+    tl.store(
+        out_ptr + row * n_cols + cols,
+        out.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
 
 
 def _num_warps(block_n: int) -> int:
@@ -164,41 +153,3 @@ def gemma_fused_add_rmsnorm(
         num_warps=_num_warps(block_n),
     )
     return out.reshape(orig_shape), res_out.reshape(orig_shape)
-
-
-def gemma_fused_add_rmsnorm_fp8(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Gemma norm followed by AITER's dynamic per-token E4M3 quantization.
-
-    The normalized values round to the input dtype before quantization,
-    preserving the separate norm and quantization operations' precision.
-    """
-    n = x.shape[-1]
-    x2, r2 = x.reshape(-1, n), residual.reshape(-1, n)
-    m = x2.shape[0]
-    out = torch.empty((m, n), dtype=torch.float8_e4m3fn, device=x.device)
-    res_out = torch.empty((m, n), dtype=x.dtype, device=x.device)
-    scales = torch.empty((m, 1), dtype=torch.float32, device=x.device)
-    block_n = triton.next_power_of_2(n)
-    _gemma_fused_add_rmsnorm_kernel[(m,)](
-        x2,
-        r2,
-        weight,
-        out,
-        res_out,
-        n,
-        x2.stride(0),
-        x2.stride(1),
-        r2.stride(0),
-        r2.stride(1),
-        eps,
-        BLOCK_N=block_n,
-        scale_ptr=scales,
-        QUANT_FP8=True,
-        num_warps=_num_warps(block_n),
-    )
-    return out.reshape(x.shape), scales, res_out.reshape(x.shape)

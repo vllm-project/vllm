@@ -15,7 +15,6 @@ with another CU count -- and THREADS threads each.
 BLOCKS = 256
 THREADS = 512
 WAVES = THREADS // 64
-LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
 
 
 def first_task(bid, base):

@@ -5,9 +5,9 @@
 # Original code is MIT-licensed; see mono/LICENSE and the provenance in
 # specialized_decode/README.md.
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
-"""K1 ``mono_pre``: one MiniMax-M3 sparse layer, input norm through cache insert.
+"""Pre-attention stages: input norm through cache insertion and index scoring.
 
-One launch per layer and rank, ``BLOCKS`` CTAs x ``THREADS`` threads, for S =
+Fused into the sparse-layer launch, ``BLOCKS`` CTAs x ``THREADS`` threads, for S =
 ``tokens`` decode rows, ``q_len`` consecutive rows a request (each row below is
 per token)::
 
@@ -25,14 +25,11 @@ layer. The numerical contracts (reduction orders, where values round to bf16)
 follow the aiter kernels the original path uses; see each stage.
 """
 
-from dataclasses import dataclass, field
-
-import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, Int64, T
+from flydsl.expr.typing import T
 
 from ..config import (
     HEAD_DIM,
@@ -40,14 +37,12 @@ from ..config import (
     LOCAL_Q_HEADS,
     MAX_QKV_ROWS,
     MAX_TOKENS,
-    ONE_INDEX_HEAD,
     PAGE16,
     ROTARY_DIM,
     TP,
     IndexHeads,
     qkv_rows,
 )
-from ..sources import SOURCES
 from ..support.device.mx import (
     FP8_MAX,
 )
@@ -60,9 +55,7 @@ from ..support.device.ops import (
     div_rn,
     fp8_pack4,
     hw_rsq,
-    kernel_symbol,
     lane_gather,
-    launcher,
     mfma_fp8,
     rows_to_lds,
     rsrc,
@@ -70,22 +63,11 @@ from ..support.device.ops import (
     uniform,
     wave_max,
 )
-from ..support.device.stamps import (
-    stamp as stamp_point,
-)
-from ..support.device.stamps import (
-    stamp_begin,
-    stamp_flush,
-)
 from ..support.device.sync import (
     Addr,
     Mailbox,
     publish,
     sreg,
-)
-from ..support.plan.build_key import (
-    key_tuple,
-    symbol_params,
 )
 from ..support.plan.execution import (
     BLOCKS,
@@ -96,9 +78,6 @@ from ..support.plan.trace import (
     Space,
     enter_stage,
 )
-from ..support.runtime.abi import (
-    KernelAbi,
-)
 from .common import (
     ar_block_sums,
     ar_pack_sumsq,
@@ -107,14 +86,13 @@ from .common import (
 )
 from .index_score import (
     emit_index_scores,
-    index_scale_log2e,
     step_rows,
 )
 
 ROWS_PER_TASK = 16
 K_CHUNKS = HIDDEN // 64  # 64-k chunks: one dwordx4 of weight per lane
 CHUNKS_PER_WAVE = K_CHUNKS // WAVES
-Q_OFF, K_OFF, V_OFF = 0, LOCAL_Q_HEADS * HEAD_DIM, (LOCAL_Q_HEADS + 1) * HEAD_DIM
+K_OFF, V_OFF = LOCAL_Q_HEADS * HEAD_DIM, (LOCAL_Q_HEADS + 1) * HEAD_DIM
 N_HEAD_TASKS = LOCAL_Q_HEADS + 4  # q heads, k, v, the rank's index_q, index_k
 IQ_TASK, IK_TASK = LOCAL_Q_HEADS + 2, LOCAL_Q_HEADS + 3
 HEAD_ROW_GROUPS = HEAD_DIM // ROWS_PER_TASK  # GEMV tasks a head
@@ -640,7 +618,7 @@ def emit_pre_attn(
 # the fused layer kernel's K1 pointers that do not change per step, in its device
 # array (the rest are K4's own, or kernel arguments)
 K1_ARGS = (
-    "ar", "g_in", "w_qkv", "s_qkv", "g_q", "g_k", "g_iq", "g_ik", "cos_sin",
+    "g_in", "w_qkv", "s_qkv", "g_q", "g_k", "g_iq", "g_ik", "cos_sin",
     "index_cache", "iq_out", "scratch",
 )  # fmt: skip
 
@@ -774,203 +752,3 @@ def emit_k1(
             make_index_q, heads, q_frag_head, make_index_q_heads,
         )  # fmt: skip
     stamp(6)
-
-
-TL_POINTS = 8  # timeline stamps per CTA
-
-# the standalone K1's arguments, in order (checked at build time, packed by name)
-K1_ABI = KernelAbi(
-    (
-        "ar", "res", "h_out", "g_in", "w_qkv", "s_qkv", "g_q", "g_k", "g_iq", "g_ik",
-        "cos_sin", "positions", "slot_mapping", "k_cache", "v_cache", "k_scale",
-        "v_scale", "index_cache", "q_out", "iq_out", "block_table", "seq_lens",
-        "bt_width", "q_len", "iscore", "scratch", "layer", "tl",
-    )
-)  # fmt: skip
-
-
-@dataclass(frozen=True)
-class K1Build:
-    """Every parameter of a standalone K1 build (``support.plan.build_key``)."""
-
-    tokens: int = field(metadata={"sym": "s"})
-    init_blocks: int = field(metadata={"sym": "ib"})
-    local_blocks: int = field(metadata={"sym": "lb"})
-    index_heads: int = field(metadata={"sym": "ih"})
-    index_own: int = field(metadata={"sym": "io"})
-    timeline: bool = field(metadata={"sym": "tl"})
-    dense: bool = field(metadata={"sym": "dn"})
-    plain_norm: bool = field(metadata={"sym": "pn"})
-    eps: float
-    sm_scale: float
-
-
-def build_pre_attn_kernel(
-    eps: float,
-    sm_scale: float,
-    init_blocks: int,
-    local_blocks: int,
-    tokens: int = 1,
-    timeline: bool = False,
-    heads: IndexHeads = ONE_INDEX_HEAD,
-    dense: bool = False,
-    plain_norm: bool = False,
-):
-    """``@flyc.jit`` launcher of K1 for this model's RMSNorm epsilon, attention
-    scale and sparse pinned blocks, a decode batch of ``tokens`` (<= MAX_TOKENS)
-    rows and the fused projection's index q ``heads``. ``dense``: a dense layer's
-    (``dense_pre``): q | k | v rows only, no indexer, K inserted as the dense
-    path's rope-cache does; ``plain_norm``: layer 0's input norm
-    (``emit_pre_attn``)."""
-    assert 1 <= tokens <= MAX_TOKENS
-    key = K1Build(
-        tokens=tokens, init_blocks=init_blocks, local_blocks=local_blocks,
-        index_heads=heads.count, index_own=heads.own, timeline=timeline,
-        dense=dense, plain_norm=plain_norm, eps=eps, sm_scale=sm_scale,
-    )  # fmt: skip
-    build_key = key_tuple(key, SOURCES)  # the launcher references it: keyed
-    index_scale = index_scale_log2e(sm_scale)
-
-    @fx.struct
-    class Smem:
-        # FP8 activations, natural k order, one row per token
-        x8: fx.Array[fx.Int32, tokens * HIDDEN // 4, 16]
-        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS if timeline else 1, 16]  # timeline stamps
-        # every token's index q for the scorers, bf16 pairs
-        qs: fx.Array[fx.Float32, HEAD_DIM // 2 * tokens * heads.count, 16]
-
-    kernel_name = kernel_symbol("minimax_m3_pre_attn", **symbol_params(key))
-
-    # the kernel body rebuilds IndexHeads from ints: an object in a closure is not
-    # a cache-key value (``build_key`` keys them anyway)
-    ih_count, ih_own = heads.count, heads.own
-
-    @flyc.kernel(name=kernel_name, known_block_size=[THREADS, 1, 1])
-    def pre_attn_kernel(
-        ar: Int64,
-        res: Int64,
-        h_out: Int64,
-        g_in: Int64,
-        w_qkv: Int64,
-        s_qkv: Int64,
-        g_q: Int64,
-        g_k: Int64,
-        g_iq: Int64,
-        g_ik: Int64,
-        cos_sin: Int64,
-        positions: Int64,
-        slot_mapping: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        k_scale: Int64,
-        v_scale: Int64,
-        index_cache: Int64,
-        q_out: Int64,
-        iq_out: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        scratch: Int64,
-        layer: Int32,
-        tl: Int64,
-    ):
-        tid = fx.thread_idx.x
-        bid = fx.block_idx.x
-        lane = tid % 64
-        wave = tid // 64
-        lds = fx.SharedAllocator().allocate(Smem).peek()
-        x8 = lds.x8.ptr
-        red = lds.red.ptr
-        tls = lds.tls.ptr
-        qs = lds.qs.ptr
-
-        def stamp(k):
-            """``timeline``: this CTA passing point k (``support.device.stamps``)."""
-            stamp_point(timeline, tls, tid, k)
-
-        stamp_begin(timeline, tls, tid, TL_POINTS)
-        emit_k1(
-            tid, bid, lane, wave, x8, red, qs, stamp, layer, eps, index_scale,
-            tokens, q_len, init_blocks, local_blocks, IndexHeads(ih_count, ih_own),
-            (
-                ar, res, h_out, g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik,
-            cos_sin, positions,
-                slot_mapping, k_cache, v_cache, k_scale, v_scale, index_cache, q_out,
-                iq_out, block_table, seq_lens, iscore, scratch,
-            ),
-            bt_width,
-            index_topk=not dense,
-            dense=dense,
-            plain_norm=plain_norm,
-        )  # fmt: skip
-        stamp_flush(timeline, tls, tl, tid, bid, TL_POINTS)
-
-    @launcher(kernel_name)
-    def launch_pre_attn(
-        ar: Int64,
-        res: Int64,
-        h_out: Int64,
-        g_in: Int64,
-        w_qkv: Int64,
-        s_qkv: Int64,
-        g_q: Int64,
-        g_k: Int64,
-        g_iq: Int64,
-        g_ik: Int64,
-        cos_sin: Int64,
-        positions: Int64,
-        slot_mapping: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        k_scale: Int64,
-        v_scale: Int64,
-        index_cache: Int64,
-        q_out: Int64,
-        iq_out: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        scratch: Int64,
-        layer: Int32,
-        tl: Int64,
-        stream: fx.Stream = _CURRENT_STREAM,
-    ):
-        _ = build_key  # every build parameter in the JIT cache key
-        pre_attn_kernel(
-            ar,
-            res,
-            h_out,
-            g_in,
-            w_qkv,
-            s_qkv,
-            g_q,
-            g_k,
-            g_iq,
-            g_ik,
-            cos_sin,
-            positions,
-            slot_mapping,
-            k_cache,
-            v_cache,
-            k_scale,
-            v_scale,
-            index_cache,
-            q_out,
-            iq_out,
-            block_table,
-            seq_lens,
-            bt_width,
-            q_len,
-            iscore,
-            scratch,
-            layer,
-            tl,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-
-    K1_ABI.check(pre_attn_kernel, launch_pre_attn)
-    return launch_pre_attn

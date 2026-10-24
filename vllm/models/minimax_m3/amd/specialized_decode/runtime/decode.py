@@ -122,7 +122,7 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
-        """Mono for a plain-decode step of at most ``max_rows`` rows, eager or
+        """Mono for a supported plain-decode width, eager or
         inside a FULL graph capture (padded rows are inert in the kernel);
         stock otherwise. Every predicate reads metadata every TP rank holds
         alike."""
@@ -175,8 +175,6 @@ class SpecializedDecode:
             raise failure
         if not self._closed:
             torch._assert_async(self.executor.fault_word[0] == 0, FAULT_MESSAGE)
-        if step is not None and step.launched:
-            self.executor.after_step()
 
     def close(self) -> None:
         if self._closed:

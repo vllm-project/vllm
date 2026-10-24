@@ -103,13 +103,12 @@ class LayerExecutor:
         self.bindings = {}
         self.k1_args = {}
         self.compiled = {}
-        self.steps = self.outputs = 0
+        self.outputs = 0
         self.launches = dict.fromkeys(self.layers, 0)
         first = layers[0].self_attn
         sparse = getattr(first.indexer, "impl", first.indexer)
         self.init_blocks, self.local_blocks = sparse.init_blocks, sparse.local_blocks
         self.query_len = 1
-        self._slots = None
 
         failure = None
         try:
@@ -175,7 +174,6 @@ class LayerExecutor:
         self.bindings[layer_id] = binding
         w = self.weights[layer_id]
         pointers = dict(
-            ar=0,
             g_in=w.input_norm.data_ptr(),
             w_qkv=w.qkv.data_ptr(),
             s_qkv=w.qkv_scale.data_ptr(),
@@ -202,7 +200,6 @@ class LayerExecutor:
         assert isinstance(index, MiniMaxM3IndexerMetadata)
         assert main.decode is not None and index.decode is not None
         self.query_len = main.decode.decode_query_len
-        self._slots = slots
         rows = slots.numel()
         expand_rows[(rows, MAX_INDEX_BLOCKS // 256)](
             main.decode.block_table,
@@ -324,9 +321,6 @@ class LayerExecutor:
             torch.accelerator.synchronize()
         except Exception:
             logger.exception("MiniMax-M3 launch: marking peers failed")
-
-    def after_step(self):
-        self.steps += 1
 
     def output_step(self):
         self.outputs += 1

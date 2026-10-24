@@ -84,8 +84,6 @@ class MonoLayerWeights:
     s13: torch.Tensor
     w2: torch.Tensor
     s2: torch.Tensor
-    routed_scale: float
-    shared_weight: float
 
     @classmethod
     def from_layer(cls, layer, *, require_cuda: bool = True) -> MonoLayerWeights:
@@ -212,6 +210,4 @@ class MonoLayerWeights:
             s13=s13.detach(),
             w2=w2.detach(),
             s2=s2.detach(),
-            routed_scale=2.0,
-            shared_weight=1.0,
         )

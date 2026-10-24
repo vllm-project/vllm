@@ -13,8 +13,7 @@ from vllm.config import CompilationMode, VllmConfig
 class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
-    max_rows: int = 16
-    # every physical row count up to max_rows: eager steps and FULL capture sizes
+    # Every supported physical row count: eager steps and FULL capture sizes.
     widths: tuple[int, ...] = tuple(range(1, 17))
     first_layer: int = 3
     last_layer: int = 59

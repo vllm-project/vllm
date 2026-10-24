@@ -136,19 +136,6 @@ def unlikely(cond):
     )
 
 
-def fresh(v):
-    """``v`` (a per-lane Int32) through an opaque move, here: the lane math built
-    on it is computed at its use, where LLVM would otherwise hoist it out of a task
-    loop or CSE it across stages into registers held for the whole kernel (spills,
-    and a kernel with scratch is refused: ``runtime.widths``)."""
-    return fx.Int32(
-        llvm.inline_asm(
-            T.i32, [fx.Int32(v).ir_value()], "v_mov_b32 $0, $1", "=v,v",
-            has_side_effects=True,
-        )
-    )  # fmt: skip
-
-
 def uniform(v):
     return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(v).ir_value()))
 
@@ -255,61 +242,6 @@ def block_max(v, lane, wave, red):
         t = fx.max(t, fx.ptr_load(red + w))
     gpu.barrier()
     return t
-
-
-def row_shr(v, lane, k):
-    """DPP row_shr:k of an f32: lane - k of the same 16-lane row, else 0."""
-    moved = lane_gather(v.bitcast(fx.Int32), fx.max(lane - k, 0)).bitcast(fx.Float32)
-    return fx.Float32((lane % 16 >= k).select(moved, fx.Float32(0.0)))
-
-
-def _xpartner(v, off, lane):
-    """Lane ``lane ^ off``'s v: DPP within a row, v_permlane*_swap across rows
-    (``xshfl`` takes ``shuffle_xor`` there)."""
-    if off < 16:
-        return xshfl(v, off)
-    a, b = permlane_swap(off, v, v)
-    return ((lane & off) != 0).select(a, b)
-
-
-def wave_incl_scan(v, lane):
-    """Inclusive prefix sum of an Int32 over the wave, in lane order."""
-    blk = v
-    for off in (1, 2, 4, 8, 16, 32):
-        o = _xpartner(blk, off, lane)
-        v = v + ((lane & off) != 0).select(o, 0)
-        blk = blk + o
-    return v
-
-
-@traced
-def block_excl_scan(v, lane, wave, buf):
-    """(exclusive prefix of v over the CTA in thread order, CTA total); ``buf``
-    needs WAVES words."""
-    incl = wave_incl_scan(v, lane)
-    gpu.barrier()
-    if lane == 63:
-        fx.ptr_store(incl, buf + wave)
-    gpu.barrier()
-    off = fx.Int32(0)
-    tot = fx.Int32(0)
-    for w in range_constexpr(WAVES):
-        cnt = fx.ptr_load(buf + w)
-        off = off + (w < wave).select(cnt, 0)
-        tot = tot + cnt
-    return incl - v + off, tot
-
-
-def global_load(addr, words=1, nt=False):
-    """``words`` i32 (1, 2 or 4) at the 64-bit global address ``addr``. A pool
-    past 4 GiB is reached only this way: a buffer load's offset (index x stride
-    included) is 32 bits. ``nt``: nontemporal."""
-    i32 = ir.IntegerType.get_signless(32)
-    ty = i32 if words == 1 else ir.VectorType.get([words], i32)
-    ptr = llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<1>"), as_ir_value(fx.Int64(addr)))
-    return llvm.LoadOp(
-        ty, ptr.result, alignment=4 * words, nontemporal=nt or None
-    ).result
 
 
 def ld_i32(ptr, i):
@@ -432,11 +364,6 @@ def bf16_pair(a, b):
         .to(fx.BFloat16)
         .bitcast(fx.Float32)[0]
     )
-
-
-def lds_bytes(struct) -> int:
-    """The LDS an ``fx.struct`` class takes, alignment included."""
-    return struct.__dsl_size_of__()
 
 
 def bf_lo(w):

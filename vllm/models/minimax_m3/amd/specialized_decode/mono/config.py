@@ -56,8 +56,6 @@ class Dims:
         return EXPERT_INTER // self.tp
 
 
-# the TP sizes the kernels are built for
-SUPPORTED_TP = (4,)
 TP = 4
 HIDDEN = 6144
 HEAD_DIM = 128

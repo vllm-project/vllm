@@ -20,19 +20,16 @@ read once for all of them, and no task needs the CTA (no barrier).
 
 Emitted at the end of K1 (``emit_index_scores``), which makes index q: K4's
 selector then finds the scores in place instead of scoring after its launch.
-``build_index_score_kernel`` runs the same tasks alone, for K4's harnesses.
 """
 
 import struct
-from dataclasses import dataclass, field
 from typing import NamedTuple
 
-import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr
-from flydsl.expr.typing import Int32, Int64, T
+from flydsl.expr.typing import T
 
 from ..config import (
     HEAD_DIM,
@@ -45,13 +42,10 @@ from ..config import (
     TP,
     IndexHeads,
 )
-from ..sources import SOURCES
 from ..support.device.ops import (
     butterfly,
     fp8x8_bf16_pk,
-    kernel_symbol,
     lane_gather,
-    launcher,
     mfma_bf16,
     permlane_swap,
     readlane,
@@ -60,24 +54,12 @@ from ..support.device.ops import (
     uniform,
     unlikely,
 )
-from ..support.device.sync import (
-    Addr,
-    Mailbox,
-)
 from ..support.plan.arith import (
     pick,
 )
-from ..support.plan.build_key import (
-    key_tuple,
-    symbol_params,
-)
 from ..support.plan.execution import (
     BLOCKS,
-    THREADS,
     WAVES,
-)
-from ..support.plan.trace import (
-    Space,
 )
 
 INDEX_BLOCK_BYTES = SPARSE_BLOCK * HEAD_DIM  # one fp8 index-K block
@@ -380,115 +362,3 @@ def emit_index_scores(
         # cold: a step without context-parallel requests runs none of it
         if unlikely(total_cp > 0):
             emit_cp_tasks()
-
-
-def q_frag_from(iq, heads=ONE_INDEX_HEAD):
-    """(``q_frag``, ``q_frag_head``) reading index q from memory: [token][head]
-    [HEAD_DIM] bf16, ``heads.count`` heads a token."""
-
-    def q_frag_head(tk, s, head):
-        lane = fx.thread_idx.x % 64
-        return fx.Vector(
-            bo.buffer_load(
-                rsrc(iq),
-                ((tk * heads.count + head) * HEAD_DIM + 32 * s + 8 * (lane // 16)) // 2,
-                vec_width=4,
-                dtype=T.i32,
-            )
-        ).bitcast(fx.BFloat16)
-
-    def q_frag(tk, s):
-        return q_frag_head(tk, s, heads.own)
-
-    return q_frag, q_frag_head
-
-
-@dataclass(frozen=True)
-class ScoreBuild:
-    """Every parameter of a standalone score build (``support.plan.build_key``)."""
-
-    tokens: int = field(metadata={"sym": "s"})
-    init_blocks: int = field(metadata={"sym": "ib"})
-    local_blocks: int = field(metadata={"sym": "lb"})
-    index_heads: int = field(metadata={"sym": "ih"})
-    index_own: int = field(metadata={"sym": "io"})
-    sm_scale: float
-
-
-def build_index_score_kernel(
-    sm_scale: float,
-    init_blocks: int,
-    local_blocks: int,
-    tokens: int = 1,
-    heads: IndexHeads = ONE_INDEX_HEAD,
-):
-    """``@flyc.jit`` launcher of the score tasks alone (index q from memory,
-    ``heads.count`` heads a token), for K4's harnesses: scores into mailbox
-    ``iscore`` with K4's layer tag."""
-    assert 1 <= tokens <= MAX_TOKENS
-    key = ScoreBuild(
-        tokens=tokens, init_blocks=init_blocks, local_blocks=local_blocks,
-        index_heads=heads.count, index_own=heads.own, sm_scale=sm_scale,
-    )  # fmt: skip
-    build_key = key_tuple(key, SOURCES)  # the launcher references it: keyed
-    scale = index_scale_log2e(sm_scale)
-    # the kernel body rebuilds IndexHeads from ints: an object in a closure is not
-    # a cache-key value (``build_key`` keys them anyway)
-    ih_count, ih_own = heads.count, heads.own
-
-    @fx.struct
-    class Smem:
-        red: fx.Array[fx.Float32, WAVES * 16, 16]
-
-    kernel_name = kernel_symbol("minimax_m3_index_score", **symbol_params(key))
-
-    @flyc.kernel(name=kernel_name, known_block_size=[THREADS, 1, 1])
-    def index_score_kernel(
-        iq: Int64,
-        index_cache: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        layer: Int32,
-    ):
-        tid = fx.thread_idx.x
-        lds = fx.SharedAllocator().allocate(Smem).peek()
-        red = lds.red.ptr
-        mbox = Mailbox(layer)
-        mb_put = mbox.put
-        k_heads = IndexHeads(ih_count, ih_own)
-        q_frag, q_frag_head = q_frag_from(iq, k_heads)
-        emit_index_scores(
-            fx.block_idx.x, tid % 64, uniform(tid // 64), red, mb_put,
-            Addr("iscore", Space.SCRATCH, iscore),
-            q_frag, tokens, q_len, init_blocks, local_blocks, scale, index_cache,
-            block_table, seq_lens, bt_width, heads=k_heads, q_frag_head=q_frag_head,
-        )  # fmt: skip
-
-    @launcher(kernel_name)
-    def launch_index_score(
-        iq: Int64,
-        index_cache: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        layer: Int32,
-        stream: fx.Stream = _CURRENT_STREAM,
-    ):
-        _ = build_key  # every build parameter in the JIT cache key
-        index_score_kernel(
-            iq,
-            index_cache,
-            block_table,
-            seq_lens,
-            bt_width,
-            q_len,
-            iscore,
-            layer,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-
-    return launch_index_score

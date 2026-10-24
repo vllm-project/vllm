@@ -40,7 +40,6 @@ class Access:
 class Record:
     stages: list[str] = field(default_factory=list)  # in the order entered
     accesses: list[Access] = field(default_factory=list)
-    unnamed: list[tuple[str, str]] = field(default_factory=list)  # (stage, kind)
 
 
 _record: Record | None = None
@@ -70,10 +69,3 @@ def _stage() -> str:
 def note(region: str, space: Space, kind: str) -> None:
     if _record is not None:
         _record.accesses.append(Access(_stage(), region, space, kind))
-
-
-def note_unnamed(kind: str) -> None:
-    """A put / poll on a raw address: the check reports it (every mailbox access of
-    a checked kernel names its region)."""
-    if _record is not None:
-        _record.unnamed.append((_stage(), kind))

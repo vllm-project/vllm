@@ -12,8 +12,7 @@ order, a stage's tasks spread over the grid. A poll then always makes progress i
 the stage it waits on comes earlier in the program, or is its own stage and the
 region an exchange (an all-reduce: a task pushes before it waits on its peers'
 pushes). ``check`` holds a ``trace.Record`` to that and to the regions'
-declarations: the stages that put each, the declared space (scope), and no
-mailbox access on an unnamed address.
+declarations: the stages that put each and the declared space (scope).
 """
 
 from dataclasses import dataclass
@@ -49,9 +48,7 @@ def check(record: Record, decls: list[RegionDecl]) -> None:
     first: dict[str, int] = {}
     for i, stage in enumerate(record.stages):
         first.setdefault(stage, i)
-    problems = [
-        f"{kind} on an unnamed address in {stage}" for stage, kind in record.unnamed
-    ]
+    problems: list[str] = []
     used = set()
     polled_before_put: set[tuple[str, str]] = set()
     put_seen: set[tuple[str, str]] = set()

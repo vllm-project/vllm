@@ -375,7 +375,7 @@ def _check_layer_post_reference(weights, s, padded, fuse_k1, *, blocks=1):
         iq = torch.empty(s, 128, dtype=torch.bfloat16, device=dev)
         pre = torch.zeros(PRE_BYTES, dtype=torch.uint8, device=dev)
         k1_values = dict(
-            ar=0, g_in=g_in.data_ptr(), w_qkv=qkv_packed.data_ptr(),
+            g_in=g_in.data_ptr(), w_qkv=qkv_packed.data_ptr(),
             s_qkv=qkv_scale.data_ptr(), g_q=g_q.data_ptr(), g_k=g_head.data_ptr(),
             g_iq=g_head.data_ptr(), g_ik=g_head.data_ptr(), cos_sin=cos_sin.data_ptr(),
             index_cache=index_cache.data_ptr(), iq_out=iq.data_ptr(),

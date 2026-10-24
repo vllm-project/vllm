@@ -465,7 +465,7 @@ def build_post_attn_kernel(
                         stamp(K1_STAMPS[k])
 
                 (
-                    unused_ar, g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik,
+                    g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik,
                     cos_sin, index_cache,
                     iq_out, scratch1,
                 ) = [load_ptr64(k1_args, i) for i in range(len(K1_ARGS))]  # fmt: skip

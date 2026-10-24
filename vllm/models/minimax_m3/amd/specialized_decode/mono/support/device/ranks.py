@@ -12,14 +12,7 @@ from flydsl.expr import range_constexpr
 
 from .ops import (
     bf2_f32,
-    load_ptr64,
 )
-
-
-def peer_bases(peers, tp):
-    """Every rank's peer buffer base from the ``peers`` table (an i64 a rank),
-    loaded once: a put's address must not wait on a load of its own."""
-    return [load_ptr64(peers, p) for p in range(tp)]
 
 
 def sum_partials(poll, own, pair_of, tp):

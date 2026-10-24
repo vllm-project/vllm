@@ -342,9 +342,6 @@ class _Executor:
     def begin_step(self, slots):
         self.slots = slots
 
-    def after_step(self):
-        self.calls["after"] += 1
-
     def abort(self):
         self.calls["abort"] += 1
 
@@ -452,7 +449,6 @@ def test_every_forward_asserts_the_error_word_is_clear(step):
     executor = _Executor()
     decode = _bare_decode(executor)
     decode.after_step(step)
-    assert executor.calls["after"] == (step is LAUNCHED)
     executor.fault_word[0] = 1
     with pytest.raises(RuntimeError, match="error word set"):
         decode.after_step(step)

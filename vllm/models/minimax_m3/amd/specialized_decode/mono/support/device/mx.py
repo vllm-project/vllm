@@ -47,12 +47,6 @@ def pow2(code):
     return (code << 23).bitcast(fx.Float32)
 
 
-def rcp_pow2(code):
-    """1 / ``pow2(code)``, exact (code in [1, 253]): x times it is x / scale
-    bit for bit, a multiply where the division is a dozen instructions."""
-    return ((254 - code) << 23).bitcast(fx.Float32)
-
-
 def scale_index(row, col, cols):
     """Byte of e8m0 scale (row, col) in aiter's ``shuffle_scale`` layout:
     ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)``."""

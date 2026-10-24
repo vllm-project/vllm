@@ -41,30 +41,3 @@ class Shard:
 
 def padded(n: int, align: int) -> int:
     return cdiv(n, align) * align
-
-
-@dataclass(frozen=True)
-class Tiles:
-    """``n`` items (a rank's heads) in tiles of ``width`` (an MFMA's N): the
-    last tile ``ragged`` when ``width`` does not divide ``n``, its items past
-    ``n`` dead -- a kernel reads a live one in their place and writes nothing."""
-
-    n: int
-    width: int
-
-    @property
-    def count(self) -> int:
-        return cdiv(self.n, self.width)
-
-    @property
-    def ragged(self) -> bool:
-        return self.n % self.width != 0
-
-
-def shard_refusal(make, tp: int) -> str | None:
-    """Why ``make(tp)`` (a model's ``Dims``) refuses TP ``tp``, or None."""
-    try:
-        make(tp)
-    except ShardError as e:
-        return str(e)
-    return None

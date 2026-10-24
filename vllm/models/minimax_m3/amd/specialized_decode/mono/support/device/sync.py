@@ -130,7 +130,7 @@ class Mailbox:
     polls the payload until all tags match, so a hand-off costs one round trip
     (no store drain, no separate flag). The tag is ``layer + 1``: it tells the
     layers of one step apart, and the runner zeroes every mailbox at a step's
-    start (``StepMailboxes.begin_step``), so a pair from an earlier step never
+    start (``LayerExecutor.begin_step``), so a pair from an earlier step never
     carries a live tag. Every address is an ``Addr``: its space picks the scope.
     """
 
