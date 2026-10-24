@@ -442,6 +442,17 @@ class InputProcessor:
             prompt_embeds = None
             prompt_is_token_ids = None
 
+        if isinstance(params, SamplingParams) and params.extra_args:
+            transfer = params.extra_args.get("kv_transfer_params") or {}
+            if "hidden_state_window" in transfer:
+                from vllm.distributed.kv_transfer.kv_connector.v1.hidden_state_window import (  # noqa: E501
+                    validate_window_request,
+                )
+
+                validate_window_request(
+                    self.vllm_config, params, prompt_token_ids, prompt_embeds, resumable
+                )
+
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):

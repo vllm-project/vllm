@@ -4261,6 +4261,9 @@ class GPUModelRunner(
         num_drafter_query_tokens = self.num_spec_tokens + (
             1 if self.speculative_config.use_dflash() else 0
         )
+        if self.speculative_config.uses_extract_hidden_states():
+            # The extractor caches existing rows; it never queries future positions.
+            return True
         return (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
             <= self.effective_drafter_max_model_len
@@ -4807,6 +4810,10 @@ class GPUModelRunner(
                     "aux_hidden_states are required when using `extract_hidden_states`"
                 )
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+            if self.drafter.hidden_states_layout == "final":
+                target_hidden_states = [hidden_states[:num_scheduled_tokens]]
+            elif self.drafter.hidden_states_layout == "auxiliary_plus_final":
+                target_hidden_states.append(hidden_states[:num_scheduled_tokens])
 
             draft_token_ids = self.drafter.propose(
                 num_speculative_tokens=num_spec_tokens_to_schedule,

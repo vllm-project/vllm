@@ -334,6 +334,12 @@ steps:
   device: h200_18gb
   working_dir: "/vllm-workspace"
   source_file_dependencies:
+    - vllm/model_executor/layers/hidden_state_cache.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/hidden_state_window.py
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/engine/input_processor.py
+    - vllm/config/kv_transfer.py
+    - vllm/config/speculative.py
     - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
