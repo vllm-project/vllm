@@ -275,10 +275,14 @@ class KernelConfig:
     """
     vLLM IR op priority for dispatching/lowering during the forward pass.
     Platform defaults appended automatically during VllmConfig.__post_init__.
+
+    Deprecated: vLLM IR is being removed, and this option will be removed in
+    v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
-    """If True, run FlashInfer autotuning during kernel warmup."""
+    """Benchmark FlashInfer kernel implementations during warmup and use the
+    fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""

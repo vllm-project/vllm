@@ -31,6 +31,9 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+if (VLLM_TARGET_DEVICE STREQUAL "rocm" OR "$ENV{VLLM_KERNEL_SYMBOL_MAP}" STREQUAL "1")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -404,6 +407,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} -c
+          "import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]: sys.argv[3:]}))"
+          "${CMAKE_CURRENT_BINARY_DIR}/generated-source-deps.json"
+          "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         COMMAND_ERROR_IS_FATAL ANY)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
@@ -1150,6 +1162,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
+  # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
+  # must not contract into FMAs to keep the FP32 boundary exact.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(BEAM_KERNEL_ARCHS)
+    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BEAM_KERNEL_SRCS}"
+      CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")
+    set_property(SOURCE ${BEAM_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
+    message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1250,6 +1282,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(BEAM_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_BEAM_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1548,7 +1584,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       endforeach()
     endif()
   endforeach()
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+  # Compress the offloaded device binaries. The 9-arch release build packs
+  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
+  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
+  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
+  # .eh_frame out of range". --offload-compress keeps the device debug info
+  # (so the RelWithDebInfo build type is unchanged) while shrinking the
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
