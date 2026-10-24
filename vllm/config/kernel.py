@@ -433,6 +433,13 @@ class KernelConfig:
             ignored_factors.add("linear_backend_per_quant")
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
+
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            factors["rocm_aiter_w4a16"] = rocm_aiter_ops.linear_w4a16_compile_factor()
         return hash_factors(factors)
 
     @field_validator(
