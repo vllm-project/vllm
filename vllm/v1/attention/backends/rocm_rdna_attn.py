@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention for gfx1151 (opt-in).
+"""Attention for gfx1150..gfx1153 (opt-in).
 
 Decodes of up to MAX_M query tokens per sequence run
 csrc/rocm/rdna_decode_attn.cu, other batches
@@ -57,12 +57,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _on_gfx1151() -> bool:
+def _on_gfx115x() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1151
+    from vllm.platforms.rocm import on_gfx115x
 
-    return on_gfx1151()
+    return on_gfx115x()
 
 
 # A kernel and its scratch buffers.
@@ -306,7 +306,7 @@ class RocmRdnaAttentionBackend(TritonAttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
-        return _on_gfx1151()
+        return _on_gfx115x()
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:

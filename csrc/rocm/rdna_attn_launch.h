@@ -4,6 +4,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include "rdna_attn_types.h"
+
 namespace rdna {
 
 // Raw pointers keep torch headers out of the kernels.
@@ -32,12 +34,12 @@ struct LaunchArgs {
 
 using LaunchFn = void (*)(const LaunchArgs&);
 
-// The launch function of each entry of kDecodeConfigs, null until its unit
-// (cmake/rocm_rdna_attn.cmake) registers it. Defined in
+// The launch function of each entry of GPU family `arch`'s decode table, null
+// until its unit (cmake/rocm_rdna_attn.cmake) registers it. Defined in
 // rdna_registry.cu.
-LaunchFn* decode_launchers();
-// Likewise for kDecodeBatchConfigs.
-LaunchFn* decode_batch_launchers();
+LaunchFn* decode_launchers(Arch arch);
+// Likewise for the batched decode tables.
+LaunchFn* decode_batch_launchers(Arch arch);
 
 // One sequence of num_tokens query tokens. partial_o, partial_ml and counters
 // are the split-KV scratch; max_seq_len only sizes the split. mm_ranges holds
@@ -68,7 +70,7 @@ struct PrefillArgs {
 
 using PrefillFn = void (*)(const PrefillArgs&);
 
-// Likewise for kPrefillConfigs.
-PrefillFn* prefill_launchers();
+// Likewise for the prefill tables.
+PrefillFn* prefill_launchers(Arch arch);
 
 }  // namespace rdna
