@@ -120,7 +120,9 @@ class BlockHashToBlockMap:
             # Try to pop block_id from the block dict, and if dict still
             # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
-            if len(blocks) > 0:
+            if len(blocks) == 1:
+                self._cache[key] = next(iter(blocks.values()))
+            elif blocks:
                 self._cache[key] = blocks
             return block
         self._unexpected_blocks_type(blocks)
