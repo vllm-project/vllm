@@ -61,6 +61,9 @@ def _prepare_dflash_inputs_to_capture(
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=num_tokens // num_reqs,
             seq_lens=input_batch.seq_lens,
+            # Capture-time upper bound: the dummy batch's per-request token
+            # count is the largest shape the recorded graph will replay.
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             max_seq_len=max_model_len,
             block_tables=input_block_tables,
