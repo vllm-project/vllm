@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -84,6 +85,10 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -135,6 +140,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+    ) -> int | None:
+        del kv_cache_spec
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+            MAX_FUSED_GDN_MTP_TOKENS,
+        )
+
+        return min(
+            max_decode_query_len(vllm_config), MAX_FUSED_GDN_MTP_TOKENS
+        )
+
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -147,6 +167,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            self.speculative_config
+            and self.speculative_config.enable_adaptive_verification
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -398,7 +422,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if spec_query_lens_cpu.numel() > 0:
+            if (
+                spec_query_lens_cpu.numel() > 0
+                and not self._adaptive_verification
+            ):
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
@@ -808,7 +835,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
-        num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+        if self._adaptive_verification:
+            # Replay may turn captured one-token requests into fewer multi-token requests,
+            # so adaptive verification must capture the speculative path.
+            num_decode_draft_tokens_cpu = torch.full_like(
+                torch.diff(m.query_start_loc_cpu), self.num_spec
+            )
+        else:
+            num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
