@@ -27,7 +27,10 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
         disable_log_stats=False,
     )
     request = "Tell me a story about an explorer who discovers a mysterious island."
-    params_use_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True)
+    # Openings use ordinary sampling, so the recorded p-value needs a fixed seed.
+    params_use_wm = SamplingParams(
+        temperature=1.0, max_tokens=256, watermarking=True, seed=0
+    )
     params_no_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=False)
     params_greedy = SamplingParams(temperature=0.0, max_tokens=16)
 
@@ -52,7 +55,7 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
     result_no_wm = detector.detect(list(output_no_wm[0].outputs[0].token_ids))
 
     assert result_use_wm.is_watermarked, result_use_wm
-    recorded_p_value = 9.83e-20
+    recorded_p_value = 2.68e-29
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
     assert not result_no_wm.is_watermarked, result_no_wm
