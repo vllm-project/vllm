@@ -949,9 +949,474 @@ async fn scale_out_generate_route_can_be_enabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn scale_out_abort_returns_ok_without_dev_mode() {
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async move {}),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(state, true);
+    for (body, content_type, status) in [
+        (
+            r#"{"request_ids":"unknown"}"#,
+            Some("text/plain"),
+            StatusCode::OK,
+        ),
+        (
+            r#"{"request_ids":["unknown"],"unused":true}"#,
+            None,
+            StatusCode::OK,
+        ),
+        (
+            r#"{"request_ids":[]}"#,
+            Some("application/json"),
+            StatusCode::OK,
+        ),
+        ("{}", None, StatusCode::BAD_REQUEST),
+        (r#"{"request_ids":null}"#, None, StatusCode::BAD_REQUEST),
+        ("not JSON", None, StatusCode::BAD_REQUEST),
+        ("[]", None, StatusCode::BAD_REQUEST),
+        (r#"[["unknown"]]"#, None, StatusCode::BAD_REQUEST),
+        ("123", None, StatusCode::BAD_REQUEST),
+        (r#"{"request_ids":123}"#, None, StatusCode::BAD_REQUEST),
+        (
+            r#"{"request_ids":["unknown",123]}"#,
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = Request::builder().method("POST").uri("/inference/v1/abort_requests");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .call(request.body(Body::from(body)).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), status, "{body}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        if status == StatusCode::OK {
+            assert!(bytes.is_empty(), "{body}");
+        } else {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).expect("error JSON");
+            assert!(value["error"]["message"].as_str().is_some_and(|message| !message.is_empty()));
+            assert_eq!(
+                value,
+                json!({"error": {
+                    "message": value["error"]["message"], "type": "Bad Request", "param": null, "code": 400
+                }})
+            );
+            if body == "{}" || body == r#"{"request_ids":null}"# {
+                assert_eq!(
+                    value["error"]["message"],
+                    "Missing 'request_ids' in request body"
+                );
+            }
+        }
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_abort_respects_auth_and_scale_out_gate() {
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+    let state = Arc::new(
+        Arc::try_unwrap(state)
+            .ok()
+            .expect("unshared test state")
+            .with_api_keys(vec!["secret".to_string()]),
+    );
+    for (enabled, token, status) in [
+        (false, None, StatusCode::UNAUTHORIZED),
+        (false, Some("secret"), StatusCode::FORBIDDEN),
+        (true, None, StatusCode::UNAUTHORIZED),
+        (true, Some("wrong"), StatusCode::UNAUTHORIZED),
+    ] {
+        let mut app = build_router_with_scale_out_endpoints(state.clone(), enabled);
+        let mut request = Request::builder().method("POST").uri("/inference/v1/abort_requests");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .call(request.body(Body::from("not JSON")).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), status);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("error JSON");
+        if status == StatusCode::UNAUTHORIZED {
+            assert_eq!(value, json!({"error": "Unauthorized"}));
+        } else {
+            assert_eq!(
+                value,
+                json!({"error": {
+                    "message": super::SCALE_OUT_DISABLED_MESSAGE,
+                    "type": "PermissionDeniedError", "param": null, "code": 403
+                }})
+            );
+        }
+    }
+    engine_task.abort_and_join().await;
+}
+
+async fn wait_for_abort_state_references(state: &Arc<AppState>, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(state) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background abort releases its state reference");
+}
+
+async fn remaining_abort_sse(body: &mut axum::body::BodyDataStream) -> String {
+    use futures::StreamExt as _;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(&chunk.expect("SSE body chunk"));
+        }
+        String::from_utf8(bytes).expect("UTF-8 SSE")
+    })
+    .await
+    .expect("SSE reaches EOF")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_abort_finishes_only_target_sse_and_preserves_other_stream() {
+    use futures::StreamExt as _;
+    let ipc = IpcNamespace::new().expect("IPC namespace");
+    let handshake = ipc.handshake_endpoint();
+    let (continue_b_tx, continue_b_rx) = tokio::sync::oneshot::channel();
+    let (internal_ids_tx, internal_ids_rx) = tokio::sync::oneshot::channel();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake.clone(),
+        b"engine-scale-out-abort".to_vec(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let mut requests = Vec::new();
+                for external in ["abort-a", "abort-b"] {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).expect("ADD");
+                    assert_eq!(request.external_req_id.as_deref(), Some(external));
+                    assert_ne!(request.request_id, external);
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output(&request.request_id, vec![33], None)],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                    requests.push(request);
+                }
+                internal_ids_tx
+                    .send([
+                        requests[0].request_id.clone(),
+                        requests[1].request_id.clone(),
+                    ])
+                    .expect("consumer awaits internal IDs");
+                // Each utility is an ordered transport barrier. The first must
+                // precede the sole ABORT; the second follows the repeated abort.
+                for first_barrier in [true, false] {
+                    let utility = recv_engine_message(dealer).await;
+                    assert_eq!(utility[0].as_ref(), &[0x03], "no unexpected ABORT");
+                    let payload = decode_value(&utility[1]).expect("decode utility payload");
+                    let fields = payload.as_array().expect("utility payload");
+                    assert_eq!(fields[2], Value::from("is_sleeping"));
+                    send_outputs(
+                        push,
+                        utility_outputs(
+                            fields[1].as_u64().expect("call ID"),
+                            utility_result_value(false),
+                        ),
+                    )
+                    .await;
+                    if first_barrier {
+                        let abort = recv_engine_message(dealer).await;
+                        assert_eq!(abort[0].as_ref(), &[0x01]);
+                        let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).expect("ABORT IDs");
+                        assert_eq!(ids, vec![requests[0].request_id.clone()]);
+                    }
+                }
+                continue_b_rx.await.expect("A ended before B continues");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &requests[1].request_id,
+                            vec![44],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let state = Arc::new(AppState::new(
+        vec!["model".to_string()],
+        ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new())),
+    ));
+    let mut app = build_router_with_scale_out_endpoints(state.clone(), true);
+    let mut streams = Vec::new();
+    let mut public_ids = Vec::new();
+    for id in ["abort-a", "abort-b"] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"request_id": id, "model": "model", "token_ids": [11,22],
+                "stream": true, "sampling_params": {"max_tokens": 4}})
+                        .to_string(),
+                    ))
+                    .expect("build generate request"),
+            )
+            .await
+            .expect("generate route");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("first token deadline")
+            .expect("first token")
+            .expect("SSE body");
+        let first = sse_json_payloads(std::str::from_utf8(&first).expect("UTF-8 SSE"));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["choices"][0]["token_ids"], json!([33]));
+        assert!(first[0]["choices"][0]["finish_reason"].is_null());
+        public_ids.push(first[0]["request_id"].as_str().expect("public ID").to_owned());
+        streams.push(body);
+    }
+    let internal_ids = internal_ids_rx.await.expect("engine received both requests");
+    let references = Arc::strong_count(&state);
+    for (body, status) in [
+        (json!({"request_ids": []}), StatusCode::OK),
+        (json!({"request_ids": ["unknown"]}), StatusCode::OK),
+        (json!({"request_ids": [internal_ids[0]]}), StatusCode::OK),
+        (json!([[public_ids[0]]]), StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/abort_requests")
+                    .body(Body::from(body.to_string()))
+                    .expect("abort request"),
+            )
+            .await
+            .expect("abort route");
+        assert_eq!(response.status(), status);
+        drop(response);
+        wait_for_abort_state_references(&state, references).await;
+    }
+    assert!(
+        !tokio::time::timeout(
+            Duration::from_secs(5),
+            state.engine_core_client().is_sleeping()
+        )
+        .await
+        .expect("transport barrier deadline")
+        .expect("transport barrier")
+    );
+    for (body, repeat) in [
+        (json!({"request_ids": [public_ids[0]]}), false),
+        (json!({"request_ids": public_ids[0]}), true),
+    ] {
+        let references = Arc::strong_count(&state);
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/abort_requests")
+                    .body(Body::from(body.to_string()))
+                    .expect("abort request"),
+            )
+            .await
+            .expect("abort route");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(to_bytes(response.into_body(), usize::MAX).await.expect("empty body").is_empty());
+        wait_for_abort_state_references(&state, references).await;
+        if !repeat {
+            let text = remaining_abort_sse(&mut streams[0]).await;
+            let payloads = sse_data_payloads(&text);
+            assert_eq!(payloads.len(), 2, "{text}");
+            let terminal: serde_json::Value = serde_json::from_str(payloads[0]).expect("terminal");
+            assert_eq!(terminal["request_id"], public_ids[0]);
+            assert_eq!(terminal["choices"][0]["token_ids"], json!([]));
+            assert_eq!(terminal["choices"][0]["finish_reason"], "abort");
+            assert_eq!(payloads[1], "[DONE]");
+        }
+    }
+    assert!(
+        !tokio::time::timeout(
+            Duration::from_secs(5),
+            state.engine_core_client().is_sleeping()
+        )
+        .await
+        .expect("repeat barrier deadline")
+        .expect("repeat barrier")
+    );
+    continue_b_tx.send(()).expect("engine awaits B continuation");
+    let text = remaining_abort_sse(&mut streams[1]).await;
+    let payloads = sse_data_payloads(&text);
+    assert_eq!(payloads.len(), 2, "{text}");
+    let terminal: serde_json::Value = serde_json::from_str(payloads[0]).expect("terminal");
+    assert_eq!(terminal["request_id"], public_ids[1]);
+    assert_eq!(terminal["choices"][0]["token_ids"], json!([44]));
+    assert_eq!(terminal["choices"][0]["finish_reason"], "length");
+    assert_eq!(payloads[1], "[DONE]");
+    drop(streams);
+    assert_eq!(server_load(&app).await, 0);
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_abort_accepts_and_logs_fail_closed_client_without_leaking_state() {
+    use futures::StreamExt as _;
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    struct AbortErrors(tokio::sync::mpsc::UnboundedSender<()>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AbortErrors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR
+                && event.metadata().target() == "vllm_server::routes::inference::abort_requests"
+            {
+                let _ = self.0.send(());
+            }
+        }
+    }
+
+    let (fail_tx, fail_rx) = tokio::sync::oneshot::channel();
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode ADD");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(&request.request_id, vec![33], None)],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                fail_rx.await.expect("stream held before engine failure");
+                push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+                    .await
+                    .expect("send engine-dead sentinel");
+                std::future::pending::<()>().await;
+            })
+        },
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(state.clone(), true);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "abort-fail-closed", "token_ids": [11, 22],
+                        "stream": true, "sampling_params": {"max_tokens": 4}
+                    })
+                    .to_string(),
+                ))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("generate route");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("first token deadline")
+        .expect("first token")
+        .expect("SSE chunk");
+    let first = sse_json_payloads(std::str::from_utf8(&first).expect("UTF-8 SSE"));
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["choices"][0]["token_ids"], json!([33]));
+    assert!(first[0]["choices"][0]["finish_reason"].is_null());
+    let public_id = first[0]["request_id"].as_str().expect("public ID");
+
+    let mut health = state.engine_core_client().subscribe_health();
+    assert!(*health.borrow());
+    fail_tx.send(()).expect("trigger client failure");
+    tokio::time::timeout(Duration::from_secs(5), health.changed())
+        .await
+        .expect("health deadline")
+        .expect("health sender remains open");
+    assert!(!*health.borrow());
+    assert!(matches!(
+        state.engine_core_client().health_error().as_deref(),
+        Some(vllm_engine_core_client::Error::EngineCoreDead)
+    ));
+
+    // Keep the unpolled SSE body alive: its facade mapping must remain tracked.
+    let references = Arc::strong_count(&state);
+    let (error_tx, mut error_rx) = tokio::sync::mpsc::unbounded_channel();
+    let subscriber = tracing_subscriber::registry().with(AbortErrors(error_tx));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/abort_requests")
+                .body(Body::from(json!({"request_ids": [public_id]}).to_string()))
+                .expect("build abort request"),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .expect("abort route");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(to_bytes(response.into_body(), usize::MAX).await.expect("empty body").is_empty());
+    tokio::time::timeout(Duration::from_secs(5), error_rx.recv())
+        .await
+        .expect("background error deadline")
+        .expect("adapter logged its failure");
+    wait_for_abort_state_references(&state, references).await;
+    drop(stream);
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
-    const ROUTES: [&str; 7] = [
-        "/inference/v1/abort_requests",
+    const ROUTES: [&str; 6] = [
         "/v1/chat/completions/render",
         "/v1/completions/render",
         "/v1/messages/render",
