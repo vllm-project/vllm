@@ -12,7 +12,9 @@ See https://github.com/vllm-project/vllm/issues/49224.
 
 import contextlib
 import gc
-from types import SimpleNamespace
+import os
+import sys
+from types import FrameType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +23,7 @@ import torch
 from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
@@ -443,3 +446,77 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     assert runner.model_state._mamba_ctx is None
     assert runner.model_state._mamba_group_ids == []
     assert runner.model_state._mamba_spec is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires GPU graph profiling"
+)
+@create_new_process_for_each_test("spawn")
+def test_adaptive_startup_preserves_profile_context():
+    """FULL cost probes must retain the configured KV context after attention prep."""
+    from vllm import LLM
+    from vllm.v1.worker.gpu.async_utils import StepTimingCollector, StepTimingSample
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdaptiveVerificationManager,
+    )
+
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN"] = "512"
+    profiles: list[list[StepTimingSample]] = []
+    seq_lengths: list[tuple[torch.Tensor, list[int]]] = []
+    fit_code = AdaptiveVerificationManager.set_initial_cost_curves.__code__
+    record_code = StepTimingCollector.record_batch.__code__
+
+    def observe_profile(frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is fit_code:
+            profiles.append(list(frame.f_locals["samples"]))
+        elif (
+            event == "call"
+            and frame.f_code is record_code
+            and frame.f_locals["self"]._collecting
+            and frame.f_locals["full_cudagraph"]
+        ):
+            batch = frame.f_locals["input_batch"]
+            seq_lengths.append(
+                (batch.seq_lens.clone(), batch.seq_lens_cpu_upper_bound.tolist())
+            )
+
+    previous_profiler = sys.getprofile()
+    llm = None
+    try:
+        # Observe actual startup samples; all methods and objects remain real.
+        sys.setprofile(observe_profile)
+        llm = LLM(
+            model="Qwen/Qwen3-1.7B",
+            dtype="float16",
+            max_model_len=2048,
+            max_num_seqs=4,
+            max_num_batched_tokens=64,
+            kv_cache_memory_bytes=512 << 20,
+            gpu_memory_utilization=0.8,
+            enable_prefix_caching=False,
+            distributed_executor_backend="uni",
+            attention_config={"backend": "TRITON_ATTN"},
+            compilation_config={
+                "mode": 0,
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 20],
+            },
+            speculative_config={
+                "method": "draft_model",
+                "model": "Qwen/Qwen3-0.6B",
+                "attention_backend": "TRITON_ATTN",
+                "num_speculative_tokens": 4,
+                "enable_adaptive_verification": True,
+            },
+        )
+        assert profiles
+        assert any(sample.full_cudagraph for sample in profiles[-1])
+        assert seq_lengths
+        for actual, expected_seq_lens in seq_lengths:
+            assert actual.cpu().tolist() == expected_seq_lens
+    finally:
+        sys.setprofile(previous_profiler)
+        if llm is not None:
+            llm.llm_engine.engine_core.shutdown()

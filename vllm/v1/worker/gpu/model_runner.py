@@ -845,6 +845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        profile_step_cost: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -919,6 +920,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_scheduler_output,
                 intermediate_tensors=intermediate_tensors,
                 dummy_run=True,
+                profile_step_cost=profile_step_cost,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
                 context_len=context_len,
@@ -1130,7 +1132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             for batch in self.adaptive_verification.batches_to_profile(
                                 self.cudagraph_manager.captured_token_counts()
                             ):
-                                self._dummy_run(**batch)
+                                self._dummy_run(**batch, profile_step_cost=True)
                         self.adaptive_verification.set_initial_cost_curves(timings)
                         # Release the profiling runs' activations, or the
                         # allocator cache is counted as graph memory below.
@@ -1752,6 +1754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        profile_step_cost: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1915,6 +1918,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata = None
         slot_mappings_by_layer = None
         ubatch_state: UBatchState | None = None
+        for_dummy_capture = (
+            dummy_run
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and not profile_step_cost
+        )
         if batch_desc.num_ubatches > 1:
             assert self.ubatch_runner is not None
             assert block_tables is not None and slot_mappings is not None
@@ -1923,7 +1931,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables,
                 slot_mappings,
                 cg_mode=batch_desc.cg_mode,
-                for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
+                for_capture=for_dummy_capture,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
@@ -1951,7 +1959,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # FULL replay reads capture-time metadata buffers. Re-stage them
                 # from the zeroed dummy block tables instead of retaining state
                 # indices from the previous real batch.
-                for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
+                for_capture=for_dummy_capture,
             )
 
         input_ids = input_batch.input_ids
