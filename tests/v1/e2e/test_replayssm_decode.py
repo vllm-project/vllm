@@ -5,10 +5,13 @@
 import pytest
 
 import vllm.envs as envs
+from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
+from . import skipped_step_scheduler
+from .skipped_step_scheduler import SkipStepOnceScheduler
 
 # Mamba2 (Nemotron-3) hybrids.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
@@ -88,6 +91,44 @@ def _check_replayssm_parity(
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name)
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_skipped_step_matches_no_skip(vllm_runner, monkeypatch, model_name):
+    # A running request left out of one step is re-added to the persistent
+    # batch; decode tokens still in its ring must not be dropped.
+    def params(skip_at):
+        return SamplingParams(
+            temperature=0.0,
+            max_tokens=48,
+            ignore_eos=True,
+            extra_args=None if skip_at is None else {"skip_step_at": skip_at},
+        )
+
+    skipped_step_scheduler.skipped.clear()
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        envs.disable_envs_cache()
+        with vllm_runner(
+            model_name,
+            max_model_len=1024,
+            trust_remote_code=True,
+            enable_prefix_caching=False,
+            mamba_backend="triton",
+            use_replayssm=True,
+            replayssm_buffer_len=16,
+            scheduler_cls=SkipStepOnceScheduler,
+            async_scheduling=False,
+        ) as llm:
+            # 23 outputs: past the first flush, with 7 tokens still in the ring.
+            ref = llm.llm.generate(PROMPTS, params(None))
+            # Only the first request is held back; the other keeps running.
+            out = llm.llm.generate(PROMPTS, [params(23), params(None)])
+    envs.disable_envs_cache()
+
+    assert len(skipped_step_scheduler.skipped) == 1
+    for r, o in zip(ref, out):
+        assert list(o.outputs[0].token_ids) == list(r.outputs[0].token_ids)
 
 
 @multi_gpu_test(num_gpus=2)
