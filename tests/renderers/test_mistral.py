@@ -37,6 +37,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
 
@@ -85,7 +86,9 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
 
     # Ensure task completes
     _, prompt = await task
-    assert prompt["prompt_token_ids"] == expected_tokens, (
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and only the
+    # token-prompt members of that union declare ``prompt_token_ids``.
+    assert prompt.get("prompt_token_ids") == expected_tokens, (
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"

@@ -55,6 +55,7 @@ def build_chunked_context(
 def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch):
     """Sparse MLA must pin computed context lengths before the H2D copy."""
     builder = SimpleNamespace(
+        _context_lens_cpu=torch.empty(2, dtype=torch.int32, pin_memory=True),
         chunked_prefill_workspace=torch.empty((2048, 1)),
         chunked_prefill_workspace_size=1024,
         kv_cache_spec=SimpleNamespace(block_size=BLOCK_SIZE),
@@ -113,6 +114,7 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
     query_lens = [4] * len(context_lens)
     metadata = build_chunked_context(context_lens, query_lens, workspace_size)
     assert metadata is not None
+    assert metadata.context_lens.tolist() == context_lens
 
     gathered: dict[int, list[tuple[int, int]]] = {}
     previous_request_start = -1
@@ -253,6 +255,7 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
         dcp_local_block_size=interleave,
     )
     assert metadata is not None
+    assert metadata.context_lens.tolist() == context_lens
     virtual_block_size = interleave * dcp_world_size
 
     local_cursor: dict[int, int] = {}
@@ -330,3 +333,23 @@ def test_dcp_reorg_uses_each_chunks_local_starts():
         )
 
         torch.testing.assert_close(reorganized, torch.cat(expected))
+
+
+def test_chunked_context_metadata_owns_context_lengths():
+    """Reusing CPU scratch must not overwrite an earlier batch's context lengths."""
+    context_lens = torch.tensor([16, 32], dtype=torch.int32)
+    metadata = build_mla_chunked_context_metadata(
+        context_lens_cpu=context_lens,
+        prefill_query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+        chunked_prefill_workspace=torch.empty((64, 1)),
+        chunked_prefill_workspace_size=64,
+        block_size=BLOCK_SIZE,
+        align_chunk_to_block=True,
+        device=torch.device("cpu"),
+        dcp_world_size=1,
+        dcp_local_block_size=1,
+        dcp_virtual_block_size=1,
+    )
+    context_lens.zero_()
+    assert metadata is not None
+    assert metadata.context_lens.tolist() == [16, 32]

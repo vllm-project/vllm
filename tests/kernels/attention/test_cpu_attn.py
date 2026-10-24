@@ -3,13 +3,22 @@
 
 import functools
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.platforms.cpu import CpuPlatform
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_sdpa,
+    zentorch_sdpa_attn,
+)
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -45,8 +54,26 @@ SEQ_LENS = [  # (q_len, kv_len)
 _FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
 _FP8_RTOL = 0.1
 ENCODER_SEQ_LENS = [
-    [1, 678, 2367, 145, 4162, 36, 7812],
+    [1, 4, 678, 2367, 145, 4162, 36, 7812],
 ]
+# Uniform (dense zentorch_sdpa call) and ragged (per-sequence loop).
+ZEN_ENCODER_SEQ_LENS = [
+    [128, 128, 128],
+    [1, 67, 233, 5],
+]
+_skip_no_zentorch_sdpa = pytest.mark.skipif(
+    not current_platform.is_zen_cpu() or not has_zentorch_op(["zentorch_sdpa_attn"]),
+    reason="zentorch_sdpa requires a Zen CPU with the op registered",
+)
+# should_use_zentorch_sdpa additionally gates each dtype on its ISA.
+_skip_no_avx512_bf16 = pytest.mark.skipif(
+    not torch.cpu._is_avx512_bf16_supported(),
+    reason="zentorch_sdpa bfloat16 requires AVX512-BF16",
+)
+_skip_no_avx512 = pytest.mark.skipif(
+    not torch.cpu._is_avx512_supported(),
+    reason="zentorch_sdpa float32 requires AVX512",
+)
 
 
 def get_attn_isa(
@@ -205,6 +232,7 @@ def ref_varlen_encoder_attn(
     seq_lens: list[int],
     scale: float,
     sliding_window: int | None = None,
+    alibi_slopes: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs = len(seq_lens)
     dtype = query.dtype
@@ -231,6 +259,11 @@ def ref_varlen_encoder_attn(
             ).logical_not()
         else:
             mask = empty_mask.logical_not()
+
+        if alibi_slopes is not None:
+            q_pos = torch.arange(0, seq_len)[None, :, None]
+            kv_pos = torch.arange(0, seq_len)[None, None, :]
+            attn += -alibi_slopes[:, None, None].float() * (q_pos - kv_pos)
 
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1)
@@ -428,6 +461,7 @@ def varlen_with_paged_kv(
     k_scale: float = 1.0,
     v_scale: float = 1.0,
     dynamic_causal: list[bool] | None = None,
+    s_aux_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -440,7 +474,7 @@ def varlen_with_paged_kv(
     scale = head_size**-0.5
     token_num = sum(query_lens)
     dynamic_causal_tensor = (
-        torch.tensor(dynamic_causal, dtype=torch.bool)
+        torch.tensor(dynamic_causal, dtype=torch.int32)
         if dynamic_causal is not None
         else None
     )
@@ -449,9 +483,7 @@ def varlen_with_paged_kv(
     # 2^(-8/n)
     alibi_slopes = _get_alibi_slopes(num_query_heads) if use_alibi else None
 
-    s_aux = (
-        15 * torch.rand((num_query_heads,), dtype=torch.bfloat16) if use_sink else None
-    )
+    s_aux = 15 * torch.rand((num_query_heads,), dtype=s_aux_dtype) if use_sink else None
 
     is_fp8 = kv_cache_dtype != "auto"
     if is_fp8 and current_platform.get_cpu_architecture() != CpuArchEnum.X86:
@@ -538,6 +570,8 @@ def varlen_with_paged_kv(
     )
 
     out_without_split = torch.empty_like(query)
+    if s_aux is not None and s_aux.dtype != torch.bfloat16:
+        s_aux = s_aux.to(torch.float32)
     cpu_attention_with_kv_cache(
         query=query,
         key_cache=packed_key_cache,
@@ -769,6 +803,151 @@ def test_varlen_encoder_attention_amx(
         block_size=block_size,
         isa=isa,
     )
+
+
+@torch.inference_mode()
+def varlen_encoder_zentorch_sdpa(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    use_alibi: bool,
+) -> None:
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    scale = head_size**-0.5
+    token_num = sum(seq_lens)
+
+    query = tensor_cache(
+        token_num * num_query_heads * head_size, dtype, tag="query"
+    ).view(token_num, num_query_heads, head_size)
+    key_value = tensor_cache(
+        2 * token_num * num_kv_heads * head_size, dtype, tag="kv"
+    ).view(2, token_num, num_kv_heads, head_size)
+    key, value = key_value.unbind(0)
+
+    query_start_loc = torch.zeros(len(seq_lens) + 1, dtype=torch.int32)
+    torch.cumsum(torch.tensor(seq_lens, dtype=torch.int32), 0, out=query_start_loc[1:])
+    alibi_slopes = _get_alibi_slopes(num_query_heads) if use_alibi else None
+    output = torch.empty_like(query)
+
+    zentorch_sdpa_attn(
+        query,
+        key,
+        value,
+        output,
+        SimpleNamespace(query_start_loc=query_start_loc, causal=False),
+        scale,
+        sliding_window if sliding_window is not None else -1,
+        alibi_slopes,
+    )
+    ref_output = ref_varlen_encoder_attn(
+        query=query,
+        key=key,
+        value=value,
+        seq_lens=seq_lens,
+        scale=scale,
+        sliding_window=sliding_window,
+        alibi_slopes=alibi_slopes,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+_ZENTORCH_SDPA_DTYPES = [
+    pytest.param(torch.bfloat16, marks=_skip_no_avx512_bf16),
+    pytest.param(torch.float32, marks=_skip_no_avx512),
+]
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize("seq_lens", ZEN_ENCODER_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+@pytest.mark.parametrize("use_alibi", [False, True])
+def test_zentorch_sdpa_attn(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    use_alibi: bool,
+) -> None:
+    varlen_encoder_zentorch_sdpa(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        use_alibi=use_alibi,
+    )
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize(
+    "attn_type", [AttentionType.ENCODER_ONLY, AttentionType.ENCODER]
+)
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+def test_should_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
+    assert should_use_zentorch_sdpa(attn_type, dtype)
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize(
+    "attn_type,dtype",
+    [
+        (AttentionType.DECODER, torch.bfloat16),
+        (AttentionType.ENCODER_ONLY, torch.float16),
+    ],
+)
+def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
+    assert not should_use_zentorch_sdpa(attn_type, dtype)
+
+
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.X86,
+    reason="FP8 KV cache requires x86",
+)
+@pytest.mark.parametrize(
+    "kv_cache_dtype,fp8_dtype",
+    [("fp8_e4m3", torch.float8_e4m3fn), ("fp8_e5m2", torch.float8_e5m2)],
+)
+def test_cpu_attn_fp8_cache_write_rounding(
+    kv_cache_dtype: str, fp8_dtype: torch.dtype
+) -> None:
+    """Cache bytes must round ties to even, including exponent boundaries."""
+    info = torch.finfo(fp8_dtype)
+    subnormal = info.tiny * info.eps
+    values = torch.tensor(
+        [
+            0,
+            1 + info.eps / 2,
+            1 + 1.5 * info.eps,
+            2 - info.eps / 2,
+            subnormal / 2,
+            0.75 * subnormal,
+            1.5 * subnormal,
+            info.tiny - subnormal / 2,
+        ]
+    )
+    key = torch.cat((values, -values)).repeat(2).reshape(1, 1, 32)
+    key_cache = torch.empty((1, 1, 32, 32), dtype=torch.uint8)
+    value_cache = torch.empty_like(key_cache)
+    cpu_attn_reshape_and_cache(
+        key,
+        key,
+        key_cache,
+        value_cache,
+        torch.tensor([0]),
+        "vec",
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    expected = key.to(fp8_dtype).view(torch.uint8).flatten()
+    torch.testing.assert_close(key_cache[0, 0, :, 0], expected, rtol=0, atol=0)
+    torch.testing.assert_close(value_cache[0, 0, 0], expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
@@ -1128,6 +1307,51 @@ def test_varlen_with_paged_kv_sink(
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [96])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [True])
+@pytest.mark.parametrize("isa", [get_attn_isa()])
+@pytest.mark.parametrize("s_aux_dtype", [torch.float16])
+def test_varlen_with_paged_kv_sink_fp16(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+    s_aux_dtype: torch.dtype,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
+        s_aux_dtype=s_aux_dtype,
+    )
+
+
 @pytest.mark.parametrize(
     "kv_cache_dtype",
     [
@@ -1180,6 +1404,60 @@ def test_varlen_with_paged_kv_dynamic_causal(
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        pytest.param(
+            [(5, 513), (1, 193), (4, 4097)],
+            (32, 4),
+            128,
+            64,
+            id="mixed_5_1_4",
+        ),
+        pytest.param([(4, 8192)], (8, 1), 128, 256, id="q4_singleton"),
+        pytest.param(
+            [(16, 8192)],
+            (32, 8),
+            128,
+            128,
+            id="q16_singleton_split_reduction",
+        ),
+        pytest.param([(16, 8192)], (16, 1), 256, 256, id="q16_single_kv"),
+        pytest.param(
+            [(17, 8192)] * 4,
+            (32, 8),
+            128,
+            128,
+            id="q17_b4_fragments",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=num_blocks,
+        use_alibi=True,
+        use_sink=True,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
@@ -1313,3 +1591,38 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
+
+
+def _select_attn_backend(kv_cache_dtype: str, use_mla: bool = False) -> str:
+    config = AttentionSelectorConfig(
+        head_size=576 if use_mla else 64,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=128,
+        use_mla=use_mla,
+    )
+    return CpuPlatform.get_attn_backend_cls(None, config)
+
+
+@pytest.mark.parametrize("fp8_isa", [True, False])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "bfloat16", "fp8", "turboquant_k8v4", "nvfp4"],
+)
+def test_cpu_attn_kv_cache_dtype_validation(
+    monkeypatch: pytest.MonkeyPatch, kv_cache_dtype: str, fp8_isa: bool
+) -> None:
+    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr("torch.cpu._is_avx512_supported", lambda: fp8_isa)
+
+    if kv_cache_dtype in ("auto", "bfloat16") or (kv_cache_dtype == "fp8" and fp8_isa):
+        assert _select_attn_backend(kv_cache_dtype).endswith("CPUAttentionBackend")
+    else:
+        with pytest.raises(ValueError, match=kv_cache_dtype):
+            _select_attn_backend(kv_cache_dtype)
+
+
+def test_cpu_mla_rejects_quantized_kv_cache() -> None:
+    assert "MLA" in _select_attn_backend("auto", use_mla=True)
+    with pytest.raises(ValueError, match="fp8"):
+        _select_attn_backend("fp8", use_mla=True)

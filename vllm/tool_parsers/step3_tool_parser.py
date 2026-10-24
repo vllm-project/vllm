@@ -32,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class Step3ToolParser(ToolParser):
-    """
-    Tool parser for a model that uses a specific XML-like format for tool calls.
+    """Tool parser for a model that uses a specific XML-like format for tool calls.
     This version uses a robust, stateful, cursor-based streaming parser and
     consolidates tool arguments into a single message.
     """
