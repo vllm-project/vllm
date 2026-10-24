@@ -27,7 +27,7 @@ All derender endpoints also accept an optional `prompt_token_ids` (the `token_id
 
 `/render` copies the request's `return_token_ids` onto the `GenerateRequest`. When it's set, derender returns `token_ids` and the generate response's `prompt_token_ids`, as `/v1/chat/completions` and `/v1/completions` do. The caller supplied `prompt_token_ids` is never echoed back since it may be only a suffix of the prompt.
 
-Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is streaming chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)).
+Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)). Non-streaming chat derender gives the parser the generate response's `prompt_token_ids` instead when it's set.
 
 ## API Reference
 
