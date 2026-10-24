@@ -911,6 +911,8 @@ steps:
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
+    # Base image has no nixl; install it or has_nixl_ep() skips the nixl_ep cases.
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - pytest -v -s kernels/moe/test_moe_layer.py
   mirror:
     amd:
