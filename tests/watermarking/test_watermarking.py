@@ -90,7 +90,10 @@ def make_gpu_watermark_sampler(monkeypatch):
     return make
 
 
-@pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel"])
+@pytest.mark.parametrize(
+    "algorithm",
+    ["gumbel", "dual_key_gumbel", "chi_squared", "ppl_hard", "ppl_soft"],
+)
 def test_watermarker_contract(algorithm: str):
     watermarker = create_watermarker(
         WatermarkConfig(algorithm=algorithm, key=42, context_width=4)
@@ -137,6 +140,32 @@ def test_gumbel_config_warns_when_context_deduplication_is_weak(
             "deduplicate_contexts_max_history at least 1024 or null to mitigate this."
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "name"),
+    [
+        ("ppl_soft", "Soft perplexity"),
+        ("ppl_hard", "Hard perplexity"),
+        ("chi_squared", None),
+    ],
+)
+def test_perplexity_configs_warn_when_context_deduplication_is_off(
+    monkeypatch, algorithm, name
+):
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "vllm.config.watermarking.logger.warning_once",
+        lambda message, *, scope: messages.append(message),
+    )
+
+    WatermarkConfig(key=42, algorithm=algorithm, deduplicate_contexts="none")
+
+    assert len(messages) == (0 if name is None else 1)
+    assert all(
+        message.startswith(f"{name} watermarking with context deduplication")
+        for message in messages
+    )
 
 
 def test_context_deduplication_history_can_be_unbounded():

@@ -110,8 +110,8 @@ generation.
 - Trace replay replaces the sampled token and therefore cannot apply a
   watermark. The first watermarked trace replay request emits a server-side
   warning and runs without watermarking.
-- Parallel sampling (`n > 1`) is supported, but plain Gumbel candidates can be
-  identical while their contexts remain identical.
+- Parallel sampling (`n > 1`) is supported, but plain Gumbel and `ppl_soft`
+  candidates can be identical while their contexts remain identical.
 - Structured outputs and tool grammars are applied before watermark sampling.
   Restrictive constraints can reduce the statistical evidence available to a
   detector.
@@ -136,7 +136,8 @@ rejected before model loading. Set
 not watermarked, while target-side rejection recovery and bonus sampling remain
 watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
-because their recovery tokens are watermarked.
+because their recovery tokens are watermarked. `chi_squared`, `ppl_hard` and
+`ppl_soft` are rejected even with `allow_target_only_watermarking`.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -225,6 +226,67 @@ vllm serve MODEL \
   '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
   --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.1}'
 ```
+
+### Chi-squared
+
+The chi-squared watermark of [Gloaguen et al. (2026)](https://arxiv.org/abs/2602.06754)
+is derived as a generalization of [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4).
+The key and the prior token context give every candidate token a score `g_u` drawn from
+Binomial(30, 1/2). The weights `w_u = max(0, 1 + delta * (g_u + mu))` make
+`p_u * w_u` the distribution with the highest expected score minus a
+chi-squared distance from `p`, where `p` is the model's
+next-token distribution  and `mu` normalizes the distribution. Tokens are
+drawn from `p_u * w_u`, as in the paper. A larger `delta` (default 1.0)
+gives a stronger watermark and more distortion:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"chi_squared","key":42,"delta":1.0}'
+```
+
+The first `context_width` tokens of an output, which lack a full context,
+are neither watermarked nor scored. Detection sums the scores of the
+scored tokens and reports the binomial tail probability of at least that sum:
+
+```python
+from vllm.v1.watermarking import BinomialScoreWatermarkDetector
+
+result = BinomialScoreWatermarkDetector(key=42).detect(token_ids)
+```
+
+The chi-squared watermark does not support
+[speculative decoding](#speculative-decoding).
+
+### Perplexity
+
+The perplexity watermarks of [Gloaguen et al. (2026)](https://arxiv.org/abs/2602.06754)
+use the same scores as the chi-squared watermark but bound how far the watermark raises the
+surprisal `-log p` of the sampled token, with a budget of `epsilon` nats per
+token (default 0):
+
+- `ppl_hard` samples from the distribution with the highest expected score
+  among those whose expected surprisal exceeds the entropy of `p` by at most
+  `epsilon` for every key. The solution puts all of its probability on one or
+  two tokens. When several tokens share the highest score, budget left over
+  after the most probable of them goes to the least probable one.
+- `ppl_soft` deterministically selects the token maximizing
+  `g_u + beta * log max(p_u, 1e-12)`, with `beta` set so that the expected
+  surprisal exceeds the entropy of `p` by `epsilon` on average over keys.
+  `beta` is found at every step by bisection over 128 Monte Carlo draws of
+  the token scores. The draws are derived from the context with a public
+  key, so they repeat with the context and do not depend on the rest of the
+  batch. Only the 4096 most probable tokens are drawn and can be selected,
+  so with `top_k` of at most 4096 this matches the reference
+  implementation, which uses every token.
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"ppl_soft","key":42,"epsilon":0.0}'
+```
+
+Both are detected with `BinomialScoreWatermarkDetector`, like the chi-squared
+watermark, leave the first `context_width` tokens of an output unwatermarked
+like it, and neither supports [speculative decoding](#speculative-decoding).
 
 ### SynthID-Text
 
