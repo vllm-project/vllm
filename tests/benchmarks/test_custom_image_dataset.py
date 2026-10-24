@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from argparse import Namespace
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import pybase64 as base64
 import pytest
+from PIL import Image
 
+import vllm.benchmarks.datasets.datasets as datasets_module
 from vllm.benchmarks.datasets import CustomImageDataset, get_samples
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
     _get_chat_content,
     _get_chat_messages,
 )
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -27,10 +32,30 @@ class _Tokenizer:
         return _TokenizedPrompt(prompt)
 
 
+def _tokenizer() -> TokenizerLike:
+    return cast(TokenizerLike, _Tokenizer())
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
+
+
+def _write_png(path: Path, color: tuple[int, int, int] = (255, 0, 0)) -> None:
+    Image.new("RGB", (1, 1), color=color).save(path)
+
+
+def _decode_data_url(data_url: str) -> tuple[str, bytes]:
+    prefix, image_base64 = data_url.split(",", 1)
+    return prefix, base64.b64decode(image_base64)
+
+
+def _assert_png_data_url(data_url: str) -> None:
+    prefix, image_bytes = _decode_data_url(data_url)
+    assert prefix == "data:image/png;base64"
+    with Image.open(BytesIO(image_bytes)) as image:
+        image.verify()
 
 
 def _args_for_custom_image(dataset_path: Path) -> Namespace:
@@ -42,6 +67,7 @@ def _args_for_custom_image(dataset_path: Path) -> Namespace:
         num_prompts=2,
         custom_output_len=32,
         enable_multimodal_chat=False,
+        custom_ensure_client_side_data=False,
         request_id_prefix="req-",
         no_oversample=False,
     )
@@ -71,7 +97,7 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
         ],
     )
 
-    samples = get_samples(_args_for_custom_image(jsonl), _Tokenizer())
+    samples = get_samples(_args_for_custom_image(jsonl), _tokenizer())
 
     assert len(samples) == 2
     assert samples[0].request_id == "req-0"
@@ -85,6 +111,7 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
     assert samples[1].multi_modal_data is None
     assert isinstance(samples[1].prompt, list)
     assert samples[1].prompt[0] == {"type": "text", "text": "Now compare "}
+    assert isinstance(samples[1].prompt[1], dict)
     assert samples[1].prompt[1]["image_url"]["url"] == f"file://{image_c}"
 
 
@@ -105,7 +132,7 @@ def test_custom_image_dataset_uses_all_image_files(tmp_path: Path) -> None:
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_tokenizer(),
         num_requests=1,
         output_len=32,
     )
@@ -150,7 +177,7 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_tokenizer(),
         num_requests=1,
         output_len=32,
     )
@@ -160,14 +187,18 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
     assert sample.multi_modal_data is None
     assert sample.prompt_len == 2
     assert isinstance(sample.prompt, list)
-    assert [part["type"] for part in sample.prompt] == [
+    parts = []
+    for part in sample.prompt:
+        assert isinstance(part, dict)
+        parts.append(part)
+    assert [part["type"] for part in parts] == [
         "text",
         "image_url",
         "text",
         "image_url",
     ]
-    assert sample.prompt[1]["image_url"]["url"] == f"file://{image_a}"
-    assert sample.prompt[3]["image_url"] == {
+    assert parts[1]["image_url"]["url"] == f"file://{image_a}"
+    assert parts[3]["image_url"] == {
         "url": f"file://{image_b}",
         "detail": "low",
     }
@@ -202,7 +233,7 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_tokenizer(),
         num_requests=1,
         output_len=32,
         enable_multimodal_chat=True,
@@ -231,6 +262,129 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
 
 @pytest.mark.benchmark
+def test_custom_image_dataset_encodes_image_media_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_a = tmp_path / "chart_a.png"
+    image_b = tmp_path / "chart b.png"
+    _write_png(image_a, color=(255, 0, 0))
+    _write_png(image_b, color=(0, 255, 0))
+    data_url = "data:image/png;base64,Zm9v"
+    remote_url = "https://example.com/chart.png"
+    original_fetch_image = datasets_module.fetch_image
+
+    def fake_fetch_image(image_url: str) -> Image.Image:
+        if image_url == remote_url:
+            return Image.new("RGB", (1, 1), color=(0, 0, 255))
+        return original_fetch_image(image_url)
+
+    monkeypatch.setattr(datasets_module, "fetch_image", fake_fetch_image)
+
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "prompt": "Compare the charts.",
+                "image_files": [
+                    str(image_a),
+                    image_b.as_uri(),
+                    remote_url,
+                    data_url,
+                ],
+            }
+        ],
+    )
+
+    dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
+    samples = dataset.sample(
+        tokenizer=_tokenizer(),
+        num_requests=1,
+        output_len=32,
+        ensure_client_side_data=True,
+    )
+
+    assert len(samples) == 1
+    assert isinstance(samples[0].multi_modal_data, list)
+    image_urls = [part["image_url"]["url"] for part in samples[0].multi_modal_data]
+
+    _assert_png_data_url(image_urls[0])
+    _assert_png_data_url(image_urls[1])
+    _assert_png_data_url(image_urls[2])
+    assert image_urls[3] == data_url
+
+
+@pytest.mark.benchmark
+def test_custom_image_dataset_encodes_interleaved_image_media(
+    tmp_path: Path,
+) -> None:
+    image_a = tmp_path / "chart_a.png"
+    image_b = tmp_path / "chart_b.png"
+    _write_png(image_a, color=(255, 0, 0))
+    _write_png(image_b, color=(0, 255, 0))
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "content": [
+                    {"type": "text", "text": "Compare "},
+                    {"type": "image", "image": str(image_a)},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_b.as_uri(),
+                            "detail": "low",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
+    samples = dataset.sample(
+        tokenizer=_tokenizer(),
+        num_requests=1,
+        output_len=32,
+        ensure_client_side_data=True,
+    )
+
+    sample = samples[0]
+    assert isinstance(sample.prompt, list)
+    parts = []
+    for part in sample.prompt:
+        assert isinstance(part, dict)
+        parts.append(part)
+    _assert_png_data_url(parts[1]["image_url"]["url"])
+    _assert_png_data_url(parts[2]["image_url"]["url"])
+    assert parts[2]["image_url"]["detail"] == "low"
+
+
+@pytest.mark.benchmark
+def test_custom_image_dataset_rejects_invalid_image_media(
+    tmp_path: Path,
+) -> None:
+    invalid_image = tmp_path / "not_an_image.png"
+    invalid_image.write_text("not an image")
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [{"prompt": "Describe the image.", "image_files": [str(invalid_image)]}],
+    )
+
+    dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
+    with pytest.raises(ValueError, match="Invalid image URL"):
+        dataset.sample(
+            tokenizer=_tokenizer(),
+            num_requests=1,
+            output_len=32,
+            ensure_client_side_data=True,
+        )
+
+
+@pytest.mark.benchmark
 def test_custom_image_dataset_rejects_invalid_content_part(
     tmp_path: Path,
 ) -> None:
@@ -240,7 +394,7 @@ def test_custom_image_dataset_rejects_invalid_content_part(
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     with pytest.raises(ValueError, match="type 'text', 'image', or 'image_url'"):
         dataset.sample(
-            tokenizer=_Tokenizer(),
+            tokenizer=_tokenizer(),
             num_requests=1,
             output_len=32,
         )

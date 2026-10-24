@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-import subprocess
+import socket
 import uuid
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -10,7 +12,6 @@ import pytest
 import torch
 import zmq
 
-from tests.conftest import _find_free_port
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -21,14 +22,19 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
+    resolve_host_ip,
+    set_role,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     KVConnectorRole,
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
 from vllm.platforms import current_platform
@@ -36,29 +42,51 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    SlidingWindowSpec,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 from .utils import create_request, create_scheduler
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    layer_names = ["layer0", "layer1", "layer2"]
+    num_blocks = 2
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    page = spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layer_names) * num_blocks * page,
+                layers=layer_names,
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)],
+    )
 
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
-
-
-def _rdma_available() -> bool:
-    """Check if RDMA devices are available."""
-    try:
-        result = subprocess.run(["ibv_devinfo"], capture_output=True, text=True)
-        return "No IB devices found" not in result.stderr
-    except FileNotFoundError:
-        return False
-
-
-rdma_available = _rdma_available()
 
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
@@ -111,6 +139,76 @@ def _setup_kv_transfer_request(
         f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{fake_uuid}"
     )
     return request
+
+
+def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = tp_size
+    scheduler._has_mamba = False
+    scheduler._reqs_need_recv = {}
+    scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
+    return scheduler
+
+
+def _write_producer_scheduler(block_size: int = 1) -> Any:
+    """Bare WRITE-mode PRODUCER scheduler exercising the save path without a
+    real engine/RDMA stack. Uses a single full-attention KV group (index 0)."""
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.is_producer = True
+    scheduler.block_size = block_size
+    scheduler._has_mamba = False
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
+    )
+    scheduler.blocks_per_sw = [0]
+    scheduler._group_block_sizes = [block_size]
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_pending_save = {}
+    scheduler._req_kv_params = {}
+    scheduler._reqs_need_send = {}
+    return scheduler
+
+
+def _spec_kv_params(transfer_id: str = "xfer-spec") -> dict[str, Any]:
+    # request_id embeds no zmq address, so add_new_req resolves the peer here.
+    return {
+        "transfer_id": transfer_id,
+        "remote_engine_id": "remote-engine",
+        "remote_block_ids": [],
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 5000,
+        "remote_notify_port": 5001,
+    }
+
+
+def _build_meta(
+    scheduler: Any, req_ids=None, new_block_ids=None, num_scheduled_tokens=None
+) -> Any:
+    # Final-chunk detection reads num_scheduled_tokens, so expose it.
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=req_ids or [],
+            new_block_ids=new_block_ids or [],
+        ),
+        num_scheduled_tokens=num_scheduled_tokens or {},
+    )
+    return scheduler.build_connector_meta(scheduler_output)
+
+
+def test_write_mode_does_not_reload_remote_kv_after_preemption():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    request = create_request(request_id=1, num_tokens=32, do_remote_prefill=True)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["do_remote_prefill"] = False
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
 
 
 class FakeMoRIIOWrapper:
@@ -169,7 +267,14 @@ class FakeMoRIIOWrapper:
     def _handle_completion_message(self, msg: str):
         pass
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def send_notify(
+        self,
+        req_ids,
+        remote_ip,
+        remote_port,
+        message_type=None,
+        message_fields=None,
+    ):
         pass
 
     def pop_finished_req_ids(self):
@@ -187,9 +292,18 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self,
+        vllm_config,
+        engine_id,
+        *args,
+        hand_shake_latency: float = 1.8,
+        kv_cache_layout="LBHNC",
+        kv_cache_config=None,
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            vllm_config, engine_id, kv_cache_config or _make_test_kv_cache_config()
+        )
 
 
 def create_vllm_config(
@@ -224,11 +338,14 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
+    # These tests exercise connector setup, not real RDMA transfer (MoRI wrapper is
+    # mocked), so we can use any backend without affecting test validity. Use xGMI to
+    # avoid requiring RNICs in CI.
     kv_transfer_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
-        kv_connector_extra_config={"read_mode": read_mode},
+        kv_connector_extra_config={"read_mode": read_mode, "backend": "xgmi"},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -241,7 +358,6 @@ def create_vllm_config(
 
 def test_write_mode_saves_local_block_ids():
     """Write mode records local block ids in MoRIIOConnectorMetadata.reqs_to_save."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_producer")
     scheduler = create_scheduler(vllm_config)
@@ -287,7 +403,7 @@ def test_write_mode_saves_local_block_ids():
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -331,18 +447,20 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
     for _, (expected_save, expected_recv, expected_send) in enumerate(expected_counts):
         scheduler_output = scheduler.schedule()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
+        assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
 
         assert len(kv_connector_metadata.reqs_to_save) == expected_save
         assert len(kv_connector_metadata.reqs_to_recv) == expected_recv
         assert len(kv_connector_metadata.reqs_to_send) == expected_send
     assert kv_connector_metadata is not None, "kv_connector_metadata is None"
+    assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
     assert request_id in kv_connector_metadata.reqs_to_save, (
         "Request ID not in reqs_to_save"
     )
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -352,7 +470,6 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
 
 def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
@@ -381,7 +498,7 @@ def test_read_mode_loads_remote_block_ids():
     ].req_to_blocks[request_id]
 
     # Set remote block ids to be fetched.
-    request.kv_transfer_params["remote_block_ids"] = block_list
+    request.kv_transfer_params["remote_block_ids"] = [block_list]
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
@@ -406,7 +523,7 @@ def test_read_mode_loads_remote_block_ids():
     req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -414,10 +531,69 @@ def test_read_mode_loads_remote_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
+@pytest.mark.parametrize(
+    ("transfer_id", "extra_params", "expected_notifications"),
+    [
+        pytest.param(
+            "xfer-7",
+            {"remote_host": "127.0.0.1", "remote_notify_port": 7000},
+            [
+                ("xfer-7", "127.0.0.1", 7000),
+                ("xfer-7", "127.0.0.1", 7001),
+            ],
+            id="address-available",
+        ),
+        pytest.param("xfer-8", {}, [], id="address-unavailable-plain-id"),
+    ],
+)
+def test_write_mode_finished_before_alloc_releases_prefill_blocks(
+    transfer_id, extra_params, expected_notifications
+):
+    scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
+    notifications = []
+    scheduler._send_transfer_release = lambda transfer_id, host, port: (
+        notifications.append((transfer_id, host, port))
+    )
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": transfer_id,
+    } | extra_params
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert not delay_free
+    assert new_params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert scheduler._reqs_need_recv == {}
+    assert notifications == expected_notifications
+
+
+def test_send_transfer_release_sends_structured_release_message():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    path = make_zmq_path("tcp", "127.0.0.1", 7000)
+    sock = MagicMock()
+    scheduler.paths = {path: sock}
+
+    scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
+
+    payload = sock.send.call_args.args[0]
+    # Unlike the READ-mode release in _pop_done_transfers, which every decode
+    # rank sends, the decode scheduler sends this one once per prefill rank on
+    # behalf of all decode ranks (the fixture's tp_size is 2), so the prefill
+    # rank must count it as its only ACK.
+    assert msgspec.msgpack.decode(payload) == {
+        "type": "release",
+        "transfer_id": "xfer-7",
+        "consumer_tp_size": 1,
+    }
+
+
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
@@ -426,16 +602,15 @@ def test_register_kv_caches(mock_parallel_groups):
     DEFAULT_PORT = 6301
     TP_RANK = 0
     DP_RANK = 0
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_layer_kv_cache_shape_bytes(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -451,6 +626,7 @@ def test_register_kv_caches(mock_parallel_groups):
         ),
     ):
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -517,22 +693,19 @@ def test_register_kv_caches(mock_parallel_groups):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
-
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_layer_kv_cache_shape_bytes(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -547,6 +720,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     ):
         handshake_port = _find_free_port()
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -580,3 +754,531 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
             assert isinstance(metadata, MoRIIOAgentMetadata), (
                 "Decoded metadata is not MoRIIOAgentMetadata"
             )
+
+
+def test_resolve_host_ip_prefers_extra_config():
+    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    (so an external router can advertise a routable/internal address); an
+    absent or empty value falls back to get_ip()."""
+    assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
+
+    fallback = get_ip()
+    assert resolve_host_ip({}) == fallback
+    assert resolve_host_ip({"host_ip": ""}) == fallback
+
+
+def test_write_mode_excludes_spec_lookahead_blocks():
+    # The save path must record only the prompt blocks, clamping off the
+    # trailing lookahead blocks decode never allocates.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec"
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
+    lookahead_blocks = [18, 19, 20]
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    # block_size=1 => num_prompt_tokens == prompt block count, all scheduled in
+    # this single chunk, so final-chunk detection fires.
+    num_prompt_tokens = len(prompt_blocks)
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    saved = meta.reqs_to_save[req_id]
+    assert saved.local_block_ids == [prompt_blocks]
+
+
+def test_write_mode_chunked_prefill_clamps_spec_lookahead_blocks():
+    # Non-final chunks are buffered untouched; lookahead blocks are only clamped
+    # on the final-chunk save.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec-chunked"
+    num_prompt_tokens = 8
+    first_chunk = [10, 11, 12, 13]
+    final_chunk = [14, 15, 16, 17, 18, 19, 20]  # 4 prompt + 3 lookahead
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+
+    # Step 1: first chunk (4 of 8 tokens) is buffered, not saved.
+    scheduler._reqs_need_save[req_id] = (req, [first_chunk])
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+    meta_step1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta_step1.reqs_to_save
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [first_chunk]
+
+    # Step 2: final chunk (computed 4 + scheduled 4 >= 8) assembles the full
+    # local set, clamps the lookahead, and records only the prompt blocks.
+    req.num_computed_tokens = 4
+    meta_step2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[final_chunk]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id in meta_step2.reqs_to_save
+    assert meta_step2.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
+
+@pytest.mark.parametrize(
+    ("block_size", "num_prompt_tokens", "num_prompt_blocks"),
+    [
+        # block_size=4: exact multiple (2 full blocks) and non-multiple (3 blocks,
+        # last one partial).
+        pytest.param(4, 8, 2, id="bs4-exact-multiple"),
+        pytest.param(4, 9, 3, id="bs4-non-multiple"),
+        # block_size=16: exact multiple (2 full blocks) and non-multiple (3
+        # blocks, last one partial).
+        pytest.param(16, 32, 2, id="bs16-exact-multiple"),
+        pytest.param(16, 40, 3, id="bs16-non-multiple"),
+    ],
+)
+def test_write_mode_clamps_prompt_blocks_with_block_size_gt_1(
+    block_size, num_prompt_tokens, num_prompt_blocks
+):
+    # With block_size > 1 the clamp must keep exactly
+    # ceil(num_prompt_tokens / block_size) prompt blocks and drop the tail.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=block_size)
+
+    req_id = f"req-bs{block_size}-{num_prompt_tokens}"
+    prompt_blocks = list(range(10, 10 + num_prompt_blocks))
+    lookahead_blocks = [10 + num_prompt_blocks]
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    assert len(prompt_blocks) == num_prompt_blocks
+    assert meta.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+
+
+def test_write_mode_defers_save_until_prompt_complete_with_lookahead():
+    # Under speculative decoding the producer reserves lookahead blocks beyond
+    # the last-scheduled prompt token, inflating the accumulated block count on
+    # a non-final chunk. Token-progress detection must keep deferring until the
+    # prompt is complete, where the lookahead is clamped off.
+    #
+    # block_size=1, num_prompt_tokens=10, chunk=4, num_lookahead=3: after 8
+    # prompt tokens the producer holds 8 + 3 = 11 blocks, but token progress
+    # 8 < 10 must keep waiting until the final chunk completes tokens 9-10.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-lookahead-final-chunk"
+    num_prompt_tokens = 10
+
+    chunk1_blocks = [100, 101, 102, 103]  # prompt tokens 1-4
+    chunk2_blocks = [104, 105, 106, 107, 108, 109, 110]  # 4 prompt + 3 lookahead
+    prompt_blocks = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    # Chunk 1 (tokens 1-4): computed 0 + scheduled 4 < 10 -> buffered.
+    scheduler._reqs_need_save[req_id] = (req, [chunk1_blocks])
+    meta1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta1.reqs_to_save, "chunk 1 must not be saved"
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [chunk1_blocks]
+
+    # Chunk 2 (tokens 5-8) inflates the buffered count to 11 via lookahead, but
+    # token progress 4 + 4 = 8 < 10 keeps the request deferred.
+    req.num_computed_tokens = 4
+    meta2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[chunk2_blocks]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id not in meta2.reqs_to_save, (
+        "second-to-last chunk saved prematurely despite incomplete prompt"
+    )
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [
+        chunk1_blocks + chunk2_blocks
+    ]
+
+    # Final chunk (tokens 9-10, no new blocks): computed 8 + scheduled 2 >= 10
+    # emits the save with the trailing lookahead block clamped off.
+    req.num_computed_tokens = 8
+    meta3 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[None],
+        num_scheduled_tokens={req_id: 2},
+    )
+    assert req_id in meta3.reqs_to_save, "final chunk must emit the WRITE save"
+    assert meta3.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
+
+def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
+    # Two full-attention groups with different block sizes are each clamped to
+    # their own prompt-block count; a sliding-window group is left untouched.
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._has_mamba = False
+    scheduler._group_block_sizes = [16, 32, 16]
+
+    req = SimpleNamespace(num_prompt_tokens=40)
+    block_ids = [
+        [0, 1, 2, 3, 4],  # ceil(40/16)=3 -> clamp to 3
+        [10, 11, 12],  # ceil(40/32)=2 -> clamp to 2
+        [20, 21, 22, 23, 24],  # sliding-window -> untouched
+    ]
+    clamped = scheduler._clamp_to_prompt_blocks(req, block_ids)
+    assert clamped == [[0, 1, 2], [10, 11], [20, 21, 22, 23, 24]]
+
+
+def _make_hybrid_kv_cache_config() -> KVCacheConfig:
+    """One full-attention group + one sliding-window group (Gemma-like)."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
+    """A uniform sliding-window model (e.g. Mistral-7B): the single group is a
+    SlidingWindowSpec, so HMA is not required once hybrid management is
+    disabled, yet the spec guard still applies."""
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = sw_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page,
+                layers=["sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _read_scheduler(
+    kv_cache_config: KVCacheConfig, disable_hma: bool = False
+) -> MoRIIOConnectorScheduler:
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+    assert connector.connector_scheduler is not None
+    return connector.connector_scheduler
+
+
+def test_hma_blocks_per_sw_two_groups():
+    """A Full + SlidingWindow config runs with HMA and computes block budgets
+    correctly"""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    assert scheduler._is_hma_required is True
+    # cdiv(32, 16) + 1 == 3 for the sliding-window group, 0 for full attention.
+    assert scheduler.blocks_per_sw == [0, 3]
+
+
+@pytest.mark.parametrize(
+    "swa_enabled, disable_hma, expected_is_hma",
+    [
+        (True, False, True),  # sliding-window group present, HMA enabled
+        (True, True, False),  # sliding-window group present but HMA disabled
+        (False, False, False),  # full-attention only, HMA not needed
+    ],
+)
+def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
+    """_is_hma_required tracks both the KV cache groups and the
+    --disable-hybrid-kv-cache-manager flag. When HMA is off,
+    get_exchange_clipped_blocks must be a no-op."""
+    config = (
+        _make_hybrid_kv_cache_config() if swa_enabled else _make_test_kv_cache_config()
+    )
+    scheduler = _read_scheduler(config, disable_hma=disable_hma)
+    assert scheduler._is_hma_required is expected_is_hma
+    if not expected_is_hma:
+        blocks = [[1, 2, 3, 4, 5]]
+        assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
+
+
+def test_transfer_disabled_hybrid_group_is_ignored():
+    config = _make_hybrid_kv_cache_config()
+    config.kv_cache_groups[1].enable_kv_transfer = False
+    scheduler = _read_scheduler(config)
+
+    assert scheduler._is_hma_required is False
+    assert scheduler.get_exchange_clipped_blocks([[1, 2, 3], [20, 21, 22]]) == [
+        [1, 2, 3]
+    ]
+
+
+def test_non_sliding_window_hybrid_is_rejected():
+    """A hybrid group that is not sliding-window (e.g. chunked-local
+    attention) must fail closed rather than be silently mistransferred."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    local_spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        attention_chunk_size=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "local0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["local0"], kv_cache_spec=local_spec),
+        ],
+    )
+    with pytest.raises(NotImplementedError, match="sliding-window hybrid"):
+        _read_scheduler(config)
+
+
+def test_get_exchange_clipped_blocks_clips_only_sw_group():
+    """get_exchange_clipped_blocks keeps the full attn group intact and clips the
+    sliding-window group to its window tail."""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    full = [10, 11, 12, 13, 14]
+    sw = [20, 21, 22, 23, 24]
+    clipped = scheduler.get_exchange_clipped_blocks([full, sw])
+    assert clipped[0] == full
+    assert clipped[1] == [22, 23, 24]
+
+
+def test_metadata_hma_block_ids_preserved_per_group():
+    """add_new_req stores per-group (BlockIds) block lists unchanged for both
+    read and write, so the hybrid group structure is retained."""
+    metadata = MoRIIOConnectorMetadata()
+
+    # Assume:
+    # - Full-attention group (6 blocks) +
+    # - sliding-window group already clipped to its window tail (3 blocks).
+    fa_blocks = [0, 1, 2, 3, 4, 5]
+    sw_blocks = [10, 11, 12]
+    local_block_ids = [fa_blocks, sw_blocks]
+    remote_block_ids = [[100, 101, 102, 103, 104, 105], [200, 201, 202]]
+
+    base_params = {
+        "remote_engine_id": "remote-engine",
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 6301,
+        "remote_notify_port": 61005,
+        "remote_block_ids": remote_block_ids,
+    }
+
+    # Read mode: both local and remote ids stay per-group.
+    metadata.add_new_req(
+        request_id="recv-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={**base_params, "transfer_id": "recv-req"},
+    )
+    recv_meta = metadata.reqs_to_recv["recv-req"]
+    assert recv_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert recv_meta.remote_block_ids == remote_block_ids
+
+    # Write mode: the decode peer allocates its own blocks, so #remote_block_ids may
+    # be empty, Local group structure is kept.
+    metadata.add_new_req(
+        request_id="save-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            **base_params,
+            "transfer_id": "save-req",
+            "remote_block_ids": [],
+        },
+        write_mode=True,
+    )
+    save_meta = metadata.reqs_to_save["save-req"]
+    assert save_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert save_meta.remote_block_ids == []
+
+
+def test_single_group_path_unchanged():
+    """A full attn config does not enable HMA and never clips blocks."""
+    scheduler = _read_scheduler(_make_test_kv_cache_config())
+    assert scheduler._is_hma_required is False
+    assert scheduler.blocks_per_sw == [0]
+    blocks = [[1, 2, 3, 4, 5]]
+    assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
+
+
+class _FakeSpecConfig(SimpleNamespace):
+    """Minimal speculative_config stand-in. Any drafter-capability probe
+    (use_dflash/use_eagle/use_dspark/uses_draft_model/...) defaults to False so
+    VllmConfig.num_lookahead_tokens resolves cleanly as upstream adds methods."""
+
+    def __getattr__(self, name: str):
+        if name.startswith(("use_", "uses_")):
+            return lambda *a, **k: False
+        raise AttributeError(name)
+
+
+def _fake_speculative_config(num_speculative_tokens: int = 1) -> SimpleNamespace:
+    return _FakeSpecConfig(num_speculative_tokens=num_speculative_tokens)
+
+
+def _spec_vllm_config() -> VllmConfig:
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
+    vllm_config.speculative_config = _fake_speculative_config()
+    # HMA off => the WRITE+hybrid guard is skipped, so construction reaches the
+    # spec-decode guard (the only path that hits it).
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    return vllm_config
+
+
+def test_spec_decode_rejected_with_sliding_window_groups():
+    """MoRIIO + speculative decoding fails closed on sliding-window models,
+    since the prompt-block clamp only covers full-attention groups. The only
+    reachable path is a uniform SWA model with HMA disabled."""
+    vllm_config = _spec_vllm_config()
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="speculative decoding"),
+    ):
+        MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_sliding_window_only_kv_cache_config(),
+        )
+
+
+def test_spec_decode_allowed_with_full_attention_only():
+    """Full-attention-only models (e.g. GLM) do not trip the spec guard."""
+    vllm_config = _spec_vllm_config()
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_test_kv_cache_config(),
+        )
+    assert connector.connector_scheduler is not None
+
+
+def test_spec_decode_allowed_with_sliding_window_in_read_mode():
+    """The spec guard is WRITE-mode only; READ mode is unaffected."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    vllm_config.speculative_config = _fake_speculative_config()
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
+        )
+    assert connector.connector_scheduler is not None
+
+
+def test_hybrid_write_mode_rejected():
+    """Hybrid KV cache groups are unsupported in WRITE mode and fail closed."""
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError),
+    ):
+        MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
+        )
+
+
+def test_worker_layer_to_group_routing(mock_parallel_groups):
+    """The worker maps every layer to its KV cache group correctly."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
+    # so provide the ports manually.
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {
+            "http_port": 12346,
+            "handshake_port": 12347,
+            "notify_port": 12348,
+        }
+    )
+    with set_current_vllm_config(vllm_config):
+        worker = FakeMoRIIOConnectorWorker(
+            vllm_config,
+            "engine0",
+            hand_shake_latency=0,
+            kv_cache_config=_make_hybrid_kv_cache_config(),
+        )
+    assert worker.layer_to_group == {"full0": 0, "sw0": 1}

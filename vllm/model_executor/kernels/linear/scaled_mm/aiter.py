@@ -9,13 +9,20 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import (
+    FP8BlockParams,
     Fp8BlockScaledMMLinearKernel,
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
@@ -57,6 +64,15 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric quantization only."
+        # AITER actually supports only per-token-per-channel GEMM.
+        # Fused per-tensor weight scales become per-channel after loading
+        # (see CutlassInt8ScaledMMLinearKernel).
+        weight_per_channel = c.is_channelwise or c.is_fused_module
+        if c.is_static_input_scheme or not weight_per_channel:
+            return (
+                False,
+                "supports only per-token activations with per-channel weights.",
+            )
         return True, None
 
     def apply_weights(
@@ -65,15 +81,13 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        `AiterInt8ScaledMMLinearKernel` implements a fused version of
+        """`AiterInt8ScaledMMLinearKernel` implements a fused version of
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
-        Currently only support per-tensor-per-tensor GEMM
-        and per-token-per-channel GEMM through AITER
+        Currently only supports per-token-per-channel GEMM through AITER
         w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` also does not support
-        ATIER block scaled GEMM and mix-precision GEMM.
+        AITER block scaled GEMM and mix-precision GEMM.
         """
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
@@ -98,24 +112,11 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         m = x_q.shape[0]  # a
         n = w_q.shape[1]  # b
 
-        per_tensor_scale_a = x_s.numel() == 1
-        per_tensor_scale_b = w_s.numel() == 1
         per_token_scale_a = x_s.numel() == m
         per_channel_scale_b = w_s.numel() == n
-
-        # @TODO:
-        # Maybe broadcast the per-tensor-scale into per-channel-scale
-        # if one of the scale is a per-channel-scale.
-        # For now, it only supports:
-        # - per-tensor-per-tensor a8w8 scaled GEMM, and
-        # - per-token-per-channel a8w8 scaled GEMM
-        assert (per_tensor_scale_a and per_tensor_scale_b) or (
-            per_token_scale_a and per_channel_scale_b
-        ), (
-            "Currently only support per-tensor-per-tensor GEMM "
-            " and per-token-per-channel GEMM through AITER"
-            " w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` "
-            "does not support AITER block scaled GEMM."
+        assert per_token_scale_a and per_channel_scale_b, (
+            "Currently only support per-token-per-channel GEMM through AITER"
+            " w8a8 scaled gemm."
         )
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
@@ -144,6 +145,12 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         except Exception:
             return False, "requires aiter library to be installed."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        # Does not call get_output_padding() - torch fallbacks
+        # resolve padding from compilation_config, which is unset in
+        # profile_run. This kernel does not pad activations.
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -212,6 +219,104 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
 
 
+class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+
+        if not rocm_aiter_ops.is_linear_hipbmm_enabled():
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1`, "
+                "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
+                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`.",
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+
+        if not hasattr(aiter, "hipb_mm"):
+            return False, "requires aiter hipb_mm support."
+
+        return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        # Same per-token FP8 consume path as
+        # AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.
+        return kFp8DynamicTokenSym
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        is_ptpc = (
+            c.activation_quant_key.scale.group_shape.is_per_token()
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        )
+        if c.weight_shape is None:
+            return False, "weight_shape is required for Aiter kernels"
+        N, K = c.weight_shape
+
+        if c.out_dtype is not torch.bfloat16:
+            return False, "requires bfloat16 output dtype."
+
+        if not is_ptpc:
+            return (
+                False,
+                "requires per token activation scales and per channel weight scales.",
+            )
+
+        if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
+            return (
+                False,
+                "requires N >= 16 and both N and K divisible by 16, "
+                f"received N={N} and K={K}.",
+            )
+
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_name, w_s_name, *_ = self.layer_param_names
+        w, w_s, *_ = self._get_layer_params(layer)
+
+        # Pre-apply the transposes that used to live in
+        # _rocm_aiter_hipb_mm_fp8_impl so the kernel can consume B/Bs directly.
+        # The `.t()` on the shuffled weight is kept as a non-contiguous view —
+        # materializing it with `.contiguous()` would re-arrange the bytes and
+        # break the `bpreshuffle` layout.
+        shuffled_w = rocm_aiter_ops.shuffle_weight(w.t().contiguous())
+        replace_parameter(
+            layer,
+            w_name,
+            torch.nn.Parameter(shuffled_w.t(), requires_grad=False),
+        )
+
+        if w_s.ndim > 1:
+            replace_parameter(
+                layer,
+                w_s_name,
+                torch.nn.Parameter(w_s.t().contiguous(), requires_grad=False),
+            )
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        output_shape[-1] = B.shape[1]
+        return rocm_aiter_ops.hipb_mm_fp8(A, B, As, Bs, bias, out_dtype).view(
+            *output_shape
+        )
+
+
 class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -220,6 +325,9 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -277,17 +385,69 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         super().__init__(config)
         n, k = config.weight_shape
 
-        self.use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        _on_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            _on_gfx1250 = on_gfx1250()
+
+        self.use_triton = not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
+
+        self.use_bpreshuffle = (
+            _on_gfx1250
+            and n % 16 == 0
+            and k % 128 == 0
+            and bool(rocm_aiter_ops.is_triton_blockscale_bpreshuffle_gemm_tuned(n, k))
+        )
+        if self.use_bpreshuffle:
+            # The tuned preshuffle configs expect a column-major group scale.
+            act_scale_descriptor = config.activation_quant_key.scale
+            self.quant_fp8 = QuantFP8(
+                static=act_scale_descriptor.static,
+                group_shape=act_scale_descriptor.group_shape,
+                num_token_padding=self.get_output_padding(),
+                use_ue8m0=False,
+                column_major_scales=True,
+            )
+            logger.info_once(
+                "Using aiter A8W8 blockscale B-preshuffle GEMM for N=%d K=%d", n, k
+            )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        if getattr(layer, "is_bmm", False):
+            self.use_bpreshuffle = False
+
+        if self.use_bpreshuffle:
+            w = FP8BlockParams.from_layer(layer).weight
+            replace_parameter(
+                layer,
+                FP8BlockParams.WEIGHT,
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
+            layer.aiter_bpreshuffled = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
+        if (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_rdna_linear_enabled()
+        ):
+            return True, None
         return (
-            rocm_aiter_ops.is_linear_enabled(),
-            "Only supported on ROCm platform \
-                with aiter package installed.",
+            False,
+            "Only supported on ROCm platform with aiter package installed.",
         )
 
     @classmethod
@@ -303,6 +463,17 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
+        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
+        # through to the generic backend.
+        if rocm_aiter_ops.is_rdna_linear_enabled():
+            n, k = config.weight_shape
+            if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+                return (
+                    False,
+                    f"(N={n}, K={k}) is not in the aiter Triton blockscale tuned list.",
+                )
         return True, None
 
     def apply_block_scaled_mm(
@@ -313,22 +484,19 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         if As.dtype != Bs.dtype:
-            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-                _upcast_e8m0_to_fp32,
-            )
-
             if As.dtype == torch.float8_e8m0fnu:
                 As = _upcast_e8m0_to_fp32(As).contiguous()
             else:
                 As = As.to(torch.float32)
 
-            if Bs.dtype == torch.float8_e8m0fnu:
-                Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
-            else:
-                Bs = Bs.to(torch.float32)
+            Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
-        if self.use_triton:
+        if self.use_bpreshuffle:
+            gemm_a8w8_blockscale_op = (
+                rocm_aiter_ops.triton_gemm_a8w8_blockscale_preshuffle
+            )
+        elif self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale

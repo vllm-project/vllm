@@ -2,23 +2,24 @@
 // reference from tensorrt_llm moe kernel implementation archive in
 // https://github.com/BBuf/tensorrt-llm-moe/tree/master
 
-#include <c10/core/ScalarType.h>
-#include <torch/all.h>
-#include "dispatch.h"
+#include <torch/csrc/stable/tensor.h>
+
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/util_type.cuh>
-#include "cutlass/numeric_size.h"
+
 #include "cutlass/array.h"
+#include "cutlass/numeric_size.h"
+#include "moe/permute_unpermute_kernels/dispatch.h"
 
 template <typename T>
-inline T* get_ptr(torch::Tensor& t) {
-  return reinterpret_cast<T*>(t.data_ptr());
+inline T* get_ptr(torch::stable::Tensor& t) {
+  return reinterpret_cast<T*>(t.mutable_data_ptr());
 }
 
 template <typename T>
-inline const T* get_ptr(const torch::Tensor& t) {
-  return reinterpret_cast<const T*>(t.data_ptr());
+inline const T* get_ptr(const torch::stable::Tensor& t) {
+  return reinterpret_cast<const T*>(t.const_data_ptr());
 }
 
 class CubKeyValueSorter {
@@ -42,18 +43,19 @@ class CubKeyValueSorter {
   int num_bits_;
 };
 
-void computeExpertFirstTokenOffset(int const* sorted_indices,
-                                   int const total_indices,
-                                   int const num_experts,
-                                   int64_t* expert_first_token_offset,
-                                   cudaStream_t stream);
+void computeExpertOffsetsAndInverse(int const* sorted_indices,
+                                    int const total_indices,
+                                    int const num_experts,
+                                    int64_t* expert_first_token_offset,
+                                    int const* sorted_rows, int* inverse,
+                                    cudaStream_t stream);
 
 void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int* permuted_experts, int* permuted_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,
                        CubKeyValueSorter& sorter, void* sorter_ws,
-                       cudaStream_t stream);
+                       cudaStream_t stream, int* inverse = nullptr);
 
 template <typename T>
 void expandInputRowsKernelLauncher(

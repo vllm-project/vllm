@@ -7,7 +7,7 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 def get_act_fn(
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     static_num_labels: bool = True,
 ) -> "PoolerActivation":
     # get classification act_fn
@@ -128,6 +128,9 @@ class PoolerClassify(PoolerActivation):
 
         self.num_labels = num_labels
 
+    def extra_repr(self) -> str:
+        return f"num_labels={self.num_labels}"
+
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = self.num_labels
         if num_labels is None:
@@ -144,6 +147,12 @@ class LambdaPoolerActivation(PoolerActivation):
         super().__init__()
 
         self.fn = fn
+
+    def extra_repr(self) -> str:
+        name = getattr(self.fn, "__name__", None)
+        if name is None:
+            name = self.fn.__class__.__name__
+        return f"fn={name}"
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         return self.fn(pooled_data)

@@ -1,8 +1,168 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::HashMap;
+use std::time::Duration;
+
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
+use vllm_server::{
+    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
+    RendererSelection,
+};
+use vllm_text::backend::hf::ModelSource;
 
-use super::{Cli, Command};
+use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+
+#[test]
+fn bench_serve_args_parse_without_managed_engine_repartition() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "bench",
+        "serve",
+        "--backend",
+        "openai-chat",
+        "--request-rate",
+        "inf",
+    ])
+    .unwrap();
+
+    let Command::Bench(BenchCommand::Serve(args)) = cli.command else {
+        panic!("expected bench serve args");
+    };
+    assert_eq!(args.backend, vllm_bench::BackendKind::OpenaiChat);
+    assert!(args.request_rate.is_infinite());
+}
+
+#[test]
+fn render_args_build_config_without_tls() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--revision",
+        "release",
+        "--tokenizer",
+        "Qwen/Qwen2.5-0.5B",
+        "--port",
+        "8080",
+        "--max-model-len",
+        "32768",
+        "--served-model-name",
+        "qwen",
+        "--tokenizer-mode",
+        "deepseek_v32",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.revision.as_deref(), Some("release"));
+    assert_eq!(
+        config.tokenizer,
+        Some(ModelSource {
+            id: "Qwen/Qwen2.5-0.5B".to_string(),
+            revision: Some("release".to_string()),
+        })
+    );
+    assert_eq!(config.hf_config, None);
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.max_model_len, Some(32768));
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
+    assert_eq!(config.max_logprobs, Some(-1));
+    assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_allow_omitted_max_model_len() {
+    let cli = Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen2.5-0.5B-Instruct"]).unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.max_model_len, None);
+}
+
+#[test]
+fn render_args_build_config_with_tls() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    let tls = config.tls.expect("TLS should be enabled");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+}
+
+#[test]
+fn render_args_reject_tls_without_certificate() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-certfile is required"));
+}
+
+#[test]
+fn render_args_reject_client_cert_verification_without_ca() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-ca-certs is required"));
+}
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
@@ -28,23 +188,73 @@ fn serve_args_forward_python_flags_with_separator() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    grpc_port: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
-                        max_model_len: Some(
-                            512,
-                        ),
-                        grpc_port: None,
+                        language_model_only: false,
+                        max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
+                        limit_mm_per_prompt: {},
+                        lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
+                        enable_request_id_headers: false,
+                        enable_scale_out: false,
+                        enable_tokenizer_info_endpoint: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
+                        allowed_origins: JsonStringList(
+                            [],
+                        ),
+                        allowed_methods: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allowed_headers: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allow_credentials: false,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
+                        profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -52,6 +262,9 @@ fn serve_args_forward_python_flags_with_separator() {
                         handshake_port: None,
                         data_parallel_size: 1,
                         data_parallel_size_local: None,
+                        max_model_len: Some(
+                            "512",
+                        ),
                         python_args: [
                             "--dtype",
                             "float16",
@@ -80,10 +293,378 @@ fn serve_args_auto_forward_python_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
+    expect![[r#"
+        [
+            "--quantization",
+            "awq",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_auto_forward_enable_lora_to_python() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--enable-lora"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--enable-lora",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_forward_shutdown_timeout_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--shutdown-timeout",
+        "60",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.shutdown_timeout, 60);
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+            "--shutdown-timeout",
+            "60",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_forward_disable_log_stats_to_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--disable-log-stats"])
+        .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.disable_log_stats);
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+            "--disable-log-stats",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_forward_profiler_config_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--profiler-config",
+        r#"{"profiler":"torch","torch_profiler_dir":"/tmp/profile"}"#,
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
+
+    let config = args.to_managed_engine_config(5555);
+    let profiler_flag_index = config
+        .python_args
+        .iter()
+        .position(|arg| arg == "--profiler-config")
+        .expect("profiler config flag");
+    let profiler_config: serde_json::Value =
+        serde_json::from_str(&config.python_args[profiler_flag_index + 1])
+            .expect("profiler config json");
     assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--quantization", "awq"]
+        profiler_config,
+        serde_json::json!({
+            "profiler": "torch",
+            "torch_profiler_dir": "/tmp/profile",
+        })
     );
+}
+
+#[test]
+fn serve_args_forward_stream_interval_to_frontend_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "4",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(frontend_config.stream_interval.get(), 4);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "0",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
+#[test]
+fn serve_args_forward_env_only_settings_to_frontend_config() {
+    let parse = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+    };
+
+    let config = parse(&[]);
+    assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
+    assert!(!config.disable_request_id_randomization);
+
+    // Set through `VLLM_LOG_STATS_INTERVAL` and
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, which bind these hidden flags.
+    let config = parse(&[
+        "--log-stats-interval",
+        "2.5",
+        "--disable-request-id-randomization",
+        "1",
+    ]);
+    assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
+    assert!(config.disable_request_id_randomization);
+}
+
+#[test]
+fn args_json_reads_env_only_settings_from_env() {
+    let apply = |vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs =
+            serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .map(|()| args)
+    };
+
+    let args = apply(&[]).unwrap();
+    assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
+    assert!(!args.disable_request_id_randomization);
+
+    let args = apply(&[
+        ("VLLM_LOG_STATS_INTERVAL", "0.5"),
+        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+    ])
+    .unwrap();
+    assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
+    assert!(args.disable_request_id_randomization);
+
+    let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
+    assert_eq!(args.log_stats_interval(), None);
+
+    let errors = [
+        apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
+        apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+    ];
+    expect![[r#"
+        [
+            "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
+            "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+        ]
+    "#]]
+    .assert_debug_eq(&errors);
+}
+
+#[test]
+fn log_stats_interval_falls_back_to_default_like_python() {
+    let parsed = [
+        "10", " 2.5 ", "1e-10", "0", "-1", "nan", "1e30", "inf", "ten",
+    ]
+    .map(|value| format!("{value:?} -> {:?}", value.parse::<LogStatsInterval>()))
+    .join("\n");
+    expect![[r#"
+        "10" -> Ok(Every(10s))
+        " 2.5 " -> Ok(Every(2.5s))
+        "1e-10" -> Ok(Every(0ns))
+        "0" -> Ok(Every(10s))
+        "-1" -> Ok(Every(10s))
+        "nan" -> Ok(Every(10s))
+        "1e30" -> Ok(Never)
+        "inf" -> Ok(Never)
+        "ten" -> Err("`ten` is not a number of seconds")"#]]
+    .assert_eq(&parsed);
+}
+
+#[test]
+fn int_flag_parses_like_python_bool_int() {
+    let parsed = ["0", "1", " 2 ", "-1", "true", ""]
+        .map(|value| format!("{value:?} -> {:?}", parse_int_flag(value)))
+        .join("\n");
+    expect![[r#"
+        "0" -> Ok(false)
+        "1" -> Ok(true)
+        " 2 " -> Ok(true)
+        "-1" -> Ok(true)
+        "true" -> Err("`true` is not an integer")
+        "" -> Err("`` is not an integer")"#]]
+    .assert_eq(&parsed);
+}
+
+#[test]
+fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.max_logprobs, Some(-1));
+
+    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(frontend_config.max_logprobs, Some(-1));
+
+    let engine_config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--max-logprobs",
+            "-1",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&engine_config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "moonshotai/Kimi-K3"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "kimi_k3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
+}
+
+#[test]
+fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Unknown/Model",
+        "--reasoning-parser",
+        "deepseek_r1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "deepseek_r1",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_do_not_forward_disabled_reasoning_parser_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-parser",
+        "none",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    assert!(config.python_args.is_empty());
+}
+
+#[test]
+fn serve_args_forward_reasoning_parser_even_with_passthrough_reasoning_parser() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--",
+        "--reasoning-parser",
+        "deepseek_r1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "deepseek_r1",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -93,10 +674,13 @@ fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--tensor-parallel-size", "2"]
-    );
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -117,6 +701,381 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
 }
 
 #[test]
+fn serve_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-request-id-headers",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.enable_request_id_headers);
+}
+
+#[test]
+fn serve_passes_enable_prompt_tokens_details_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-prompt-tokens-details",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.enable_prompt_tokens_details);
+}
+
+#[test]
+fn serve_passes_return_tokens_as_token_ids_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--return-tokens-as-token-ids",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.default_return_tokens_as_token_ids);
+}
+
+#[test]
+fn serve_passes_tls_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+        "--ssl-ca-certs",
+        "/tmp/ca.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let tls = config.tls.expect("tls configured");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+    assert_eq!(tls.ca_certs.as_deref(), Some("/tmp/ca.pem"));
+    assert_eq!(tls.cert_reqs, 2);
+}
+
+#[test]
+fn serve_without_ssl_flags_has_no_tls() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.tls.is_none());
+}
+
+#[test]
+fn serve_ssl_keyfile_without_certfile_fails_validation() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    // TLS is requested (a key was given) but there is no certificate, so
+    // validation fails loud rather than silently serving plaintext.
+    assert_eq!(config.tls.as_ref().expect("tls requested").cert_file, None);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-certfile is required"), "{err}");
+}
+
+#[test]
+fn serve_mtls_without_ca_certs_fails_validation() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    // Client-cert verification without a CA bundle has nothing to verify
+    // against, so it fails loud at startup.
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-ca-certs is required"), "{err}");
+}
+
+#[test]
+fn frontend_args_json_passes_tls_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_keyfile":"/tmp/key.pem"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    let tls = config.tls.expect("tls configured");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+}
+
+#[test]
+fn frontend_args_json_rejects_out_of_range_cert_reqs() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_cert_reqs":5}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    // The JSON path bypasses clap's range check, so validate() is the only guard.
+    let config = args.into_config();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-cert-reqs"), "{err}");
+}
+
+#[test]
+fn frontend_args_json_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_request_id_headers":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.api_server_options.enable_request_id_headers);
+}
+
+#[test]
+fn serve_args_parse_lora_modules_in_both_forms() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-lora",
+        "--lora-modules",
+        "alice=charent/self_cognition_Alice",
+        r#"{"name": "bob", "path": "/adapters/bob", "base_model_name": "base"}"#,
+        "--lora-modules",
+        "carol=org/carol",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    // Frontend-only flag: the managed Python engine must not see it.
+    assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    expect![[r#"
+        [
+            LoraModulePath {
+                name: "alice",
+                path: "charent/self_cognition_Alice",
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+            LoraModulePath {
+                name: "bob",
+                path: "/adapters/bob",
+                base_model_name: Some(
+                    "base",
+                ),
+                is_3d_lora_weight: false,
+            },
+            LoraModulePath {
+                name: "carol",
+                path: "org/carol",
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&config.lora_modules);
+}
+
+#[test]
+fn serve_args_reject_malformed_lora_module() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--lora-modules",
+        "alice",
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value 'alice' for '--lora-modules <MODULE>...': expected `name=path`, got `alice`
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
+fn frontend_args_json_passes_lora_modules_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","lora_modules":[{"name":"alice","path":"org/alice","base_model_name":null,"is_3d_lora_weight":true}]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(
+        config.lora_modules,
+        vec![LoraModulePath {
+            name: "alice".to_string(),
+            path: "org/alice".to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: true,
+        }]
+    );
+}
+
+#[test]
+fn serve_passes_api_keys_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--api-key",
+        "secret-a",
+        "--api-key",
+        "secret-b",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.api_keys, vec!["secret-a", "secret-b"]);
+    let debug = format!("{config:#?}");
+    assert!(debug.contains("api_keys: [<redacted>; 2]"));
+    assert!(!debug.contains("secret-a"));
+    assert!(!debug.contains("secret-b"));
+}
+
+#[test]
+fn frontend_args_json_accepts_api_key_string() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":"secret"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.api_keys, vec!["secret"]);
+}
+
+#[test]
+fn frontend_args_json_accepts_api_key_list() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":["secret-a","secret-b"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.api_keys, vec!["secret-a", "secret-b"]);
+}
+
+#[test]
 fn serve_args_reject_unknown_renderer_value() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -128,7 +1087,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -137,11 +1096,17 @@ fn serve_args_reject_unknown_renderer_value() {
 
 #[test]
 fn serve_args_reject_unsupported_flag_arg() {
-    let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--allow-credentials"])
-        .unwrap_err();
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--root-path",
+        "/prefix",
+    ])
+    .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--allow-credentials [<ALLOW_CREDENTIALS>]': argument is not implemented in Rust frontend yet
+        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -149,8 +1114,59 @@ fn serve_args_reject_unsupported_flag_arg() {
         This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
 
         For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
+fn serve_args_enable_per_request_metrics_requires_engine_stats() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+    ])
+    .expect("per-request metrics flag is supported");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:0".into());
+    assert!(config.api_server_options.enable_per_request_metrics);
+    assert!(config.validate().is_ok());
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+        "--disable-log-stats",
+    ])
+    .expect("flags parse independently");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.to_frontend_config("tcp://127.0.0.1:0".into()).validate().unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("--enable-per-request-metrics requires engine statistics logging")
+    );
+}
+
+#[test]
+fn serve_args_reject_custom_generation_config_source() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--generation-config",
+        "/tmp/custom-config",
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '/tmp/custom-config' for '--generation-config <GENERATION_CONFIG>': generation config source `/tmp/custom-config` is not implemented yet (expected one of: auto, vllm)
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
 }
 
 #[test]
@@ -183,10 +1199,10 @@ fn frontend_args_accept_json() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
         "--args-json",
@@ -199,27 +1215,81 @@ fn frontend_args_accept_json() {
             command: Frontend(
                 FrontendArgs {
                     listen_fd: 3,
-                    input_address: "ipc:///tmp/input.sock",
-                    output_address: "ipc:///tmp/output.sock",
+                    grpc_listen_fd: None,
+                    input_listener_fd: 999999,
+                    output_listener_fd: 999998,
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
                     ),
+                    engine_start_index: 0,
                     engine_count: 1,
+                    data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
-                        tool_call_parser: Auto,
-                        reasoning_parser: Auto,
+                        tool_call_parser: None,
+                        reasoning_parser: None,
+                        tool_strict_level: None,
                         renderer: Auto,
-                        max_model_len: None,
-                        grpc_port: None,
+                        language_model_only: false,
+                        max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
+                        limit_mm_per_prompt: {},
+                        lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
+                        enable_request_id_headers: false,
+                        enable_scale_out: false,
+                        enable_tokenizer_info_endpoint: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
+                        allowed_origins: JsonStringList(
+                            [],
+                        ),
+                        allowed_methods: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allowed_headers: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allow_credentials: false,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
+                        profiler_config: None,
                     },
                 },
             ),
@@ -235,10 +1305,12 @@ fn frontend_args_json_applies_defaults() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--engine-count",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -247,13 +1319,201 @@ fn frontend_args_json_applies_defaults() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.generation_config, GenerationConfigMode::Auto);
     assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
-    assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
-    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
-    assert_eq!(args.runtime.max_model_len, None);
+    assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
+    assert_eq!(args.into_config().transport_mode.data_parallel_size(), 4);
+}
+
+#[test]
+fn frontend_args_json_ignores_engine_owned_max_model_len() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","max_model_len":-1}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
+}
+
+#[test]
+fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "org/weights",
+        "--revision",
+        "release",
+        "--tokenizer",
+        "org/tokenizer",
+        "--hf-config-path",
+        "org/config",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    expect![[r#"
+        (
+            Some(
+                ModelSource {
+                    id: "org/tokenizer",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+            Some(
+                ModelSource {
+                    id: "org/config",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+        )
+    "#]]
+    .assert_debug_eq(&(config.tokenizer, config.hf_config));
+    expect![[r#"
+        [
+            "--revision",
+            "release",
+            "--tokenizer",
+            "org/tokenizer",
+            "--hf-config-path",
+            "org/config",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(1234).python_args);
+}
+
+#[test]
+fn frontend_args_json_resolve_tokenizer_revision_against_model() {
+    let payload = r#"{"model_tag":"org/weights","revision":"release","tokenizer_revision":"tokenizer-fix","hf_config_path":"org/config"}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        payload,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+
+    let config = args.into_config();
+    expect![[r#"
+        (
+            Some(
+                ModelSource {
+                    id: "org/weights",
+                    revision: Some(
+                        "tokenizer-fix",
+                    ),
+                },
+            ),
+            Some(
+                ModelSource {
+                    id: "org/config",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+        )
+    "#]]
+    .assert_debug_eq(&(config.tokenizer, config.hf_config));
+}
+
+#[test]
+fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
+    let patch = r#"{"text_config":{"rope_parameters":{"factor":4}},"sliding_window":null}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides",
+        patch,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let expected: serde_json::Value = serde_json::from_str(patch).unwrap();
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        expected
+    );
+    let engine = args.to_managed_engine_config(1234);
+    let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        expected
+    );
+    assert!(!engine.python_args.iter().any(|arg| arg == "--hf-config-path"));
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    assert_eq!(serde_json::to_value(config.hf_overrides).unwrap(), expected);
+
+    let payload = serde_json::json!({"model_tag":"Qwen/Qwen3-0.6B", "hf_overrides":expected});
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &payload.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args")
+    };
+    assert_eq!(
+        serde_json::to_value(args.into_config().hf_overrides).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn hf_overrides_reject_non_object_inputs() {
+    for patch in ["null", "[]", "1", r#""callable""#] {
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--hf-overrides",
+            patch,
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
 
 #[test]
@@ -263,12 +1523,12 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -276,6 +1536,8 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
+    assert_eq!(args.runtime.model.revision.as_deref(), Some("release"));
+    assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
         ParserSelection::Explicit("hermes".to_string())
@@ -285,8 +1547,37 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         ParserSelection::Explicit("qwen3_thinking".to_string())
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
-    assert_eq!(args.runtime.max_model_len, Some(8192));
+    assert!(args.runtime.language_model_only);
+    assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
+}
+
+#[test]
+fn serve_args_forward_auto_max_model_len_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-model-len",
+        "auto",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--max-model-len",
+            "auto",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -314,10 +1605,10 @@ fn frontend_args_json_ignores_unknown_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","uds":"/tmp/vllm.sock","nested_unknown":{"x":1}}"#,
     ])
@@ -326,29 +1617,95 @@ fn frontend_args_json_ignores_unknown_fields() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
 }
 
 #[test]
-fn frontend_args_json_accepts_noop_fields() {
+fn frontend_args_json_sets_prompt_tokens_details_flag() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2,"enable_prompt_tokens_details":true}"#,
     ])
     .unwrap();
 
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
+    assert!(args.runtime.enable_prompt_tokens_details);
+}
+
+#[test]
+fn serve_args_parse_cors_flags() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--allowed-origins",
+        r#"["http://a.com","http://b.com"]"#,
+        "--allowed-methods",
+        r#"["GET","POST"]"#,
+        "--allow-credentials",
+    ])
+    .unwrap();
+
+    let Command::Serve(serve) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        serve.runtime.allowed_origins.0,
+        ["http://a.com", "http://b.com"]
+    );
+    assert_eq!(serve.runtime.allowed_methods.0, ["GET", "POST"]);
+    assert!(serve.runtime.allow_credentials);
+    // Unspecified lists keep the permissive default.
+    assert_eq!(serve.runtime.allowed_headers.0, ["*"]);
+}
+
+#[test]
+fn serve_args_cors_defaults_restrict_origins() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(serve) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(serve.runtime.allowed_origins.0.is_empty());
+    assert_eq!(serve.runtime.allowed_methods.0, ["*"]);
+    assert_eq!(serve.runtime.allowed_headers.0, ["*"]);
+    assert!(!serve.runtime.allow_credentials);
+}
+
+#[test]
+fn frontend_args_json_parses_cors_fields() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","allowed_origins":["http://a.com"],"allow_credentials":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.allowed_origins.0, ["http://a.com"]);
+    assert!(args.runtime.allow_credentials);
+    // Unspecified lists fall back to the permissive default via serde.
+    assert_eq!(args.runtime.allowed_methods.0, ["*"]);
 }
 
 #[test]
@@ -358,19 +1715,19 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - allow_credentials
+        - root_path
 
         Remove these arguments to continue.
 
@@ -385,25 +1742,159 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
+    let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
-        - allow_credentials
-        - api_key
+        - response_role
+        - root_path
 
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]].assert_eq(&actual);
+}
+
+/// Python args that have no meaningful Rust equivalent are accepted on both the
+/// `vllm-rs serve` and the `--args-json` paths.
+#[test]
+fn noop_args_are_accepted() {
+    Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--disable-fastapi-docs",
+    ])
+    .expect("--disable-fastapi-docs is accepted");
+
+    Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true}"#,
+    ])
+    .expect("disable_fastapi_docs is accepted");
+}
+
+/// `--custom-histogram-buckets` reaches the frontend config on both the
+/// `vllm-rs serve` and the `--args-json` paths, and invalid bounds fail startup.
+#[test]
+fn custom_histogram_buckets_reach_frontend_config() {
+    let buckets = r#"{"time_to_first_token":[0.5,1.0]}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--custom-histogram-buckets",
+        buckets,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let serve_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+
+    let args_json =
+        format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B","custom_histogram_buckets":{buckets}}}"#);
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let frontend_config = args.into_config();
+
+    assert_eq!(
+        serve_config.custom_histogram_buckets,
+        frontend_config.custom_histogram_buckets
+    );
+    expect![[r#"
+        CustomHistogramBuckets(
+            {
+                TimeToFirstToken: [
+                    0.5,
+                    1.0,
+                ],
+            },
+        )
+    "#]]
+    .assert_debug_eq(&serve_config.custom_histogram_buckets);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--custom-histogram-buckets",
+        r#"{"time_to_first_token":[1.0,0.5]}"#,
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
+/// Frontend-read Python args that Rust recognizes but does not support yet must
+/// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
+#[test]
+fn unsupported_args_fail_startup() {
+    let cases = [
+        (
+            "--enable-tower-connector-lora",
+            "true",
+            "enable_tower_connector_lora",
+        ),
+        ("--enable-elastic-ep", "true", "enable_elastic_ep"),
+    ];
+    for (flag, value, key) in cases {
+        let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("argument is not implemented in Rust frontend yet"),
+            "{flag}: {error}"
+        );
+
+        let args_json =
+            serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: value }).to_string();
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            &args_json,
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("- {key}\n")), "{key}: {error}");
+    }
 }
 
 #[test]
@@ -413,10 +1904,10 @@ fn frontend_args_json_rejects_malformed_json() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B""#,
     ])
@@ -424,6 +1915,24 @@ fn frontend_args_json_rejects_malformed_json() {
 
     expect![[r#"
         error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B"' for '--args-json <JSON>': invalid JSON arguments: EOF while parsing an object at line 1 column 30
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
+fn serve_args_reject_unsupported_modality_in_limit_mm_per_prompt() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--limit-mm-per-prompt",
+        r#"{"unsupported_modality": 1}"#,
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '{"unsupported_modality": 1}' for '--limit-mm-per-prompt <JSON>': invalid JSON object: unknown variant `unsupported_modality`, expected one of `image`, `audio`, `video` at line 1 column 23
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -473,10 +1982,15 @@ fn serve_args_keep_python_passthrough_flags_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--tensor-parallel-size", "2", "--dtype", "float16"]
-    );
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+            "--dtype",
+            "float16",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -498,10 +2012,15 @@ fn serve_args_keep_python_multi_char_alias_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["-tp", "2", "--dtype", "float16"]
-    );
+    expect![[r#"
+        [
+            "-tp",
+            "2",
+            "--dtype",
+            "float16",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -519,10 +2038,13 @@ fn serve_args_keep_frontend_arg_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--uds", "/tmp/vllm.sock"]
-    );
+    expect![[r#"
+        [
+            "--uds",
+            "/tmp/vllm.sock",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -542,10 +2064,15 @@ fn serve_args_keep_python_multi_char_engine_aliases_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["-dpr", "1", "-dpl", "2"]
-    );
+    expect![[r#"
+        [
+            "-dpr",
+            "1",
+            "-dpl",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -555,7 +2082,13 @@ fn serve_args_auto_forward_unknown_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.managed_engine.python_args, vec!["--foo", "bar"]);
+    expect![[r#"
+        [
+            "--foo",
+            "bar",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -572,10 +2105,13 @@ fn serve_args_auto_forward_negative_value_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--num-gpu-blocks-override", "-1"]
-    );
+    expect![[r#"
+        [
+            "--num-gpu-blocks-override",
+            "-1",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -603,21 +2139,73 @@ fn serve_args_accept_handshake_aliases() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    grpc_port: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
-                        max_model_len: None,
-                        grpc_port: None,
+                        language_model_only: false,
+                        max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
+                        limit_mm_per_prompt: {},
+                        lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
+                        enable_request_id_headers: false,
+                        enable_scale_out: false,
+                        enable_tokenizer_info_endpoint: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
+                        allowed_origins: JsonStringList(
+                            [],
+                        ),
+                        allowed_methods: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allowed_headers: JsonStringList(
+                            [
+                                "*",
+                            ],
+                        ),
+                        allow_credentials: false,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
+                        profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
@@ -627,6 +2215,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         data_parallel_size: 4,
                         data_parallel_size_local: None,
+                        max_model_len: None,
                         python_args: [],
                     },
                 },
@@ -721,21 +2310,67 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
             },
+            grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: None,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            limit_mm_per_prompt: {},
+            lora_modules: [],
             chat_template_content_format: Auto,
-            enable_log_requests: false,
+            max_logprobs: None,
+            stream_interval: 1,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
+                enable_per_request_metrics: false,
+                enable_request_id_headers: false,
+                enable_scale_out: false,
+                enable_tokenizer_info_endpoint: false,
+                sse_keep_alive_interval: None,
+            },
+            cors: CorsConfig {
+                allow_origins: [],
+                allow_methods: [
+                    "*",
+                ],
+                allow_headers: [
+                    "*",
+                ],
+                allow_credentials: false,
+            },
+            tls: None,
+            api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
+            manages_engine: true,
+            keep_alive_timeout: 5s,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -783,21 +2418,67 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
             },
+            grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: None,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            limit_mm_per_prompt: {},
+            lora_modules: [],
             chat_template_content_format: Auto,
-            enable_log_requests: false,
+            max_logprobs: None,
+            stream_interval: 1,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
+                enable_per_request_metrics: false,
+                enable_request_id_headers: false,
+                enable_scale_out: false,
+                enable_tokenizer_info_endpoint: false,
+                sse_keep_alive_interval: None,
+            },
+            cors: CorsConfig {
+                allow_origins: [],
+                allow_methods: [
+                    "*",
+                ],
+                allow_headers: [
+                    "*",
+                ],
+                allow_credentials: false,
+            },
+            tls: None,
+            api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
+            manages_engine: true,
+            keep_alive_timeout: 5s,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -810,10 +2491,10 @@ fn frontend_args_reject_legacy_handshake_flags() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
         "--handshake-address",
@@ -825,20 +2506,91 @@ fn frontend_args_reject_legacy_handshake_flags() {
 }
 
 #[test]
+fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-address",
+        "10.99.48.128",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "0",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+
+    assert!(!config.manages_engine);
+}
+
+#[test]
+fn frontend_config_trusts_request_chat_template_from_args_json() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","trust_request_chat_template":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().trust_request_chat_template);
+}
+
+#[test]
+fn frontend_config_excludes_tools_when_tool_choice_none_from_args_json() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","exclude_tools_when_tool_choice_none":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().exclude_tools_when_tool_choice_none);
+}
+
+#[test]
 fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
+        "--engine-start-index",
+        "3",
         "--engine-count",
-        "2",
+        "1",
+        "--data-parallel-size",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -852,29 +2604,77 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
     expect![[r#"
         Config {
             transport_mode: Bootstrapped {
-                input_address: "ipc:///tmp/input.sock",
-                output_address: "ipc:///tmp/output.sock",
-                engine_count: 2,
+                input_listener_fd: 999999,
+                output_listener_fd: 999998,
+                engine_start_index: 3,
+                engine_count: 1,
+                data_parallel_size: 4,
                 ready_timeout: 600s,
             },
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",
             },
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: InheritedFd {
                 fd: 3,
             },
-            tool_call_parser: Auto,
-            reasoning_parser: Auto,
+            grpc_listener_mode: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
+            tool_strict_level: None,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            limit_mm_per_prompt: {},
+            lora_modules: [],
             chat_template_content_format: Auto,
-            enable_log_requests: false,
+            max_logprobs: None,
+            stream_interval: 1,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
+                enable_per_request_metrics: false,
+                enable_request_id_headers: false,
+                enable_scale_out: false,
+                enable_tokenizer_info_endpoint: false,
+                sse_keep_alive_interval: None,
+            },
+            cors: CorsConfig {
+                allow_origins: [],
+                allow_methods: [
+                    "*",
+                ],
+                allow_headers: [
+                    "*",
+                ],
+                allow_credentials: false,
+            },
+            tls: None,
+            api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
+            manages_engine: false,
+            keep_alive_timeout: 5s,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -888,6 +2688,8 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
         "Qwen/Qwen3-0.6B",
         "--uds",
         "/tmp/vllm.sock",
+        "--grpc-port",
+        "50051",
     ])
     .unwrap();
 
@@ -902,4 +2704,154 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
             path: "/tmp/vllm.sock".to_string(),
         }
     );
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 50051,
+        })
+    );
+}
+
+#[test]
+fn serve_frontend_config_binds_grpc_on_http_host() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--host",
+        "0.0.0.0",
+        "--grpc-port",
+        "50051",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::BindTcp {
+            host: "0.0.0.0".to_string(),
+            port: 50051,
+        })
+    );
+}
+
+#[test]
+fn frontend_config_adopts_inherited_grpc_listener() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--grpc-listen-fd",
+        "4",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","grpc_port":50051}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::InheritedFd { fd: 4 })
+    );
+}
+
+#[test]
+fn frontend_args_json_enables_profiling_when_profiler_config_set() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":"torch","torch_profiler_dir":"/tmp/profile"}}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
+    let config = args.into_config();
+    assert_eq!(config.profiler.as_deref(), Some("torch"));
+}
+
+#[test]
+fn frontend_args_json_disables_profiling_when_profiler_config_absent() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.profiler(), None);
+    let config = args.into_config();
+    assert_eq!(config.profiler, None);
+}
+
+#[test]
+fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":null}}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.profiler(), None);
+    let config = args.into_config();
+    assert_eq!(config.profiler, None);
+}
+
+#[test]
+fn serve_revision_reaches_frontend_and_managed_engine() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "test/model", "--revision", "release"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.to_frontend_config("tcp://localhost:1234".into()).revision.as_deref(),
+        Some("release")
+    );
+    let engine = args.to_managed_engine_config(1234);
+    assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }

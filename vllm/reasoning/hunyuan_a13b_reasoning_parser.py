@@ -7,20 +7,16 @@ from typing import TYPE_CHECKING
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
-logger = init_logger(__name__)
-
 
 class HunyuanA13BReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Hunyuan A13B Model
+    """Reasoning parser for Hunyuan A13B Model.
 
     HunyuanReasoningParser
 
@@ -105,8 +101,8 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the
             reasoning content and non-reasoning content.
-        """
 
+        """
         re_match = self.full_match_reasoning_regex.findall(model_output)
         if re_match:
             reasoning, response_content = re_match[0]
@@ -133,18 +129,6 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
         return None, model_output
 
-    def _is_strict_increasing_subsequence(
-        self, subsequence: Sequence[int], sequence: Sequence[int]
-    ) -> bool:
-        if not subsequence:
-            return False
-
-        sub_idx = 0
-        for num in sequence:
-            if sub_idx < len(subsequence) and num == subsequence[sub_idx]:
-                sub_idx += 1
-        return sub_idx == len(subsequence)
-
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -154,7 +138,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Extract content using token ID sequence state machine"""
+        """Extract content using token ID sequence state machine."""
         # Define sequences
         think_start_sequence = self.think_start_ids
         response_start_sequence = self.response_start_ids

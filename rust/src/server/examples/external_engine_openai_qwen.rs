@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -14,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
-    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
-    RendererSelection, serve,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -56,21 +61,43 @@ async fn main() -> Result<()> {
         },
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
+        revision: None,
+        tokenizer: None,
+        hf_config: None,
+        hf_overrides: Default::default(),
+        generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),
             port,
         },
+        grpc_listener_mode: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
+        tool_strict_level: None,
         renderer: RendererSelection::Auto,
+        language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        trust_request_chat_template: false,
+        exclude_tools_when_tool_choice_none: false,
+        limit_mm_per_prompt: HashMap::new(),
+        lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-        enable_log_requests: false,
+        max_logprobs: None,
+        stream_interval: NonZeroU32::MIN,
+        api_server_options: ApiServerOptions::default(),
+        cors: CorsConfig::default(),
+        tls: None,
+        api_keys: Vec::new(),
         disable_log_stats: false,
-        grpc_port: None,
+        custom_histogram_buckets: Default::default(),
+        log_stats_interval: Some(Duration::from_secs(10)),
+        disable_request_id_randomization: false,
         shutdown_timeout: Duration::ZERO,
+        manages_engine: false,
+        keep_alive_timeout: Duration::from_secs(5),
+        profiler: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

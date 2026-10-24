@@ -6,16 +6,16 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -29,12 +29,10 @@ logger = init_logger(__name__)
 
 class Ernie45ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
-        """
-        Ernie thinking model format:
+        """Ernie thinking model format:
         abc\n</think>\n\n\n<tool_call>\ndef\n</tool_call>\n
         """
         super().__init__(tokenizer, tools)
-        self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id = -1
         self.streamed_args_for_tool: list[str] = []

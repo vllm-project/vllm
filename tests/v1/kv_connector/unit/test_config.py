@@ -5,9 +5,37 @@
 
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _StubLMCacheMPConnector:
+    """Stand-in for LMCacheMPConnector used in config-translation tests.
+
+    The real connector module hard-imports the optional ``lmcache`` package
+    at module load time, which is not installed in the cpu_test image. This
+    test only asserts on the connector *name* and the ``extra_config`` dict
+    produced by ``VllmConfig``, never instantiates the connector, so a bare
+    placeholder class is sufficient. Not subclassing ``SupportsHMA`` mirrors
+    the real connector's HMA support (it does not support HMA either)."""
+
+
+@pytest.fixture
+def stub_lmcache_mp_connector(monkeypatch):
+    """Replace the lazy loader so VllmConfig.__post_init__ does not import
+    ``lmcache_mp_connector`` (and thus ``lmcache``) during config tests."""
+    monkeypatch.setitem(
+        KVConnectorFactory._registry,
+        "LMCacheMPConnector",
+        lambda: _StubLMCacheMPConnector,
+    )
 
 
 @pytest.mark.parametrize(
@@ -16,15 +44,23 @@ pytestmark = pytest.mark.cpu_test
         ("native", 4.0, 1, 1, "OffloadingConnector", 4.0 * (1 << 30)),
         # bytes per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
         ("native", 8.0, 2, 2, "OffloadingConnector", 8.0 * (1 << 30)),
-        ("lmcache", 4.0, 1, 1, "LMCacheConnectorV1", 4.0),
-        # size per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
-        ("lmcache", 8.0, 2, 2, "LMCacheConnectorV1", 2.0),
+        # ``lmcache`` backend now defaults to LMCacheMPConnector. The KV
+        # storage capacity is owned by the standalone LMCache server, so
+        # ``kv_offloading_size`` is intentionally not propagated.
+        ("lmcache", 4.0, 1, 1, "LMCacheMPConnector", None),
+        ("lmcache", 8.0, 2, 2, "LMCacheMPConnector", None),
         # When kv_offloading_size is None, offloading is disabled (backend is ignored)
         ("native", None, 1, 1, None, None),
     ],
 )
 def test_kv_connector(
-    kv_offloading_backend, kv_offloading_size, tp, pp, expected_backend, expected_bytes
+    stub_lmcache_mp_connector,
+    kv_offloading_backend,
+    kv_offloading_size,
+    tp,
+    pp,
+    expected_backend,
+    expected_bytes,
 ):
     kv_transfer_config = (
         KVTransferConfig(kv_connector_extra_config={"existing_key": "existing_value"})
@@ -49,6 +85,7 @@ def test_kv_connector(
         return
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
 
     assert kv_transfer_config.kv_connector == expected_backend
@@ -59,15 +96,18 @@ def test_kv_connector(
         # Existing config should be preserved
         assert kv_connector_extra_config["existing_key"] == "existing_value"
     elif kv_offloading_backend == "lmcache":
-        assert kv_connector_extra_config["lmcache.local_cpu"] is True
-        assert kv_connector_extra_config["lmcache.max_local_cpu_size"] == expected_bytes
-        # Existing config should be replaced
-        assert "existing_key" not in kv_connector_extra_config
+        # MP mode does not push lmcache.local_cpu / max_local_cpu_size into
+        # extra config (the LMCache server owns capacity). Pre-existing
+        # extra config entries are preserved as-is.
+        assert "lmcache.local_cpu" not in kv_connector_extra_config
+        assert "lmcache.max_local_cpu_size" not in kv_connector_extra_config
+        assert kv_connector_extra_config["existing_key"] == "existing_value"
 
 
 def _build_config(
     *,
     kv_connector: str | None,
+    kv_connector_extra_config: dict | None = None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
 ) -> VllmConfig:
@@ -76,7 +116,11 @@ def _build_config(
     from types import SimpleNamespace
 
     kv_transfer_config = (
-        KVTransferConfig(kv_connector=kv_connector, kv_role="kv_both")
+        KVTransferConfig(
+            kv_connector=kv_connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=kv_connector_extra_config or {},
+        )
         if kv_connector is not None
         else None
     )
@@ -108,7 +152,7 @@ def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
     """Sleep mode routes KV allocations through CuMemAllocator's pool, which
     auto-disables expandable_segments (see #40812)."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
+    _build_config(kv_connector="MooncakeConnector", enable_sleep_mode=True)
 
 
 def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
@@ -117,6 +161,28 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     """Manual CuMem allocation must also bypass expandable_segments."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
+
+
+@pytest.mark.parametrize(
+    ("kv_connector", "extra_config", "env"),
+    [
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, None),
+        ("NixlPushConnector", {}, None),
+        ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
+        ("MooncakeConnector", {}, "MC_USE_TENT"),
+    ],
+)
+def test_sleep_mode_refuses_unsupported_kv_connector(
+    monkeypatch, kv_connector, extra_config, env
+):
+    if env:
+        monkeypatch.setenv(env, "1")
+    with pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep"):
+        _build_config(
+            kv_connector=kv_connector,
+            kv_connector_extra_config=extra_config,
+            enable_sleep_mode=True,
+        )
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
@@ -144,6 +210,7 @@ def test_kv_offloading_size_only_uses_native_default():
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"

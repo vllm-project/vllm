@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script demonstrates how to use the vLLM API server to perform audio
+"""This script demonstrates how to use the vLLM API server to perform audio
 transcription with the `openai/whisper-large-v3` model.
 
 Before running this script, you must start the vLLM server with the following command:
@@ -33,15 +32,22 @@ def sync_openai(
     *,
     repetition_penalty: float = 1.3,
     hotwords: str = None,
+    prompt: str | None = None,
 ):
-    """
-    Perform synchronous transcription using OpenAI-compatible API.
+    """Perform synchronous transcription using OpenAI-compatible API.
+
+    The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
+    vocabulary hint). It is wired through model-by-model: Whisper uses it
+    as a ``<|prev|>`` continuation hint, Qwen3-ASR maps it into the
+    chat-template ``system`` turn. Models that do not consume it accept
+    it without effect.
     """
     with open(audio_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=f,
             model=model,
             language="en",
+            prompt=prompt or "",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
@@ -55,17 +61,20 @@ def sync_openai(
 
 
 async def stream_openai_response(
-    audio_path: str, client: AsyncOpenAI, model: str, hotwords: str = None
+    audio_path: str,
+    client: AsyncOpenAI,
+    model: str,
+    hotwords: str = None,
+    prompt: str | None = None,
 ):
-    """
-    Perform asynchronous transcription using OpenAI-compatible API.
-    """
+    """Perform asynchronous transcription using OpenAI-compatible API."""
     print("\ntranscription result [stream]:", end=" ")
     with open(audio_path, "rb") as f:
         transcription = await client.audio.transcriptions.create(
             file=f,
             model=model,
             language="en",
+            prompt=prompt or "",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
@@ -85,9 +94,7 @@ async def stream_openai_response(
 
 
 def stream_api_response(audio_path: str, model: str, openai_api_base: str):
-    """
-    Perform streaming transcription using raw HTTP requests to the vLLM API server.
-    """
+    """Stream a transcription using raw HTTP requests to the vLLM API server."""
     import json
     import os
 
@@ -146,6 +153,7 @@ def main(args):
         model=model,
         repetition_penalty=args.repetition_penalty,
         hotwords=args.hotwords,
+        prompt=args.prompt,
     )
 
     # Run the asynchronous function
@@ -160,6 +168,7 @@ def main(args):
                 client,
                 model,
                 hotwords=args.hotwords,
+                prompt=args.prompt,
             )
         )
     else:
@@ -192,6 +201,17 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="hotwords",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help=(
+            "Optional `prompt` (OpenAI transcription API: style/vocabulary "
+            "hint). Wired model-by-model: Whisper uses it as a `<|prev|>` "
+            "continuation hint, Qwen3-ASR maps it into the chat-template "
+            "system turn."
+        ),
     )
     args = parser.parse_args()
     main(args)

@@ -15,7 +15,7 @@ from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 from ....conftest import VllmRunner
 from ....models.utils import check_outputs_equal
@@ -111,7 +111,6 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
     """
-
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -158,6 +157,10 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
 
 
 @pytest.mark.flaky(reruns=2, only_on=current_platform.is_rocm())
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason=("XPU matmul/attention kernels are not batch-invariant"),
+)
 def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test ngram_gpu speculative decoding with different configurations.
 
@@ -167,7 +170,6 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     - Async scheduling enabled (as in production)
     - Different executors and chunking settings
     """
-
     # Variant with larger speculation window
     ngram_gpu_config = {
         "method": "ngram_gpu",
@@ -203,7 +205,6 @@ def run_tests(
 ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
-
     # Flex attention supports float32.
     attention_config = {"backend": "FLEX_ATTENTION"}
 
@@ -328,11 +329,12 @@ def run_test(
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
-        # Force preemptions: with 32 blocks the cache holds at most a single
-        # max-length request, so the ~34 concurrent prompts contend and trigger
-        # preemption. (Prompts here are << max_model_len, so dropping
-        # max_model_len from 4096 to 512 doesn't change generation behavior.)
-        dict(num_gpu_blocks_override=32, max_model_len=512)
+        # Force preemptions: with 33 blocks (one is the reserved null block)
+        # the cache holds at most a single max-length request, so the ~34
+        # concurrent prompts contend and trigger preemption. (Prompts here are
+        # << max_model_len, so dropping max_model_len from 4096 to 512 doesn't
+        # change generation behavior.)
+        dict(num_gpu_blocks_override=33, max_model_len=512)
         if test_preemption
         else dict(gpu_memory_utilization=0.9, max_model_len=4096)
     )
@@ -443,6 +445,8 @@ def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
-    before_val = next(m.value for m in before if m.name == name)
-    after_val = next(m.value for m in after if m.name == name)
-    return after_val - before_val
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Counter)
+    assert isinstance(after_metric, Counter)
+    return after_metric.value - before_metric.value

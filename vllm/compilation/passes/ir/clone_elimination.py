@@ -4,6 +4,7 @@ import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._higher_order_ops.triton_kernel_wrap import TritonKernelWrapperFunctional
+from torch._inductor.fx_utils import get_node_storage
 from torch._ops import HigherOrderOperator, OpOverload
 
 from vllm.config import VllmConfig
@@ -14,6 +15,26 @@ from ..inductor_pass import get_pass_context
 from ..vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
+
+
+def clone_preserves_layout(node: fx.Node, original_node: fx.Node) -> bool:
+    node_val = node.meta.get("val")
+    original_val = original_node.meta.get("val")
+    if node_val is None or original_val is None:
+        return True
+
+    try:
+        node_stride = tuple(node_val.stride())
+        original_stride = tuple(original_val.stride())
+        node_storage_offset = node_val.storage_offset()
+        original_storage_offset = original_val.storage_offset()
+    except (AttributeError, RuntimeError):
+        return True
+
+    return (
+        node_stride == original_stride
+        and node_storage_offset == original_storage_offset
+    )
 
 
 def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
@@ -49,13 +70,27 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
     return False
 
 
+def would_alias_graph_io(clone: fx.Node, original: fx.Node) -> bool:
+    """Whether replacing clone with original makes a graph output share storage
+    with a graph input or another output, which callers may mutate in place.
+    Unknown storage is treated as aliasing."""
+    clone_storage = get_node_storage(clone)
+    original_storage = get_node_storage(original)
+    if clone_storage is None or original_storage is None:
+        return True
+
+    graph = clone.graph
+    outputs = {get_node_storage(n) for n in graph.output_node().all_input_nodes}
+    inputs = {get_node_storage(n) for n in graph.find_nodes(op="placeholder")}
+    return clone_storage in outputs and original_storage in inputs | outputs
+
+
 class UnsafeCloneEliminationPass(VllmInductorPass):
-    """
-    This pass removes clone nodes that are no longer needed after vLLM IR lowering.
+    """This pass removes clone nodes that are no longer needed after vLLM IR lowering.
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
     contents of non-donated graph inputs.
 
-    It is "unsafe" because it does not (yet) take aliasing into account. Solving
+    It is "unsafe" because it only handles aliasing of graph outputs. Solving
     aliasing is an open problem, so this pass intends to support known vLLM cases
     and not guarantee soundness on general graphs. In the future, this pass will likely
     support basic forms of aliasing to handle simple views (e.g. qkv -> q,k,v).
@@ -78,6 +113,15 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
 
             original_node = node.args[0]
             assert isinstance(original_node, fx.Node)
+
+            if not clone_preserves_layout(node, original_node):
+                logger.debug(
+                    "Clone removal not possible, clone changes layout: "
+                    "original_node=%s node=%s",
+                    original_node,
+                    node,
+                )
+                continue
 
             # Clone needs to be preserved if node is getting written to and
             # the old value is used again.
@@ -113,6 +157,14 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
                         original_node,
                     )
                     continue
+            elif would_alias_graph_io(node, original_node):
+                logger.debug(
+                    "Clone removal not possible, returned clone %s would alias "
+                    "graph input or output %s",
+                    node,
+                    original_node,
+                )
+                continue
 
             logger.debug(
                 "Node %s is a redundant clone node of %s, removing it",

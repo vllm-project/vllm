@@ -7,15 +7,15 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
 
-from vllm.config import VllmConfig
+from vllm import envs
+from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
@@ -26,6 +26,9 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -42,7 +45,9 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node()
+        allowed_memory_nodes = get_visible_memory_node(
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
@@ -55,32 +60,26 @@ class CPUWorker(Worker):
                 allowed_memory_nodes,
             )
 
-        torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
+        # On s390x, numa_node may be a synthetic book ID that doesn't
+        # correspond to a real memory node. Fall back to first visible node.
+        if cpu_core.numa_node in allowed_memory_nodes:
+            memory_node = cpu_core.numa_node
+        else:
+            logger.warning(
+                "CPU group key %s is not a valid memory node. "
+                "Falling back to memory node %s.",
+                cpu_core.numa_node,
+                allowed_memory_nodes[0],
+            )
+            memory_node = allowed_memory_nodes[0]
 
-        memory_status = get_memory_node_info(cpu_core.numa_node)
+        torch.ops._C.init_cpu_memory_env([memory_node])
+
+        memory_status = get_memory_node_info(memory_node)
         memory_fraction = vllm_config.cache_config.gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
-        available_memory = memory_status.available_memory
-
-        if (
-            vllm_config.cache_config.kv_cache_memory_bytes is None
-            and self.requested_cpu_memory > available_memory
-        ):
-            raise ValueError(
-                f"Available memory on node {cpu_core.numa_node} "
-                f"({format_gib(available_memory)}/"
-                f"{format_gib(memory_status.total_memory)} GiB) on startup "
-                f"is less than desired CPU memory utilization "
-                f"({vllm_config.cache_config.gpu_memory_utilization}, "
-                f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "On the CPU backend, the `--gpu-memory-utilization` flag "
-                "controls the fraction of CPU memory reserved (despite its "
-                "name). To resolve: decrease `--gpu-memory-utilization` "
-                "(e.g. `--gpu-memory-utilization 0.5`) "
-                "or reduce CPU memory used by other processes."
-            )
 
         super().__init__(
             vllm_config,
@@ -92,23 +91,11 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
-        # Torch profiler. Enabled and configured through profiler_config.
-        self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU"],
-            )
-
     def init_device(self):
         self.device = torch.device("cpu")
 
         # Check whether critical libraries are loaded
-        def check_preloaded_libs(name: str):
+        def check_preloaded_libs(name: str) -> bool:
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 logger.warning(
@@ -119,11 +106,22 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries.",
                     name,
                 )
+                return False
+            return True
 
         if sys.platform.startswith("linux"):
             check_preloaded_libs("libtcmalloc")
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                check_preloaded_libs("libiomp")
+                iomp_loaded = check_preloaded_libs("libiomp")
+                if not iomp_loaded and self.vllm_config.speculative_config is not None:
+                    logger.warning(
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
+                    )
 
         def skip_set_num_threads(x: int):
             logger.warning(
@@ -133,8 +131,12 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        init_method = self.distributed_init_method
+        os.environ["VLLM_DIST_IDENT"] = (
+            os.path.basename(init_method.removeprefix("file://"))
+            if init_method.startswith("file://")
+            else init_method.split(":")[-1]
+        )
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,
@@ -143,6 +145,9 @@ class CPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -166,8 +171,26 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        raise RuntimeError("Selective discard is not supported on CPU.")
+
+    def _should_warm_up_model(self) -> bool:
+        # VLLM_CPU_CI_ENV always skips warmup to save CI time.
+        if envs.VLLM_CPU_CI_ENV:
+            return False
+        # With eager (CompilationMode.NONE) execution and an explicit KV
+        # cache size, warmup serves no purpose: there's no compiled graph to
+        # prewarm, and the auto KV-cache-size calc below -- which relies on
+        # a warmup forward pass having already bumped RSS to a realistic
+        # steady-state value -- is bypassed whenever the size is explicit.
+        return not (
+            self.compilation_config.mode == CompilationMode.NONE
+            and self.cache_config.kv_cache_memory_bytes is not None
+        )
+
     def determine_available_memory(self) -> int:
-        self.model_runner.warming_up_model()
+        if self._should_warm_up_model():
+            self.model_runner.warming_up_model()
 
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
@@ -198,10 +221,24 @@ class CPUWorker(Worker):
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
-            if (
-                requested_memory_for_kv <= 0
-                or requested_memory_for_kv > available_memory
-            ):
+            if requested_memory_for_kv <= 0:
+                # The worker's own footprint already fills its reservation, so
+                # freeing memory elsewhere cannot help: only a larger
+                # reservation or an explicit KV cache size can.
+                in_use = math.ceil(consumed_memory / memory_status.total_memory * 100)
+                raise ValueError(
+                    f"The worker already uses {format_gib(consumed_memory)} GiB "
+                    "(model weights and runtime), more than the "
+                    f"{format_gib(self.requested_cpu_memory)} GiB of CPU memory "
+                    f"reserved for it on node {cpu_core.numa_node}, leaving none "
+                    "for the KV cache. On the CPU backend, the "
+                    "`--gpu-memory-utilization` flag controls the fraction of CPU "
+                    "memory reserved (despite its name). To resolve: increase "
+                    f"`--gpu-memory-utilization` to more than {in_use / 100:.2f}, "
+                    "or set the KV cache size explicitly with "
+                    "`--kv-cache-memory-bytes` or VLLM_CPU_KVCACHE_SPACE."
+                )
+            if requested_memory_for_kv > available_memory:
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
@@ -228,20 +265,25 @@ class CPUWorker(Worker):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
-        if len(self.model_runner.kv_caches) == 0:
+        if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
+        # profile_run skips the MRV2 scheduler-driven kernels, so without this
+        # their Triton JIT lands in the first request's TTFT.
+        kernel_config = self.vllm_config.kernel_config
+        if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
+            from vllm.v1.worker.gpu.warmup import warmup_kernels
+
+            warmup_kernels(
+                cast("GPUModelRunner", self.model_runner),
+                self.execute_model,
+                self.sample_tokens,
+            )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
-
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
-        else:
-            self.profiler.stop()

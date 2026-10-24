@@ -14,7 +14,7 @@ steps:
           limit: 2
 
   - label: ":docker: :smoking: Non-root smoke tests"
-    key: image-smoke-test
+    key: image-build-smoke-test
     depends_on:
       - image-build
     commands:

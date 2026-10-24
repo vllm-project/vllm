@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
@@ -35,12 +35,6 @@ def register_speech_to_text_api_routers(
         from .translation.api_router import router as translation_router
 
         app.include_router(translation_router)
-
-
-def add_websocket_metrics_middleware(app: FastAPI):
-    from .realtime.metrics import WebSocketMetricsMiddleware
-
-    app.add_middleware(WebSocketMetricsMiddleware)
 
 
 def init_speech_to_text_state(

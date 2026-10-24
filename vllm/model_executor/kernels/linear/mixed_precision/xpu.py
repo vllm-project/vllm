@@ -3,10 +3,9 @@
 
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -51,20 +50,11 @@ class XPUwNa16LinearKernel(MPLinearKernel):
                 "XPUwNa16, supported sizes are multiples of 32",
             )
 
-        if c.partition_weight_shape[1] % 32 != 0:
-            return (
-                False,
-                f"Output size ({c.partition_weight_shape[1]}) not supported by "
-                "XPUWNA16, supported sizes are multiples of 32",
-            )
-
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        # Default names since marlin requires empty parameters for these,
+        # Default name since marlin requires empty parameter for zp,
         # TODO: remove this requirement from marlin (allow optional tensors)
-        if self.w_gidx_name is None:
-            self.w_gidx_name = "g_idx"
         if self.w_zp_name is None:
             self.w_zp_name = "w_zp"
 
@@ -94,20 +84,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             )
         else:
             weight_zero_point = torch.Tensor([8]).to(torch.int8).to("xpu")
-            setattr(
-                layer, self.w_zp_name, Parameter(weight_zero_point, requires_grad=False)
-            )
-        if self.config.has_g_idx:
-            setattr(
-                layer,
-                self.w_gidx_name,
-                Parameter(
-                    getattr(layer, self.w_gidx_name).data.t().contiguous(),
-                    requires_grad=False,
-                ),
-            )
-        else:
-            setattr(layer, self.w_gidx_name, None)
+            replace_parameter(layer, self.w_zp_name, weight_zero_point)
 
     def apply_weights(
         self,
@@ -116,7 +93,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
             w_q.t(),
@@ -124,7 +101,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             w_s,
             w_zp,
             self.config.group_size,
-            w_gidx,
+            None,  # Retained by the external XPU op ABI.
         )
         return out
 
@@ -190,7 +167,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         device = layer.weight_packed.device
         # TODO: support asymmetric quantization
         weight_zero_point = torch.tensor([8], dtype=torch.int8, device=device)
-        layer.weight_zero_point = Parameter(weight_zero_point, requires_grad=False)
+        replace_parameter(layer, "weight_zero_point", weight_zero_point)
 
         # weight_packed is [out, in] int8, signed int4 values in [-8, 7]
         w = layer.weight_packed.data  # [out, in]
@@ -206,7 +183,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
 
         # Free the original unpacked int8 weight (still registered as "weight")
         # to avoid double-storing both int8 [N, K] and int32 [N, K/8] in memory.
-        layer.register_parameter("weight", None)
+        delattr(layer, "weight")
 
     def apply_weights(
         self,
@@ -231,7 +208,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
             layer.weight_scale,
             layer.weight_zero_point,
             self.config.group_size,
-            None,  # g_idx not currently supported
+            None,  # Retained by the external XPU op ABI.
             bias,
         )
 

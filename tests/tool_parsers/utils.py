@@ -2,16 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import TypedDict
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+
+
+class ToolState(TypedDict):
+    """Streamed tool call state accumulated from tool call deltas."""
+
+    name: str | None
+    arguments: str
+
+
+class ToolStateWithHeader(ToolState):
+    id: str | None
+    type: str | None
 
 
 class StreamingToolReconstructor:
@@ -40,6 +55,9 @@ class StreamingToolReconstructor:
                 "Streaming tool calls should only emit function calls. Got "
                 f"{call_delta.type}"
             )
+            assert call_delta.function is not None, (
+                "Streaming tool calls must include a function delta"
+            )
             current_tool_call = (
                 self.tool_calls[call_delta.index]
                 if call_delta.index < len(self.tool_calls)
@@ -57,6 +75,9 @@ class StreamingToolReconstructor:
                 assert call_delta.index == len(self.tool_calls) - 1, (
                     f"Incorrect index for tool delta. Got {call_delta.index}, "
                     f"expected {len(self.tool_calls) - 1}"
+                )
+                assert call_delta.function.arguments is not None, (
+                    "Streaming tool call updates must carry an arguments delta"
                 )
                 current_tool_call.function.arguments += call_delta.function.arguments
             else:
@@ -79,6 +100,14 @@ class StreamingToolReconstructor:
                         ),
                     )
                 )
+
+
+def get_function_delta(tool_call: DeltaToolCall) -> DeltaFunctionCall:
+    """Return the function delta of a streamed tool call, asserting it is set."""
+    assert tool_call.function is not None, (
+        "Streaming tool call deltas must include a function delta"
+    )
+    return tool_call.function
 
 
 def run_tool_extraction(
@@ -143,10 +172,13 @@ def run_tool_extraction_streaming(
     )
     previous_text = ""
     previous_tokens: list[int] = []
+    tokenizer = tool_parser.model_tokenizer
     for delta in model_deltas:
+        # tokenize() is an HF tokenizer method; TokenizerLike does not declare it.
+        tokens = tokenizer.tokenize(delta)  # type: ignore[attr-defined]
         token_delta = [
             tool_parser.vocab.get(token)
-            for token in tool_parser.model_tokenizer.tokenize(delta)
+            for token in tokens
             if token in tool_parser.vocab
         ]
         current_text = previous_text + delta

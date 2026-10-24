@@ -8,16 +8,16 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -38,7 +38,6 @@ class HunyuanA13BToolParser(ToolParser):
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []
         self.current_tool_id = -1
-        self.current_tool_name_sent = False
         self.streamed_args: list[str] = []  # Track arguments sent for each tool
 
         # For backward compatibility with tests
@@ -101,9 +100,7 @@ class HunyuanA13BToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract tool calls from a complete model output.
-        """
+        """Extract tool calls from a complete model output."""
         try:
             # Preprocess the model output
             content, potential_tool_calls = self.preprocess_model_output(model_output)
@@ -145,7 +142,7 @@ class HunyuanA13BToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),
@@ -178,10 +175,7 @@ class HunyuanA13BToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        """
-        Extract tool calls for streaming mode.
-        """
-
+        """Extract tool calls for streaming mode."""
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_string):
             start_idx = consume_space(start_idx + len(self.bot_string), current_text)
@@ -262,7 +256,6 @@ class HunyuanA13BToolParser(ToolParser):
                         )
                     else:
                         self.streaming_state["sent_tools"][0]["sent_name"] = True
-                    self.current_tool_name_sent = True
                     return delta
         return None
 
@@ -306,7 +299,6 @@ class HunyuanA13BToolParser(ToolParser):
                     ]
                 )
                 self.streaming_state["sent_tools"][current_idx]["sent_name"] = True
-                self.current_tool_name_sent = True
                 while len(self.streamed_args) <= current_idx:
                     self.streamed_args.append("")
                 return delta

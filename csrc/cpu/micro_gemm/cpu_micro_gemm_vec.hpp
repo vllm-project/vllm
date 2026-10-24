@@ -71,8 +71,7 @@ class TileGemm82 {
       scalar_t* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
         scalar_t v = *curr_m_a;
-        load_vec_t a_reg_original(v);
-        vec_op::FP32Vec16 a_reg(a_reg_original);
+        vec_op::FP32Vec16 a_reg(static_cast<float>(v));
         c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
         c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
 
@@ -104,6 +103,8 @@ class MicroGemm<cpu_utils::ISA::VEC, scalar_t> {
  public:
   static constexpr int32_t MaxMSize = 8;
   static constexpr int32_t NSize = 32;
+  static constexpr int32_t WeightOCGroupSize = 16;
+  static constexpr bool PackA = false;
 
  public:
   void gemm(DEFINE_CPU_MICRO_GEMM_PARAMS) {
