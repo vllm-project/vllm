@@ -3219,9 +3219,10 @@ class VllmConfig:
     def _get_dbo_unsupported_features(self) -> list[str]:
         """Collect what the V2 model runner cannot combine with DBO.
 
-        The V2 runner microbatches a plain decoder forward pass. Anything that
-        slices or replays the batch differently (drafting, adapters, pipeline
-        stages, context parallelism, encoders) is not handled yet.
+        The V2 runner microbatches a decoder forward pass (drafting runs whole,
+        after it). Anything else that slices or replays the batch differently
+        (adapters, pipeline stages, prefill context parallelism, encoders) is
+        not handled yet.
         """
         # TODO: DBO with model runner V2 is under development.
         # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
@@ -3235,15 +3236,10 @@ class VllmConfig:
 
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
-        if self.speculative_config is not None:
-            unsupported.append("dual batch overlap with speculative decoding")
         if parallel_config.pipeline_parallel_size > 1:
             unsupported.append("dual batch overlap with pipeline parallelism")
-        if (
-            parallel_config.decode_context_parallel_size > 1
-            or parallel_config.prefill_context_parallel_size > 1
-        ):
-            unsupported.append("dual batch overlap with context parallelism")
+        if parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("dual batch overlap with prefill context parallelism")
         if model_config is not None and (
             model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):

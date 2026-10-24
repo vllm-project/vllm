@@ -964,3 +964,36 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("num_reqs", [3, 4, 5])
+def test_uniform_spec_decode_batches_split_on_request_boundaries(num_reqs: int):
+    # Verifying 2 drafts per request: 3 tokens each. A midpoint split would cut
+    # a request in two whenever num_reqs is odd, leaving neither microbatch a
+    # uniform decode.
+    query_len = 3
+    input_batch = _make_input_batch(
+        [query_len] * num_reqs, [64] * num_reqs, _make_buffers()
+    )
+    slices = create_ubatch_slices(input_batch, 2, uniform_token_count=query_len)
+    first, second = slices
+    assert first.token_slice.stop % query_len == 0
+    assert first.request_slice.stop == second.request_slice.start
+    assert first.num_tokens == query_len * (num_reqs // 2)
+    assert second.token_slice.stop == query_len * num_reqs
+
+
+def test_single_token_or_unknown_uniform_count_keeps_midpoint_split():
+    input_batch = _make_input_batch([3] * 5, [64] * 5, _make_buffers())
+    for uniform_token_count in (None, 1):
+        first, _ = create_ubatch_slices(
+            input_batch, 2, uniform_token_count=uniform_token_count
+        )
+        assert first.token_slice.stop == 15 // 2
+
+
+def test_too_few_requests_to_align_keeps_midpoint_split():
+    # One request cannot be split on a request boundary.
+    input_batch = _make_input_batch([4], [64], _make_buffers())
+    first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
+    assert first.token_slice.stop == 2
