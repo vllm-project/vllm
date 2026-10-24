@@ -61,7 +61,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         )
         tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
-        # 2. Record expert load metrics.
+        # 2. Record expert load metrics per logical expert.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
         # can be done in a more unified way, since
@@ -87,10 +87,9 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             & record_enabled
             & is_unpadded
             & (physical_id >= 0)
-            & (physical_id < out_size)
+            & (expert_id < out_size)
         )
-        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
-        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
+        tl.atomic_add(out_ptr + safe_expert_id, 1, mask=valid)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,

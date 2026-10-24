@@ -768,13 +768,12 @@ def test_custom(
 
 @pytest.mark.parametrize("record_enabled", [True, False])
 @pytest.mark.parametrize(
-    "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
+    "l2p_map, replica_count, topk_ids, expected_out, expected_load",
     [
         pytest.param(
             # logical i → physical i
             [[0], [1], [2], [3]],
             [1, 1, 1, 1],
-            4,
             [[0, 1], [2, 3], [0, 2]],
             [[0, 1], [2, 3], [0, 2]],
             [2, 1, 2, 1],
@@ -784,20 +783,18 @@ def test_custom(
             # logical 0→3, 1→0, 2→1, 3→2
             [[3], [0], [1], [2]],
             [1, 1, 1, 1],
-            4,
             [[0, 1], [2, 3], [0, 2]],
             [[3, 0], [1, 2], [3, 1]],
-            [1, 2, 1, 2],
+            [2, 1, 2, 1],
             id="shuffled",
         ),
         pytest.param(
             # logical 0→5, 1→2, 2→7, 3→0 in a larger physical space
             [[5], [2], [7], [0]],
             [1, 1, 1, 1],
-            8,
             [[0, 1], [2, 3]],
             [[5, 2], [7, 0]],
-            [1, 0, 1, 0, 0, 1, 0, 1],
+            [1, 1, 1, 1],
             id="sparse",
         ),
     ],
@@ -806,14 +803,13 @@ def test_eplb_map_no_redundancy(
     record_enabled,
     l2p_map,
     replica_count,
-    num_physical,
     topk_ids,
     expected_out,
     expected_load,
 ):
     l2p = torch.tensor(l2p_map, dtype=torch.int64, device=DEVICE)
     rc = torch.tensor(replica_count, dtype=torch.int64, device=DEVICE)
-    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    load = torch.zeros(len(l2p_map), dtype=torch.int32, device=DEVICE)
     rec = torch.tensor(record_enabled, dtype=torch.bool, device=DEVICE)
     ids = torch.tensor(topk_ids, dtype=torch.int32, device=DEVICE)
 
@@ -863,10 +859,10 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
     )
     topk_ids[:, 0] = 0
 
-    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    load = torch.zeros(num_logical, dtype=torch.int32, device=DEVICE)
     rec = torch.tensor(True, dtype=torch.bool, device=DEVICE)
 
-    eplb_map_to_physical_and_record(
+    out = eplb_map_to_physical_and_record(
         topk_ids=topk_ids,
         expert_load_view=load,
         logical_to_physical_map=l2p,
@@ -874,7 +870,8 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
         record_enabled=rec,
     )
 
-    hot_load = load[:R].float()
+    assert load[0].item() == num_tokens
+    hot_load = torch.bincount(out.flatten(), minlength=num_physical)[:R].float()
     max_mean = (hot_load.max() / hot_load.mean()).item()
     assert max_mean < 1.15, (
         f"Hot expert replicas uneven: {hot_load.tolist()}, max/mean={max_mean:.3f}"
@@ -883,46 +880,43 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
 
 @pytest.mark.parametrize("record_enabled", [True, False])
 @pytest.mark.parametrize(
-    "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
+    "l2p_map, replica_count, topk_ids, expected_out, expected_load",
     [
         pytest.param(
             # experts 0,1 have 2 replicas; 2,3 have 1
             [[0, 4], [1, 5], [2, -1], [3, -1]],
             [2, 2, 1, 1],
-            6,
             [[0, 1], [2, 3], [0, 2]],
             # replica = (token_idx * KNUTH) & 0xFFFFFFFF % R.
             # token 0 hash=0x00000000: %2=0, %1=0.
             # token 1 hash=0x9E3779B9: %2=1, %1=0.
             # token 2 hash=0x3C6EF372: %2=0, %1=0.
             [[0, 1], [2, 3], [0, 2]],
-            [2, 1, 2, 1, 0, 0],
+            [2, 1, 2, 1],
             id="partial",
         ),
         pytest.param(
             # all 4 experts have 2 replicas
             [[0, 4], [1, 5], [2, 6], [3, 7]],
             [2, 2, 2, 2],
-            8,
             [[0, 1], [2, 3], [0, 2]],
             # token 0 hash=0x00000000: %2=0.
             # token 1 hash=0x9E3779B9: %2=1.
             # token 2 hash=0x3C6EF372: %2=0.
             [[0, 1], [6, 7], [0, 2]],
-            [2, 1, 1, 0, 0, 0, 1, 1],
+            [2, 1, 2, 1],
             id="full",
         ),
         pytest.param(
             # expert 0: 4 replicas, experts 1,2: 2 replicas
             [[0, 3, 5, 7], [1, 4, -1, -1], [2, 6, -1, -1]],
             [4, 2, 2],
-            8,
             [[0, 1], [2, 0], [1, 2]],
             # token 0 hash=0x00000000: %4=0, %2=0.
             # token 1 hash=0x9E3779B9: %4=1, %2=1.
             # token 2 hash=0x3C6EF372: %4=2, %2=0.
             [[0, 1], [6, 3], [1, 2]],
-            [1, 2, 1, 1, 0, 0, 1, 0],
+            [2, 2, 2],
             id="uneven",
         ),
     ],
@@ -931,14 +925,13 @@ def test_eplb_map_with_redundancy(
     record_enabled,
     l2p_map,
     replica_count,
-    num_physical,
     topk_ids,
     expected_out,
     expected_load,
 ):
     l2p = torch.tensor(l2p_map, dtype=torch.int64, device=DEVICE)
     rc = torch.tensor(replica_count, dtype=torch.int64, device=DEVICE)
-    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    load = torch.zeros(len(l2p_map), dtype=torch.int32, device=DEVICE)
     rec = torch.tensor(record_enabled, dtype=torch.bool, device=DEVICE)
     ids = torch.tensor(topk_ids, dtype=torch.int32, device=DEVICE)
 

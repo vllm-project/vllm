@@ -537,7 +537,7 @@ class ElasticEPScalingExecutor:
         model.expert_weights = []
         with set_current_vllm_config(self.worker.vllm_config):
             model.set_eplb_state(
-                eplb_model_state.expert_load_pass_buffer,
+                eplb_model_state.expert_load_pass,
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
@@ -575,7 +575,7 @@ class ElasticEPScalingExecutor:
         is_async_enabled = eplb_state.is_async
         run_async = async_op and is_async_enabled
         eplb_state.is_async = run_async
-        eplb_state.rearrange(rank_mapping=rank_mapping, use_last_expert_load=True)
+        eplb_state.rearrange(rank_mapping=rank_mapping)
         if not run_async:
             # Wait for non-blocking expert resharding copies before continuing
             # the Elastic EP reconfiguration.
