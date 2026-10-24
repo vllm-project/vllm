@@ -1037,6 +1037,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     requires_tokenizer: ClassVar[bool] = True
 
+    # Processor outputs to leave out of the model-dtype cast (e.g. raw waveforms).
+    keep_dtype_keys: ClassVar[frozenset[str]] = frozenset()
+
     def __init__(
         self,
         info: _I,
@@ -1294,6 +1297,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             self.info.get_hf_processor(**hf_kwargs),
             hf_data,
             hf_kwargs,
+            keep_dtype_keys=self.keep_dtype_keys,
         )
 
     def _finalize_hf_mm_data(
