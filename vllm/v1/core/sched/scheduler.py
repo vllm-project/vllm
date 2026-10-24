@@ -1271,12 +1271,16 @@ class Scheduler(SchedulerInterface):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
+                    # Note: `not prefill_scheduled` already ensures this is a
+                    # pure decode batch, so num_computed_tokens must be > 0
+                    # (prefill was completed). The additional
+                    # `scheduled_running_reqs or num_computed_tokens > 0` guard
+                    # was redundant and is removed here.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
-                        and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
