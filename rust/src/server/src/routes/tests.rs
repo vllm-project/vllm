@@ -53,6 +53,7 @@ use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::{Tokenizer, TokenizerError};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -554,6 +555,135 @@ impl ChatRenderer for FakeChatBackend {
             media_order: None,
             effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
+    }
+}
+
+/// Renderer that rejects roles outside the standard chat set, matching
+/// DeepSeek-style backends that return [`vllm_chat::Error::UnsupportedChatRole`].
+#[derive(Clone)]
+struct UnsupportedRoleChatBackend {
+    inner: FakeChatBackend,
+}
+
+impl UnsupportedRoleChatBackend {
+    fn new() -> Self {
+        Self {
+            inner: FakeChatBackend::new(),
+        }
+    }
+}
+
+impl fmt::Debug for UnsupportedRoleChatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnsupportedRoleChatBackend").finish_non_exhaustive()
+    }
+}
+
+impl TextBackend for UnsupportedRoleChatBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        self.inner.tokenizer()
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+}
+
+impl ChatBackend for UnsupportedRoleChatBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        self.inner.new_chat_output_processor(request, options)
+    }
+}
+
+impl ChatRenderer for UnsupportedRoleChatBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+        for message in &request.messages {
+            if let ChatMessage::Custom { role, .. } = message {
+                return Err(vllm_chat::Error::UnsupportedChatRole { role: role.clone() });
+            }
+        }
+        self.inner.render(request)
+    }
+}
+
+/// Tokenizer whose encode path fails, so `/tokenize` can exercise an internal
+/// (non-validation) error through the HTTP adapter.
+struct FailingEncodeTokenizer;
+
+impl Tokenizer for FailingEncodeTokenizer {
+    fn encode(&self, _text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
+        Err(TokenizerError("backend exploded".to_string()))
+    }
+
+    fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+        self.encode(text, false)
+    }
+
+    fn decode(
+        &self,
+        _token_ids: &[u32],
+        _skip_special_tokens: bool,
+    ) -> vllm_tokenizer::Result<String> {
+        Ok(String::new())
+    }
+
+    fn token_to_id(&self, _token: &str) -> Option<u32> {
+        None
+    }
+
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        None
+    }
+}
+
+#[derive(Clone)]
+struct FailingEncodeChatBackend {
+    inner: FakeChatBackend,
+}
+
+impl FailingEncodeChatBackend {
+    fn new() -> Self {
+        Self {
+            inner: FakeChatBackend::new(),
+        }
+    }
+}
+
+impl fmt::Debug for FailingEncodeChatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FailingEncodeChatBackend").finish_non_exhaustive()
+    }
+}
+
+impl TextBackend for FailingEncodeChatBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(FailingEncodeTokenizer)
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+}
+
+impl ChatBackend for FailingEncodeChatBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        self.inner.chat_renderer()
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        self.inner.new_chat_output_processor(request, options)
     }
 }
 
@@ -8810,6 +8940,88 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
     let continue_len = continue_final["tokens"].as_array().unwrap().len();
     let new_len = new_assistant["tokens"].as_array().unwrap().len();
     assert!(new_len > continue_len);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_unsupported_role_returns_400() {
+    let (mut app, _engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(UnsupportedRoleChatBackend::new()),
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "latest_reminder", "content": "be brief"}
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(json["error"]["code"], 400);
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(
+        message.contains("latest_reminder"),
+        "unexpected error message: {message}"
+    );
+    assert!(
+        message.contains("not supported by this chat renderer"),
+        "unexpected error message: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_internal_tokenizer_failure_returns_500() {
+    let (mut app, _engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FailingEncodeChatBackend::new()),
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let (completion_status, completion_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+        }),
+    )
+    .await;
+    assert_eq!(completion_status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(completion_json["error"]["type"], "InternalServerError");
+    assert_eq!(completion_json["error"]["code"], 500);
+    let completion_message = completion_json["error"]["message"].as_str().expect("error message");
+    assert!(
+        completion_message.contains("tokenize failed"),
+        "unexpected error message: {completion_message}"
+    );
+
+    let (chat_status, chat_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+        }),
+    )
+    .await;
+    assert_eq!(chat_status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(chat_json["error"]["type"], "InternalServerError");
+    assert_eq!(chat_json["error"]["code"], 500);
+    let chat_message = chat_json["error"]["message"].as_str().expect("error message");
+    assert!(
+        chat_message.contains("tokenize failed"),
+        "unexpected error message: {chat_message}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
