@@ -970,19 +970,23 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
         device=torch.device("cpu"),
     )
 
+    fp8_group = group_cache_dtype != "auto"
+    q_dtype = dtypes.fp8 if fp8_group else torch.bfloat16
+    kv_dtype = dtypes.fp8 if fp8_group else dtypes.bf16
     assert info_calls == [
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
-            "max_qo_len": builder.reorder_batch_threshold,
+            "max_qo_len": qlen,
             "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
-            "q_dtype": dtypes.fp8,
-            "kv_dtype": dtypes.fp8,
+            "q_dtype": q_dtype,
+            "kv_dtype": kv_dtype,
             "is_sparse": False,
             "fast_mode": True,
         }
+        for qlen in range(1, builder.reorder_batch_threshold + 1)
     ]
-    assert builder._mla_q_dtype == dtypes.fp8
-    assert builder._mla_kv_dtype == dtypes.fp8
+    assert builder._mla_q_dtype == q_dtype
+    assert builder._mla_kv_dtype == kv_dtype
 
     builder.dcp_world_size = 2
     chunk = object()
@@ -1012,6 +1016,118 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     assert build_rows.call_args_list == (
         [mock.call(chunk, torch.device("cpu"))] * 2 if needs_row_map else []
     )
+
+
+def test_builder_sizes_metadata_for_every_decode_qlen(monkeypatch):
+    """Size the persistent metadata for the largest need of any served qlen.
+
+    The builder serves every qlen up to reorder_batch_threshold (a DSpark draft
+    runs k-token blocks under a k + 1 threshold). On gfx950, aiter tiles a bf16
+    block of fewer than 128 packed rows by 64, so 16 heads x 7 tokens needs
+    twice the buffers of 16 heads x 8 tokens.
+    """
+
+    def get_mla_metadata_info_v1(
+        max_batch_size,
+        max_qo_len,
+        num_attention_heads,
+        q_dtype,
+        kv_dtype,
+        *,
+        is_sparse,
+        fast_mode,
+    ):
+        packed = max_qo_len * num_attention_heads
+        tiles = math.ceil(packed / (64 if 64 <= packed < 128 else 128))
+        work = max_batch_size * tiles
+        return (
+            (2, torch.uint64),
+            (257, torch.int32),
+            ((work + 255, 8), torch.int32),
+            (work + 1, torch.int32),
+            ((work, 2), torch.int32),
+            (2 * work, torch.int32),
+        )
+
+    def init_common_builder(self, *args, **kwargs):
+        self.num_heads = 16
+        self.q_data_type = torch.bfloat16
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        self.dcp_world_size = 1
+        self.cp_kv_cache_interleave_size = 1
+        self.reorder_batch_threshold = 8
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(
+            dtypes=SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16"),
+            get_mla_metadata_info_v1=get_mla_metadata_info_v1,
+        ),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "__init__", init_common_builder
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="deepseek_mtp", num_speculative_tokens=7, parallel_drafting=False
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=16,
+            dtype=torch.bfloat16,
+            get_num_attention_heads=lambda parallel_config: 16,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        cache_config=SimpleNamespace(cache_dtype="auto", num_gpu_blocks=None),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            static_forward_context={},
+        ),
+    )
+    builder = AiterMLAMetadataBuilder(
+        kv_cache_spec=SimpleNamespace(
+            block_size=1, dtype=torch.bfloat16, cache_dtype_str="auto"
+        ),
+        layer_names=["layer.0"],
+        vllm_config=config,
+        device=torch.device("cpu"),
+    )
+
+    infos = [
+        get_mla_metadata_info_v1(
+            4, qlen, 16, torch.bfloat16, "bf16", is_sparse=False, fast_mode=True
+        )
+        for qlen in range(1, 9)
+    ]
+    buffers = [
+        builder._mla_work_meta_data,
+        builder._mla_work_indptr,
+        builder._mla_work_info_set,
+        builder._mla_reduce_indptr,
+        builder._mla_reduce_final_map,
+        builder._mla_reduce_partial_map,
+    ]
+    for i, buffer in enumerate(buffers):
+        needed = [
+            torch.Size(torch.empty(info[i][0], device="meta").shape) for info in infos
+        ]
+        assert all(
+            all(have >= need for have, need in zip(buffer.shape, shape))
+            for shape in needed
+        ), (i, buffer.shape, needed)
 
 
 def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -99,6 +99,19 @@ def _segmented_mla_page_size(block_size: int) -> int:
     """
     assert block_size > 0
     return min(128, largest_power_of_2_divisor(block_size))
+
+
+def _max_mla_metadata_info(
+    infos: Iterable[tuple[tuple[int | tuple[int, ...], torch.dtype], ...]],
+) -> list[tuple[tuple[int, ...], torch.dtype]]:
+    """Per-dimension maximum of several ``get_mla_metadata_info_v1`` results."""
+    merged = []
+    for entries in zip(*infos):
+        shapes = [
+            shape if isinstance(shape, tuple) else (shape,) for shape, _ in entries
+        ]
+        merged.append((tuple(max(dims) for dims in zip(*shapes)), entries[0][1]))
+    return merged
 
 
 @functools.lru_cache(maxsize=1)
@@ -826,12 +839,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     f"{_NATIVE_CPRR_HEADS}, and this AITER build lacks segmented "
                     "MLA decode."
                 )
+        # The group's cache dtype can differ from cache_config.cache_dtype
+        # (a speculative kv_cache_dtype override, kv_cache_dtype_skip_layers).
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
             and _segmented_mla_fits_lds(
                 self.num_heads * self.dcp_world_size,
                 kv_cache_spec.block_size,
-                is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
+                is_quantized_kv_cache(kv_cache_dtype),
             )
         )
         self._use_triton_dcp_verify = (
@@ -845,10 +864,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 device
             ).multi_processor_count
 
-        # Use the group's original format: decode normalizes E5M2 to "fp8".
-        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
-        if kv_cache_dtype is None:
-            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
             kv_cache_dtype,
             self.q_data_type,
@@ -957,7 +972,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # pad has to be applied here explicitly.
         if self._asm_dcp_verify:
             self._num_attention_heads = self._asm_dcp_verify_heads
-        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        kv_cache_dtype_str = kv_cache_dtype
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
             kv_dtype = dtypes.fp8
@@ -985,6 +1000,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_q_dtype = q_dtype
         self._mla_kv_dtype = kv_dtype
+        # The metadata is built for every qlen up to _mtp_decode_qlen, and
+        # aiter's buffer needs are not monotonic in qlen: on gfx950 a bf16
+        # block of fewer than 128 packed rows is tiled by 64 instead of 128.
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -992,21 +1010,24 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             (reduce_indptr_size, reduce_indptr_type),
             (reduce_final_map_size, reduce_final_map_type),
             (reduce_partial_map_size, reduce_partial_map_type),
-        ) = get_mla_metadata_info_v1(
-            max_num_reqs,
-            self._mtp_decode_qlen,
-            self._num_attention_heads,
-            q_dtype,
-            kv_dtype,
-            is_sparse=False,
-            fast_mode=True,
-            # Must match max_split_per_batch in get_mla_metadata_v1; without it
-            # aiter sizes the reduce scratch from capacity (~9 GiB).
-            **(
-                dict(max_split_per_batch=self._mla_max_split_per_batch)
-                if self._asm_dcp_verify
-                else {}
-            ),
+        ) = _max_mla_metadata_info(
+            get_mla_metadata_info_v1(
+                max_num_reqs,
+                qlen,
+                self._num_attention_heads,
+                q_dtype,
+                kv_dtype,
+                is_sparse=False,
+                fast_mode=True,
+                # Must match max_split_per_batch in get_mla_metadata_v1; without
+                # it aiter sizes the reduce scratch from capacity (~9 GiB).
+                **(
+                    dict(max_split_per_batch=self._mla_max_split_per_batch)
+                    if self._asm_dcp_verify
+                    else {}
+                ),
+            )
+            for qlen in range(1, self._mtp_decode_qlen + 1)
         )
         self._mla_work_meta_data = torch.empty(
             work_meta_data_size, dtype=work_meta_data_type, device=device
