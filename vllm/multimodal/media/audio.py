@@ -159,19 +159,12 @@ def load_audio_pyav(
         resampler = (
             av.AudioResampler(format="fltp", layout="mono", rate=sr)
             if needs_resampling
-            else None
+            else av.AudioResampler(format="fltp")
         )
         try:
             for frame in container.decode(stream):
-                if needs_resampling:
-                    assert resampler is not None
-                    for out_frame in resampler.resample(frame):
-                        arr = out_frame.to_ndarray()
-                        total_samples += arr.shape[-1]
-                        total_decode_bytes += arr.nbytes
-                        chunks.append(arr)
-                else:
-                    arr = frame.to_ndarray()
+                for out_frame in resampler.resample(frame):
+                    arr = out_frame.to_ndarray()
                     total_samples += arr.shape[-1]
                     total_decode_bytes += arr.nbytes
                     chunks.append(arr)
