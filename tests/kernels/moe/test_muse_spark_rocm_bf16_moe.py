@@ -974,3 +974,91 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     expected = reference.apply(None, routed[:3], weights[:3], ids[:3], False)
     torch.testing.assert_close(actual[:3], expected, atol=2e-2, rtol=2e-2)
     assert torch.count_nonzero(actual[3:]) == 0
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+@pytest.mark.parametrize(
+    "reduce_dtype,num_tokens,expected_scattered,expected_all_reduced,"
+    "expected_gathered_in_place",
+    [
+        # Already in the reduce dtype: one reduce-scatter over the TP-divisible
+        # prefix, the remaining token all-reduced.
+        (torch.bfloat16, 11, [10], [1], [10]),
+        # Within one default chunk the chunk is padded as before.
+        (torch.bfloat16, 3, [4], [], []),
+        # A reduce-dtype copy keeps the chunks, each padded as before.
+        (torch.float32, 11, [4, 4, 4], [], [4, 4]),
+    ],
+)
+def test_token_sharded_finalize_chunks_only_a_reduce_dtype_copy(
+    monkeypatch,
+    reduce_dtype: torch.dtype,
+    num_tokens: int,
+    expected_scattered: list[int],
+    expected_all_reduced: list[int],
+    expected_gathered_in_place: list[int],
+) -> None:
+    """Emulate TP2 rank 0 whose peer contributes nothing to the reduction."""
+    torch.manual_seed(0)
+    top_k, hidden = 8, 4096
+    norm = _post_expert_norm_module(hidden).cuda()
+    routed = torch.randn(num_tokens, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1)
+    ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device="cuda")
+    scattered: list[int] = []
+    all_reduced: list[int] = []
+    gathered_in_place: list[int] = []
+
+    def _reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        assert dim == 0 and x.shape[0] % 2 == 0
+        scattered.append(x.shape[0])
+        return x[: x.shape[0] // 2]
+
+    def _all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        assert dim == 0
+        return torch.cat([x, torch.zeros_like(x)])
+
+    def _all_gather_into_tensor(out: torch.Tensor, x: torch.Tensor, group) -> None:
+        # Rank 0's rows were finalized into the head of the output.
+        assert x.data_ptr() == out.data_ptr() and out.shape[0] == 2 * x.shape[0]
+        gathered_in_place.append(out.shape[0])
+        out[x.shape[0] :].zero_()
+
+    def _all_reduce(x: torch.Tensor) -> torch.Tensor:
+        all_reduced.append(x.shape[0])
+        return x
+
+    module = "vllm.models.muse_spark.amd.muse_moe_runner"
+    monkeypatch.setattr(
+        f"{module}.tensor_model_parallel_reduce_scatter", _reduce_scatter
+    )
+    monkeypatch.setattr(f"{module}.tensor_model_parallel_all_gather", _all_gather)
+    monkeypatch.setattr(f"{module}.tensor_model_parallel_all_reduce", _all_reduce)
+    monkeypatch.setattr(
+        f"{module}.dist.all_gather_into_tensor", _all_gather_into_tensor
+    )
+    monkeypatch.setattr(
+        f"{module}.get_tp_group", lambda: SimpleNamespace(device_group=None)
+    )
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 0)
+
+    reducer = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=True)
+    reducer.reduce_dtype = reduce_dtype
+    reducer.rs_min_tokens = 1
+    reducer._chunk_size = lambda top_k, hidden_dim: 4  # type: ignore[method-assign]
+    actual = reducer.apply(None, routed, weights, ids, False)
+
+    assert scattered == expected_scattered
+    assert all_reduced == expected_all_reduced
+    assert gathered_in_place == expected_gathered_in_place
+    if expected_all_reduced:
+        # Rank 0 owns tokens 0..4 of the scattered 10, the gathered rows 5..9
+        # are the peer's (zeros), and token 10 is finalized from the all-reduce.
+        reference = MuseSparkTopKWeightAndReduce(
+            norm.forward, pre_norm_all_reduce=False
+        )
+        expected = reference.apply(None, routed, weights, ids, False)
+        torch.testing.assert_close(actual[:5], expected[:5], atol=2e-2, rtol=2e-2)
+        assert torch.count_nonzero(actual[5:10]) == 0
+        torch.testing.assert_close(actual[10:], expected[10:], atol=2e-2, rtol=2e-2)
