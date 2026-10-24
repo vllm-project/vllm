@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import msgspec
+import numpy as np
 import pytest
 import torch
 import zmq.asyncio
@@ -39,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _block_ids_for_region,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
+    _contiguous_runs,
     _has_opaque_packed_row,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
@@ -2156,6 +2158,99 @@ async def test_build_transfer_params_sends_packed_region_once(
     assert src_ptrs == [0x1000 + 10 * block_len]
     assert dst_ptrs == [0xA000 + 20 * block_len]
     assert lengths == [n_blocks * block_len]
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "starts", "run_lens"),
+    [
+        ([], [], [], []),
+        ([3, 4, 5], [7, 8, 9], [0], [3]),
+        ([5, 4, 3], [9, 8, 7], [0, 1, 2], [1, 1, 1]),
+        ([1, 2, 7, 8, 9], [4, 5, 6, 10, 11], [0, 2, 3], [2, 1, 2]),
+    ],
+)
+def test_contiguous_runs(src, dst, starts, run_lens):
+    """A run breaks wherever either side does not step by +1."""
+    got_starts, got_lens = _contiguous_runs(
+        np.array(src, dtype=np.int64), np.array(dst, dtype=np.int64)
+    )
+    assert got_starts.tolist() == starts
+    assert got_lens.tolist() == run_lens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kv_block_len", [256, 128])
+async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
+    """Fragmented ids give one copy per contiguous run per layer, in layer order.
+
+    A kv_block_len shorter than the block row cannot be merged across blocks.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = False
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
+
+    block_len = 256
+    local_regions, remote_regions = (
+        [
+            _region(
+                base + layer * 0x10000,
+                block_len=block_len,
+                kv_block_len=kv_block_len,
+                row_offset=0,
+                layer_name=f"model.layers.{layer}.self_attn",
+                layer_index=layer,
+            )
+            for layer in range(2)
+        ]
+        for base in (0x100000, 0xA00000)
+    )
+    transfer_id = "xfer-fragmented"
+    send_meta = SendBlockMeta(
+        p_req_id="p-fragmented",
+        transfer_id=transfer_id,
+        local_block_ids=[[3, 4, 9, 8]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-fragmented": (transfer_id, [[7, 8, 2, 1]])}
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-fragmented", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    if kv_block_len == block_len:
+        local_ids, remote_ids, sizes = [3, 9, 8], [7, 2, 1], [512, 256, 256]
+    else:
+        local_ids, remote_ids, sizes = [3, 4, 9, 8], [7, 8, 2, 1], [128] * 4
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        r.base_addr + b * block_len for r in local_regions for b in local_ids
+    ]
+    assert dst_ptrs == [
+        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
+    ]
+    assert lengths == sizes * len(local_regions)
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
