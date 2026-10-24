@@ -2149,7 +2149,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
-    # with quantization methods and attention backends.
+    # with quantization methods and the kernel/backend resolved for each layer,
+    # e.g. QLinear(quant=Fp8Config(kernel=CutlassFP8ScaledMMLinearKernel)).
+    # Layers whose kernel is not selected yet report the method only.
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
