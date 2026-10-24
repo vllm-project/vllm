@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import json
 import math
 import os
 import queue
@@ -20,6 +21,8 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
+from enum import Enum
+from fractions import Fraction
 from typing import Any, TypeVar
 
 import torch
@@ -67,9 +70,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -79,6 +84,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -129,10 +135,109 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
     prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    fingerprint = (
+        f"@cfg:{metadata.config_fingerprint}" if metadata.config_fingerprint else ""
+    )
     return (
         f"vllm-mooncake-store:{prefix}{metadata.model_name}"
-        f"{metadata.store_namespace}@{chunk_hash}"
+        f"{metadata.store_namespace}{fingerprint}@{chunk_hash}"
     )
+
+
+def _fingerprint_value(value: Any) -> Any:
+    """Describe one KV cache spec field as a JSON value.
+
+    A stored block is raw device memory transferred under a key, so every field
+    that shapes that memory has to reach the digest. A field this function
+    cannot describe raises instead of being dropped: silently ignoring it would
+    let two differently shaped caches share a key and read each other's bytes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Enum):
+        return f"enum:{type(value).__name__}.{value.name}"
+    if isinstance(value, torch.dtype):
+        return f"dtype:{value}"
+    if isinstance(value, Fraction):
+        return f"fraction:{value}"
+    if isinstance(value, MultipleOf):
+        return f"multiple_of:{value.base}"
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _fingerprint_value(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {
+            str(_fingerprint_value(key)): _fingerprint_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, bool | int | float | str):
+        return value
+    raise TypeError(
+        f"Cannot fingerprint KV cache spec value of type "
+        f"{type(value).__name__}: {value!r}"
+    )
+
+
+def _fingerprint_group(group: KVCacheGroupSpec) -> dict[str, Any]:
+    """Describe one cache group as the store transfers it.
+
+    ``len(layer_names)`` is part of the payload shape: each layer contributes
+    its own transfer segment, so a group covering more layers moves more
+    segments under the same key.
+    """
+    spec = group.kv_cache_spec
+    return {
+        "spec_type": type(spec).__name__,
+        "spec": _fingerprint_value(spec),
+        "page_size_bytes": spec.page_size_bytes,
+        "num_layers": len(group.layer_names),
+        "is_eagle_group": group.is_eagle_group,
+        "role": group.role.name,
+    }
+
+
+def build_store_config_fingerprint(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    *,
+    scheduler_block_size: int,
+    hash_block_size: int,
+    topology: tuple[int, ...],
+) -> str:
+    """Return the 12-hex-digit digest of the settings a stored block depends on.
+
+    ``topology`` is the parallel layout the caller's key namespace does not
+    already pin, so a shared store namespace contributes only PCP and DCP.
+
+    The resolved KV cache layout belongs here even when the caller's namespace
+    spells it out: a rank-local store name carries no layout at all, and two
+    layouts order the same bytes differently inside one block, so a consumer
+    would apply the wrong stride to a producer's payload.
+    """
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    factors = {
+        "kv_cache_dtype": cache_config.cache_dtype,
+        "model_dtype": str(model_config.dtype),
+        "quantization": model_config.quantization,
+        "mamba_cache_dtype": cache_config.mamba_cache_dtype,
+        "mamba_ssm_cache_dtype": cache_config.mamba_ssm_cache_dtype,
+        "kv_cache_layout": cache_config.get_resolved_kv_cache_layout().name,
+        "scheduler_block_size": scheduler_block_size,
+        "hash_block_size": hash_block_size,
+        "groups": [
+            _fingerprint_group(group)
+            for group in kv_cache_config.prefix_cacheable_groups
+        ],
+        "topology": topology,
+    }
+    return safe_hash(
+        json.dumps(factors, sort_keys=True).encode(), usedforsecurity=False
+    ).hexdigest()[:12]
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -1515,6 +1620,21 @@ class MooncakeStoreWorker:
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
+        # The shared and compatibility namespaces carry store TP and PP, so a
+        # key with one only needs the sizes those namespaces leave out.
+        topology = (
+            (self.pcp_size, self.dcp_size)
+            if store_namespace
+            else (self.tp_size, self.pp_size, self.pcp_size, self.dcp_size)
+        )
+        config_fingerprint = build_store_config_fingerprint(
+            vllm_config,
+            kv_cache_config,
+            scheduler_block_size=self.block_size,
+            hash_block_size=self.hash_block_size,
+            topology=topology,
+        )
+        logger.info("Mooncake store key fingerprint: %s", config_fingerprint)
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1527,6 +1647,7 @@ class MooncakeStoreWorker:
                 )
             ),
             store_namespace=store_namespace,
+            config_fingerprint=config_fingerprint,
         )
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
