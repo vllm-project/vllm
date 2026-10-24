@@ -149,15 +149,6 @@ class MambaStateDtypeCalculator:
             )
         return (conv_state_dtype, recurrent_state_dtype)
 
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, torch.float32, activation_dtype)
-
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -420,27 +411,6 @@ class MambaStateShapeCalculator:
             num_heads,
             head_dim if head_k_dim is None else head_k_dim,
             head_dim,
-        )
-
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
-        num_heads: int,
-        head_dim: int,
-        tp_world_size: int,
-        spec_query_len: int,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-    ]:
-        local_num_heads = divide(num_heads, tp_world_size)
-        return (
-            *base_shapes,
-            (local_num_heads, spec_query_len, head_dim),
-            (local_num_heads, spec_query_len, 2 * head_dim),
         )
 
 
