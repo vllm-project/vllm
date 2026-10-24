@@ -96,6 +96,20 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
 
+When `rejection_sample_method` is `synthetic`, generated token IDs and stop
+checks remain real, while text returned by offline generation and the OpenAI
+Chat Completions and Completions endpoints is `"synthetic "` repeated once per
+output token ID. The HTTP endpoints set `x-vllm-synthetic-output: true` on
+successful responses so benchmark clients can distinguish filler from model
+content. This mode is for throughput measurements, not content evaluation.
+Use server-reported usage for token counts: retokenizing the placeholder does
+not recover the number of generated tokens. Structured output, required or
+named tool calls, generated-output API logprobs, and prompt echo are unsupported
+in this mode. Beam search and the speech-to-text endpoints, including realtime
+transcription, are also unsupported.
+Other text-serving adapters are outside this output contract; the token API
+still supports token-only output.
+
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
     as generic draft models. Use `"method": "mtp"` with the assistant

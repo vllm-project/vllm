@@ -428,6 +428,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
+        if self.synthetic_output:
+            return self.create_error_response(
+                "Speech-to-text is unsupported with synthetic acceptance"
+            )
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
