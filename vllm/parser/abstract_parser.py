@@ -543,7 +543,13 @@ class DelegatingParser(Parser):
                     request.tool_choice,
                 ),
                 request.tool_choice,
-                strict_level,
+                # Next to a structured output, a parser default only constrains
+                # the calls a strict tool makes possible.
+                ToolStrictLevel.AUTO
+                if self.tool_strict_level is None
+                and is_auto
+                and structured_outputs is not None
+                else strict_level,
             )
 
         output_format = None
