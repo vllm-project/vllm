@@ -42,6 +42,9 @@ class MLAPrefillBackend(ABC):
         torch.bfloat16,
     ]
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = []
+    # Whether the backend can consume an FP8-quantized query, i.e. whether
+    # `AttentionConfig.use_prefill_query_quantization` can be honoured.
+    supports_query_quantization: ClassVar[bool] = False
 
     @staticmethod
     @abstractmethod
