@@ -8,7 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
@@ -58,6 +58,51 @@ class NonUvaBuffer:
         return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
+class StagedH2DBuffer:
+    """Explicit-copy fallback for NVIDIA Confidential Computing.
+
+    The device view of pinned host memory is not coherent under Confidential
+    Computing, so the pinned host buffer is mirrored into a device tensor on
+    every ``uva()``. The H2D is issued on the idle prep stream: under
+    Confidential Computing it is host-synchronous, so it has completed when
+    ``uva()`` returns, and it only waits for its own transfer instead of the
+    forward queued on the compute stream (see vllm.v1.conf_compute_utils). The
+    device tensor is written by the prep stream and therefore allocated on it.
+    Rewriting it in place relies on the same pool invariant a UVA buffer does:
+    no GPU reader of the slot is still in flight when the slot is reused.
+    """
+
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+        from vllm.platforms import current_platform
+        from vllm.v1.conf_compute_utils import prep_stream
+
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        self.np = self.cpu.numpy()
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        with torch.inference_mode(False), torch.cuda.stream(prep_stream(device)):
+            self._gpu = torch.zeros(size, dtype=dtype, device=device)
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        from vllm.v1.conf_compute_utils import prep_stream
+
+        cpu, gpu = (self.cpu, self._gpu) if n is None else (self.cpu[:n], self._gpu[:n])
+        with torch.cuda.stream(prep_stream(gpu.device)):
+            gpu.copy_(cpu, non_blocking=True)
+        return gpu
+
+
+def _pool_buffer_cls() -> type[UvaBuffer | StagedH2DBuffer | NonUvaBuffer]:
+    if is_uva_available():
+        return UvaBuffer
+    from vllm.v1.conf_compute_utils import confidential_compute_enabled
+
+    if confidential_compute_enabled() and is_pin_memory_available():
+        return StagedH2DBuffer
+    return NonUvaBuffer
+
+
 class UvaBufferPool:
     """Preallocate each slot at size, growing its first dimension as needed.
 
@@ -77,7 +122,7 @@ class UvaBufferPool:
         self.max_concurrency = max_concurrency
 
         # UVA buffers for concurrency
-        self._buffer_cls = UvaBuffer if is_uva_available() else NonUvaBuffer
+        self._buffer_cls = _pool_buffer_cls()
         self._uva_bufs = [self._buffer_cls(size, dtype) for _ in range(max_concurrency)]
         # Current buffer index
         self._curr = 0
