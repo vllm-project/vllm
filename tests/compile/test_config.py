@@ -1273,3 +1273,34 @@ def test_combo_kernel_defaults_without_inductor_deterministic_setting():
 
     assert config.inductor_compile_config["combo_kernels"] is True
     assert config.inductor_compile_config["benchmark_combo_kernel"] is True
+
+
+@pytest.mark.parametrize(
+    "vllm_batch_invariant,user_config,batch_invariant,benchmark_combo",
+    [
+        (False, {}, None, True),
+        (True, {}, True, False),
+        (True, {"batch_invariant": False}, False, True),
+    ],
+)
+def test_batch_invariant_pins_inductor_kernel_configs(
+    monkeypatch, vllm_batch_invariant, user_config, batch_invariant, benchmark_combo
+):
+    """VLLM_BATCH_INVARIANT must stop Inductor from picking kernel configs by
+    on-device timing, which can differ between restarts (#58899)."""
+    if not _is_torch_equal_or_newer(torch.__version__, "2.13.0"):
+        pytest.skip("Inductor batch_invariant needs torch>=2.13")
+    from torch._inductor import config as inductor_config
+
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", vllm_batch_invariant)
+    with (
+        inductor_config.patch(deterministic=False),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig(inductor_compile_config=dict(user_config))
+
+    assert config.inductor_compile_config.get("batch_invariant") is batch_invariant
+    assert config.inductor_compile_config["combo_kernels"] is True
+    assert config.inductor_compile_config["benchmark_combo_kernel"] is benchmark_combo
