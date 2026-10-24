@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call
 
 import pytest
+from transformers import AutoModelForCausalLM
 
 from vllm import LLM
 from vllm.exceptions import ProfilerAlreadyActiveError
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
@@ -272,6 +274,46 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)
         assert len(num_accepted_tokens_per_pos[0].values) == 5
+
+
+def test_lora_requests_info(vllm_runner, tmp_path):
+    """With one LoRA slot, the lora-b request waits while the lora-a request
+    runs, and each label of vllm:lora_requests_info lists only its own LoRAs."""
+    peft = pytest.importorskip("peft")
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    peft.get_peft_model(
+        AutoModelForCausalLM.from_pretrained(model),
+        peft.LoraConfig(r=8, target_modules=["q_proj", "v_proj"]),
+    ).save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=8,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.05,
+        enforce_eager=True,
+        disable_log_stats=False,
+    ) as vllm_model:
+        llm: LLM = vllm_model.llm
+        llm.generate(
+            ["Hello", "Hello"],
+            SamplingParams(max_tokens=2, ignore_eos=True),
+            lora_request=[
+                LoRARequest("lora-a", 1, str(tmp_path)),
+                LoRARequest("lora-b", 2, str(tmp_path)),
+            ],
+        )
+        lora_info_labels = {
+            (m.labels["running_lora_adapters"], m.labels["waiting_lora_adapters"])
+            for m in llm.get_metrics()
+            if m.name == "vllm:lora_requests_info"
+        }
+
+    assert ("lora-a", "lora-b") in lora_info_labels
+    # Each LoRA has one request, so no LoRA is both running and waiting.
+    assert all(not r or r not in w.split(",") for r, w in lora_info_labels)
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
