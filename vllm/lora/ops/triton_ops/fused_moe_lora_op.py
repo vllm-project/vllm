@@ -121,6 +121,12 @@ _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK = 128
 # ---------------------------------------------------------------------------
 
 
+def _token_mapping_factor(x: torch.Tensor, topk_weights: torch.Tensor) -> int:
+    """Divisor from a flat (token, top_k) index to a row of ``x``: w13 inputs
+    have one row per token, w2 inputs one per route (weighted or not)."""
+    return topk_weights.shape[1] if x.shape[0] == topk_weights.shape[0] else 1
+
+
 @triton.heuristics({"EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0})
 @triton.jit
 def _fused_moe_lora_one_shot_kernel(
@@ -392,7 +398,7 @@ def _run_fused_moe_lora_one_shot(
     if EM_grid == 0 or grid_lora_dim == 0 or num_slices == 0:
         return
 
-    token_mapping_factor = 1 if mul_routed_weight else top_k_num
+    token_mapping_factor = _token_mapping_factor(qcurr_hidden_states, topk_weights)
 
     A_ptrs = _get_ptr(lora_a_stacked, device)
     B_ptrs = _get_ptr(lora_b_stacked, device)
@@ -780,7 +786,7 @@ def _run_fused_moe_lora_small_batch(
     if M_grid == 0 or num_slices == 0:
         return
 
-    token_mapping_factor = 1 if mul_routed_weight else top_k_num
+    token_mapping_factor = _token_mapping_factor(qcurr_hidden_states, topk_weights)
 
     A_ptrs = _get_ptr(lora_a_stacked, device)
     B_ptrs = _get_ptr(lora_b_stacked, device)
@@ -1274,7 +1280,7 @@ def _fused_moe_lora_shrink(
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
-        token_mapping_factor=1 if mul_routed_weight else top_k_num,
+        token_mapping_factor=_token_mapping_factor(qcurr_hidden_states, topk_weights),
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
         ADD_INPUTS=False,
