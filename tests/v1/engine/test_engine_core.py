@@ -756,8 +756,6 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
-    core._checkpoint_state = CheckpointState.RUNNING
-    core._checkpoint_error = None
     return core
 
 

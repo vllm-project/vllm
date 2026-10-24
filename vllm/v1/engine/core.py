@@ -117,6 +117,11 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    # Class-level defaults so tests can build an EngineCore with
+    # object.__new__.
+    _checkpoint_state = CheckpointState.RUNNING
+    _checkpoint_error: str | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -231,8 +236,6 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
-        self._checkpoint_state = CheckpointState.RUNNING
-        self._checkpoint_error: str | None = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
