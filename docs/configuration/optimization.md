@@ -50,8 +50,11 @@ In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as re
 
 With `--scheduling-policy priority`, a waiting request does not preempt running requests by default: a high-priority request that finds the KV cache full waits until running requests of a lower priority finish, or until one of them is preempted because a running request cannot grow. `--max-priority-preemptions-per-step N` (0, off, by default) lets the waiting request of the highest priority that can be scheduled preempt up to `N` running requests of a strictly lower priority in a step when the KV cache lacks room for its whole sequence: in the order the scheduler preempts in, the lowest priority first and the latest arrival within it, and none if `N` would not make room. The room is net of the request's prefix cache hits, and it counts the blocks the running requests take until the preempted requests' blocks are freed. They resume like any preempted request once in-flight prefills of a higher priority have the blocks they still need, and the Prometheus counter `vllm:num_priority_preemptions` counts them.
 
+`--priority-prefill-budget-cap` (off by default) keeps prefills of a strictly lower priority, running or waiting, out of the steps of a request's first tokens: from the step in which the waiting request of the highest priority fits (a free running slot and KV cache room for its whole sequence), or in which its KV load from a KV connector is done, while it prefills, until it has its first `--priority-prefill-budget-cap-tokens` output tokens (16 by default). A KV load in flight holds them out for its first `--priority-prefill-budget-cap-tokens` steps only, so a load that never completes holds nothing after those. Decodes are never cut, a request that does not fit holds nothing back, and nothing is held back while no running slot is free.
+
 ```bash
-vllm serve <model> --scheduling-policy priority --max-priority-preemptions-per-step 2
+vllm serve <model> --scheduling-policy priority \
+    --max-priority-preemptions-per-step 2 --priority-prefill-budget-cap
 ```
 
 ## Chunked Prefill
