@@ -53,6 +53,7 @@ from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
+    InvalidSentenceTransformersModulePath,
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
     try_get_dense_modules,
@@ -2433,6 +2434,45 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     assert try_get_dense_modules(str(tmp_path)) == [
         {**dense_config, "folder": "2_Dense"}
     ]
+
+
+@pytest.mark.parametrize(
+    ("module_type", "reader"),
+    [
+        ("sentence_transformers.models.Dense", try_get_dense_modules),
+        ("sentence_transformers.models.Pooling", get_pooling_config),
+    ],
+)
+@pytest.mark.parametrize(
+    "escape",
+    ["absolute", "parent", "directory_symlink", "file_symlink", "non_string"],
+)
+def test_sentence_transformers_config_rejects_outside_model(
+    tmp_path, module_type, reader, escape
+):
+    model = tmp_path / "model"
+    model.mkdir()
+    victim = tmp_path / "victim"
+    _write_json(victim / "config.json", {"out_features": 4})
+
+    if escape == "absolute":
+        folder = str(victim)
+    elif escape == "parent":
+        folder = "../victim"
+    elif escape == "directory_symlink":
+        (model / "linked").symlink_to(victim, target_is_directory=True)
+        folder = "linked"
+    elif escape == "file_symlink":
+        (model / "module").mkdir()
+        (model / "module" / "config.json").symlink_to(victim / "config.json")
+        folder = "module"
+    else:
+        folder = 1
+
+    _write_json(model / "modules.json", [{"type": module_type, "path": folder}])
+
+    with pytest.raises(InvalidSentenceTransformersModulePath):
+        reader(str(model))
 
 
 @pytest.mark.skipif(
