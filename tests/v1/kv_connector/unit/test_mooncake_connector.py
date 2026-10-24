@@ -2959,3 +2959,210 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.fixture
+def readiness_sender():
+    with mooncake_register_worker(
+        _make_test_kv_cache_config(), kv_role="kv_producer"
+    ) as (worker, _):
+        try:
+            worker.num_sender_tasks = 2
+            worker._sender_semaphore = asyncio.Semaphore(worker.num_sender_tasks)
+            worker.max_pending_transfers = 128
+            worker.kv_caches_base_addr = [0x1000]
+            worker.block_len_per_layer = worker.kv_block_len_per_layer = [256]
+            worker.registered_layer_names = ["model.layers.0.self_attn"]
+            worker.registered_layer_indices = [0]
+            worker.registered_group_indices = [0]
+            with patch.object(
+                worker,
+                "sender_loop",
+                SimpleNamespace(run_in_executor=AsyncMock(return_value=0)),
+            ):
+                yield worker
+        finally:
+            worker.shutdown()
+            worker.is_kv_consumer = True
+
+
+def _readiness_pull(req_id):
+    return MooncakeXferMetadata(
+        remote_hostname="consumer",
+        remote_port=1234,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={req_id: (req_id, [[2]])},
+        kv_caches_base_addr=[0x2000],
+        block_lens=[256],
+        kv_block_lens=[256],
+        registered_layer_names=["model.layers.0.self_attn"],
+        registered_layer_indices=[0],
+    )
+
+
+async def _wait_for_sender(predicate):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=1)
+
+
+@contextlib.asynccontextmanager
+async def _readiness_listener(worker):
+    incoming: asyncio.Queue[tuple[bytes, bytes]] = asyncio.Queue()
+    sock = AsyncMock(
+        spec=zmq.asyncio.Socket, send_multipart=AsyncMock(), recv_multipart=AsyncMock()
+    )
+    sock.bind_to_random_port = MagicMock(return_value=1234)
+    sock.recv_multipart.side_effect = incoming.get
+    worker.async_zmq_ctx = MagicMock()
+    worker.async_zmq_ctx.socket.return_value = sock
+    worker.hostname = "127.0.0.1"
+    worker.register_worker_with_bootstrap = AsyncMock()
+    ready = MagicMock()
+    task = asyncio.create_task(worker._mooncake_sender_listener(ready))
+    try:
+        await _wait_for_sender(lambda: ready.set.called)
+        yield incoming, sock
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _ready_producer(worker, req_id):
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_to_send[req_id] = (req_id, [])
+    await worker.record_send_reqs(metadata)
+    metadata.reqs_to_send[req_id] = (req_id, [[1]])
+    await worker.record_send_reqs(metadata)
+
+
+@pytest.mark.asyncio
+async def test_ownerless_waiters_do_not_block_ready_transfers(readiness_sender):
+    """More missing P requests than send slots must not delay ready KV."""
+    worker = readiness_sender
+    async with _readiness_listener(worker) as (incoming, sock):
+        for i in range(6):
+            incoming.put_nowait(
+                (b"missing", worker._encoder.encode(_readiness_pull(str(i))))
+            )
+        await _wait_for_sender(lambda: len(worker.reqs_need_send) == 6)
+        await _ready_producer(worker, "fresh")
+        incoming.put_nowait(
+            (b"fresh", worker._encoder.encode(_readiness_pull("fresh")))
+        )
+        await _wait_for_sender(lambda: sock.send_multipart.called)
+        identity, encoded = sock.send_multipart.call_args.args[0]
+        response = worker._xfer_resp_decoder.decode(encoded)
+        assert identity == b"fresh"
+        assert response.ok_reqs == ["fresh"]
+        assert response.err_reqs is None
+        assert worker.finished_sending_reqs == {"fresh"}
+        assert len(worker.reqs_need_send) == 6
+        worker.sender_loop.run_in_executor.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_transfer_limit_fails_fast_and_recovers(readiness_sender):
+    """Bound readiness tasks and admit fresh work after pending work completes."""
+    worker = readiness_sender
+    worker.max_pending_transfers = 2
+    async with _readiness_listener(worker) as (incoming, sock):
+        for req_id in ("old0", "old1", "overflow"):
+            incoming.put_nowait(
+                (req_id.encode(), worker._encoder.encode(_readiness_pull(req_id)))
+            )
+        await _wait_for_sender(lambda: sock.send_multipart.called)
+        identity, encoded = sock.send_multipart.call_args.args[0]
+        response = worker._xfer_resp_decoder.decode(encoded)
+        assert identity == b"overflow"
+        assert response.status == MooncakeXferResponseStatus.ERROR
+        assert "too many pending transfers" in response.err_msg
+        assert "overflow" not in worker.reqs_need_send
+        await _wait_for_sender(lambda: len(worker.reqs_need_send) == 2)
+        for req_id in ("old0", "old1"):
+            await _ready_producer(worker, req_id)
+        await _wait_for_sender(lambda: sock.send_multipart.await_count == 3)
+        await _wait_for_sender(lambda: not worker._pending_sender_tasks)
+        await _ready_producer(worker, "fresh")
+        incoming.put_nowait(
+            (b"fresh", worker._encoder.encode(_readiness_pull("fresh")))
+        )
+        await _wait_for_sender(lambda: sock.send_multipart.await_count == 4)
+        response = worker._xfer_resp_decoder.decode(
+            sock.send_multipart.call_args.args[0][1]
+        )
+        assert response.ok_reqs == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_ready_transfers_respect_limit_and_retain_blocks(readiness_sender):
+    """Ready KV stays pinned while waiting for the bounded data-plane pool."""
+    worker = readiness_sender
+    release = asyncio.Event()
+
+    async def send(*args):
+        await release.wait()
+        return 0
+
+    worker.sender_loop.run_in_executor.side_effect = send
+    tasks = []
+    metas = []
+    try:
+        for req_id in ("one", "two", "three"):
+            await _ready_producer(worker, req_id)
+            metas.append(worker.reqs_need_send[req_id])
+            tasks.append(
+                asyncio.create_task(
+                    worker.send_kv_to_decode(
+                        b"d",
+                        AsyncMock(
+                            spec=zmq.asyncio.Socket,
+                            send_multipart=AsyncMock(),
+                            recv_multipart=AsyncMock(),
+                        ),
+                        _readiness_pull(req_id),
+                    )
+                )
+            )
+        await _wait_for_sender(lambda: all(meta.sending == 1 for meta in metas))
+        assert worker.sender_loop.run_in_executor.await_count == 2
+        for meta in metas:
+            meta.expire_time = time.perf_counter() - 1
+        assert not await worker.fetch_finished_sending_reqs()
+        assert len(worker.reqs_need_send) == 3
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert worker.sender_loop.run_in_executor.await_count == 3
+        assert worker.finished_sending_reqs == {"one", "two", "three"}
+        assert all(meta.sending == 0 for meta in metas)
+        assert not worker.reqs_need_send
+    finally:
+        release.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sender_error_does_not_leave_blocks_marked_sending(readiness_sender):
+    worker = readiness_sender
+    await _ready_producer(worker, "ready")
+    meta = worker.reqs_need_send["ready"]
+    worker._build_transfer_params = AsyncMock(
+        side_effect=RuntimeError("bad descriptor")
+    )
+    sock = AsyncMock(
+        spec=zmq.asyncio.Socket, send_multipart=AsyncMock(), recv_multipart=AsyncMock()
+    )
+    await worker._sender_worker(
+        sock, b"d", worker._encoder.encode(_readiness_pull("ready"))
+    )
+    response = worker._xfer_resp_decoder.decode(
+        sock.send_multipart.call_args.args[0][1]
+    )
+    assert response.status == MooncakeXferResponseStatus.ERROR
+    assert meta.sending == 0
+    assert not worker.finished_sending_reqs

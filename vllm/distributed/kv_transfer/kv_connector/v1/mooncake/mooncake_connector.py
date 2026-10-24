@@ -1251,10 +1251,14 @@ class MooncakeConnectorWorker:
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
-        # Create more tasks than workers to keep the thread pool saturated.
-        # Tasks can await async events, so a surplus (2x is a robust heuristic)
-        # prevents workers from idling.
         self.num_sender_tasks = self.num_sender_workers * 2
+        self.max_pending_transfers = int(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "max_pending_transfers", 1024
+            )
+        )
+        if self.max_pending_transfers <= 0:
+            raise ValueError("Mooncake max_pending_transfers must be positive")
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
@@ -1337,8 +1341,8 @@ class MooncakeConnectorWorker:
                 "Mooncake Prefiller: use %d workers to send kvcaches",
                 self.num_sender_workers,
             )
-            # An asyncio queue to buffer incoming requests for the sender
-            self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
+            # Readiness waits do not occupy the bounded data-transfer slots.
+            self._sender_semaphore = asyncio.Semaphore(self.num_sender_tasks)
             self.sender_loop = asyncio.new_event_loop()
             # Background thread for processing new sending requests.
             self._sender_listener_t = threading.Thread(
@@ -1516,18 +1520,28 @@ class MooncakeConnectorWorker:
 
         await self.register_worker_with_bootstrap()
 
-        # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
+        self._pending_sender_tasks: set[asyncio.Task[None]] = set()
+        sender_tasks = self._pending_sender_tasks
 
         ready_event.set()
 
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
-                await self.sender_worker_queue.put((identity, metadata_bytes))
+                if len(sender_tasks) >= self.max_pending_transfers:
+                    response = MooncakeXferResponse(
+                        status=MooncakeXferResponseStatus.ERROR,
+                        err_msg="Mooncake sender has too many pending transfers.",
+                    )
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    continue
+                task = asyncio.create_task(
+                    self._sender_worker(sock, identity, metadata_bytes)
+                )
+                sender_tasks.add(task)
+                task.add_done_callback(sender_tasks.discard)
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
         except Exception as e:
@@ -1539,27 +1553,23 @@ class MooncakeConnectorWorker:
             await asyncio.gather(*sender_tasks, return_exceptions=True)
             sock.close()
 
-    async def _sender_worker(self, sock: zmq.asyncio.Socket):
-        while True:
+    async def _sender_worker(
+        self, sock: zmq.asyncio.Socket, identity: bytes, metadata_bytes: bytes
+    ):
+        try:
+            metadata = self._xfer_meta_decoder.decode(metadata_bytes)
+            await self.send_kv_to_decode(identity, sock, metadata)
+        except zmq.ContextTerminated:
+            return
+        except Exception as e:
+            logger.error("Error processing Mooncake xfer request: %s", e)
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
+            )
             try:
-                identity, metadata_bytes = await self.sender_worker_queue.get()
-                try:
-                    metadata = self._xfer_meta_decoder.decode(metadata_bytes)
-                    await self.send_kv_to_decode(identity, sock, metadata)
-                except Exception as e:
-                    logger.error("Error processing Mooncake xfer request: %s", e)
-                    error_response = MooncakeXferResponse(
-                        status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
-                    )
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(error_response))
-                    )
-                finally:
-                    self.sender_worker_queue.task_done()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Error in _sender_worker: %s", e)
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+            except zmq.ZMQError:
+                logger.debug("Mooncake sender socket closed while reporting an error")
 
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
@@ -1666,54 +1676,79 @@ class MooncakeConnectorWorker:
             for d_req_id, send_meta in pending_reqs.items()
         ]
 
-        while wait_tasks:
-            done, pending = await asyncio.wait(
-                wait_tasks,
-                timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if not done:
-                # Timeout, abort all pending requests.
-                for task in wait_tasks:
-                    task.cancel()
-                logger.warning(
-                    "Timeout waiting for P side ready: %s", list(pending_reqs)
+        try:
+            while wait_tasks:
+                done, pending = await asyncio.wait(
+                    wait_tasks,
+                    timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                response = MooncakeXferResponse(
-                    status=MooncakeXferResponseStatus.FINISH,
-                    err_reqs=list(pending_reqs),
-                    err_msg="Timeout waiting for P side ready.",
-                    layout_id=meta.layout_id,
-                )
-                await sock.send_multipart((identity, self._encoder.encode(response)))
-                break
 
-            wait_tasks = list(pending)
-            response_status = (
-                MooncakeXferResponseStatus.CONTINUE
-                if wait_tasks
-                else MooncakeXferResponseStatus.FINISH
-            )
-            ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            for task in done:
-                d_req_id, send_meta = task.result()
-                del pending_reqs[d_req_id]
-                # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
-                    # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
-                    if not send_meta.need_send:
-                        self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
-                        )
-                    ready_reqs.append((d_req_id, send_meta))
-                else:
-                    # Otherwise (expired, very unlikely), just forget it.
+                if not done:
+                    # Timeout, abort all pending requests.
+                    for task in wait_tasks:
+                        task.cancel()
                     logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
+                        "Timeout waiting for P side ready: %s", list(pending_reqs)
                     )
+                    response = MooncakeXferResponse(
+                        status=MooncakeXferResponseStatus.FINISH,
+                        err_reqs=list(pending_reqs),
+                        err_msg="Timeout waiting for P side ready.",
+                        layout_id=meta.layout_id,
+                    )
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    break
 
+                wait_tasks = list(pending)
+                response_status = (
+                    MooncakeXferResponseStatus.CONTINUE
+                    if wait_tasks
+                    else MooncakeXferResponseStatus.FINISH
+                )
+                ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
+                for task in done:
+                    d_req_id, send_meta = task.result()
+                    del pending_reqs[d_req_id]
+                    # Do we still in reqs_need_send (not expired)?
+                    if send_meta.transfer_id in self.reqs_need_send:
+                        # Mark it sending to avoid expiration.
+                        send_meta.sending += 1
+                        if not send_meta.need_send:
+                            self.resolve_need_send(
+                                send_meta, remote_tp_ranks, meta.remote_pp_size
+                            )
+                        ready_reqs.append((d_req_id, send_meta))
+                    else:
+                        # Otherwise (expired, very unlikely), just forget it.
+                        logger.warning(
+                            "Request %s expired before sending on P side.", d_req_id
+                        )
+
+                try:
+                    response = await self._send_ready_kv(
+                        ready_reqs, meta, local_regions, remote_regions, response_status
+                    )
+                finally:
+                    for _, send_meta in ready_reqs:
+                        send_meta.sending -= 1
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+        finally:
+            for task in wait_tasks:
+                task.cancel()
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
+
+    async def _send_ready_kv(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+        response_status: MooncakeXferResponseStatus,
+    ) -> MooncakeXferResponse:
+        async with self._sender_semaphore:
             (
                 src_ptrs,
                 dst_ptrs,
@@ -1758,8 +1793,6 @@ class MooncakeConnectorWorker:
                     ok_ready_reqs = []
 
             for d_req_id, send_meta in ready_reqs:
-                send_meta.sending -= 1
-
                 if d_req_id in err_req_set:
                     continue
 
@@ -1777,7 +1810,7 @@ class MooncakeConnectorWorker:
                 err_msg=err_msg,
                 layout_id=meta.layout_id,
             )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return response
 
     def resolve_need_send(
         self,
