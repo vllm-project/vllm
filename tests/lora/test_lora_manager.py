@@ -1100,6 +1100,69 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     torch.testing.assert_close(packed_lora1.lora_b[1], up_lora1.lora_b)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_dummy_run_without_active_loras_keeps_adapters(
+    dist_init, dummy_model, device, tmp_path
+):
+    """A dummy run that activates no LoRAs, like an idle data parallel rank's
+    dummy batch, leaves loaded adapters alone, including ones whose ids collide
+    with the dummy LoRA ids."""
+    import numpy as np
+
+    from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+    )
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    runner = LoRAModelRunnerMixin.__new__(LoRAModelRunnerMixin)
+    runner.lora_config = lora_config
+    runner.lora_manager = LRUCacheWorkerLoRAManager(
+        vllm_config, device, EMBEDDING_MODULES
+    )
+    runner.lora_manager.create_lora_manager(dummy_model, vllm_config)
+    adapter_manager = runner.lora_manager._adapter_manager
+
+    assert runner.add_lora(LoRARequest("adapter-1", 1, dummy_lora_files))
+    assert runner.add_lora(LoRARequest("adapter-3", 3, dummy_lora_files))
+    assert runner.list_loras() == {1, 3}
+    slots = list(adapter_manager.lora_index_to_id)
+    assert set(slots) == {1, 3}
+
+    num_tokens = np.ones(2, dtype=np.int32)
+    for remove_lora in (True, False):
+        with runner.maybe_dummy_run_with_lora(
+            lora_config,
+            num_tokens,
+            num_tokens,
+            remove_lora=remove_lora,
+            num_active_loras=0,
+        ):
+            assert runner.list_loras() == {1, 3}
+        assert runner.list_loras() == {1, 3}
+        assert adapter_manager.lora_index_to_id == slots
+
+    # Warmup and graph capture activate dummy LoRAs and then drop every
+    # adapter, which is only safe before any real adapter is loaded.
+    with runner.maybe_dummy_run_with_lora(
+        lora_config, num_tokens, num_tokens, num_active_loras=2
+    ):
+        assert set(adapter_manager.lora_index_to_id) == {1, 2}
+    assert runner.list_loras() == set()
+
+
 def _test_target_modules(
     model,
     target_modules: list[str] | None,
