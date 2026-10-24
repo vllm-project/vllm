@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    model_serializer,
     model_validator,
 )
 
@@ -138,3 +139,10 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
     completion_tokens_details: CompletionTokenUsageInfo | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if data.get("prompt_tokens_details") is None:
+            data.pop("prompt_tokens_details", None)
+        return data
