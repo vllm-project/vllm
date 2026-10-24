@@ -70,6 +70,11 @@ def _reference_weight(module: nn.Module) -> torch.Tensor | None:
     return None
 
 
+def _call_as_module(self: nn.Module, *args, **kwargs):
+    """Call `self` through `nn.Module.__call__`, as patched by fx while tracing."""
+    return nn.Module.__call__(self, *args, **kwargs)
+
+
 class _MetaProxy(fx.Proxy):
     """Proxy carrying the meta-tensor value of the traced expression.
 
@@ -124,6 +129,32 @@ class _AllLeafTracer(fx.Tracer):
 
     def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
         return True
+
+    def trace(self, root, concrete_args=None):
+        # Classes which override `__call__` (e.g. vLLM's `support_torch_compile`) skip
+        # the `nn.Module.__call__` that fx patches, so would be traced through
+        overriding = {
+            cls for m in root.modules() if (cls := type(m)).__call__ is not _MODULE_CALL
+        }
+        original = {cls: cls.__dict__.get("__call__") for cls in overriding}
+        for cls in overriding:
+            cls.__call__ = _call_as_module  # type: ignore[method-assign]
+        try:
+            return super().trace(root, concrete_args)
+        finally:
+            for cls, call in original.items():
+                if call is None:
+                    del cls.__call__
+                else:
+                    cls.__call__ = call  # type: ignore[method-assign]
+
+    def call_module(self, m, forward, args, kwargs):
+        # Modules which are not submodules (e.g. a global activation) are traced through
+        try:
+            self.path_of_module(m)
+        except NameError:
+            return forward(*args, **kwargs)
+        return super().call_module(m, forward, args, kwargs)
 
     def proxy(self, node: fx.Node) -> fx.Proxy:
         return _MetaProxy(node, self)
@@ -246,14 +277,16 @@ def _leaf_attention_interfaces():
     return mock.patch.object(AttentionInterface, "get_interface", get_interface)
 
 
-def trace(module: nn.Module) -> fx.Graph | None:
-    """Trace `module.forward`, returning the partial graph on failure."""
+def trace(
+    module: nn.Module, concrete_args: dict[str, Any] | None = None, partial: bool = True
+) -> fx.Graph | None:
+    """Trace `module.forward`, returning the partial graph on failure unless `partial`
+    is `False`. `concrete_args` that `forward` does not take are ignored."""
     parameters = forward_parameters(type(module))
     # vLLM never passes `past_key_values` so it is always the default value of `None`.
     # Make this concrete to simplify tracing.
-    concrete_args = None
-    if "past_key_values" in parameters:
-        concrete_args = {"past_key_values": None}
+    concrete_args = {"past_key_values": None, **(concrete_args or {})}
+    concrete_args = {k: v for k, v in concrete_args.items() if k in parameters}
     # Get the name of the kwargs parameter passed to module.forward (usually "kwargs")
     tracer = _AllLeafTracer()
     tracer.varkw = next(
@@ -266,10 +299,10 @@ def trace(module: nn.Module) -> fx.Graph | None:
     )
     try:
         with _leaf_attention_interfaces():
-            return tracer.trace(module, concrete_args=concrete_args)
+            return tracer.trace(module, concrete_args=concrete_args or None)
     except Exception as exc:
         logger.debug("Could not fully trace %s: %s", type(module), exc)
-        return getattr(tracer, "graph", None)
+        return getattr(tracer, "graph", None) if partial else None
 
 
 def recover_forward(cls: type[nn.Module]) -> tuple[ast.FunctionDef, Callable]:
