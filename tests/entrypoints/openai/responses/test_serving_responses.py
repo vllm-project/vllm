@@ -2516,3 +2516,25 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+@pytest.mark.parametrize(
+    ("top_logprobs", "expected_tokens"),
+    [(-1, ["a", "b", "c"]), (2, ["a", "b"]), (0, [])],
+)
+def test_response_logprobs_honor_top_logprobs(top_logprobs, expected_tokens):
+    """top_logprobs=-1 means every candidate, as in Chat Completions."""
+    serving = _make_serving_instance()
+    step = {
+        token_id: SampleLogprob(logprob=-float(token_id), decoded_token=token)
+        for token_id, token in enumerate(["a", "b", "c"], start=1)
+    }
+
+    (logprob,) = serving._create_response_logprobs(
+        token_ids=[1],
+        logprobs=[step],
+        tokenizer=MagicMock(),
+        top_logprobs=top_logprobs,
+    )
+
+    assert [top.token for top in logprob.top_logprobs] == expected_tokens
