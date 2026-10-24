@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
 )
 
@@ -2409,29 +2410,70 @@ def _make_host_buffer_worker(copy_op):
 
 
 @pytest.mark.cpu_test
+def test_host_buffer_keeps_padded_page_stride():
+    """A Mamba state padded to the attention page keeps that padding in its host
+    buffer, so blocks strided by the padded page stay in the registered memory."""
+    num_blocks, padded_page = 4, 256
+    worker = _make_host_buffer_worker(copy_op=None)
+    worker.use_mla = False
+    worker.kv_cache_layout = "LBHNC"
+    worker._layer_specs = {
+        "mamba": MambaSpec(
+            block_size=16,
+            shapes=((16,), (16,)),
+            dtypes=(torch.float16, torch.float16),
+            page_size_padded=padded_page,
+        )
+    }
+    content = worker._layer_specs["mamba"].state_content_size_bytes
+    # Device view as allocate_kv_cache builds it: unpadded content per block,
+    # blocks a padded page apart.
+    device = torch.randint(
+        -128, 127, (num_blocks * padded_page,), dtype=torch.int8
+    ).as_strided((num_blocks, 1, 1, content), (padded_page, content, content, 1))
+
+    worker.initialize_host_xfer_buffer(
+        {"mamba": device, "attn": torch.empty(4, 2, 16, 8)}
+    )
+
+    host = worker.host_xfer_buffers["mamba"]
+    assert host.shape == device.shape
+    assert host.stride(0) * host.element_size() == padded_page
+    assert host.untyped_storage().nbytes() == num_blocks * padded_page
+    assert worker.host_xfer_buffers["attn"].is_contiguous()
+    blocks = torch.tensor([3, 0])
+    host[blocks] = device[blocks]
+    torch.testing.assert_close(host[blocks], device[blocks])
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_block_ids,expected_ids",
+    "group_block_ids",
     [
-        # Single group (non-hybrid model): one copy, as before.
-        ([[1, 2, 3]], [1, 2, 3]),
-        # Hybrid model: three groups collapse into a single copy.
-        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
+        # Single group (non-hybrid model).
+        [[1, 2, 3]],
+        # Hybrid model: each group copies only its own layers.
+        [[1, 2], [3, 4], [5]],
         # An empty group contributes no ids.
-        ([[1, 2], []], [1, 2]),
+        [[1, 2], []],
     ],
 )
-def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
-    """h2d copies are issued once per request, not once per KV cache group."""
+def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
 
     calls = []
     worker = _make_host_buffer_worker(
         lambda src, dst, src_ids, dst_ids, direction: calls.append(
-            (src_ids, dst_ids, direction)
+            (list(src), list(dst), src_ids, dst_ids, direction)
         )
     )
-    worker.host_xfer_buffers = {"layer": None}
-    worker.device_kv_caches = {"layer": None}
+    names = [f"layer.{g}" for g in range(len(group_block_ids))]
+    # "shared" reuses another layer's KV cache: a host buffer, no transfer group.
+    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
+    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[SimpleNamespace(layer_names=[name]) for name in names]
+    )
 
     meta = ReqMeta(
         local_block_ids=group_block_ids,
@@ -2440,4 +2482,51 @@ def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_id
     )
     worker.sync_recved_kv_to_device("req", meta)
 
-    assert calls == [(expected_ids, expected_ids, "h2d")]
+    assert calls == [
+        ([name], [name], ids, ids, "h2d") for name, ids in zip(names, group_block_ids)
+    ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "ratio,expected",
+    [(1, [[1, 2], [5]]), (2, [[2, 3, 4, 5], [5]])],
+    ids=["same_block_size", "smaller_kernel_blocks"],
+)
+def test_save_kv_to_host_copies_each_group_own_layers(ratio, expected):
+    """P saves each group's layers only at that group's blocks. With smaller
+    kernel blocks, attention ids are expanded but Mamba ids are not, so copying
+    a Mamba layer at attention kernel ids could index past its blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
+
+    calls = []
+    worker = _make_host_buffer_worker(
+        lambda src, dst, src_ids, dst_ids, direction: calls.append(
+            (list(src), list(dst), src_ids, dst_ids, direction)
+        )
+    )
+    worker._physical_blocks_per_logical_kv_block = ratio
+    names = ["attn", "mamba"]
+    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
+    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
+    specs = [
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+        MambaSpec(block_size=16, shapes=((16,),), dtypes=(torch.float16,)),
+    ]
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[
+            SimpleNamespace(layer_names=[name], kv_cache_spec=spec)
+            for name, spec in zip(names, specs)
+        ]
+    )
+
+    meta = ReqMeta(
+        local_block_ids=[[1, 2], [5]], local_physical_block_ids=[], tp_size=1
+    )
+    worker.save_kv_to_host(SimpleNamespace(reqs_to_save={"req": meta}))
+
+    assert calls == [
+        ([name], [name], ids, ids, "d2h") for name, ids in zip(names, expected)
+    ]

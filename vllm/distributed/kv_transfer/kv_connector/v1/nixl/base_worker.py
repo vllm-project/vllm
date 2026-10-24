@@ -1308,9 +1308,23 @@ class NixlBaseConnectorWorker:
                             kv_shape = tuple(kv_shape[i] for i in inv_order)
                             permute_shape = True
 
-                xfer_buffers[layer_name] = torch.empty(
-                    kv_shape, dtype=kv_dtype, device="cpu"
+                # Keep page padding (e.g. a Mamba state padded to the attention
+                # page): registration strides blocks by the padded page size.
+                padded_page_size = getattr(
+                    self._layer_specs.get(layer_name), "page_size_padded", None
                 )
+                if padded_page_size is None:
+                    xfer_buffers[layer_name] = torch.empty(
+                        kv_shape, dtype=kv_dtype, device="cpu"
+                    )
+                else:
+                    assert padded_page_size % kv_dtype.itemsize == 0
+                    page_numel = padded_page_size // kv_dtype.itemsize
+                    assert math.prod(kv_shape[1:]) <= page_numel
+                    page_strides = torch.empty(kv_shape[1:], device="meta").stride()
+                    xfer_buffers[layer_name] = torch.empty(
+                        kv_shape[0] * page_numel, dtype=kv_dtype, device="cpu"
+                    ).as_strided(kv_shape, (page_numel, *page_strides))
                 if permute_shape:
                     xfer_buffers[layer_name] = xfer_buffers[layer_name].permute(
                         inv_order
@@ -2984,18 +2998,20 @@ class NixlBaseConnectorWorker:
         assert self.copy_blocks is not None
 
         local_block_ids = meta.local_physical_block_ids
-        # Every KV cache group allocates from the same BlockPool, so block ids
-        # are unique across groups and the per-group copies can be issued as one.
-        block_ids = [block_id for group in local_block_ids for block_id in group]
-        # The h2d block copy below is intentionally synchronous.
+        # The h2d block copies below are intentionally synchronous.
         with gpu_sync_allowed():
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                block_ids,
-                block_ids,
-                "h2d",
-            )
+            # NIXL fills each layer's host buffer only at its own group's
+            # blocks, and layers of different groups share device tensors.
+            for group, block_ids in zip(
+                self.kv_cache_config.transfer_groups, local_block_ids
+            ):
+                self.copy_blocks(
+                    {n: self.host_xfer_buffers[n] for n in group.layer_names},
+                    {n: self.device_kv_caches[n] for n in group.layer_names},
+                    block_ids,
+                    block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -3022,19 +3038,20 @@ class NixlBaseConnectorWorker:
                         req_id,
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
-                # blocking
-                block_ids = [
-                    block_id
-                    for group in meta.local_physical_block_ids
-                    for block_id in group
-                ]
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    block_ids,
-                    block_ids,
-                    "d2h",
-                )
+                # Copy each group's layers only at that group's blocks, as in
+                # sync_recved_kv_to_device. Attention kernel block ids can
+                # exceed the number of Mamba state blocks.
+                for group, block_ids in zip(
+                    self.kv_cache_config.transfer_groups,
+                    meta.local_physical_block_ids,
+                ):
+                    self.copy_blocks(
+                        {n: self.device_kv_caches[n] for n in group.layer_names},
+                        {n: self.host_xfer_buffers[n] for n in group.layer_names},
+                        block_ids,
+                        block_ids,
+                        "d2h",
+                    )
 
     def post_process_device_kv_on_receive(
         self,
