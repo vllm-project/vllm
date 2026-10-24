@@ -121,6 +121,7 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         from vllm.platforms import current_platform
 
+        Glm5NextModelConfig._greedy_draft_argmax(vllm_config)
         cache_config = vllm_config.cache_config
         if (
             cache_config.cache_dtype != "auto"
@@ -140,6 +141,25 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
             and spec_config.kv_cache_dtype is None
         ):
             spec_config.kv_cache_dtype = "auto"
+
+    @staticmethod
+    def _greedy_draft_argmax(vllm_config: "VllmConfig") -> None:
+        """The specialized decode samples greedy MTP drafts from a vocab-parallel
+        argmax: the same tokens as the argmax of all-gathered logits."""
+        extra = vllm_config.additional_config
+        spec = vllm_config.speculative_config
+        if (
+            not isinstance(extra, dict)
+            or extra.get("decode_backend") != "latency_specialized"
+            or spec is None
+            or spec.method != "mtp"
+            or spec.draft_sample_method != "greedy"
+            or spec.enable_adaptive_verification
+            or spec.use_local_argmax_reduction
+        ):
+            return
+        spec.use_local_argmax_reduction = True
+        logger.info_once("GLM-5.3-Flash specialized decode: greedy draft argmax")
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
