@@ -50,7 +50,12 @@ class ScalingMiddleware:
         # waiting for the external orchestrator to remove its process.
         rank_retired = get_elastic_ep_rank_retired()
         serving_paused = get_scaling_elastic_ep() or rank_retired
-        if serving_paused and scope["path"] not in _SCALING_OBSERVABILITY_PATHS:
+        scale_request = scope["path"] == "/scale_elastic_ep"
+        if (
+            serving_paused
+            and scope["path"] not in _SCALING_OBSERVABILITY_PATHS
+            and not scale_request
+        ):
             error = (
                 "This data-parallel rank has been retired and is awaiting shutdown."
                 if rank_retired
