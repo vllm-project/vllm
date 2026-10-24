@@ -476,6 +476,41 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+def test_partial_tail_load_keeps_tail_chunk_storable():
+    """The chunk of a loaded partial tail is not a hit chunk.
+
+    Geometry: 16 tokens per chunk, a load of 28 tokens. Chunk 0 is a full hit,
+    and chunk 1 holds the partial tail (tokens 16-27). The request computes the
+    rest of chunk 1, so the full-attention group must store it when it is full.
+    If the store starts at chunk 2, chunk 1 is never stored, and every later
+    lookup of this prefix stops at the same partial tail. The Mamba group keeps
+    the skip: its block for chunk 1 holds the state at token 28.
+    """
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+
+    full_state, mamba_state = req_status.group_states
+    assert full_state.next_stored_chunk_idx == 1
+    assert mamba_state.next_stored_chunk_idx == 2
+
+
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
