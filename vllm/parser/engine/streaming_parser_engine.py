@@ -5,6 +5,7 @@ incremental lexing, and state-machine-driven semantic event emission."""
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ from vllm.parser.engine.incremental_lexer import (
     LexerShape,
     LexToken,
     TerminalDef,
+    terminals_from_literals,
 )
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -41,19 +43,33 @@ def _build_drop_info(
     tokenizer,
 ) -> _DropInfo | None:
     try:
-        special_tokens: list[str] = list(tokenizer.all_special_tokens)
-        special_ids: list[int] = list(tokenizer.all_special_ids)
+        special_tokens = tuple(tokenizer.all_special_tokens)
+        special_ids = tuple(tokenizer.all_special_ids)
     except (AttributeError, NotImplementedError):
         return None
 
-    if not special_tokens:
-        return None
-
     configured_texts = (
-        set(config.token_id_terminals.values())
+        frozenset(config.token_id_terminals.values())
         | config.terminal_literals
         | config.preserve_tokens
     )
+    return _compute_drop_info(
+        tuple(config.terminals.items()),
+        configured_texts,
+        special_tokens,
+        special_ids,
+    )
+
+
+@functools.lru_cache(maxsize=32)
+def _compute_drop_info(
+    terminals: tuple[tuple[str, str | tuple[str, ...]], ...],
+    configured_texts: frozenset[str],
+    special_tokens: tuple[str, ...],
+    special_ids: tuple[int, ...],
+) -> _DropInfo | None:
+    if not special_tokens:
+        return None
 
     extra_token_ids: dict[int, str] = {}
     drop_texts: set[str] = set()
@@ -77,7 +93,7 @@ def _build_drop_info(
         for text in drop_texts
     ]
 
-    all_terminal_defs = list(config.terminal_defs) + drop_terminal_defs
+    all_terminal_defs = terminals_from_literals(dict(terminals)) + drop_terminal_defs
     lexer_shape = LexerShape(all_terminal_defs)
 
     return _DropInfo(
