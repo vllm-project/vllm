@@ -8,8 +8,9 @@ from inspect import signature
 import pytest
 
 import vllm.envs as envs
+from vllm import SamplingParams
 from vllm.platforms import current_platform
-from vllm.v1.metrics.reader import Counter
+from vllm.v1.metrics.reader import Counter, Vector
 
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
@@ -449,3 +450,235 @@ def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2)
         use_v2=use_v2,
         speculative_method="mtp",
     )
+
+
+def _stress_metric_counts(llm) -> dict[str, int]:
+    return {
+        metric.name: metric.value
+        for metric in llm.get_metrics()
+        if isinstance(metric, Counter)
+    }
+
+
+def _stress_mamba_block_size(worker) -> int:
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    sizes = {
+        group.kv_cache_spec.block_size
+        for group in worker.model_runner.kv_cache_config.kv_cache_groups
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    }
+    assert len(sizes) == 1, sizes
+    return sizes.pop()
+
+
+def _generate_with_preemption(llm, block_size: int):
+    """Preempt active requests, then complete decode across three cache blocks."""
+    engine = llm.llm_engine
+    max_tokens = 16_384
+    assert 3 * block_size <= max_tokens, (block_size, max_tokens)
+    requests = {
+        "short": ("The capital of France is", 256),
+        "long": (
+            "Write a detailed history of mathematics, starting in antiquity.",
+            max_tokens,
+        ),
+    }
+    before = _stress_metric_counts(llm)
+    for request_id, (prompt, length) in requests.items():
+        engine.add_request(
+            request_id,
+            prompt,
+            SamplingParams(
+                temperature=0.0, max_tokens=length, ignore_eos=True, logprobs=5
+            ),
+        )
+    latest = {}
+    preempted = False
+    observed_turnover = False
+    for _ in range(max_tokens + 1024):
+        for output in engine.step():
+            latest[output.request_id] = output
+        if len(latest) != len(requests):
+            continue
+        short, long = latest["short"], latest["long"]
+        if not preempted and len(long.outputs[0].token_ids) >= 32:
+            assert not short.finished and not long.finished
+            assert llm.reset_prefix_cache(reset_running_requests=True)
+            preempted = True
+        observed_turnover |= short.finished and not long.finished
+        if all(output.finished for output in latest.values()):
+            break
+    assert preempted and observed_turnover
+    assert all(output.finished for output in latest.values())
+    after = _stress_metric_counts(llm)
+    assert after["vllm:num_preemptions"] - before["vllm:num_preemptions"] >= 2
+    result = []
+    for request_id, (_, length) in requests.items():
+        output = latest[request_id]
+        completion = output.outputs[0]
+        assert len(completion.token_ids) == length
+        assert completion.finish_reason == "length"
+        if request_id == "long":
+            prompt_len = len(output.prompt_token_ids)
+            crossed = (prompt_len + length - 1) // block_size - prompt_len // block_size
+            assert crossed >= 3, (prompt_len, length, block_size, crossed)
+            print(f"ReplaySSM stress: block_size={block_size}, crossings={crossed}")
+        result.append((completion.token_ids, completion.text, completion.logprobs))
+    return result
+
+
+@requires_flashinfer_replayssm_materialization
+@large_gpu_mark(min_gb=40)
+@pytest.mark.parametrize(
+    ("use_v2", "async_scheduling"),
+    [(False, False), (False, True), (True, True)],
+    ids=["v1-sync", "v1-async", "v2-async"],
+)
+def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
+    vllm_runner, monkeypatch, use_v2, async_scheduling
+):
+    """Check natural MTP, request turnover, preemption, and cached GSM8K answers."""
+    from ...evals.gsm8k.gsm8k_eval import INVALID, get_answer_value, load_gsm8k_data
+
+    train, questions = load_gsm8k_data()
+    questions = questions[:16]
+    labels = [get_answer_value(question["answer"]) for question in questions]
+    assert len(labels) == 16 and INVALID not in labels
+    quality_outputs, stress_outputs, scores = [], [], []
+    prompts = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+            envs.disable_envs_cache()
+            for use_replayssm in (False, True):
+                with vllm_runner(
+                    MAMBA2_MTP_MODEL,
+                    trust_remote_code=True,
+                    max_model_len=32_768,
+                    max_num_seqs=4,
+                    max_num_batched_tokens=2048,
+                    tensor_parallel_size=1,
+                    dtype="bfloat16",
+                    mamba_backend="flashinfer",
+                    mamba_ssm_cache_dtype="float16",
+                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
+                    enable_chunked_prefill=True,
+                    enable_mamba_cache_stochastic_rounding=True,
+                    mamba_cache_philox_rounds=5,
+                    async_scheduling=async_scheduling,
+                    disable_log_stats=False,
+                    speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+                    use_replayssm=use_replayssm,
+                    replayssm_buffer_len=16,
+                ) as runner:
+                    llm = runner.get_llm()
+                    config = llm.llm_engine.vllm_config
+                    assert config.use_v2_model_runner is use_v2
+                    assert config.scheduler_config.async_scheduling is async_scheduling
+                    (block_size,) = runner.collective_rpc(_stress_mamba_block_size)
+                    stress_outputs.append(_generate_with_preemption(llm, block_size))
+
+                    tokenizer = llm.get_tokenizer()
+                    if prompts is None:
+                        prefix = (
+                            "Solve each problem. End each answer with #### "
+                            "followed by the numerical answer.\n\n"
+                        )
+                        for example in train:
+                            prefix += (
+                                f"Question: {example['question']}\n"
+                                f"Answer: {example['answer']}\n\n"
+                            )
+                            if len(tokenizer.encode(prefix)) >= 12_288:
+                                break
+                        prompts = [
+                            prefix + f"Question: {question['question']}\nAnswer:"
+                            for question in questions
+                        ]
+                    assert len(tokenizer.encode(prefix)) >= 2 * block_size
+                    assert (
+                        max(len(tokenizer.encode(text)) for text in prompts) + 512
+                        < 32_768
+                    )
+                    # Prime the actual shared prefix without scoring warmup output.
+                    assert llm.reset_prefix_cache()
+                    llm.generate(
+                        prompts[:1], SamplingParams(temperature=0.0, max_tokens=1)
+                    )
+                    before = _stress_metric_counts(llm)
+                    outputs = llm.generate(
+                        prompts,
+                        SamplingParams(
+                            temperature=0.0,
+                            max_tokens=512,
+                            stop=["\nQuestion:"],
+                            logprobs=5,
+                        ),
+                    )
+                    after = _stress_metric_counts(llm)
+                    assert len(outputs) == len(labels)
+                    assert all(output.finished for output in outputs)
+                    assert (
+                        after["vllm:prefix_cache_hits"]
+                        > before["vllm:prefix_cache_hits"]
+                    )
+                    assert all(
+                        output.num_cached_tokens is not None
+                        and output.num_cached_tokens > 0
+                        for output in outputs
+                    )
+                    accepted = (
+                        after["vllm:spec_decode_num_accepted_tokens"]
+                        - before["vllm:spec_decode_num_accepted_tokens"]
+                    )
+                    drafted = (
+                        after["vllm:spec_decode_num_draft_tokens"]
+                        - before["vllm:spec_decode_num_draft_tokens"]
+                    )
+                    assert 0 < accepted < drafted, (accepted, drafted)
+                    positions = [
+                        metric.values
+                        for metric in llm.get_metrics()
+                        if isinstance(metric, Vector)
+                        and metric.name
+                        == "vllm:spec_decode_num_accepted_tokens_per_pos"
+                    ]
+                    assert len(positions) == 1 and positions[0][0] > positions[0][-1]
+                    answers = [
+                        get_answer_value(output.outputs[0].text) for output in outputs
+                    ]
+                    score = sum(
+                        actual == expected for actual, expected in zip(answers, labels)
+                    )
+                    assert score >= 12, (score, answers, labels)
+                    scores.append(score)
+                    quality_outputs.append(
+                        [
+                            (
+                                output.outputs[0].token_ids,
+                                output.outputs[0].text,
+                                output.outputs[0].logprobs,
+                            )
+                            for output in outputs
+                        ]
+                    )
+                    print(
+                        f"ReplaySSM={use_replayssm}: GSM8K={score}/16, "
+                        f"accepted={accepted}/{drafted}, answers={answers}"
+                    )
+    finally:
+        envs.disable_envs_cache()
+
+    assert scores[1] >= scores[0], scores
+    for name, outputs in (
+        ("stress", stress_outputs),
+        ("cached_gsm8k", quality_outputs),
+    ):
+        check_logprobs_close(
+            outputs_0_lst=outputs[0],
+            outputs_1_lst=outputs[1],
+            name_0=f"baseline_{name}",
+            name_1=f"replayssm_{name}",
+        )

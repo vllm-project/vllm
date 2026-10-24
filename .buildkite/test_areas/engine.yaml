@@ -171,6 +171,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
+    - tests/evals/gsm8k/gsm8k_eval.py
     - tests/kernels/mamba/test_ssu_dispatch.py
     - vllm/v1/worker/utils.py
     - vllm/v1/core/kv_cache_planning.py
