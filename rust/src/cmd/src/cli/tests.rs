@@ -218,6 +218,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
@@ -734,6 +735,23 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_return_tokens_as_token_ids_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--return-tokens-as-token-ids",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.default_return_tokens_as_token_ids);
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1235,6 +1253,7 @@ fn frontend_args_accept_json() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
@@ -2150,6 +2169,7 @@ fn serve_args_accept_handshake_aliases() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
@@ -2320,6 +2340,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -2427,6 +2448,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -2622,6 +2644,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
