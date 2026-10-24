@@ -1535,10 +1535,21 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
   # the kernels and launchers. A file listed here is dead weight unless
   # attention_dispatch.cu also dispatches its entry point (guarded below).
+  # The int4 skinny GEMM is instantiated one unit per N_in (see
+  # WVSPLITK_INT4_LANE in skinny_gemms_int4.cu): with the whole op in one unit
+  # the 9-arch build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and forwards on N_in.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/skinny_gemms_int4.cu"
+    ${VLLM_SKINNY_INT4_SRC}
     "csrc/rocm/attention_dispatch.cu"
     "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
     "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
@@ -1598,14 +1609,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_INT4_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
     set(VLLM_SKINNY_SRC
       "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
+      ${VLLM_SKINNY_INT4_SRC})
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
