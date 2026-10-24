@@ -238,6 +238,22 @@ vllm run-batch \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
+For batch embeddings, create an `embeddings.jsonl` file with one request per line:
+
+```json
+{"custom_id":"embedding-1","method":"POST","url":"/v1/embeddings","body":{"model":"intfloat/multilingual-e5-small","input":"query: What is vLLM?","encoding_format":"float"}}
+```
+
+```bash
+vllm run-batch -i embeddings.jsonl -o results.jsonl \
+    --model intfloat/multilingual-e5-small
+```
+
+Each output keeps the request's `custom_id`. Successful embeddings appear in
+`response.body.data` with `response.status_code` set to `200` and `error` set to
+`null`. Check each output's status and error fields: a completed batch can
+contain failed requests.
+
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
 
 ## preload
