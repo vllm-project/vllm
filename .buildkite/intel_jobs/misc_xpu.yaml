@@ -44,7 +44,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s v1/sample || true'
+    pytest --continue-on-collection-errors -v -s v1/sample || true'
 - label: ':nvidia: (H200 MIG 18GB) V1 Logits + Oracle'
   key: v1-logits-oracle
   device: intel_gpu
@@ -72,10 +72,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s v1/logits_processors || true &&
-    pytest -v -s v1/test_oracle.py || true &&
-    pytest -v -s v1/test_request.py || true &&
-    pytest -v -s v1/test_outputs.py || true'
+    pytest --continue-on-collection-errors -v -s v1/logits_processors || true &&
+    pytest --continue-on-collection-errors -v -s v1/test_oracle.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/test_request.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/test_outputs.py || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 Core'
   key: v1-core
   device: intel_gpu
@@ -128,7 +128,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not cpu_test v1/core || true'
+    pytest --continue-on-collection-errors -v -s -m not cpu_test v1/core || true'
 - label: ':nvidia: (H200 MIG 18GB) V1 Executor + Worker'
   key: v1-executor-worker
   device: intel_gpu
@@ -155,9 +155,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s v1/executor || true &&
-    pytest -v -s v1/worker || true &&
-    pytest -v -s v1/streaming_input || true'
+    pytest --continue-on-collection-errors -v -s v1/executor || true &&
+    pytest --continue-on-collection-errors -v -s v1/worker || true &&
+    pytest --continue-on-collection-errors -v -s v1/streaming_input || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 KV Offload'
   key: v1-kv-offload
   device: intel_gpu
@@ -184,9 +184,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/install-kv-offload.sh || true &&
-    pytest -v -s v1/kv_offload || true &&
-    pytest -v -s v1/simple_kv_offload || true'
+    pytest --continue-on-collection-errors -v -s v1/kv_offload || true &&
+    pytest --continue-on-collection-errors -v -s v1/simple_kv_offload || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N'
   key: v1-kv-connectors
   device: intel_gpu
@@ -203,6 +202,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -214,8 +214,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not cpu_test v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
-    pytest -v -s -m not cpu_test v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest --continue-on-collection-errors -v -s -m not cpu_test v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
+    pytest --continue-on-collection-errors -v -s -m not cpu_test v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval'
   key: v1-metrics-lmeval
   device: intel_gpu
@@ -242,9 +242,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not cpu_test v1/metrics --ignore="v1/metrics/test_ray_metrics.py" || true &&
+    pytest --continue-on-collection-errors -v -s -m not cpu_test v1/metrics --ignore="v1/metrics/test_ray_metrics.py" || true &&
     pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api || true &&
-    pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine || true'
 - label: ':nvidia: (H200 MIG 18GB) Extract Hidden States Integration'
   key: extract-hidden-states-integration
   device: intel_gpu
@@ -273,7 +273,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration || true'
+    pytest --continue-on-collection-errors -v -s tests/v1/kv_connector/extract_hidden_states_integration || true'
 - label: ':nvidia: (L4) Extract Hidden States Integration'
   key: extract-hidden-states-integration-2-gpus
   device: intel_gpu
@@ -303,7 +303,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pytest -v -s -m distributed tests/v1/kv_connector/extract_hidden_states_integration || true'
+    pytest --continue-on-collection-errors -v -s -m distributed tests/v1/kv_connector/extract_hidden_states_integration || true'
 - label: ':nvidia: (H200 MIG 18GB) Regression'
   key: regression-2
   device: intel_gpu
@@ -341,7 +341,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install "modelscope\<1.38" || true &&
     cd tests &&
-    pytest -v -s test_regression.py || true'
+    pytest --continue-on-collection-errors -v -s test_regression.py || true'
 - label: ':nvidia: (L4) Metrics, Tracing'
   key: metrics-tracing-2-gpus-2
   device: intel_gpu
@@ -383,9 +383,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install "opentelemetry-sdk\>=1.26.0" "opentelemetry-api\>=1.26.0" "opentelemetry-exporter-otlp\>=1.26.0" "opentelemetry-semantic-conventions-ai\>=0.4.1" || true &&
     cd tests &&
-    pytest -v -s v1/tracing || true &&
-    pytest -v -s tracing || true'
-- label: ':nvidia: (H200 MIG 18GB) Python-only Installation'
+    pytest --continue-on-collection-errors -v -s v1/tracing || true &&
+    pytest --continue-on-collection-errors -v -s tracing || true'
+- label: ':nvidia: (H200 MIG 18GB) [Nightly] Python-only Installation'
   key: python-only-installation
   device: intel_gpu
   timeout_in_minutes: 20
@@ -411,7 +411,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     bash standalone_tests/python_only_compile.sh || true'
-- label: ':nvidia: (H200 MIG 18GB) Python 3.14 Smoke Nightly'
+- label: ':nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke'
   key: python-314-smoke-nightly
   device: intel_gpu
   timeout_in_minutes: 30
@@ -478,9 +478,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install av &&
     cd tests &&
-    pytest -v -s detokenizer || true &&
-    pytest -v -s -m "not cpu_test" ./multimodal || true &&
-    pytest -v -s utils_ || true'
+    pytest --continue-on-collection-errors -v -s detokenizer || true &&
+    pytest --continue-on-collection-errors -v -s -m "not cpu_test" ./multimodal || true &&
+    pytest --continue-on-collection-errors -v -s utils_ || true'
 - label: ':nvidia: (H100) Batch Invariance'
   key: batch-invariance-h100
   device: intel_gpu
@@ -518,11 +518,11 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     pip install pytest-timeout pytest-forked || true &&
     cd tests &&
-    pytest -v -s v1/determinism/test_batch_invariance.py || true &&
-    pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
-    pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py || true &&
-    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
-    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true'
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_lora_shrink_batch_invariant.py || true &&
+    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
+    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true'
 - label: ':nvidia: (B200) Batch Invariance'
   key: batch-invariance-b200
   device: intel_gpu
@@ -544,6 +544,7 @@ steps:
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
   - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
   - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
@@ -564,16 +565,17 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     pip install pytest-timeout pytest-forked || true &&
     cd tests &&
-    pytest -v -s v1/determinism/test_batch_invariance.py || true &&
-    pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
-    pytest -v -s v1/determinism/test_batch_invariance_vlm.py || true &&
-    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
-    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
-    pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py || true &&
-    pytest -v -s v1/determinism/test_matmul_batch_invariant.py || true &&
-    pytest -v -s v1/determinism/test_cutlass_batch_invariance.py || true &&
-    pytest -v -s v1/determinism/test_online_batch_invariance.py || true'
-- label: ':nvidia: (H100) Batch Invariance (Distributed)'
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_lora_shrink_batch_invariant.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance_vlm.py || true &&
+    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
+    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_nvfp4_batch_invariant.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_matmul_batch_invariant.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_cutlass_batch_invariance.py || true &&
+    pytest --continue-on-collection-errors -v -s v1/determinism/test_online_batch_invariance.py || true'
+- label: ':nvidia: (H100) [Nightly] Batch Invariance (Distributed)'
   key: batch-invariance-distributed-4xh100
   device: intel_gpu
   timeout_in_minutes: 45
@@ -609,11 +611,11 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     cd tests &&
-    VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN or without_batch_invariance_should_fail || true &&
-    VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN || true &&
-    VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
-    VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS=--data-parallel-size\ 4\ --enable-expert-parallel\ --max-model-len\ 4096 pytest -v -s v1/determinism/test_online_batch_invariance.py || true'
-- label: ':nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)'
+    VLLM_TEST_TP_SIZE=4 pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN or without_batch_invariance_should_fail || true &&
+    VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN || true &&
+    VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest --continue-on-collection-errors -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
+    VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest --continue-on-collection-errors -v -s v1/determinism/test_online_batch_invariance.py || true'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Acceptance Length (Large Models)'
   key: acceptance-length-test-large-models
   device: intel_gpu
   timeout_in_minutes: 20
@@ -640,4 +642,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
     cd tests &&
-    pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test || true'
+    pytest --continue-on-collection-errors -v -s v1/spec_decode/test_acceptance_length.py -m slow_test || true'

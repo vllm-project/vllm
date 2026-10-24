@@ -2,7 +2,7 @@ group: Models - Distributed XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (L4) Qwen4 Exp SP'
+- label: ':nvidia: (L4) [Nightly] Qwen4 Exp SP'
   key: qwen4-exp-sp-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 30
@@ -32,7 +32,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/qwen4_exp/test_tpsp.py || true'
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_tpsp.py || true'
 - label: ':nvidia: (L4) Distributed Models Shard %N'
   key: distributed-model-tests-2-gpus-2
   device: intel_gpu
@@ -63,9 +63,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install vllm[audio] || true &&
     cd tests &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "0" || TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "0" || pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m not slow_test || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "1" || pytest models/transformers/test_backend.py -v -s -m distributed(num_gpus=2) || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "1" || pytest models/language -v -s -m distributed(num_gpus=2) || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "2" || pytest models/multimodal -v -s -m distributed(num_gpus=2) --ignore models/multimodal/generation/test_whisper.py || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" == "2" || VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m distributed(num_gpus=2) || true'
+    test "$$BUILDKITE_PARALLEL_JOB" == "0" || TARGET_TEST_SUITE=MI300 pytest --continue-on-collection-errors -v -s basic_correctness/ -m distributed(num_gpus=2) || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" == "0" || pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_sharded_state_loader.py -m not slow_test || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" == "1" || pytest --continue-on-collection-errors models/transformers/test_backend.py -v -s -m distributed(num_gpus=2) || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" == "1" || pytest --continue-on-collection-errors models/language -v -s -m distributed(num_gpus=2) || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" == "2" || pytest --continue-on-collection-errors models/multimodal -v -s -m distributed(num_gpus=2) --ignore models/multimodal/generation/test_whisper.py || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" == "2" || VLLM_WORKER_MULTIPROC_METHOD=spawn pytest --continue-on-collection-errors models/multimodal/generation/test_whisper.py -v -s -m distributed(num_gpus=2) || true'
