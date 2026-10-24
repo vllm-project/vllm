@@ -1243,6 +1243,19 @@ def test_no_mm_input_chunking(warm_encoder_cache: bool):
         )
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_no_mm_input_chunking_rejects_small_prefill_cap(adaptive: bool):
+    with pytest.raises(ValueError, match="long_prefill_token_threshold"):
+        create_scheduler(
+            model="llava-hf/llava-1.5-7b-hf",
+            max_num_batched_tokens=2048,
+            max_model_len=4096,
+            disable_chunked_mm_input=True,
+            long_prefill_token_threshold=500,
+            long_prefill_token_threshold_adaptive=adaptive,
+        )
+
+
 def test_no_mm_input_chunking_for_same_step_duplicate():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",

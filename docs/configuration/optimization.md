@@ -79,6 +79,16 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+### Multimodal Prefill Caps
+
+With `--disable-chunked-mm-input`, a nonzero `--long-prefill-token-threshold`
+must be at least the model's maximum tokens per multimodal item. Otherwise,
+initialization fails rather than allowing contended requests to stall. Set the
+threshold to `0` to disable the cap, or increase it to fit a whole item. Adaptive
+thresholds follow the same requirement because their fair share can shrink as
+more requests arrive. Validation uses the configured maximum item size, even
+when a particular request contains a smaller item or runs alone.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
