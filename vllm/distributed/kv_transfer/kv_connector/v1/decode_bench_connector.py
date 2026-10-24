@@ -255,6 +255,15 @@ class DecodeBenchConnectorScheduler:
         self._startup_fill_group_ids = (
             _get_startup_fill_group_ids(kv_cache_config) if self.startup_fill else set()
         )
+        # Groups that opted out of external KV transfer (e.g. the HiSparse
+        # hot/resident tiers) are ephemeral per-request replicas rebuilt from
+        # their transferable source group after a connector load; there is
+        # nothing for this connector to fill in them.
+        self._non_transfer_group_ids = {
+            group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if not group.enable_kv_transfer
+        }
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
@@ -333,26 +342,17 @@ class DecodeBenchConnectorScheduler:
                 strict=True,
             )
         ):
-            if group_idx in self._startup_fill_group_ids:
+            if (
+                group_idx in self._startup_fill_group_ids
+                or group_idx in self._non_transfer_group_ids
+            ):
                 block_ids_per_group_list.append([])
                 continue
             is_circular_buffer = all(
                 isinstance(spec, CircularBufferSpec)
                 for spec in iter_layer_specs(group.kv_cache_spec)
             )
-            # Bounded, non-prefix-cacheable state caches (e.g. the HiSparse
-            # hot/resident tiers) allocate a fixed number of blocks per
-            # request regardless of sequence length, so token-range math
-            # does not apply: fill all of their allocated blocks, as for
-            # circular buffers. Being non-prefix-cacheable, this can never
-            # overwrite locally cached prefix blocks. Prefix-cacheable
-            # non-attention specs (e.g. Mamba) keep the token-range math,
-            # which holds for them today.
-            is_bounded_non_cacheable = all(
-                not isinstance(spec, AttentionSpec) and not spec.prefix_cacheable
-                for spec in iter_layer_specs(group.kv_cache_spec)
-            )
-            if not is_circular_buffer and not is_bounded_non_cacheable:
+            if not is_circular_buffer:
                 num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
                 external_block_start = num_local_computed_tokens // group_block_size
                 assert (
