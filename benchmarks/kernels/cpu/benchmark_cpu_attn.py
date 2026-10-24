@@ -264,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--isa",
         type=str,
-        choices=["vec", "neon", "amx", "amx_fp8", "vec16", "rvv"],
+        choices=["vec", "neon", "sve", "amx", "amx_fp8", "vec16", "rvv"],
         default=None,
     )
     parser.add_argument(
