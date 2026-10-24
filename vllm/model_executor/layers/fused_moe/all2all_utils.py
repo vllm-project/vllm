@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     GroupCoordinator,
@@ -339,7 +340,11 @@ def maybe_make_prepare_finalize(
 
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
         # block scales, which the experts consume without re-quantizing.
-        use_fp4_dispatch = quant_config.use_mxfp4_w4a4
+        # DeepSeek V4.1 a4w4 runs on a W4A16 quant config with MXFP4
+        # activations; opt-in, it takes the same pre-quantized FP4 input.
+        use_fp4_dispatch = quant_config.use_mxfp4_w4a4 or (
+            moe.use_mxfp4_w4a4_dsv4 and envs.VLLM_MORI_A4W4_FP4_DISPATCH
+        )
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = not use_fp4_dispatch and (

@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
+    VLLM_MORI_A4W4_FP4_DISPATCH: bool = False
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -1298,6 +1299,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
+    ),
+    # With VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 and MoRI: dispatch the MoE input
+    # as packed MXFP4 with e8m0 block scales, which the a4w4 experts take
+    # without quantizing again, instead of BF16 (a quarter of the bytes).
+    "VLLM_MORI_A4W4_FP4_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_MORI_A4W4_FP4_DISPATCH", "0"))
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
