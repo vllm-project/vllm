@@ -511,6 +511,8 @@ class SimpleCPUOffloadScheduler:
                 cpu_block_ids.append(cpu_blk.block_id)
                 cpu_blocks_to_touch.append(cpu_blk)
 
+        assert len(gpu_block_ids) == len(set(gpu_block_ids))
+
         # Touch CPU blocks to prevent eviction during async load.
         self.cpu_block_pool.touch(cpu_blocks_to_touch)
         # Release the temporary pin held since get_num_new_matched_tokens().
@@ -854,6 +856,9 @@ class SimpleCPUOffloadScheduler:
         """Return confirmed eager blocks, cursor advances, and event metadata."""
         assert self._gpu_block_pool is not None
         gpu_block_ids: list[int] = []
+        # A request's block table can repeat a GPU block (e.g. SWA reuse);
+        # in-flight tracking only covers earlier requests, so dedup here.
+        selected_gpu_block_ids: set[int] = set()
         advanced_per_group = [0] * len(self.cpu_kv_cache_config.kv_cache_groups)
         block_meta: list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None = (
             [] if self.enable_kv_cache_events else None
@@ -899,7 +904,8 @@ class SimpleCPUOffloadScheduler:
                     gpu_block = recovered
                     gpu_block_id = gpu_block.block_id
                 if (
-                    self._classify_store_candidate(gpu_block)
+                    gpu_block_id in selected_gpu_block_ids
+                    or self._classify_store_candidate(gpu_block)
                     is not _StoreAdmission.READY
                 ):
                     advanced_per_group[g] += 1
@@ -908,6 +914,7 @@ class SimpleCPUOffloadScheduler:
                     break
                 primary_block_hash = gpu_block.block_hash
                 assert primary_block_hash is not None
+                selected_gpu_block_ids.add(gpu_block_id)
                 gpu_block_ids.append(gpu_block_id)
                 advanced_per_group[g] += 1
                 if block_meta is not None:
@@ -1365,12 +1372,15 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
+            # Free CPU touch refs. Dedup to avoid double-free: the
+            # transfer pairs may repeat the same CPU block when
+            # different GPU blocks share identical content.
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.cpu_block_ids
+                for bid in dict.fromkeys(state.transfer_meta.cpu_block_ids)
             )
-            # Free GPU touch refs
+            # Free GPU touch refs. CPU-hit allocation gives each loaded block a
+            # distinct GPU block, asserted in update_state_after_alloc.
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(
                 self._gpu_block_pool.blocks[bid]
