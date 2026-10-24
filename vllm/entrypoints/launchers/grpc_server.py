@@ -23,6 +23,7 @@ import asyncio
 import signal
 import sys
 import time
+from functools import partial
 
 try:
     import grpc
@@ -51,6 +52,71 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+# Grace in-flight RPCs get with --shutdown-timeout 0. A positive timeout never
+# gives them less, so setting one is never less graceful than the default.
+_RPC_GRACE_S = 5.0
+# Teardown time EngineCore keeps past the drain budget (NIXL, device memory,
+# shm), as the default 5 s join gave it before.
+_ENGINE_TEARDOWN_S = 5.0
+# Time RPCs get to send their last responses once EngineCore has stopped;
+# whatever is still open after that (e.g. KV-event streams) is cancelled.
+_RPC_FLUSH_S = 5.0
+# How often to check whether the in-flight RPCs still have requests.
+_IDLE_POLL_S = 0.1
+
+
+async def _wait_for_requests(rpcs: asyncio.Future, async_llm: AsyncLLM) -> None:
+    """Return once ``rpcs`` is done or the RPCs have no request in flight.
+
+    EngineCore rejects every request it reads once its shutdown has started,
+    even one an RPC forwarded before SIGTERM, so it must keep running until
+    the requests are done. RPCs that carry none, such as KV-event streams, do
+    not hold it back. Idle has to hold on two polls in a row, which gives an
+    RPC accepted just before SIGTERM a poll interval to add its request.
+    """
+    idle = False
+    while not rpcs.done():
+        was_idle, idle = idle, async_llm.get_num_unfinished_requests() == 0
+        if was_idle and idle:
+            return
+        await asyncio.wait([rpcs], timeout=_IDLE_POLL_S)
+
+
+async def _drain_and_stop(server, async_llm: AsyncLLM, shutdown_timeout: int) -> None:
+    """Stop the gRPC server and AsyncLLM within ``--shutdown-timeout``.
+
+    0 keeps the abort behavior: in-flight RPCs get ``_RPC_GRACE_S``, then
+    EngineCore gets its default join. Otherwise the server refuses new RPCs at
+    once and EngineCore keeps serving until the in-flight requests are done;
+    RPCs still running at the deadline (``--shutdown-timeout``, but no less
+    than ``_RPC_GRACE_S``) are cancelled and abort their requests. EngineCore
+    then drains work that outlives an RPC, such as NIXL prefill blocks the
+    decode side has not read yet, until the same deadline plus
+    ``_ENGINE_TEARDOWN_S`` for teardown.
+    """
+    loop = asyncio.get_running_loop()
+    if shutdown_timeout == 0:
+        await server.stop(grace=_RPC_GRACE_S)
+        logger.info("gRPC server stopped")
+        await loop.run_in_executor(None, async_llm.shutdown)
+        logger.info("AsyncLLM engine stopped")
+        return
+
+    grace = max(shutdown_timeout, _RPC_GRACE_S)
+    deadline = loop.time() + grace
+    logger.info("Draining in-flight requests (shutdown_timeout=%ds)", shutdown_timeout)
+    rpcs = asyncio.ensure_future(server.stop(grace=grace))
+    await _wait_for_requests(rpcs, async_llm)
+    remaining = max(deadline - loop.time(), 0.0)
+    await loop.run_in_executor(
+        None, partial(async_llm.shutdown, timeout=remaining + _ENGINE_TEARDOWN_S)
+    )
+    logger.info("AsyncLLM engine stopped")
+    await asyncio.wait([rpcs], timeout=_RPC_FLUSH_S)
+    await server.stop(grace=None)
+    await rpcs
+    logger.info("gRPC server stopped")
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -146,8 +212,15 @@ async def serve_grpc(args: argparse.Namespace):
         # Handle shutdown signals
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
+        force_stops = []
 
         def signal_handler():
+            if stop_event.is_set():
+                # A second signal skips the drain: cancelling the RPCs aborts
+                # their requests, so EngineCore runs out of work and exits.
+                logger.info("Received another shutdown signal; cancelling RPCs")
+                force_stops.append(loop.create_task(server.stop(grace=None)))
+                return
             logger.info("Received shutdown signal")
             stop_event.set()
 
@@ -166,10 +239,7 @@ async def serve_grpc(args: argparse.Namespace):
             health_servicer.set_not_serving()
         except Exception:  # broad: must not prevent server.stop() / shutdown()
             logger.warning("Failed to set health status to NOT_SERVING", exc_info=True)
-        await server.stop(grace=5.0)
-        logger.info("gRPC server stopped")
-        async_llm.shutdown()
-        logger.info("AsyncLLM engine stopped")
+        await _drain_and_stop(server, async_llm, vllm_config.shutdown_timeout)
         logger.info("Shutdown complete")
 
 
