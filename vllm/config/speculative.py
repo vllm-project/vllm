@@ -692,6 +692,11 @@ class SpeculativeConfig:
         if self.method == "mtp" and self.draft_model_config is not None:
             factors.append(
                 getattr(
+                    self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+                )
+            )
+            factors.append(
+                getattr(
                     self.draft_model_config.hf_config,
                     "index_share_for_mtp_iteration",
                     False,
@@ -795,6 +800,7 @@ class SpeculativeConfig:
         ):
             from vllm.model_executor.models.mimo_v2_mtp import (
                 _MIMO_V2_PRO_NUM_MTP_LAYERS,
+                get_mimo_mtp_layer_count,
             )
 
             mtp_arch_maps = {
@@ -803,8 +809,12 @@ class SpeculativeConfig:
             }
 
             hf_config.model_type = "mimo_v2_mtp"
-            # vLLM currently supports only the first MiMo-V2 MTP layer.
-            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            # Preserve Omni's existing single-layer behavior pending validation.
+            n_predict = (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS
+                if arch == "MiMoV2OmniForCausalLM"
+                else get_mimo_mtp_layer_count(hf_config)
+            )
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
@@ -816,12 +826,11 @@ class SpeculativeConfig:
 
         if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
             from vllm.model_executor.models.mimo_v2_mtp import (
-                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+                get_mimo_mtp_layer_count,
             )
 
             hf_config.model_type = "mimo_v2_mtp"
-            # vLLM currently supports only the first MiMo-V2 MTP layer.
-            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            n_predict = get_mimo_mtp_layer_count(hf_config)
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
@@ -1441,6 +1450,7 @@ class SpeculativeConfig:
                         )
                     if (
                         self.num_speculative_tokens > 1
+                        and not self.use_multi_module_mtp()
                         and self.draft_model_config.hf_config.model_type
                         not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
                     ):
@@ -2140,6 +2150,15 @@ class SpeculativeConfig:
 
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
+
+    def validate_mimo_runner(self, use_v2: bool) -> None:
+        if (
+            not use_v2
+            and self.draft_model_config is not None
+            and self.draft_model_config.hf_config.model_type == "mimo_v2_mtp"
+            and self.use_multi_module_mtp()
+        ):
+            raise ValueError("Multi-layer MiMo MTP requires Model Runner V2")
 
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
