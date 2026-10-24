@@ -47,7 +47,8 @@ def write_zeros_to_output(
     stride_cm,
     stride_cn,
     pid_n,
-    N,
+    pid_n_local,
+    N_local,
     offs_token,
     token_mask,
     BLOCK_SIZE_M,
@@ -55,9 +56,9 @@ def write_zeros_to_output(
     compute_type,
 ):
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=compute_type)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_cn = pid_n_local * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N_local)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -139,14 +140,28 @@ def fused_moe_kernel_gptq_awq(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
+    
+    # TP sharding for MoE output projection (w2/down_proj):
+    # Each TP rank computes only its output shard (N_local = N // tp_size).
+    # The weight matrix B has full N dimension (replicated across ranks).
+    N_local = N // tp_size
+    N_start = tp_rank * N_local
+    N_end = N_start + N_local
+    
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_n = tl.cdiv(N_local, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_n_local = (pid % num_pid_in_group) // group_size_m
+    # Global pid_n for weight loading (B has full N dimension)
+    pid_n = N_start // BLOCK_SIZE_N + pid_n_local
+    
+    # If this rank has no work in N dimension, exit early
+    if N_local == 0:
+        return
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -167,12 +182,14 @@ def fused_moe_kernel_gptq_awq(
         # -----------------------------------------------------------
         # Write back zeros to the output when the expert is not
         # in the current expert parallel rank.
+        pid_n_local = pid_n - (N_start // BLOCK_SIZE_N)
         write_zeros_to_output(
             c_ptr,
             stride_cm,
             stride_cn,
             pid_n,
-            N,
+            pid_n_local,
+            N_local,
             offs_token,
             token_mask,
             BLOCK_SIZE_M,
@@ -288,9 +305,11 @@ def fused_moe_kernel_gptq_awq(
     accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # Use local pid_n for output indexing since C has sharded dimension
+    pid_n_local = pid_n - (N_start // BLOCK_SIZE_N)
+    offs_cn = pid_n_local * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N_local)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -349,6 +368,10 @@ def fused_moe_kernel(
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
+    # TP sharding for MoE output projection (w2/down_proj)
+    # When TP > 1, each rank computes only its output shard
+    tp_rank: tl.constexpr = 0,
+    tp_size: tl.constexpr = 1,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
 ):
@@ -384,14 +407,28 @@ def fused_moe_kernel(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
+    
+    # TP sharding for MoE output projection (w2/down_proj):
+    # Each TP rank computes only its output shard (N_local = N // tp_size).
+    # The weight matrix B has full N dimension (replicated across ranks).
+    N_local = N // tp_size
+    N_start = tp_rank * N_local
+    N_end = N_start + N_local
+    
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_n = tl.cdiv(N_local, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_n_local = (pid % num_pid_in_group) // group_size_m
+    # Global pid_n for weight loading (B has full N dimension)
+    pid_n = N_start // BLOCK_SIZE_N + pid_n_local
+    
+    # If this rank has no work in N dimension, exit early
+    if N_local == 0:
+        return
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -423,12 +460,14 @@ def fused_moe_kernel(
         # -----------------------------------------------------------
         # Write back zeros to the output when the expert is not
         # in the current expert parallel rank.
+        pid_n_local = pid_n - (N_start // BLOCK_SIZE_N)
         write_zeros_to_output(
             c_ptr,
             stride_cm,
             stride_cn,
             pid_n,
-            N,
+            pid_n_local,
+            N_local,
             offs_token,
             token_mask,
             BLOCK_SIZE_M,
@@ -602,9 +641,11 @@ def fused_moe_kernel(
 
     # -----------------------------------------------------------
     # Write back the block of the output
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # Use local pid_n for output indexing since C has sharded dimension
+    pid_n_local = pid_n - (N_start // BLOCK_SIZE_N)
+    offs_cn = pid_n_local * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N_local)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -831,9 +872,25 @@ def invoke_fused_moe_triton_kernel(
             )
     else:
         EM = num_tokens * config["BLOCK_SIZE_M"]
+    
+    # TP sharding for MoE output projection (w2/down_proj):
+    # Each TP rank computes only its shard of the hidden_size (output of w2).
+    from vllm.distributed.parallel_state import (
+        get_tensor_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
+    )
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    
+    # Full output dimension (hidden_size)
+    K_full = B.size(1)
+    # Local shard size
+    K_local = K_full // tp_size
+    
+    # Grid uses local K dimension
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+        * triton.cdiv(K_local, META["BLOCK_SIZE_N"]),
     )
     HAS_BIAS = B_bias is not None
 
@@ -872,7 +929,7 @@ def invoke_fused_moe_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.size(1),
+        N_full,  # Pass full N for kernel's internal calculations
         B.size(2),
         EM,
         num_tokens,
@@ -904,6 +961,8 @@ def invoke_fused_moe_triton_kernel(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
         **config,
     )
 

@@ -135,6 +135,8 @@ class PassConfig:
     """Eliminate no-op ops."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
+    fuse_moe_tp_collectives: bool = None  # type: ignore[assignment]
+    """Enable MoE TP collective optimization - shard expert output projection per TP rank."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -220,6 +222,7 @@ class PassConfig:
         "fuse_act_quant",
         "fuse_attn_quant",
         "fuse_allreduce_rms",
+        "fuse_moe_tp_collectives",
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
