@@ -551,10 +551,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
             and not cache_config.enable_prefix_caching
         ):
-            logger.warning_once(
-                "SWA bounded replay with PCP requires prefix caching; "
-                "decoder-side replay is not supported with PCP."
-            )
+            logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():
             logger.warning_once(
@@ -710,15 +707,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         attn_metadata = get_forward_context().attn_metadata
         qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
         _, _, kv = self._split_qkv_and_norm(qr_kv)
+        cache_positions = positions
         if isinstance(attn_metadata, dict):
             # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
             # the unused query; same as dspark's _insert_context_kv.
             cache = self.swa_cache_layer.kv_cache
+            swa_metadata = cast(
+                "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
+            )
+            cache_kv, slot_mapping = kv, swa_metadata.slot_mapping
+            if self.use_pcp:
+                cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
+                assert swa_metadata.cache_slot_mapping is not None
+                assert swa_metadata.cache_positions is not None
+                slot_mapping = swa_metadata.cache_slot_mapping
+                cache_positions = swa_metadata.cache_positions
             torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                kv,
+                cache_kv,
                 cache,
-                cast(Any, attn_metadata[self.swa_cache_layer.prefix]).slot_mapping,
-                positions,
+                slot_mapping,
+                cache_positions,
                 self.rotary_emb.cos_sin_cache,
                 self.swa_cache_layer.block_size,
                 self._flashinfer_fp8_kv_scale
@@ -728,9 +736,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
         if self.compressor is not None:
             latent = self.compressor(kv_score, positions)
-            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+            if self.use_pcp and latent is not None:
+                latent = get_pcp_group().all_gather(latent, dim=0)
+            self.compressor.insert_cache(latent, cache_positions, self.rotary_emb)
             if self.indexer is not None and self.indexer.owns_k:
-                self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+                self.indexer._produce_k(
+                    latent, cache_positions, self.indexer_rotary_emb
+                )
 
     def bind_gemm_rs(self) -> None:
         """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.

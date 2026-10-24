@@ -194,7 +194,7 @@ mod tests {
             output.model_specific.get("audio_sample_counts"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![24000, 1921]
         ));
-        assert!(output.encoder_input.iter().all(|&v| (v - 0.25).abs() < 1e-6));
+        assert!(output.encoder_input.as_f32().iter().all(|&v| (v - 0.25).abs() < 1e-6));
     }
 
     #[test]
