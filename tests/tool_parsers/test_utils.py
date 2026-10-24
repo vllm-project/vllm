@@ -8,6 +8,9 @@ import pytest
 
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
+    _check_open_top_level_arg_string,
+    _decode_simple_json_str_delta,
+    _try_arm_open_arg_string_fast_path,
     coerce_to_schema_type,
     contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
@@ -773,3 +776,140 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class TestOpenArgStringStreamingFastPath:
+    def test_check_open_top_level_arg_string_cases(self):
+        raw = '{"name": "write", "arguments": {"path": "a.py", "code": "hello'
+        assert _check_open_top_level_arg_string(raw, "code") == len(raw)
+
+        # Supports "parameters" key (Llama 3 format)
+        raw_params = '{"name": "write", "parameters": {"code": "hello'
+        assert _check_open_top_level_arg_string(raw_params, "code") == len(raw_params)
+
+        # Rejects wrong key, closed string, or nested object string
+        assert _check_open_top_level_arg_string(raw, "path") is None
+        assert _check_open_top_level_arg_string(raw + '"}}', "code") is None
+        nested = '{"name": "write", "arguments": {"cfg": {"code": "hello'
+        assert _check_open_top_level_arg_string(nested, "code") is None
+
+        # Holds back trailing backslash or incomplete \uXXXX escape
+        assert _check_open_top_level_arg_string(raw + "\\", "code") == len(raw)
+        assert _check_open_top_level_arg_string(raw + "\\u00", "code") == len(raw)
+        assert _check_open_top_level_arg_string(raw + "\\u12x", "code") is None
+
+        # Rejects unclosed surrogate pair so slow path handles surrogate merging
+        assert _check_open_top_level_arg_string(raw + "\\ud83d", "code") is None
+        assert _check_open_top_level_arg_string(raw + "\\ud83d\\ude", "code") is None
+        assert _check_open_top_level_arg_string(raw + "\\ud83d\\ude00", "code") == len(
+            raw + "\\ud83d\\ude00"
+        )
+
+        # Strips trailing whitespace to match partial_json_parser
+        assert _check_open_top_level_arg_string(raw + "   ", "code") == len(raw)
+
+    def test_decode_simple_json_str_delta_escapes_and_holdback(self):
+        # Standard escapes, slash unescaping, and unicode escapes
+        raw = r"hello \"world\" \/ \n\t \u0041\u00e9" + "\\"
+        res = _decode_simple_json_str_delta(raw)
+        assert res is not None
+        consumed, encoded, decoded = res
+        assert consumed == len(raw) - 1  # trailing \ held back
+        assert decoded == 'hello "world" / \n\t Aé'
+        assert encoded == json.dumps(decoded, ensure_ascii=False)[1:-1]
+
+        # Incomplete \u escape at tail is held back; non-hex partial \u is rejected
+        res_u = _decode_simple_json_str_delta(r"abc\u00")
+        assert res_u == (3, "abc", "abc")
+        assert _decode_simple_json_str_delta(r'abc\u12"') is None
+        assert _decode_simple_json_str_delta(r"abc\u12x") is None
+
+        # Closing quote or surrogate escape returns None to trigger slow path
+        assert _decode_simple_json_str_delta('abc"}') is None
+        assert _decode_simple_json_str_delta(r"\ud83d\ude00") is None
+        assert _decode_simple_json_str_delta(r"\u0022") is None
+
+    def test_streaming_equivalence_across_json_parsers(self):
+        from unittest.mock import MagicMock
+
+        import vllm.tool_parsers.granite_20b_fc_tool_parser as granite_mod
+        import vllm.tool_parsers.internlm2_tool_parser as internlm_mod
+        import vllm.tool_parsers.llama_tool_parser as llama_mod
+        from vllm.tool_parsers.granite_20b_fc_tool_parser import (
+            Granite20bFCToolParser,
+        )
+        from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
+        from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+
+        tok = MagicMock()
+        tok.vocab = {"<|python_tag|>": 128010}
+        tok.get_vocab.return_value = {"<|python_tag|>": 128010}
+
+        payload_params = (
+            '{"name": "write", "parameters": {"path": "a.py", '
+            '"content": "line1\\n\\"quoted\\" \\\\ \\/ \\u00e9 \\ud83d\\ude00   end"}}'
+        )
+        payload_args = payload_params.replace('"parameters":', '"arguments":')
+        noop_arm = lambda *a, **kw: (None, 0, "")
+
+        for cls, mod, prefix, payload, suffix in [
+            (Llama3JsonToolParser, llama_mod, ["<|python_tag|>"], payload_params, []),
+            (
+                Granite20bFCToolParser,
+                granite_mod,
+                ["<function_call>"],
+                payload_args,
+                [],
+            ),
+            (
+                Internlm2ToolParser,
+                internlm_mod,
+                ["<|action_start|>", "<|plugin|>"],
+                payload_params,
+                ["<|action_end|>"],
+            ),
+        ]:
+            body_chunks = [payload[i : i + 3] for i in range(0, len(payload), 3)]
+            chunks = prefix + body_chunks + suffix
+
+            mod._try_arm_open_arg_string_fast_path = _try_arm_open_arg_string_fast_path
+            p_fast = cls(tok)
+            prev = ""
+            fast_deltas = []
+            for ch in chunks:
+                cur = prev + ch
+                d = p_fast.extract_tool_calls_streaming(prev, cur, ch, [], [], [], None)
+                fast_deltas.append(
+                    d.model_dump(exclude_none=True) if d is not None else None
+                )
+                prev = cur
+
+            mod._try_arm_open_arg_string_fast_path = noop_arm
+            try:
+                p_slow = cls(tok)
+                prev = ""
+                slow_deltas = []
+                for ch in chunks:
+                    cur = prev + ch
+                    d = p_slow.extract_tool_calls_streaming(
+                        prev, cur, ch, [], [], [], None
+                    )
+                    slow_deltas.append(
+                        d.model_dump(exclude_none=True) if d is not None else None
+                    )
+                    prev = cur
+            finally:
+                mod._try_arm_open_arg_string_fast_path = (
+                    _try_arm_open_arg_string_fast_path
+                )
+
+            for df, ds in zip(fast_deltas, slow_deltas):
+                if df and "tool_calls" in df:
+                    for tc in df["tool_calls"]:
+                        tc.pop("id", None)
+                if ds and "tool_calls" in ds:
+                    for tc in ds["tool_calls"]:
+                        tc.pop("id", None)
+                assert df == ds
+            assert p_fast.prev_tool_call_arr == p_slow.prev_tool_call_arr
+            assert p_fast.streamed_args_for_tool == p_slow.streamed_args_for_tool

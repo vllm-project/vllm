@@ -28,6 +28,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
+    _step_open_arg_string_fast_path,
+    _try_arm_open_arg_string_fast_path,
     find_common_prefix,
     is_complete_json,
     partial_json_loads,
@@ -50,6 +52,9 @@ class Llama3JsonToolParser(ToolParser):
     # This handles arbitrary nesting depth correctly
     tool_call_start_regex: re.Pattern = re.compile(r"\{")
     json_decoder: json.JSONDecoder = json.JSONDecoder()
+    _open_arg_key: str | None = None
+    _open_arg_consumed_pos: int = 0
+    _open_arg_pending_delta: str = ""
 
     def __init__(
         self,
@@ -66,6 +71,9 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
         self.bot_token_id = self.vocab.get(self.bot_token)
         if self.bot_token_id is None:
             raise RuntimeError(
@@ -180,6 +188,45 @@ class Llama3JsonToolParser(ToolParser):
         ):
             return DeltaMessage(content=delta_text)
 
+        if (
+            self._open_arg_key is not None
+            and self.current_tool_name_sent
+            and 0 <= self.current_tool_id < len(self.prev_tool_call_arr)
+            and 0 <= self.current_tool_id < len(self.streamed_args_for_tool)
+            and current_text.startswith(previous_text)
+            and len(previous_text) >= self._open_arg_consumed_pos
+        ):
+            (
+                handled,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                argument_diff,
+            ) = _step_open_arg_string_fast_path(
+                current_text,
+                self._open_arg_key,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                self.prev_tool_call_arr[self.current_tool_id],
+                self.streamed_args_for_tool,
+                self.current_tool_id,
+            )
+            if handled:
+                if argument_diff is None:
+                    return None
+                return DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True),
+                        )
+                    ]
+                )
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
+
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
@@ -196,10 +243,14 @@ class Llama3JsonToolParser(ToolParser):
                     if current_text.startswith(self.bot_token)
                     else 0
                 )
+                last_call_start = 0
+                last_call_end = 0
                 while start_idx < len(current_text):
                     (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
+                    last_call_start = start_idx
+                    last_call_end = start_idx + end_idx
                     is_complete.append(
-                        is_complete_json(current_text[start_idx : start_idx + end_idx])
+                        is_complete_json(current_text[last_call_start:last_call_end])
                     )
                     start_idx += end_idx + len("; ")
                     # depending on the prompt Llama can use
@@ -321,6 +372,23 @@ class Llama3JsonToolParser(ToolParser):
                         )
                         self.streamed_args_for_tool[self.current_tool_id] += (
                             argument_diff
+                        )
+
+                    if (
+                        not is_complete[self.current_tool_id]
+                        and self.current_tool_id == len(tool_call_arr) - 1
+                        and last_call_end == len(current_text)
+                    ):
+                        (
+                            self._open_arg_key,
+                            self._open_arg_consumed_pos,
+                            self._open_arg_pending_delta,
+                        ) = _try_arm_open_arg_string_fast_path(
+                            current_text[last_call_start:last_call_end],
+                            last_call_start,
+                            cur_arguments,
+                            cur_args_json,
+                            self.streamed_args_for_tool[self.current_tool_id],
                         )
 
             self.prev_tool_call_arr = tool_call_arr

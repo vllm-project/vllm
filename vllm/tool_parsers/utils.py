@@ -1287,3 +1287,304 @@ def compute_tool_delta(
         if arg_diff
         else None
     )
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _check_open_top_level_arg_string(
+    raw_json: str,
+    expected_key: str,
+) -> int | None:
+    """Verify ``raw_json`` is a single tool-call JSON object currently inside
+    an unclosed top-level string argument for ``expected_key`` under
+    ``"arguments"`` or ``"parameters"``.
+
+    Returns the character index in ``raw_json`` consumed into the parsed string
+    value (matching ``partial_json_parser``'s trailing-whitespace strip and
+    holding back any incomplete trailing ``\\`` or ``\\uXXXX`` escape so the
+    next delta completes it), or ``None`` if the parser is not in that state.
+    """
+    if not raw_json or raw_json[0] != "{":
+        return None
+
+    stripped = raw_json.rstrip()
+    in_str = False
+    escape = False
+    stack: list[tuple[str, str | None]] = []
+    last_str_start = -1
+    last_str_end = -1
+    key_before_colon: str | None = None
+    key_for_open_str: str | None = None
+
+    for i, ch in enumerate(stripped):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+                last_str_end = i
+                key_before_colon = None
+        else:
+            if ch == '"':
+                in_str = True
+                last_str_start = i
+                key_for_open_str = key_before_colon
+            elif ch == ":":
+                if (
+                    last_str_start >= 0
+                    and last_str_end > last_str_start
+                    and stripped[last_str_end + 1 : i].strip() == ""
+                ):
+                    try:
+                        key_before_colon = json.loads(
+                            stripped[last_str_start : last_str_end + 1]
+                        )
+                    except Exception:
+                        key_before_colon = None
+                else:
+                    key_before_colon = None
+            elif ch == "{":
+                stack.append(("{", key_before_colon))
+                key_before_colon = None
+            elif ch == "[":
+                stack.append(("[", None))
+                key_before_colon = None
+            elif ch in ("}", "]"):
+                expected_open = "{" if ch == "}" else "["
+                if not stack or stack[-1][0] != expected_open:
+                    return None
+                stack.pop()
+                key_before_colon = None
+            elif ch == "," or not ch.isspace():
+                key_before_colon = None
+
+    if not in_str or last_str_start < 0 or key_for_open_str != expected_key:
+        return None
+
+    if (
+        len(stack) != 2
+        or stack[0] != ("{", None)
+        or stack[1][0] != "{"
+        or stack[1][1] not in ("arguments", "parameters")
+    ):
+        return None
+
+    val_tail = stripped[last_str_start + 1 :]
+    if escape:
+        return len(stripped) - 1
+
+    # Bail out on non-standard \U or \x prefixes handled specially by
+    # partial_json_parser.
+    if (
+        val_tail.rfind("\\U", max(0, len(val_tail) - 9)) != -1
+        or val_tail.rfind("\\x", max(0, len(val_tail) - 3)) != -1
+    ):
+        return None
+
+    holdback = 0
+    scan_from = max(0, len(val_tail) - 11)
+    idx = val_tail.find("\\u", scan_from)
+    while idx != -1:
+        if not _is_escaped(val_tail, idx):
+            rem = len(val_tail) - idx
+            if rem < 6:
+                if not all(c in _HEX_DIGITS for c in val_tail[idx + 2 :]):
+                    return None
+                holdback = rem
+                break
+            try:
+                code = int(val_tail[idx + 2 : idx + 6], 16)
+            except ValueError:
+                return None
+            if 0xD800 <= code <= 0xDBFF and rem < 12:
+                return None
+        idx = val_tail.find("\\u", idx + 2)
+
+    return len(stripped) - holdback
+
+
+def _decode_simple_json_str_delta(
+    raw_delta: str,
+) -> tuple[int, str, str] | None:
+    """Incrementally decode a raw JSON string slice for the open-string
+    streaming fast path.
+
+    Returns ``(consumed_raw_len, json_dumps_encoded_delta, decoded_str_delta)``
+    where ``json_dumps_encoded_delta`` matches ``json.dumps(...,
+    ensure_ascii=False)`` output, or ``None`` if ``raw_delta`` closes the
+    string or contains escapes that require the full slow path.
+    """
+    n = len(raw_delta)
+    if n == 0:
+        return 0, "", ""
+
+    encoded_parts: list[str] = []
+    decoded_parts: list[str] = []
+    i = 0
+    while i < n:
+        ch = raw_delta[i]
+        if ch == '"' or ord(ch) < 0x20:
+            return None
+        if ch != "\\":
+            j = i + 1
+            while j < n:
+                c = raw_delta[j]
+                if c == '"' or c == "\\" or ord(c) < 0x20:
+                    break
+                j += 1
+            seg = raw_delta[i:j]
+            encoded_parts.append(seg)
+            decoded_parts.append(seg)
+            i = j
+            continue
+
+        # Backslash escape sequence
+        if i + 1 >= n:
+            break
+        nxt = raw_delta[i + 1]
+        if nxt == '"':
+            encoded_parts.append('\\"')
+            decoded_parts.append('"')
+            i += 2
+        elif nxt == "\\":
+            encoded_parts.append("\\\\")
+            decoded_parts.append("\\")
+            i += 2
+        elif nxt == "/":
+            encoded_parts.append("/")
+            decoded_parts.append("/")
+            i += 2
+        elif nxt == "b":
+            encoded_parts.append("\\b")
+            decoded_parts.append("\b")
+            i += 2
+        elif nxt == "f":
+            encoded_parts.append("\\f")
+            decoded_parts.append("\f")
+            i += 2
+        elif nxt == "n":
+            encoded_parts.append("\\n")
+            decoded_parts.append("\n")
+            i += 2
+        elif nxt == "r":
+            encoded_parts.append("\\r")
+            decoded_parts.append("\r")
+            i += 2
+        elif nxt == "t":
+            encoded_parts.append("\\t")
+            decoded_parts.append("\t")
+            i += 2
+        elif nxt == "u":
+            if i + 6 > n:
+                if not all(c in _HEX_DIGITS for c in raw_delta[i + 2 : n]):
+                    return None
+                break
+            hex_digits = raw_delta[i + 2 : i + 6]
+            try:
+                code = int(hex_digits, 16)
+            except ValueError:
+                return None
+            if 0xD800 <= code <= 0xDFFF or code < 0x20 or code in (0x22, 0x5C):
+                return None
+            ch_decoded = chr(code)
+            encoded_parts.append(ch_decoded)
+            decoded_parts.append(ch_decoded)
+            i += 6
+        else:
+            return None
+
+    return i, "".join(encoded_parts), "".join(decoded_parts)
+
+
+def _try_arm_open_arg_string_fast_path(
+    raw_tool_json: str,
+    base_offset: int,
+    cur_arguments: Any,
+    cur_args_json: str | None,
+    streamed_args: str,
+) -> tuple[str | None, int, str]:
+    """Check if the active tool call ends inside an open top-level string
+    argument and return ``(open_key, consumed_pos, pending_delta)`` for
+    the incremental streaming fast path.
+    """
+    if (
+        not isinstance(cur_arguments, dict)
+        or not cur_arguments
+        or cur_args_json is None
+        or not cur_args_json.endswith('"}')
+    ):
+        return None, 0, ""
+
+    last_key = next(reversed(cur_arguments))
+    last_val = cur_arguments[last_key]
+    if not isinstance(last_val, str):
+        return None, 0, ""
+
+    new_sent = len(streamed_args)
+    if 0 <= new_sent <= len(cur_args_json) - 2 and cur_args_json.startswith(
+        streamed_args
+    ):
+        consumed_in_slice = _check_open_top_level_arg_string(raw_tool_json, last_key)
+        if consumed_in_slice is not None:
+            return (
+                last_key,
+                base_offset + consumed_in_slice,
+                cur_args_json[new_sent:-2],
+            )
+
+    return None, 0, ""
+
+
+def _step_open_arg_string_fast_path(
+    raw_text: str,
+    open_key: str,
+    consumed_pos: int,
+    pending_delta: str,
+    prev_tool_call: dict,
+    streamed_args_for_tool: list[str],
+    tool_id: int,
+    *,
+    emit_empty_on_noop: bool = False,
+) -> tuple[bool, int, str, str | None]:
+    """Attempt one incremental streaming step on an open top-level string
+    argument.
+
+    Returns ``(handled, new_consumed_pos, new_pending_delta, argument_diff)``.
+    When ``handled`` is ``False``, the caller must clear its fast-path state
+    and fall back to the slow path.
+    """
+    prev_arguments = (
+        prev_tool_call.get("parameters")
+        if "parameters" in prev_tool_call
+        else prev_tool_call.get("arguments")
+    )
+    if not isinstance(prev_arguments, dict) or not isinstance(
+        prev_arguments.get(open_key), str
+    ):
+        return False, 0, "", None
+
+    fast_res = _decode_simple_json_str_delta(raw_text[consumed_pos:].rstrip())
+    if fast_res is None:
+        return False, 0, "", None
+
+    consumed_len, encoded_delta, decoded_delta = fast_res
+    if consumed_len == 0:
+        return (
+            True,
+            consumed_pos,
+            pending_delta,
+            "" if emit_empty_on_noop else None,
+        )
+
+    prev_arguments[open_key] += decoded_delta
+    argument_diff = pending_delta
+    streamed_args_for_tool[tool_id] += argument_diff
+    return (
+        True,
+        consumed_pos + consumed_len,
+        encoded_delta,
+        argument_diff,
+    )
