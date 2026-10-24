@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from copy import copy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -273,6 +274,11 @@ def get_tokenizer(
         # AutoTokenizer otherwise reloads config.json internally. Reuse the
         # config that get_config just loaded successfully so a concurrent Hub
         # cache refresh cannot invalidate the file between the two reads.
+        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
+            # Preserve the Hub identity for AutoTokenizer's model-specific
+            # routing while loading tokenizer files from the local snapshot.
+            config = copy(config)
+            config._name_or_path = requested_name
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
