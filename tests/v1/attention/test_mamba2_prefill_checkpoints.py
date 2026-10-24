@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Internal prefill checkpoints for Mamba2 align-mode prefix caching."""
 
+from dataclasses import asdict
+
 import torch
 
 from tests.v1.attention.utils import (
@@ -136,22 +138,27 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
 
 
-def test_update_block_table_regathers_checkpoint_blocks():
-    """Groups sharing a spec reuse one group's metadata via update_block_table.
+def test_cross_group_build_regathers_checkpoint_blocks():
+    """Groups sharing a spec reuse one group's metadata.
 
     Checkpoint destinations are block-table entries, so each group needs its
     own: layers of different groups share physical tensors, and reusing the
     first group's indices writes every group's checkpoint into its blocks.
     """
-    builder = _create_mamba2_builder()
-    meta = _build(builder, seq_lens=[900, 100], query_lens=[900, 100])
-    assert meta.checkpoint_meta is not None
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[900, 100], query_lens=[900, 100]),
+        MAMBA_BLOCK_SIZE,
+        DEVICE,
+        arange_block_indices=True,
+    ).replace(is_prefilling=torch.ones(2, dtype=torch.bool), _cross_group_cache={})
+    _create_mamba2_builder().build(0, common)
 
     # A second group's table: same shape as the first, disjoint block ids.
-    other_table = torch.arange(1000, 1016, dtype=torch.int32).reshape(2, 8)
-    updated = builder.update_block_table(
-        meta, other_table, torch.zeros(1000, dtype=torch.int64)
-    )
+    other_table = common.block_table_tensor + 1000
+    other = common.replace(block_table_tensor=other_table)
+    updated = _create_mamba2_builder().build(0, other)
+    expected = _create_mamba2_builder().build(0, other.replace(_cross_group_cache=None))
+    torch.testing.assert_close(asdict(updated), asdict(expected))
 
     # Row 0 checkpoints in column cdiv(900, 256) - 2 == 2; row 1 declined.
     assert updated.checkpoint_meta is not None
