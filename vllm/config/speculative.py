@@ -495,11 +495,11 @@ class SpeculativeConfig:
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
-    """Maximum size of ngram token window when using Ngram proposer, required
-    when method is set to ngram."""
+    """Maximum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_min` if set, otherwise 5."""
     prompt_lookup_min: int | None = Field(default=None, ge=1)
-    """Minimum size of ngram token window when using Ngram proposer, if
-    provided. Defaults to 1."""
+    """Minimum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_max` if set, otherwise 5."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
@@ -1281,18 +1281,10 @@ class SpeculativeConfig:
                 self.prompt_lookup_min = 5
                 self.prompt_lookup_max = 5
             elif self.prompt_lookup_min is None:
-                if self.prompt_lookup_max is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
+                assert self.prompt_lookup_max is not None
                 self.prompt_lookup_min = self.prompt_lookup_max
             elif self.prompt_lookup_max is None:
-                if self.prompt_lookup_min is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
+                assert self.prompt_lookup_min is not None
                 self.prompt_lookup_max = self.prompt_lookup_min
 
             # Validate values

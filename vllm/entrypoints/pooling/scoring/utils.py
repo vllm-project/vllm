@@ -191,9 +191,7 @@ def _parse_score_content(
     else:
         parts = cast(Iterable[ChatCompletionContentPartParam], data)
 
-    mm_parser = mm_tracker.create_parser()
-
-    parse_res = parse_chat_message_content_parts(
+    return parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
@@ -201,19 +199,6 @@ def _parse_score_content(
         interleave_strings=False,
         multimodal_content_part_separator="",
     )
-
-    if parse_res:
-        return parse_res
-
-    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
-
-    if (
-        len(mm_placeholder_storage) != 1
-        or len(next(iter(mm_placeholder_storage.values()))) != 1
-    ):
-        raise ValueError("Only one multi-modal item is supported")
-
-    return next(iter(mm_placeholder_storage.values()))[0]
 
 
 def parse_score_data_single(
