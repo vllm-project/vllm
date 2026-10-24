@@ -1273,6 +1273,7 @@ class Scheduler(SchedulerInterface):
                     # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self._num_spec_tokens_for(request) == self.num_spec_tokens
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
@@ -2730,6 +2731,15 @@ class Scheduler(SchedulerInterface):
         if self.ec_connector is not None:
             self.ec_connector.update_state_after_free(request, input_id)
 
+    def _num_spec_tokens_for(self, request: Request) -> int:
+        """Draft tokens to verify per step for `request`, at most the
+        server's `num_speculative_tokens`."""
+        params = request.sampling_params
+        cap = params.max_speculative_tokens if params is not None else None
+        if cap is None:
+            return self.num_spec_tokens
+        return min(cap, self.num_spec_tokens)
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -2747,6 +2757,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
+            num_spec_tokens = self._num_spec_tokens_for(request)
+            if len(spec_token_ids) > num_spec_tokens:
+                spec_token_ids = spec_token_ids[:num_spec_tokens]
             request.spec_token_ids = self.structured_output_manager.validate_tokens(
                 request, spec_token_ids
             )

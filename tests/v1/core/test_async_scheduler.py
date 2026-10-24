@@ -109,6 +109,36 @@ def test_no_spec_decode_padding_up_to_max_model_len():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
+def test_max_speculative_tokens_sizes_placeholders_per_request():
+    """Async scheduling schedules each request's next drafts from its
+    placeholder list, so the list must be capped per request."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    full, capped, off = create_requests(num_requests=3, num_tokens=8)
+    for req, cap in ((capped, 1), (off, 0)):
+        params = req.sampling_params.clone()
+        params.max_speculative_tokens = cap
+        req.sampling_params = params
+        scheduler.add_request(req)
+    scheduler.add_request(full)
+
+    sched_output = scheduler.schedule()
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+    assert len(full.spec_token_ids) == num_spec
+    assert len(capped.spec_token_ids) == 1
+    assert off.spec_token_ids == []
+
+    sched_output = scheduler.schedule()
+    spec_tokens = sched_output.scheduled_spec_decode_tokens
+    assert len(spec_tokens[full.request_id]) == num_spec
+    assert len(spec_tokens[capped.request_id]) == 1
+    assert off.request_id not in spec_tokens
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)

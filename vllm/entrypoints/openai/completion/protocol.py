@@ -284,6 +284,17 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    max_speculative_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum number of draft tokens verified per step for this request "
+            "when the server runs speculative decoding. 0 disables speculation "
+            "for this request. Values above the server's setting have no "
+            "effect."
+        ),
+    )
+
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
         description=(
@@ -432,6 +443,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            max_speculative_tokens=self.max_speculative_tokens,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 

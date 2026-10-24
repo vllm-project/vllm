@@ -2819,6 +2819,63 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def _cap_spec_tokens(request: Request, cap: int | None) -> None:
+    params = request.sampling_params.clone()
+    params.max_speculative_tokens = cap
+    request.sampling_params = params
+
+
+def test_max_speculative_tokens_caps_drafts_per_request():
+    """A request verifies at most `max_speculative_tokens` drafts per step;
+    0 turns speculation off for it. Other requests keep the server's K."""
+    num_spec = 3
+    scheduler = create_scheduler(num_speculative_tokens=num_spec)
+    full, capped, off = create_requests(num_requests=3, num_tokens=8)
+    _cap_spec_tokens(capped, 1)
+    _cap_spec_tokens(off, 0)
+    for req in (full, capped, off):
+        scheduler.add_request(req)
+
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]] * 3)
+    req_ids = [full.request_id, capped.request_id, off.request_id]
+    scheduler.update_draft_token_ids(DraftTokenIds(req_ids, [[1, 2, 3]] * 3))
+
+    out = scheduler.schedule()
+    assert out.scheduled_spec_decode_tokens[full.request_id] == [1, 2, 3]
+    assert out.scheduled_spec_decode_tokens[capped.request_id] == [1]
+    assert off.request_id not in out.scheduled_spec_decode_tokens
+    assert out.num_scheduled_tokens[full.request_id] == 1 + num_spec
+    assert out.num_scheduled_tokens[capped.request_id] == 2
+    assert out.num_scheduled_tokens[off.request_id] == 1
+
+
+def test_spec_decode_padding_skipped_for_capped_request():
+    """Padding to 1 + num_spec_tokens would verify drafts the request opted
+    out of, so a capped first-decode-step request keeps its 1-token span."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+    _cap_spec_tokens(r2, 0)
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_resumed_request_without_running_requests():
     """Pad a synchronously resumed request even without local running work."""
     num_spec = 3

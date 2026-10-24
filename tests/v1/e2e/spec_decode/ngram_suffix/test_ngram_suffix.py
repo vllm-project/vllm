@@ -7,6 +7,7 @@ from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
+from vllm.v1.metrics.reader import Vector
 
 from ..utils import (
     evaluate_llm_for_gsm8k,
@@ -90,6 +91,75 @@ def test_ngram_gpu_default_with_async_scheduling(
             == async_scheduling
         )
         evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
+
+
+def _spec_decode_counts(metrics) -> tuple[float, float, list[int]]:
+    per_pos = next(
+        m for m in metrics if m.name == "vllm:spec_decode_num_accepted_tokens_per_pos"
+    )
+    assert isinstance(per_pos, Vector)
+    return (
+        get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts"),
+        get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_draft_tokens"),
+        per_pos.values,
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True], ids=["sync", "async"])
+@single_gpu_only
+def test_ngram_gpu_max_speculative_tokens(
+    async_scheduling: bool,
+    model_name: str,
+    vllm_runner,
+):
+    """A per-request cap bounds the drafts verified per step: cap 1 accepts
+    only at position 0, cap 0 verifies no drafts, while uncapped requests on
+    the same engine accept beyond position 0."""
+    num_spec = 3
+    texts = [
+        " ".join(f"item-{i}-{j} costs {i * j % 97} dollars." for j in range(24))
+        for i in range(8)
+    ]
+    prompts = [f"Repeat this list exactly:\n{t}\nRepeated list:\n{t}" for t in texts]
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        trust_remote_code=False,
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_max": 4,
+            "prompt_lookup_min": 2,
+            "num_speculative_tokens": num_spec,
+        },
+        max_model_len=2048,
+        async_scheduling=async_scheduling,
+        disable_log_stats=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as runner:
+        llm = runner.llm
+
+        def run(cap: int | None) -> tuple[float, float, list[int]]:
+            drafts0, tokens0, pos0 = _spec_decode_counts(llm.get_metrics())
+            params = SamplingParams(
+                temperature=0, max_tokens=96, max_speculative_tokens=cap
+            )
+            llm.generate(prompts, params)
+            drafts, tokens, pos = _spec_decode_counts(llm.get_metrics())
+            return (
+                drafts - drafts0,
+                tokens - tokens0,
+                [b - a for a, b in zip(pos0, pos)],
+            )
+
+        _, _, uncapped_pos = run(None)
+        capped_drafts, capped_tokens, capped_pos = run(1)
+        off_drafts, off_tokens, _ = run(0)
+
+    assert sum(uncapped_pos[1:]) > 0, uncapped_pos
+    assert capped_drafts > 0 and capped_tokens == capped_drafts
+    assert capped_pos[0] > 0 and sum(capped_pos[1:]) == 0, capped_pos
+    assert off_drafts == 0 and off_tokens == 0
 
 
 @single_gpu_only

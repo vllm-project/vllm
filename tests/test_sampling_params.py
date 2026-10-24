@@ -56,6 +56,19 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@pytest.mark.parametrize("cap", [-1, 1.5, True, "2"])
+def test_max_speculative_tokens_rejects_non_count(cap):
+    params = SamplingParams(max_speculative_tokens=cap)
+    with pytest.raises(VLLMValidationError, match="max_speculative_tokens"):
+        params.verify(MockModelConfig(), None, None, None)
+
+
+def test_diffusion_rejects_max_speculative_tokens():
+    params = SamplingParams(max_speculative_tokens=1)
+    with pytest.raises(VLLMValidationError, match="max_speculative_tokens"):
+        params.verify(MockModelConfig(is_diffusion=True), None, None, None)
+
+
 def test_verify_leaves_logits_processors_to_admission():
     """verify() is runner-agnostic; LP validation lives in the admission
     layer, so an unimportable FQCN must not fail verify()."""

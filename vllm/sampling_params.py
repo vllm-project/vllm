@@ -426,6 +426,11 @@ class SamplingParams(
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
+    max_speculative_tokens: int | None = None
+    """Maximum number of draft tokens verified per step for this request when
+    speculative decoding is enabled. 0 disables speculation for the request.
+    Values above the server's `num_speculative_tokens` (or its batch-size
+    schedule) have no effect. Ignored without speculative decoding."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -464,6 +469,7 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
+        max_speculative_tokens: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -532,6 +538,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            max_speculative_tokens=max_speculative_tokens,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -1186,6 +1193,15 @@ class SamplingParams(
         self,
         speculative_config: SpeculativeConfig | None,
     ) -> None:
+        cap = self.max_speculative_tokens
+        if cap is not None and (
+            not isinstance(cap, int) or isinstance(cap, bool) or cap < 0
+        ):
+            raise VLLMValidationError(
+                f"max_speculative_tokens must be a non-negative integer, got {cap!r}.",
+                parameter="max_speculative_tokens",
+                value=cap,
+            )
         if speculative_config is None:
             return
 
@@ -1216,6 +1232,11 @@ class SamplingParams(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
+            )
+        if self.max_speculative_tokens is not None:
+            raise VLLMValidationError(
+                "max_speculative_tokens is not supported with diffusion models.",
+                parameter="max_speculative_tokens",
             )
 
     def _validate_structured_outputs(
@@ -1460,6 +1481,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"max_speculative_tokens={self.max_speculative_tokens}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
