@@ -99,3 +99,24 @@ def test_causal_prefix_fields_config_handles_empty_cached_hf_inputs() -> None:
     fields = processor._get_mm_fields_config(BatchFeature(), {})
 
     assert fields["pixel_values"].field.slices == []
+
+
+def test_radio_encoder_layer_takes_varlen_tensors() -> None:
+    """Varlen metadata must reach the layer as tensors, not a dataclass.
+
+    dynamic_arg_dims addresses arguments by name, so cu_seqlens can only be marked
+    dynamic if it is an argument; wrapped in MaskMetadata its length gets baked into
+    the compiled encoder and --compile-mm-encoder dies on the first request.
+    """
+    import inspect
+
+    from vllm.model_executor.models.radio import (
+        RadioParallelAttention,
+        RadioVisionEncoderLayer,
+    )
+
+    for cls in (RadioVisionEncoderLayer, RadioParallelAttention):
+        params = inspect.signature(cls.forward).parameters
+        assert "cu_seqlens" in params, cls.__name__
+        assert "max_seqlen" in params, cls.__name__
+        assert "mask_meta" not in params, cls.__name__

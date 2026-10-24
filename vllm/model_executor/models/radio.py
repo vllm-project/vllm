@@ -19,6 +19,10 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import PreTrainedConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import (
@@ -459,7 +463,10 @@ class MaskMetadata:
 
 class RadioParallelAttention(InternParallelAttention):
     def forward(
-        self, x: torch.Tensor, mask_meta: MaskMetadata | None = None
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -467,15 +474,19 @@ class RadioParallelAttention(InternParallelAttention):
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
 
-        cu_seqlens, max_seqlen = None, None
-        if mask_meta is not None:
-            cu_seqlens = mask_meta.cu_seqlens
-            max_seqlen = mask_meta.max_seqlen
         out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         out, _ = self.proj(out)
         return out
 
 
+@support_torch_compile(
+    # RADIO packs NaViT tokens in dim 1 (InternVL's inherited value marks dim 0), and
+    # cu_seqlens grows with the number of packed images, so both must be dynamic or the
+    # compiled encoder bakes the profiling shapes.
+    dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class RadioVisionEncoderLayer(InternVisionEncoderLayer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
@@ -483,11 +494,17 @@ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        mask_meta: MaskMetadata | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ):
         hidden_states = (
             hidden_states
-            + self.attn(self.norm1(hidden_states), mask_meta=mask_meta) * self.ls1
+            + self.attn(
+                self.norm1(hidden_states),
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            * self.ls1
         )
 
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
@@ -505,8 +522,12 @@ class RadioVisionEncoder(InternVisionEncoder):
         mask_meta: MaskMetadata | None = None,
     ):
         hidden_states = inputs_embeds
+        cu_seqlens = mask_meta.cu_seqlens if mask_meta is not None else None
+        max_seqlen = mask_meta.max_seqlen if mask_meta is not None else None
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, mask_meta=mask_meta)
+            hidden_states = encoder_layer(
+                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            )
         return hidden_states
 
 
