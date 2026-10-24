@@ -1127,7 +1127,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
         event_deque, new_event_signal = self.event_store[response_id]
-        start_index = 0 if starting_after is None else starting_after + 1
+        start_index = 0 if starting_after is None else max(0, starting_after + 1)
         current_index = start_index
 
         while True:
