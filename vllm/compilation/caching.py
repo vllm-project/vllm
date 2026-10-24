@@ -159,6 +159,29 @@ class StandaloneCompiledArtifacts:
         self.loaded_submodule_store = {}
 
 
+def validate_mega_artifact(artifacts: StandaloneCompiledArtifacts) -> None:
+    """Reject a deserialized AOT artifact that carries no compiled code.
+
+    An empty artifact deserializes without error and reconstructs into a
+    callable that runs eager. That is correctness-preserving, but it is a large
+    and completely unannounced performance regression, and the only trace of it
+    is two zeros in an INFO log line. Raising instead turns the load into a
+    cache miss, which the caller already knows how to recover from.
+
+    Raises:
+        RuntimeError: If the artifact holds no submodules or no compiled bytes.
+    """
+    num_artifacts = artifacts.num_artifacts()
+    num_submods = len(artifacts.submodule_names())
+    if num_artifacts == 0 or num_submods == 0:
+        raise RuntimeError(
+            "AOT artifact contains no compiled submodules "
+            f"(num_artifacts={num_artifacts} num_submods={num_submods}); "
+            "treating this as a cache miss so the model is recompiled "
+            "instead of silently falling back to eager execution."
+        )
+
+
 @contextlib.contextmanager
 def patch_pytree_map_over_slice():
     pytree._private_register_pytree_node(
@@ -325,6 +348,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             assert standalone_compile_artifacts is not None
+            validate_mega_artifact(standalone_compile_artifacts)
             submod_names = standalone_compile_artifacts.submodule_names()
             num_submods = len(submod_names)
             num_artifacts = standalone_compile_artifacts.num_artifacts()
