@@ -148,7 +148,8 @@ def _default_input_image_details(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    content = value.get("content")
+    field = "output" if value.get("type") == "function_call_output" else "content"
+    content = value.get(field)
     if not isinstance(content, list):
         return value
 
@@ -165,7 +166,7 @@ def _default_input_image_details(value: Any) -> Any:
             changed = True
         new_content.append(new_part)
 
-    return {**value, "content": new_content} if changed else value
+    return {**value, field: new_content} if changed else value
 
 
 def _tool_field(tool: Any, field: str) -> Any:
