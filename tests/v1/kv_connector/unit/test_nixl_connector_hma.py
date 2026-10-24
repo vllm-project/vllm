@@ -20,6 +20,7 @@ from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+    NixlConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
@@ -1635,6 +1636,103 @@ def test_mamba_n1_d_side_builds_decode_metadata():
 
     assert metadata.num_decodes == 1
     assert metadata.num_prefills == 0
+
+
+def _host_save_scheduler(req):
+    """P-side scheduler with a host buffer and FA + Mamba groups."""
+    sched = make_nixl_scheduler(has_mamba=True)
+    sched.use_host_buffer = True
+    sched._reqs_need_save = {req.request_id: req}
+    sched._reqs_save_block_ids = {}
+    return sched
+
+
+def _host_save_step(sched, req, num_tokens, new_block_ids, new=False, resumed=False):
+    """Run _build_save_meta for one step scheduling ``num_tokens`` of ``req``."""
+    req_id = req.request_id
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=(
+            [SimpleNamespace(req_id=req_id, block_ids=new_block_ids)] if new else []
+        ),
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[] if new else [req_id],
+            new_block_ids=[] if new else [new_block_ids],
+            resumed_req_ids={req_id} if resumed else set(),
+        ),
+        num_scheduled_tokens={req_id: num_tokens},
+    )
+    meta = NixlConnectorMetadata()
+    sched._build_save_meta(meta, scheduler_output)
+    req.num_computed_tokens += num_tokens
+    saved = meta.reqs_to_save.get(req_id)
+    return None if saved is None else tuple(saved.local_block_ids)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "final_chunk_blocks,expected",
+    [(([3], []), ([1, 2, 3], [7])), (None, ([1, 2], [7]))],
+    ids=["final_chunk_allocates", "final_chunk_allocates_nothing"],
+)
+def test_host_buffer_save_waits_for_final_prefill_chunk(final_chunk_blocks, expected):
+    """The Mamba state block is allocated on the first chunk and rewritten in
+    place by every later chunk, so a chunked prefill must be saved to the host
+    buffer only after its final chunk, with every block of the request."""
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    sched = _host_save_scheduler(req)
+
+    assert _host_save_step(sched, req, 6, ([1, 2], [7]), new=True) is None
+    assert _host_save_step(sched, req, 4, final_chunk_blocks) == expected
+    assert not sched._reqs_need_save
+    assert not sched._reqs_save_block_ids
+
+
+@pytest.mark.cpu_test
+def test_host_buffer_save_single_step_prefill():
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    sched = _host_save_scheduler(req)
+
+    assert _host_save_step(sched, req, 10, ([1], [7]), new=True) == ([1], [7])
+    assert not sched._reqs_need_save
+    assert not sched._reqs_save_block_ids
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("as_new", [False, True], ids=["v1_cached", "v2_new"])
+def test_host_buffer_save_resumed_request_replaces_blocks(as_new):
+    """A resumed request carries its full block list; blocks accumulated
+    before preemption must not be saved. Model Runner V2 schedules it as a
+    new request instead of a resumed cached one."""
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    sched = _host_save_scheduler(req)
+
+    assert _host_save_step(sched, req, 6, ([1, 2], [7]), new=True) is None
+    req.num_computed_tokens = 0
+    resumed = _host_save_step(
+        sched, req, 10, ([4], [8]), new=as_new, resumed=not as_new
+    )
+    assert resumed == ([4], [8])
+
+
+@pytest.mark.cpu_test
+def test_host_buffer_save_drops_aborted_partial_prefill():
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    sched = _host_save_scheduler(req)
+
+    assert _host_save_step(sched, req, 6, ([1, 2], [7]), new=True) is None
+    # request_finished pops an aborted partial prefill from _reqs_need_save.
+    sched._reqs_need_save.pop(req.request_id)
+    sched._build_save_meta(
+        NixlConnectorMetadata(),
+        SimpleNamespace(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=[], new_block_ids=[], resumed_req_ids=set()
+            ),
+            num_scheduled_tokens={},
+        ),
+    )
+    assert not sched._reqs_save_block_ids
 
 
 @pytest.mark.cpu_test
