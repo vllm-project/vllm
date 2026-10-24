@@ -2,7 +2,7 @@ meta:
   title: "MiniMax-M3.1-Flash"
   slug: "minimax-m3.1-flash"
   provider: "MiniMax"
-  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X (single node or prefill/decode disaggregated), and TP8 on NVIDIA Hopper."
+  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
   date_updated: 2026-10-23
   tasks:
@@ -52,7 +52,7 @@ features:
       - "--reasoning-parser"
       - "minimax_m3"
   spec_decoding:
-    description: "DSpark speculative decoding with the draft shipped in the checkpoint (`dspark/`), three speculative tokens, FP8 draft KV cache. Draft attention backend is per-brand: FLASH_ATTN on NVIDIA, TRITON_ATTN on AMD."
+    description: "DSpark speculative decoding with the draft shipped in the checkpoint (`dspark/`), FP8 draft KV cache. Per brand: seven speculative tokens with FLASHINFER_TS draft attention on NVIDIA, three with TRITON_ATTN on AMD."
     # Per-brand draft attention backend (a feature's top-level `args` is the
     # fallback when no hardware_overrides.<gen> matches; both brands are
     # covered here).
@@ -63,7 +63,7 @@ features:
       nvidia:
         args:
           - "--speculative-config"
-          - '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+          - '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
       amd:
         args:
           - "--speculative-config"
@@ -278,9 +278,46 @@ strategy_overrides:
   # never decodes) and offloads KV to host memory in 1 GiB HugeTLB pages; both
   # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
   # of one per layer.
+  # GB200/GB300 1P1D as in the guide's NVIDIA PD section: a DEP2 prefill on
+  # one tray and a DEP4 decode on a second tray. vllm-router takes
+  # one DP size for both pools, so it sends each request to the endpoint and
+  # each engine picks its own DP rank.
   pd_cluster:
+    router:
+      intra_node_data_parallel_size: 1
     prefill:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
       hardware_overrides:
+        gb200: &m31_gb_prefill
+          extra_args:
+            - "--data-parallel-size"
+            - "2"
+            - "--data-parallel-size-local"
+            - "2"
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.9"
+            - "--enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_prefill
         mi355x:
           extra_args:
             - "--tensor-parallel-size"
@@ -295,7 +332,37 @@ strategy_overrides:
             CUDA_VISIBLE_DEVICES: "0,1,2,3"
             VLLM_KV_CACHE_LAYOUT: "BLHNC"
     decode:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
       hardware_overrides:
+        # 28 sequences per rank; graphs up to 28 x (1 + 7 DSpark tokens).
+        gb200: &m31_gb_decode
+          extra_args:
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":224}'
+            - "--max-num-seqs"
+            - "28"
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.95"
+            - "--watermark"
+            - "0.05"
+            - "--no-enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_decode
         mi355x:
           extra_args:
             - "--tensor-parallel-size"
@@ -407,7 +474,7 @@ guide: |
     --kv-cache-dtype nvfp4 \
     --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --max-num-seqs 256 \
     --disable-hybrid-kv-cache-manager
   ```
@@ -501,50 +568,85 @@ guide: |
     echo 2240 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
     ```
 
-  ### Prefill/decode disaggregation (1P1D, TP4 + TP4, NVIDIA GB200)
+  ### Prefill/decode disaggregation (1P1D, DEP2 + DEP4, NVIDIA GB200 / GB300)
 
-  The NVIDIA pair runs NVFP4 KV end to end over NIXL (kv_buffer_device
-  `cuda`); the prefill node skips CUDA graphs (`--enforce-eager`) and carries
-  a 32768-token batch budget, the decode node runs FULL_DECODE_ONLY graphs.
+  A DEP2 prefill on one 4-GPU tray feeds a DEP4 decode on a second tray over
+  NIXL. Both roles run attention data parallel with the NVFP4 experts
+  on the DeepGEMM MegaMoE kernel over expert parallelism, the V2 model runner,
+  NUMA binding, and a seven-token DSpark draft on the FlashInfer PrimiTS
+  (`FLASHINFER_TS`) backend. The settings were tuned on GB300; GB200 uses the
+  same commands.
 
   Prefill node:
 
   ```bash
-  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
-    -tp 4 \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
     --reasoning-parser minimax_m3 \
     --block-size 128 \
     --kv-cache-dtype nvfp4 \
-    --attention-config '{"indexer_kv_dtype": "nvfp4"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
-    --max-num-seqs 16 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 64 \
     --max-num-batched-tokens 32768 \
+    --long-prefill-token-threshold 8192 \
     --gpu-memory-utilization 0.9 \
-    --enforce-eager \
+    --enable-prefix-caching \
+    --disable-hybrid-kv-cache-manager \
     --port 8100 \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"kv_lease_duration":120}}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
   ```
 
   Decode node:
 
   ```bash
-  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
-    -tp 4 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
     --reasoning-parser minimax_m3 \
     --block-size 128 \
     --kv-cache-dtype nvfp4 \
     --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
-    --max-num-seqs 88 \
-    --max-num-batched-tokens 512 \
-    --gpu-memory-utilization 0.9 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "max_cudagraph_capture_size": 224}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 28 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.95 \
+    --watermark 0.05 \
+    --no-enable-prefix-caching \
     --disable-hybrid-kv-cache-manager \
     --port 8200 \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"kv_lease_duration":120}}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
   ```
+
+  - `VLLM_ENGINE_READY_TIMEOUT_S=3600`: with data parallel, each API server
+    waits this long for its engines to start (default 600 s). A cold prefill
+    start (JIT builds, CUDA graph capture, FlashInfer autotune) takes longer
+    than 10 minutes.
+  - `--max-num-seqs` is per DP rank. The decode CUDA graphs cover 28 requests
+    of 1 + 7 tokens (224).
+  - `--watermark 0.05` keeps 5% of the decode KV cache free when admitting
+    requests, so extra requests wait in the queue instead of preempting
+    running ones. On GB300 (about 4.5M KV tokens per decode rank) at a
+    200K-token mean context, expect about 19-21 running requests per rank.
+  - Keep the decode `--max-num-batched-tokens` at 8192: a preempted request
+    recomputes its context in chunks of that size, and every DP rank runs
+    eager steps until it finishes.
+  - `engine_ttl: 0` turns off NIXL's cleanup of idle remote engines; with the
+    default one-hour TTL, a decode crashed an hour after its prefill went away.
+  - Prefix caching stays on the prefill node only. For multi-turn traffic, the
+    prefill node can also offload KV to host memory, 180 GiB per rank:
+    `--kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"engine_ttl":0}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":193273528320,"lazy_offload":true}}]}}'`.
 
   For a quick test, put the toy NIXL proxy from the vLLM repository in front of
   the two nodes and send requests to port 8000:
@@ -595,7 +697,7 @@ guide: |
     cache block size must match (otherwise `No common block size for 16`).
   - **Parsers.** `--tool-call-parser` and `--reasoning-parser` both use
     `minimax_m3`.
-  - **HugeTLB pages (PD prefill node).** See the PD section above.
+  - **HugeTLB pages (PD prefill node).** See the AMD PD section above.
 
   ## References
 
