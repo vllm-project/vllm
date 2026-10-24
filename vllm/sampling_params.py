@@ -3,6 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
+import itertools
 import json as json_mod
 import math
 from dataclasses import field
@@ -422,6 +423,7 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    _aux_readout_slices: list[tuple[str, int, int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
@@ -447,6 +449,11 @@ class SamplingParams(
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
+
+    aux_readouts: list[str] | None = None
+    """Names of the model's auxiliary readouts (`SupportsAuxReadout`) to return
+    in `CompletionOutput.aux_readouts`, one float32 row per generated token.
+    Requires `enable_aux_readouts=True`."""
 
     @staticmethod
     def from_optional(
@@ -915,6 +922,7 @@ class SamplingParams(
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
+        self._validate_aux_readouts(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1195,6 +1203,41 @@ class SamplingParams(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
+
+    def _validate_aux_readouts(self, model_config: ModelConfig) -> None:
+        if self.aux_readouts is None:
+            return
+        if not model_config.enable_aux_readouts:
+            raise VLLMValidationError(
+                "aux_readouts requires the engine to be started with "
+                "enable_aux_readouts=True (--enable-aux-readouts).",
+                parameter="aux_readouts",
+                value=self.aux_readouts,
+            )
+        if self.output_kind == RequestOutputKind.DELTA:
+            raise VLLMValidationError(
+                "aux_readouts are returned with the final output only and do not "
+                "support output_kind=DELTA yet.",
+                parameter="output_kind",
+                value=self.output_kind.name,
+            )
+        declared = model_config.aux_readout_dims
+        unknown = [n for n in self.aux_readouts if n not in declared]
+        if (
+            not self.aux_readouts
+            or unknown
+            or len(set(self.aux_readouts)) != len(self.aux_readouts)
+        ):
+            raise VLLMValidationError(
+                f"aux_readouts must be a non-empty list of distinct names out of "
+                f"{sorted(declared)}; got {self.aux_readouts}.",
+                parameter="aux_readouts",
+                value=self.aux_readouts,
+            )
+        starts = dict(zip(declared, itertools.accumulate(declared.values(), initial=0)))
+        self._aux_readout_slices = [
+            (n, starts[n], starts[n] + declared[n]) for n in self.aux_readouts
+        ]
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
         if not model_config.is_diffusion:

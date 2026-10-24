@@ -1315,6 +1315,41 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _verify_aux_readout_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_aux_readouts:
+            return
+        # Only Model Runner V2 computes readouts; the restrictions below are
+        # configurations it has not been validated with yet.
+        if not self.use_v2_model_runner:
+            raise ValueError("enable_aux_readouts requires Model Runner V2")
+        if model_config.runner_type != "generate" or model_config.is_diffusion:
+            raise ValueError(
+                "enable_aux_readouts only supports autoregressive generation models"
+            )
+        if not model_config.aux_readout_dims:
+            raise ValueError(
+                f"enable_aux_readouts: {model_config.architecture} declares no "
+                "auxiliary readouts (it does not implement SupportsAuxReadout)"
+            )
+        if self.speculative_config is not None:
+            raise ValueError(
+                "enable_aux_readouts does not support speculative decoding"
+            )
+        if self.parallel_config.tensor_parallel_size > 1:
+            raise ValueError(
+                "enable_aux_readouts does not support tensor parallelism yet"
+            )
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "enable_aux_readouts does not support pipeline parallelism"
+            )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            or self.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError("enable_aux_readouts does not support context parallelism")
+
     def _verify_trace_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.enable_trace_replay:
@@ -1551,6 +1586,7 @@ class VllmConfig:
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
+        self._verify_aux_readout_config()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (

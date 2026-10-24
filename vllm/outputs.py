@@ -69,6 +69,9 @@ class CompletionOutput:
             position if the logprobs are requested.
         sampling_mask: The post-processing token support set for each generated
             token, if requested.
+        aux_readouts: For each name in `SamplingParams.aux_readouts`, a float32
+            tensor [len(token_ids), width] of the model's auxiliary readout at
+            each generated token. Returned with the final output.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -95,6 +98,7 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    aux_readouts: dict[str, torch.Tensor] | None = None
     weight_versions: list[WeightVersionSpan] | None = None
 
     def finished(self) -> bool:
@@ -243,6 +247,8 @@ class RequestOutput:
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:
                             completion.routed_experts = next_completion.routed_experts
+                        if next_completion.aux_readouts is not None:
+                            completion.aux_readouts = next_completion.aux_readouts
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason

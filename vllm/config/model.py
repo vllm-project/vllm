@@ -283,6 +283,11 @@ class ModelConfig:
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    enable_aux_readouts: bool = False
+    """Whether requests may ask for the model's auxiliary readouts
+    (`SamplingParams.aux_readouts`): small float32 outputs, such as an N-way
+    decision head, computed from the hidden states that generation samples
+    from. Requires a model implementing `SupportsAuxReadout`."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -477,6 +482,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",
+            "enable_aux_readouts",
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
@@ -2036,6 +2042,11 @@ class ModelConfig:
     @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
+
+    @property
+    def aux_readout_dims(self) -> dict[str, int]:
+        """Readout name -> width declared by the model (empty if none)."""
+        return dict(self._model_info.aux_readout_dims)
 
     @property
     def is_hybrid(self) -> bool:

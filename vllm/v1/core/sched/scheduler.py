@@ -2211,6 +2211,7 @@ class Scheduler(SchedulerInterface):
         prompt_token_id_logprobs_dict = (
             model_runner_output.prompt_token_id_logprobs_dict
         )
+        aux_readouts = model_runner_output.aux_readouts
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
@@ -2433,6 +2434,12 @@ class Scheduler(SchedulerInterface):
                         req_index, len(new_token_ids)
                     )
 
+            new_aux_readouts = None
+            if aux_readouts and new_token_ids:
+                readout = aux_readouts.get(req_id)
+                if readout is not None:
+                    new_aux_readouts = readout[: len(new_token_ids)]
+
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
@@ -2464,6 +2471,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        new_aux_readouts=new_aux_readouts,
                     )
                 )
             else:

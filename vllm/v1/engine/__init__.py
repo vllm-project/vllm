@@ -246,6 +246,10 @@ class EngineCoreOutput(
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
 
+    # [num_new_tokens, total_width] float32 auxiliary readouts
+    # (SamplingParams.aux_readouts); appended last for array_like compatibility.
+    new_aux_readouts: torch.Tensor | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

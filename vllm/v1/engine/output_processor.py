@@ -238,6 +238,10 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # (name, start, end) column slices of the requested auxiliary readouts,
+        # and the [num_tokens, total_width] chunks received so far.
+        self.aux_readout_slices: list[tuple[str, int, int]] | None = None
+        self.aux_readout_chunks: list[torch.Tensor] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
 
@@ -346,6 +350,8 @@ class RequestState:
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
         )
+        if sampling_params is not None:
+            state.aux_readout_slices = sampling_params._aux_readout_slices
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
             state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
@@ -514,12 +520,18 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        aux_readouts = None
+        if finished and self.aux_readout_slices and self.aux_readout_chunks:
+            joined = torch.cat(self.aux_readout_chunks, dim=0)
+            aux_readouts = {n: joined[:, a:b] for n, a, b in self.aux_readout_slices}
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
+            aux_readouts=aux_readouts,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
@@ -836,6 +848,10 @@ class OutputProcessor:
                     req_state.sampling_mask_chunks.append(
                         engine_core_output.new_sampling_mask
                     )
+                if engine_core_output.new_aux_readouts is not None:
+                    req_state.aux_readout_chunks.append(
+                        engine_core_output.new_aux_readouts
+                    )
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
@@ -913,6 +929,8 @@ class OutputProcessor:
             )
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
+        if output.new_aux_readouts is not None:
+            output.new_aux_readouts = output.new_aux_readouts[:num_kept]
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

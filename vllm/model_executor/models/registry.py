@@ -49,6 +49,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
+    supports_aux_readout,
     supports_hc_sp,
     supports_kv_cache_grouping,
     supports_lora,
@@ -924,6 +925,16 @@ class _ModelInfo:
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    # (name, width) pairs; a tuple so that _ModelInfo stays hashable.
+    aux_readout_dims: tuple[tuple[str, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        # The JSON model-info cache round-trips tuples as lists.
+        object.__setattr__(
+            self,
+            "aux_readout_dims",
+            tuple((str(n), int(w)) for n, w in self.aux_readout_dims),
+        )
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -961,6 +972,11 @@ class _ModelInfo:
             ),
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
+            ),
+            aux_readout_dims=(
+                tuple(model.aux_readout_dims.items())
+                if supports_aux_readout(model)
+                else ()
             ),
         )
 

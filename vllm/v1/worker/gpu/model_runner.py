@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -52,7 +52,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    SupportsAuxReadout,
+    requires_raw_input_tokens,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -343,6 +346,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
+        # Requests that asked for auxiliary readouts; None when the engine does
+        # not allow them.
+        self.aux_readout_req_ids: set[str] | None = (
+            set() if self.model_config.enable_aux_readouts else None
+        )
+        self.aux_readout_width = sum(self.model_config.aux_readout_dims.values())
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
@@ -1170,6 +1179,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
+        if self.aux_readout_req_ids is not None:
+            self.aux_readout_req_ids.discard(req_id)
         self.lora_state.remove_request(req_id)
         return True
 
@@ -1250,6 +1261,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
+                if (
+                    self.aux_readout_req_ids is not None
+                    and new_req_data.sampling_params.aux_readouts
+                ):
+                    self.aux_readout_req_ids.add(req_id)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -2121,6 +2137,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
+    def _compute_aux_readouts(
+        self, hidden_states: torch.Tensor, input_batch: InputBatch
+    ) -> dict[str, torch.Tensor] | None:
+        """req_id -> [num_logits, total_width] float32 at the rows that
+        `compute_logits` read, for the scheduled requests that asked."""
+        if not self.aux_readout_req_ids:
+            return None
+        cu = input_batch.cu_num_logits_np
+        asking = [
+            (req_id, int(cu[i]), int(cu[i + 1]))
+            for i, req_id in enumerate(input_batch.req_ids)
+            if req_id in self.aux_readout_req_ids and cu[i + 1] > cu[i]
+        ]
+        if not asking:
+            return None
+        rows = torch.cat([input_batch.logits_indices[a:b] for _, a, b in asking])
+        model = cast(SupportsAuxReadout, self.model)
+        readouts = model.compute_aux_readouts(hidden_states[rows])
+        sizes = [b - a for _, a, b in asking]
+        expected = (sum(sizes), self.aux_readout_width)
+        if tuple(readouts.shape) != expected:
+            raise ValueError(
+                f"{type(model).__name__}.compute_aux_readouts returned shape "
+                f"{tuple(readouts.shape)}; expected {expected} "
+                "(rows, sum of aux_readout_dims)"
+            )
+        readouts = readouts.float()
+        return {
+            req_id: r for (req_id, _, _), r in zip(asking, torch.split(readouts, sizes))
+        }
+
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
@@ -2213,6 +2260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            aux_readouts=self._compute_aux_readouts(hidden_states, input_batch),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
