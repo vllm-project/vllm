@@ -2099,9 +2099,8 @@ def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
 
 
 def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
-    """The sender's trainer_init drives the init handshake with the
-    worker-shaped init info; sparse ships no packed wire params, so the worker
-    keeps its unpacked defaults. Sparse takes no `source`."""
+    """The sender's trainer_init sends worker-shaped init info with
+    `packed=False` and default buffer settings. Sparse takes no `source`."""
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
     group = object()
