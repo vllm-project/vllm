@@ -200,7 +200,11 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
         build_and_serve,
         build_async_engine_client,
     )
-    from vllm.entrypoints.launchers.launcher import setup_server
+    from vllm.entrypoints.launchers.launcher import (
+        remove_unix_socket_file,
+        setup_server,
+        unix_socket_file_identity,
+    )
 
     args.enable_sleep_mode = True
 
@@ -228,6 +232,7 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
         args.port = listener.port
         await _restore_reloadable_state(engine)
         listen_address, sock = setup_server(args, reuse_port=False)
+        uds_identity = unix_socket_file_identity(args.uds) if args.uds else None
         try:
             shutdown_task = await build_and_serve(
                 engine,
@@ -238,6 +243,8 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
             await shutdown_task
         finally:
             sock.close()
+            if args.uds:
+                remove_unix_socket_file(args.uds, uds_identity)
 
 
 def main(argv: list[str] | None = None) -> None:

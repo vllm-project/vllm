@@ -3,8 +3,10 @@
 
 import asyncio
 import contextlib
+import os
 import signal
 import socket
+import stat
 from collections.abc import Generator, MutableSequence
 from functools import partial
 from typing import Any
@@ -356,9 +358,64 @@ def create_server_socket(
 
 
 def create_server_unix_socket(path: str) -> socket.socket:
+    _remove_stale_unix_socket(path)
     sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
     sock.bind(path)
     return sock
+
+
+def _remove_stale_unix_socket(path: str) -> None:
+    """Remove a socket file left behind by a previous server at ``path``.
+
+    A Unix socket file outlives the process that bound it, so without this a
+    restart on the same ``--uds`` path fails with ``EADDRINUSE``. Only a file
+    that nothing accepts connections on is removed; a path that a live server
+    still listens on is left alone, and ``bind`` then fails as before.
+    """
+    if path.startswith("\0"):
+        return  # abstract namespace: no file
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return
+    except FileNotFoundError:
+        return
+    probe = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    try:
+        probe.connect(path)
+    except ConnectionRefusedError:
+        logger.warning("Removing stale Unix socket file %s", path)
+        os.unlink(path)
+    except OSError:
+        # Let bind() report whatever is wrong with the path.
+        return
+    finally:
+        probe.close()
+
+
+def unix_socket_file_identity(path: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the socket file at ``path``, captured right after
+    binding so that shutdown removes only this server's file. ``None`` when there
+    is no such file (abstract namespace, missing, or not a socket)."""
+    if path.startswith("\0"):
+        return None
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISSOCK(info.st_mode) else None
+
+
+def remove_unix_socket_file(path: str, identity: tuple[int, int] | None) -> None:
+    """Remove the socket file at ``path`` if it is still the one captured in
+    ``identity``; a replacement bound by another server since then is kept."""
+    if identity is None or unix_socket_file_identity(path) != identity:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("Failed to remove Unix socket file %s: %s", path, e)
 
 
 @instrument(span_name="API server setup")
