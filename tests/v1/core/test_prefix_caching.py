@@ -50,6 +50,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -3634,18 +3635,16 @@ def test_kv_cache_events(blocks_to_cache: int):
     stored_block_hash = block.block_hashes
 
     # Remove blocks and send another request
-    # Should see block_to_cache number of removed block events and a new block
-    # stored event
+    # Should see one removed block event carrying the blocks_to_cache evicted
+    # hashes and a new block stored event
     manager.free(req0)
     req1 = make_request("1", list(range(num_tokens)), block_size, sha256)
     _ = manager.allocate_slots(req1, num_tokens)
     events = manager.take_events()
 
-    for blocks in events[:-1]:
-        assert isinstance(blocks, BlockRemoved)
-        assert blocks.block_hashes[0] in stored_block_hash
-    assert len(events) == blocks_to_cache + 1
-    assert isinstance(events[-2], BlockRemoved)
+    assert len(events) == 2
+    assert isinstance(events[0], BlockRemoved)
+    assert sorted(events[0].block_hashes) == sorted(stored_block_hash)
     assert (
         len(events[-1].block_hashes)
         == blocks_to_cache
@@ -4069,15 +4068,107 @@ def test_block_removed_event_group_idx(group_id: int):
     # Return all blocks to the free queue so they become eviction candidates.
     pool.free_blocks(all_blocks)
 
-    # Re-allocate all blocks; the two with hashes trigger BlockRemoved events.
+    # Re-allocate all blocks; the two with hashes are reported in one
+    # BlockRemoved event.
     pool.get_new_blocks(4)
 
     events = pool.take_events()
     removed_events = [e for e in events if isinstance(e, BlockRemoved)]
 
-    assert len(removed_events) == 2
-    for event in removed_events:
-        assert event.group_idx == group_id
+    assert len(removed_events) == 1
+    assert len(removed_events[0].block_hashes) == 2
+    assert removed_events[0].group_idx == group_id
+
+
+@pytest.mark.parametrize("use_int_hashes", [False, True])
+def test_block_removed_events_batched_per_group(
+    monkeypatch: pytest.MonkeyPatch, use_int_hashes: bool
+):
+    """An allocation that evicts cached blocks of several groups emits one
+    BlockRemoved per group, with the same external hashes the blocks were
+    stored under."""
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", str(int(use_int_hashes)))
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=7,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_evict_groups",
+        prompt_token_ids=list(range(block_size * 3)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    all_blocks = pool.get_new_blocks(6)
+    stored: dict[int, list] = {}
+    for group_id, blocks in ((0, all_blocks[:3]), (2, all_blocks[3:])):
+        pool.cache_full_blocks(
+            request=req,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=3,
+            block_size=block_size,
+            kv_cache_group_id=group_id,
+        )
+        [stored_event] = pool.take_events()
+        stored[group_id] = stored_event.block_hashes
+    assert all(isinstance(h, int if use_int_hashes else bytes) for h in stored[0])
+
+    pool.free_blocks(all_blocks)
+    pool.get_new_blocks(6)
+    events = pool.take_events()
+
+    assert all(isinstance(e, BlockRemoved) for e in events)
+    assert {e.group_idx: sorted(e.block_hashes) for e in events} == {
+        group_id: sorted(hashes) for group_id, hashes in stored.items()
+    }
+
+
+def test_evict_blocks_batches_removed_events():
+    """evict_blocks reports the evicted hashes in one BlockRemoved per group."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_evict_ids",
+        prompt_token_ids=list(range(block_size * 2)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(4)
+    for group_id, group_blocks in ((0, blocks[:2]), (1, blocks[2:])):
+        pool.cache_full_blocks(
+            request=req,
+            blocks=group_blocks,
+            num_cached_blocks=0,
+            num_full_blocks=2,
+            block_size=block_size,
+            kv_cache_group_id=group_id,
+        )
+    pool.take_events()
+
+    pool.evict_blocks({block.block_id for block in blocks})
+    events = pool.take_events()
+
+    assert all(isinstance(e, BlockRemoved) for e in events)
+    assert sorted((e.group_idx, len(e.block_hashes)) for e in events) == [
+        (0, 2),
+        (1, 2),
+    ]
+
+
+def test_maybe_convert_block_hash_low_64_bits(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    for block_hash in (bytes(range(32)), b"\xff" * 32, b"\x01\x02\x03"):
+        assert maybe_convert_block_hash(BlockHash(block_hash)) == int.from_bytes(
+            block_hash, "big"
+        ) & ((1 << 64) - 1)
 
 
 def test_emit_cached_block_events():
