@@ -1,0 +1,117 @@
+diff --git a/csrc/kernels/backend/nvshmem.cu b/csrc/kernels/backend/nvshmem.cu
+index 837d8fe22..c84834bfb 100644
+--- a/csrc/kernels/backend/nvshmem.cu
++++ b/csrc/kernels/backend/nvshmem.cu
+@@ -1,17 +1,49 @@
+-#include <cstring>
+-#include <optional>
+-#include <vector>
++#include <nvshmem.h>
+ 
++#include <cstring>
+ #include <deep_ep/common/compiled.cuh>
+ #include <deep_ep/common/exception.cuh>
++#include <optional>
++#include <sstream>
++#include <vector>
+ 
+-#include <nvshmem.h>
++#if !defined(NVSHMEM_VENDOR_MAJOR_VERSION) || !defined(NVSHMEM_VENDOR_MINOR_VERSION) || !defined(NVSHMEM_VENDOR_PATCH_VERSION)
++#error "NVSHMEM vendor version macros are required"
++#endif
+ 
+ namespace deep_ep::nvshmem {
+ 
+ nvshmem_team_t cpu_rdma_team = NVSHMEM_TEAM_INVALID;
+ nvshmem_team_config_t cpu_rdma_team_config;
+ 
++namespace {
++
++constexpr bool uses_qp_major_rc_layout(const int major, const int minor, const int patch) {
++    return major > 3 or (major == 3 and minor > 5) or (major == 3 and minor == 5 and patch >= 19);
++}
++
++constexpr bool kCompileTimeUsesQpMajorRcLayout =
++    uses_qp_major_rc_layout(NVSHMEM_VENDOR_MAJOR_VERSION, NVSHMEM_VENDOR_MINOR_VERSION, NVSHMEM_VENDOR_PATCH_VERSION);
++
++static_assert(not uses_qp_major_rc_layout(3, 5, 18));
++static_assert(uses_qp_major_rc_layout(3, 5, 19));
++
++void check_rc_layout_compatibility() {
++    int runtime_major, runtime_minor, runtime_patch;
++    nvshmemx_vendor_get_version_info(&runtime_major, &runtime_minor, &runtime_patch);
++    if (kCompileTimeUsesQpMajorRcLayout == uses_qp_major_rc_layout(runtime_major, runtime_minor, runtime_patch))
++        return;
++
++    std::stringstream ss;
++    ss << "DeepEP was compiled with NVSHMEM " << NVSHMEM_VENDOR_MAJOR_VERSION << "." << NVSHMEM_VENDOR_MINOR_VERSION << "."
++       << NVSHMEM_VENDOR_PATCH_VERSION << ", but loaded NVSHMEM " << runtime_major << "." << runtime_minor << "." << runtime_patch
++       << "; these versions use incompatible IBGDA RC QP layouts. Recompile DeepEP "
++          "against the loaded NVSHMEM library.";
++    throw EPException("NVSHMEM", __FILE__, __LINE__, ss.str());
++}
++
++}  // namespace
++
+ std::vector<uint8_t> get_unique_id() {
+     nvshmemx_uniqueid_t unique_id;
+     nvshmemx_get_uniqueid(&unique_id);
+@@ -50,6 +82,11 @@ int init(const std::vector<uint8_t>& root_unique_id_val,
+          const int& rank,
+          const int& num_ranks,
+          const int& team_split_stride) {
++    // NVSHMEM's normal compatibility check allows an older device module to load
++    // against a newer host library. Reject that combination when it crosses the
++    // 3.5.19 RC QP layout transition used by the legacy IBGDA kernels.
++    check_rc_layout_compatibility();
++
+     nvshmemx_uniqueid_t root_unique_id;
+     nvshmemx_init_attr_t attr;
+     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
+diff --git a/csrc/kernels/legacy/ibgda_device.cuh b/csrc/kernels/legacy/ibgda_device.cuh
+index 819bdd1c8..cbe028762 100644
+--- a/csrc/kernels/legacy/ibgda_device.cuh
++++ b/csrc/kernels/legacy/ibgda_device.cuh
+@@ -7,15 +7,18 @@
+ //  - nvshmem/src/include/non_abi/device/pt-to-pt/ibgda_device.cuh
+ #pragma once
+ 
+-
+-#include <nvshmem.h>
+ #include <device_host_transport/nvshmem_common_ibgda.h>
+-#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
++#include <nvshmem.h>
+ 
+ #include <deep_ep/common/exception.cuh>
++#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+ 
+ #include "utils.cuh"
+ 
++#if !defined(NVSHMEM_VENDOR_MAJOR_VERSION) || !defined(NVSHMEM_VENDOR_MINOR_VERSION) || !defined(NVSHMEM_VENDOR_PATCH_VERSION)
++#error "NVSHMEM vendor version macros are required"
++#endif
++
+ namespace deep_ep::legacy {
+ 
+ EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
+@@ -80,9 +83,17 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_state_t* ibgda_get_state
+ 
+ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
+     auto state = ibgda_get_state();
+-    const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
+-    return &state->globalmem
+-                .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
++    const auto num_rcs = state->num_rc_per_pe * state->num_devices_initialized;
++    const auto qp = id % num_rcs;
++#if NVSHMEM_VENDOR_MAJOR_VERSION > 3 || (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION > 5) || \
++    (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION == 5 && NVSHMEM_VENDOR_PATCH_VERSION >= 19)
++    // Since 3.5.19, NVSHMEM stores RC QPs in QP-major, PE-interleaved order.
++    const auto num_pes = nvshmemi_device_state_d.npes;
++    return &state->globalmem.rcs[qp * num_pes + pe];
++#else
++    // Older NVSHMEM releases store RC QPs in PE-major order.
++    return &state->globalmem.rcs[pe * num_rcs + qp];
++#endif
+ }
+ 
+ __device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {
