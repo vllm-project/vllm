@@ -521,11 +521,17 @@ def render_message(
             )
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"] or (
-        messages[index].get("role") == "system" and index > 0
+    elif role in ["user", "developer"] or (
+        role == "system"
+        and (
+            index > 0
+            or index == len(messages) - 1
+            or messages[index + 1].get("role") == "assistant"
+        )
     ):
-        # Normal generation: append Assistant + thinking token
-        # (mid-conversation system messages also trigger the assistant header)
+        # Normal generation: append Assistant + thinking token. A system
+        # message also opens a turn when it is trailing or precedes an
+        # assistant message.
         prompt += ASSISTANT_SP_TOKEN
         if not drop_thinking and thinking_mode == "thinking":
             prompt += thinking_start_token
