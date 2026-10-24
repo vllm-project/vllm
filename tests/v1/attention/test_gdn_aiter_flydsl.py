@@ -146,13 +146,19 @@ def _flydsl_prefill_unavailable() -> bool:
 @pytest.mark.parametrize(
     "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32_state", "bf16_state"]
 )
-def test_aiter_flydsl_prefill_matches_triton_reference(state_dtype: torch.dtype):
+@pytest.mark.parametrize("in_place", [False, True], ids=["alloc_out", "in_place_out"])
+def test_aiter_flydsl_prefill_matches_triton_reference(
+    state_dtype: torch.dtype, in_place: bool
+):
     """Run both prefill paths on device and compare.
 
     The reference is the same AITER entry point with the FlyDSL prepare and K5
     kernels switched off, so the only thing that differs between the two calls
     is the kernels this backend exists to select. The state dtype follows
     --mamba-ssm-cache-dtype, which may be float32 or bfloat16.
+
+    With in_place the output goes into a leading slice of a larger buffer, as
+    the model's core_attn_out does, and the rows past it must stay untouched.
     """
     from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
 
@@ -205,15 +211,27 @@ def test_aiter_flydsl_prefill_matches_triton_reference(state_dtype: torch.dtype)
         use_prepare_flydsl=False,
         **shared,
     )
+    out_buffer = torch.full(
+        (total_tokens + 16, num_v_heads, head_dim),
+        float("nan"),
+        dtype=torch.bfloat16,
+        device=device,
+    )
     flydsl_out, flydsl_state = ChunkGatedDeltaRule.forward_aiter_flydsl(
         None,
         initial_state=initial_state.clone(),
         aiter_prefill_metadata=rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
             seq_lens, cu_seqlens=cu_seqlens
         ),
+        core_attn_out=out_buffer[:total_tokens] if in_place else None,
         **shared,
     )
 
+    if in_place:
+        assert flydsl_out.data_ptr() == out_buffer.data_ptr()
+        # Padding past the slice. A store there overwrites the NaN with a
+        # bf16 value; the written prefix is checked against the reference.
+        assert out_buffer[total_tokens:].isnan().all()
     assert flydsl_state.dtype == state_dtype
     torch.testing.assert_close(
         flydsl_out.float(), reference_out.float(), rtol=2e-2, atol=2e-2
