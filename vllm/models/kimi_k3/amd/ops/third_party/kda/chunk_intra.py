@@ -351,7 +351,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     ],
     key=["BK", "BT", "HV"],
 )
-@triton.jit(do_not_specialize=["B", "T"])
+@triton.jit(do_not_specialize=["T"])
 def chunk_kda_fwd_kernel_intra_sub_chunk(
     q,
     k,
