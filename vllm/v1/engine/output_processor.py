@@ -814,6 +814,19 @@ class OutputProcessor:
                     retryable=True,
                 )
                 pooling_output = EMPTY_CPU_TENSOR
+            elif req_state.detokenizer is None and finish_reason == FinishReason.ERROR:
+                request_error = RequestError(
+                    code="engine_error",
+                    message="Engine failed to process the pooling request.",
+                    retryable=True,
+                )
+
+            if (
+                pooling_output is None
+                and req_state.detokenizer is None
+                and finish_reason in (FinishReason.ABORT, FinishReason.ERROR)
+            ):
+                pooling_output = EMPTY_CPU_TENSOR
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
