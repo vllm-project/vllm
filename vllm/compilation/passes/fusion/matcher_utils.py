@@ -7,6 +7,7 @@ import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -108,12 +109,18 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
+        # The base RoPE is a vLLM IR op emitted on every platform (incl. ROCm
+        # AITER, whose kernel is now an IR provider), so always match the IR
+        # node. Only flashinfer stays on its dedicated custom op.
+        self.use_ir_op = not use_flashinfer
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
         elif match_rocm_aiter:
             self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
+        if self.use_ir_op:
+            self.forward = self.forward_custom
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -129,6 +136,16 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_ir_op:
+            return ir.ops.rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
         result = auto_functionalized(
             self.rotary_op,
             positions=positions,
