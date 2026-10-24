@@ -93,7 +93,11 @@ from vllm.renderers.online_renderer import (
     ResponsesPreviousMessages,
     ResponsesRenderResult,
 )
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
@@ -484,9 +488,41 @@ class OpenAIServingResponses(GenerateBaseServing):
                         enable_auto_tools=self.enable_auto_tools,
                     )
                 else:
+                    content_timing_parser = None
+                    if (
+                        not request.stream
+                        and self.enable_per_request_metrics
+                        and response_parser is not None
+                    ):
+                        content_timing_parser = self._make_response_parser(
+                            request, tokenizer, chat_template_kwargs
+                        )
+                        if content_timing_parser is not None:
+                            prompt_token_ids = self._extract_prompt_components(
+                                engine_input
+                            ).token_ids
+                            if prompt_token_ids is not None:
+                                content_timing_parser.set_prompt_token_ids(
+                                    prompt_token_ids
+                                )
                     context = SimpleContext(
                         response_parser=response_parser,
+                        content_timing_parser=content_timing_parser,
+                        request=request,
                     )
+
+            if (
+                not request.stream
+                and self.enable_per_request_metrics
+                and (
+                    isinstance(context, HarmonyContext)
+                    or (
+                        isinstance(context, SimpleContext)
+                        and context.content_timing_parser is not None
+                    )
+                )
+            ):
+                sampling_params.output_kind = RequestOutputKind.DELTA
 
             reasoning_parser_kwargs = None
             if (
@@ -684,6 +720,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             async for res in generator:
                 context.request_metrics = res.metrics
                 context.append_output(res)
+                if (
+                    isinstance(context, SimpleContext)
+                    and context.content_timing_parser is not None
+                ):
+                    output = res.outputs[0]
+                    assert context.request is not None
+                    delta_message = context.content_timing_parser.parse_delta(
+                        delta_text=output.text,
+                        delta_token_ids=as_list(output.token_ids),
+                        request=context.request,
+                        prompt_token_ids=res.prompt_token_ids,
+                        finished=output.finish_reason is not None,
+                    )
+                    if delta_message is not None and delta_message.content:
+                        context.record_first_content_token(res.metrics)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
@@ -919,7 +970,17 @@ class OpenAIServingResponses(GenerateBaseServing):
             and context.request_metrics_cover_all_generation_turns
         ):
             per_request_metrics = build_per_request_timing_metrics(
-                context.request_metrics, num_generated_tokens
+                context.request_metrics,
+                num_generated_tokens,
+                first_content_token_ts=(
+                    context.first_content_token_ts
+                    if context.response_parser is not None
+                    else (
+                        context.request_metrics.first_token_ts
+                        if context.request_metrics is not None
+                        else None
+                    )
+                ),
             )
         response = ResponsesResponse.from_request(
             request,
@@ -1260,6 +1321,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             else:
                 delta_message = DeltaMessage(content=output.text)
+
+            if delta_message is not None and delta_message.content:
+                ctx.record_first_content_token(ctx.last_output.metrics)
 
             if not delta_message:
                 continue
