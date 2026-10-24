@@ -21,6 +21,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
+    get_current_attn_backends,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -104,7 +105,6 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
-from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -1944,12 +1944,6 @@ class MoRIIOConnectorWorker:
         self._region_session_index: dict[str, list[int]] | None = None
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
-        backend = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            use_mla=self.use_mla,
-        )
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         # READ-mode producer: a decode release-ACK can arrive BEFORE
         # start_load_kv populates transfer_id_to_request_id (the notify races
@@ -1962,8 +1956,7 @@ class MoRIIOConnectorWorker:
         # is preserved.
         self._pending_unmapped_acks: list = []
 
-        # TODO: consider the integration of flashinfer or other backends.
-        self.backend_name = backend.get_name()
+        self.backend_name = get_current_attn_backends(vllm_config)[0].get_name()
         logger.debug("Detected attention backend %s", self.backend_name)
 
     def schedule_write_blocks(
