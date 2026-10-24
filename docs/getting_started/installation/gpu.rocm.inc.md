@@ -247,8 +247,8 @@ You can find more information about vLLM's wheels in
 
     pip install --index-url ${ROCM_INDEX} \
         "rocm[libraries,devel,device-${GPU_ARCH}]==10.0.0" \
-        "torch[device-${GPU_ARCH}]==2.12.0+rocm10.0.0" \
-        "torchvision[device-${GPU_ARCH}]==0.27.0+rocm10.0.0"
+        "torch[device-${GPU_ARCH}]==2.14.0+rocm10.0.0" \
+        "torchvision[device-${GPU_ARCH}]==0.29.0+rocm10.0.0"
     rocm-sdk init
 
     # Point builds at the pip-installed ROCm SDK
