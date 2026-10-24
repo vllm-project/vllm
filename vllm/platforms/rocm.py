@@ -135,28 +135,6 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
         return None
 
 
-def _sync_hip_cuda_env_vars():
-    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
-    Treats empty string as unset. Raises on genuine conflicts."""
-    hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
-    cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
-
-    if hip_val is not None and cuda_val is not None:
-        if hip_val != cuda_val:
-            raise ValueError(
-                f"Inconsistent GPU visibility env vars: "
-                f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
-                f"CUDA_VISIBLE_DEVICES='{cuda_val}'. "
-                f"Please set only one, or ensure they match."
-            )
-    elif hip_val is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
-
-
-# Sync at import time - catches misconfigurations from process start.
-_sync_hip_cuda_env_vars()
-
-
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -611,8 +589,7 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
-    # rocm shares the same device control env var as CUDA
-    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    device_control_env_var: str = "HIP_VISIBLE_DEVICES"
     # Set in pre_register_and_update, so it exists only on the driver; Ray
     # workers are separate processes and copy env vars by allowlist.
     additional_env_vars: list[str] = ["GPU_PINNED_MIN_XFER_SIZE"]
