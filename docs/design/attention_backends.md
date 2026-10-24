@@ -175,6 +175,8 @@ Priority is **1 = highest** (tried first).
 
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
+> On SM107, `--attention-config.trtllm_gen_split_kv_prefill=true` (off by default) runs chunked prefills over a long cached prefix on the trtllm-gen generation kernel with a split KV instead of the context kernel, when a cost model predicts a gain. It applies to FP8 queries with an FP8 KV cache, head size 256 and 8 query heads per KV head, without DCP. Split launches change the floating-point reduction order, so outputs are not bitwise identical to the context kernel.
+>
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
 >
 > On Blackwell, when the FlashAttention backend is selected, `head_size=256` is served
