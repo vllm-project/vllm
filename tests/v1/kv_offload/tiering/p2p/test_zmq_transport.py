@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import select
 import socket
 import time
 
@@ -16,6 +17,11 @@ from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqTransport,
     _Sockets,
 )
+
+# Transports whose libzmq I/O thread is blocked. Terminating their context
+# blocks forever, and garbage collection would terminate it, so they stay
+# referenced until the interpreter exits (pyzmq skips the term at exit).
+_WEDGED_TRANSPORTS: list[ZmqTransport] = []
 
 
 def _free_port() -> int:
@@ -376,8 +382,59 @@ class TestZmqReconnect:
         finally:
             transport_a.close()
             silent.close()
-            # Terminating a wedged context blocks forever.
-            if not wedged:
+            if wedged:
+                _WEDGED_TRANSPORTS.append(transport_b)
+            else:
+                transport_b.close()
+
+    def test_close_while_connecting_keeps_transport_usable(self):
+        """Closing a connection whose TCP connect never completed keeps the
+        transport usable.
+
+        A peer address with no host behind it (a departed pod, a lost node)
+        never answers the SYN. Tearing down that connect raises EVENT_CLOSED
+        on libzmq's I/O thread, and a monitor event sent after its reader is
+        closed blocks that thread, so no socket in the context can send or
+        receive again.
+        """
+        # Linux drops SYNs to a listener whose accept queue is full, so a
+        # connect to it stays in progress like one to an address with no host.
+        full = socket.socket()
+        full.bind(("127.0.0.1", 0))
+        full.listen(0)
+        addr = full.getsockname()
+        filler = socket.create_connection(addr, timeout=1.0)
+        probe = socket.socket()
+        probe.setblocking(False)
+        probe.connect_ex(addr)
+        _, connected, _ = select.select([], [probe], [], 0.5)
+        probe.close()
+        if connected:
+            filler.close()
+            full.close()
+            pytest.skip("kernel completes connects to a full accept queue")
+
+        transport_a, port_a = _make_transport()
+        transport_b, _ = _make_transport()
+        wedged = True
+        try:
+            pending = transport_b.connect(f"127.0.0.1:{addr[1]}")
+            # Let the I/O thread start the TCP connect.
+            time.sleep(0.2)
+            pending.close()
+
+            conn = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn.send({"seq": 1})
+            inbound = _wait_for_inbound(transport_a)[0]
+            assert _wait_for_messages(transport_a, inbound, 1) == [{"seq": 1}]
+            wedged = False
+        finally:
+            transport_a.close()
+            filler.close()
+            full.close()
+            if wedged:
+                _WEDGED_TRANSPORTS.append(transport_b)
+            else:
                 transport_b.close()
 
 
