@@ -8,12 +8,16 @@ import pytest
 import torch
 
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from vllm.multimodal.image_prune.rate import (
+    compute_retained_tokens_count as rate_retained_tokens_count,
+)
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.multimodal.video_prune.evs import compute_mrope_for_media
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -235,3 +239,188 @@ def test_match_qwen3vl_mrope_evs_on(
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
+
+
+def make_image_embedding(h, w, image_pruning_rate: float = 0.0, seed: int = 1234):
+    """Make an image embedding for a given image size and pruning rate.
+
+    Args:
+        h: Number of rows (post spatial merge).
+        w: Number of columns (post spatial merge).
+        image_pruning_rate: Pruning rate for the image.
+        seed: Seed for the deterministic retention subset.
+
+    Returns:
+        Tuple of (unpruned_tokens_sequence, pruned_tokens_sequence,
+        retention_mask)
+
+    """
+    unpruned_tokens_sequence = (
+        [VISION_START_TOKEN_ID] + [IMAGE_TOKEN_ID] * h * w + [VISION_END_TOKEN_ID]
+    )
+    unpruned_tokens_sequence = torch.tensor(unpruned_tokens_sequence, dtype=torch.long)
+    image_token_mask = unpruned_tokens_sequence == IMAGE_TOKEN_ID
+
+    retained_count = rate_retained_tokens_count(h * w, image_pruning_rate)
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(h * w, generator=g)
+    image_retention_mask = torch.zeros(h * w, dtype=torch.bool)
+    image_retention_mask[perm[:retained_count]] = True
+    # Retain vision_start / vision_end; only image tokens are pruned.
+    retention_mask = torch.cat(
+        [
+            torch.ones(1, dtype=torch.bool),
+            image_retention_mask,
+            torch.ones(1, dtype=torch.bool),
+        ]
+    )
+    # Sanity check that only image tokens are ever pruned.
+    assert retention_mask[~image_token_mask].all()
+
+    pruned_tokens_sequence = unpruned_tokens_sequence[retention_mask]
+    return unpruned_tokens_sequence, pruned_tokens_sequence, retention_mask
+
+
+@pytest.mark.parametrize("spatial_merge_size", [1, 2])
+@pytest.mark.parametrize("grid_hw", [[8, 7], [12, 10]])
+@pytest.mark.parametrize("num_prefix_tokens", [1, 11])
+@pytest.mark.parametrize("num_suffix_tokens", [0, 7])
+@pytest.mark.parametrize("image_pruning_rate", [0.0, 0.25, 0.75])
+@pytest.mark.parametrize(
+    "num_computed_extra_tokens",
+    [0, 1],
+    ids=["at_vision_start", "past_vision_start"],
+)
+def test_match_qwen3vl_mrope_rate_on(
+    spatial_merge_size: int,
+    grid_hw: tuple[int, int],
+    num_prefix_tokens: int,
+    num_suffix_tokens: int,
+    image_pruning_rate: float,
+    num_computed_extra_tokens: int,
+):
+    hf_config = DummyConfig()
+    hf_config.vision_config.spatial_merge_size = spatial_merge_size
+
+    h, w = grid_hw
+    llm_grid_h = h // spatial_merge_size
+    llm_grid_w = w // spatial_merge_size
+    num_tokens = llm_grid_h * llm_grid_w
+    population = list(range(1, 100))
+    prefix_tokens = random.choices(population, k=num_prefix_tokens)
+    suffix_tokens = random.choices(population, k=num_suffix_tokens)
+
+    image_tokens, image_tokens_pruned, retention_mask = make_image_embedding(
+        llm_grid_h,
+        llm_grid_w,
+        image_pruning_rate=image_pruning_rate,
+    )
+
+    input_tokens = prefix_tokens + image_tokens.tolist() + suffix_tokens
+    input_tokens_pruned = prefix_tokens + image_tokens_pruned.tolist() + suffix_tokens
+
+    whole_sequence_retention_mask = torch.cat(
+        [
+            torch.ones(len(prefix_tokens), dtype=torch.bool),
+            retention_mask,
+            torch.ones(len(suffix_tokens), dtype=torch.bool),
+        ],
+        dim=0,
+    )
+
+    # Build the GT mrope for the unpruned input.
+    image_offset = len(prefix_tokens) + 1  # First image token index.
+    mm_feature = MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {
+                "image_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor([1, h, w]),
+                    field=None,  # HACK.
+                ),
+            }
+        ),
+        modality="image",
+        identifier="DUMMY",
+        mm_position=PlaceholderRange(offset=image_offset, length=num_tokens),
+    )
+    expected_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=input_tokens,
+        mm_features=[mm_feature],
+        config=hf_config,
+    )
+
+    # Mirror `_postprocess_image_embeds_evs`: retained image embeddings carry
+    # their original grid positions (plus a dummy fifth channel).
+    image_retention_mask = retention_mask[1:-1]
+    num_retained = int(image_retention_mask.sum().item())
+    media_positions = compute_mrope_for_media(
+        torch.tensor([1, h, w]), spatial_merge_size
+    )
+    expanded_positions = torch.zeros(
+        (num_retained, 5),
+        dtype=torch.long,
+    )
+    expanded_positions[:, :4] = media_positions[image_retention_mask]
+
+    hidden_size = 16
+    image_embeddings = torch.empty(
+        (num_retained, hidden_size),
+    )
+    image_embeddings = torch.cat([image_embeddings, expanded_positions.float()], dim=1)
+    multimodal_embeddings = [image_embeddings]
+
+    expected_mrope_masked = expected_mrope[:, whole_sequence_retention_mask]
+
+    # Number of tokens computed before this prefill chunk. `+1` simulates a
+    # chunk boundary right past the vision_start token, which exercises the
+    # media-start fallback in `recompute_mrope_positions`.
+    num_computed_tokens = len(prefix_tokens) + num_computed_extra_tokens
+
+    # Placeholder mrope for the pruned sequence, as produced by
+    # `_get_mrope_input_positions` in the real pipeline.
+    pruned_mm_feature = MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {
+                "image_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor([1, h, w]),
+                    field=None,  # HACK.
+                ),
+            }
+        ),
+        modality="image",
+        identifier="DUMMY",
+        mm_position=PlaceholderRange(offset=image_offset, length=num_retained),
+    )
+    computed_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=input_tokens_pruned,
+        mm_features=[pruned_mm_feature],
+        config=hf_config,
+    )
+    if image_pruning_rate > 0.0:
+        # Paranoia check that the placeholder mrope is wrong.
+        assert not torch.equal(computed_mrope, expected_mrope_masked)
+
+    _, actual_mrope, _ = Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+        input_ids=input_tokens_pruned,
+        multimodal_embeddings=multimodal_embeddings,
+        mrope_positions=computed_mrope,
+        num_computed_tokens=num_computed_tokens,
+        vision_start_token_id=hf_config.vision_start_token_id,
+        image_token_id=hf_config.image_token_id,
+        video_token_id=hf_config.video_token_id,
+    )
+
+    # Prefix and media positions must match the masked unpruned mrope
+    # exactly. Trailing text (vision_end + suffix) instead continues right
+    # after the last retained media position: unlike the video path, image
+    # mm positions are raw grid coords, so no gap is left for pruned tokens.
+    trailing_len = 1 + num_suffix_tokens  # vision_end + suffix text
+    media_end = len(input_tokens_pruned) - trailing_len
+    assert torch.equal(
+        actual_mrope[:, :media_end], expected_mrope_masked[:, :media_end]
+    )
+    last_media_max = int(expected_mrope_masked[:, media_end - 1].max())
+    expected_trailing = (
+        torch.arange(trailing_len).unsqueeze(0) + last_media_max + 1
+    ).expand(3, -1)
+    assert torch.equal(actual_mrope[:, media_end:], expected_trailing)

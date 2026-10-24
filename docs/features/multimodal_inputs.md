@@ -375,6 +375,28 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
     are rejected at startup. Enabling video pruning also disables encoder CUDA
     graphs, since the retained token count becomes data-dependent.
 
+#### Image Token Pruning
+
+For supported models, vLLM can prune image tokens after the vision encoder
+using **RATE** (Redundancy-Aware Token Eviction). Tokens are scored by their
+similarity to a small pivot set of representative tokens, and the most
+redundant fraction is dropped. Set `--image-pruning-rate <q>` to prune the
+fraction `q` of image tokens from each image; at least one token is always
+retained.
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+    --image-pruning-rate 0.5
+```
+
+Image and video pruning can be enabled together (`--image-pruning-rate` with
+`--video-pruning-rate`); each modality is pruned independently.
+
+!!! note
+    Image pruning is currently supported by the Qwen3-VL family only.
+    Enabling it also disables encoder CUDA graphs, since the retained token
+    count becomes data-dependent.
+
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
