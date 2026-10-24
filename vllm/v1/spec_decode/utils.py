@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from vllm.config import SpeculativeConfig
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupChoices,
     WarmupIntRange,
@@ -849,3 +851,21 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
     rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
+
+
+def check_draft_context_window(
+    speculative_config: SpeculativeConfig,
+    attn_layers: dict[str, AttentionLayerBase],
+    draft_layer_names: set[str],
+) -> None:
+    """Raise if `draft_context_window` is set but a draft layer ignores it."""
+    window = speculative_config.draft_context_window
+    if window is None:
+        return
+    for name in sorted(draft_layer_names):
+        if getattr(attn_layers[name], "sliding_window", None) != window:
+            raise ValueError(
+                f"draft_context_window is set but draft layer {name} does "
+                "not apply it. Only drafters built on the Llama EAGLE-3 model "
+                "code support it."
+            )
