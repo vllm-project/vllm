@@ -1008,8 +1008,15 @@ class AsyncLLM(EngineClient):
                   :meth:`resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
+                Ignored when ``mode="keep"``.
 
         """
+        if mode == "keep":
+            # "keep" freezes requests in the queue instead of draining them,
+            # so caches must not be cleared: queued requests may still hold
+            # handles into the multimodal cache, and clearing it invalidates
+            # those handles, which raises in the worker and kills the engine.
+            clear_cache = False
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_generation_async(
