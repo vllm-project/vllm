@@ -461,12 +461,13 @@ def _stress_metric_counts(llm) -> dict[str, int]:
 
 
 def _stress_mamba_block_size(worker) -> int:
-    from vllm.v1.kv_cache_interface import MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec, iter_layer_specs
 
     sizes = {
-        group.kv_cache_spec.block_size
+        spec.block_size
         for group in worker.model_runner.kv_cache_config.kv_cache_groups
-        if isinstance(group.kv_cache_spec, MambaSpec)
+        for spec in iter_layer_specs(group.kv_cache_spec)
+        if isinstance(spec, MambaSpec)
     }
     assert len(sizes) == 1, sizes
     return sizes.pop()
@@ -535,6 +536,7 @@ def _generate_with_preemption(llm, block_size: int):
     [(False, False), (False, True), (True, True)],
     ids=["v1-sync", "v1-async", "v2-async"],
 )
+@pytest.mark.usefixtures("enable_pickle")
 def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
     vllm_runner, monkeypatch, use_v2, async_scheduling
 ):
