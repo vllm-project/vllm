@@ -23,6 +23,8 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+    _compute_code_hash,
+    _compute_code_hash_with_content,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -1067,3 +1069,13 @@ def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_
         assert traced > before
         assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
         assert counters["unique_graphs"] == traced
+
+
+def test_compute_code_hash_tolerates_unreadable_file(tmp_path):
+    """A traced file that cannot be decoded must not abort compilation."""
+    bad_file = str(tmp_path / "bad.py")
+    with open(bad_file, "wb") as f:
+        f.write(b"\xff\xfe")
+    assert _compute_code_hash({bad_file}) == _compute_code_hash_with_content(
+        {bad_file: ""}
+    )
