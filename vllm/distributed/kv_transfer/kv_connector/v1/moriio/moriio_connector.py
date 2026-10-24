@@ -1223,7 +1223,7 @@ class MoRIIOConnectorScheduler:
                             )
 
                     block_notify_list: list[int] | list[list[int]]
-                    if self._has_mamba:
+                    if self._has_mamba or self._is_hma_required:
                         block_notify_list = list(
                             self._clamp_to_prompt_blocks(
                                 request, blocks.get_block_ids()
