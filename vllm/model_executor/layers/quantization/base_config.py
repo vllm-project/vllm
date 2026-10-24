@@ -272,6 +272,16 @@ class QuantizationConfig(ABC):
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
+    def get_num_experts_for_layer(self, layer_idx: int) -> int | None:
+        """Actual number of routed experts of one decoder layer.
+
+        Checkpoints pruned to a non-uniform number of experts per layer
+        record the per-layer counts in the quantization config, while the
+        model config carries the maximum. Returns None to use the model
+        config's expert count.
+        """
+        return None
+
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,

@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    determine_expert_counts,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -145,7 +146,23 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.ep_group = get_ep_group().device_group
         self.ep_size = self.ep_group.size()
-        self.n_routed_experts = config.num_experts
+
+        # Load balancing settings.
+        eplb_config = vllm_config.parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        # A REAP-pruned checkpoint keeps a different number of experts per
+        # layer, recorded in its quantization config, while the model config
+        # carries only the maximum; its router gate and expert weights are
+        # compacted to the retained count, so the gate must be sized to it too.
+        _, self.n_routed_experts, _ = determine_expert_counts(
+            num_experts=config.num_experts,
+            num_redundant_experts=eplb_config.num_redundant_experts,
+            n_shared_experts=None,
+            fuse_shared_experts=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -173,15 +190,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 parallel_config.enable_expert_parallel,
                 self.is_sequence_parallel,
             )
-        if self.tp_size > config.num_experts:
+        if self.tp_size > self.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}."
+                f"the number of experts {self.n_routed_experts}."
             )
-
-        # Load balancing settings.
-        eplb_config = vllm_config.parallel_config.eplb_config
-        self.enable_eplb = parallel_config.enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
@@ -190,7 +203,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.gate = GateLinear(
             config.hidden_size,
-            config.num_experts,
+            self.n_routed_experts,
             prefix=f"{prefix}.gate",
         )
 

@@ -97,6 +97,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         transform_config: dict[str, Any] | None = None,
         total_num_heads: int | None = None,
         total_num_kv_heads: int | None = None,
+        expert_counts_per_layer: list[int | None] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -107,6 +108,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        self.expert_counts_per_layer = expert_counts_per_layer
 
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
@@ -125,6 +127,20 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_name(self) -> QuantizationMethods:
         return "compressed-tensors"
+
+    def get_num_experts_for_layer(self, layer_idx: int) -> int | None:
+        """Retained expert count of one decoder layer of a pruned checkpoint.
+
+        ``moe_sparsity_config.num_experts`` lists the retained count of every
+        decoder layer (``None`` for dense layers), and the checkpoint compacts
+        both the router gate and the expert weights to it. Layers outside the
+        list (e.g. MTP drafts) fall back to the model config's expert count.
+        """
+        if self.expert_counts_per_layer is None:
+            return None
+        if not 0 <= layer_idx < len(self.expert_counts_per_layer):
+            return None
+        return self.expert_counts_per_layer[layer_idx]
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         """Transform layer paths in config targets to match vLLM's naming.
@@ -267,7 +283,28 @@ class CompressedTensorsConfig(QuantizationConfig):
             kv_cache_scheme=config.get("kv_cache_scheme"),
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
+            expert_counts_per_layer=cls._parse_moe_sparsity_config(config),
         )
+
+    @staticmethod
+    def _parse_moe_sparsity_config(
+        config: dict[str, Any],
+    ) -> list[int | None] | None:
+        """Per-layer retained expert counts of a pruned MoE checkpoint.
+
+        REAP-pruned checkpoints record the retained expert count of every
+        decoder layer in ``moe_sparsity_config`` and compact the router gate
+        and expert weights to the per-layer count.
+        """
+        if not (moe_sparsity_config := config.get("moe_sparsity_config")):
+            return None
+        if (method := moe_sparsity_config.get("method")) != "prune":
+            raise ValueError(
+                f"unsupported moe_sparsity_config.method {method!r}: only "
+                "'prune' (REAP) checkpoints, which drop pruned experts and "
+                "compact the retained ones, are supported"
+            )
+        return moe_sparsity_config.get("num_experts")
 
     @classmethod
     def _parse_sparsity_config(
