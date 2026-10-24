@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
 )
+from vllm.model_executor.warmup.triton_autotune import (
+    atomic_write_json,
+    get_autotune_cache_dir,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -1106,6 +1110,9 @@ def get_config_file_name(
     return f"E={E},N={N},device_name={device_name}{dtype_selector}{block_shape_selector}.json"  # noqa: E501
 
 
+MOE_CONFIGS_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs")
+
+
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 @functools.lru_cache
 def get_moe_configs(
@@ -1141,9 +1148,12 @@ def get_moe_configs(
         )
         config_file_paths.append(user_defined_config_file_path)
 
-    default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
+    # Configs tuned at startup by --kernel-config.enable_triton_autotune
+    config_file_paths.append(
+        get_moe_autotune_config_file_path(E, N, dtype, block_shape)
     )
+
+    default_config_file_path = os.path.join(MOE_CONFIGS_DIR, json_file_name)
     config_file_paths.append(default_config_file_path)
 
     for config_file_path in config_file_paths:
@@ -1168,6 +1178,45 @@ def get_moe_configs(
         ", ".join(config_file_paths),
     )
     return None
+
+
+def get_moe_autotune_config_file_path(
+    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+) -> str:
+    return os.path.join(
+        get_autotune_cache_dir("fused_moe"),
+        get_config_file_name(E, N, dtype, block_shape),
+    )
+
+
+def load_moe_autotune_configs(
+    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+) -> dict[int, dict[str, Any]]:
+    path = get_moe_autotune_config_file_path(E, N, dtype, block_shape)
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items() if k.isdigit()}
+
+
+def save_moe_configs(
+    E: int,
+    N: int,
+    dtype: str | None,
+    block_shape: list[int] | None,
+    configs: dict[int, dict[str, Any]],
+) -> str:
+    path = get_moe_autotune_config_file_path(E, N, dtype, block_shape)
+    atomic_write_json(
+        path,
+        {
+            "triton_version": getattr(triton, "__version__", "unknown"),
+            **{str(k): v for k, v in sorted(configs.items())},
+        },
+    )
+    get_moe_configs.cache_clear()
+    return path
 
 
 def _ensure_block_size_k_divisible(
