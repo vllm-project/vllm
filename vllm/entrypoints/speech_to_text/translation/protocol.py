@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.config.speech_to_text import SpeechToTextParams, VADConfig
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeechToTextConfig
 
 logger = init_logger(__name__)
+
+
+_DEFAULT_VAD_CONFIG = VADConfig()
 
 
 class TranslationResponseStreamChoice(OpenAIBaseModel):
@@ -151,6 +154,53 @@ class TranslationRequest(OpenAIBaseModel):
     For instance, Whisper only supports `to_language=en`.
     """
 
+    # Flattened VAD options to simplify multipart form data.
+    vad_enabled: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.enabled,
+        alias="vad_config.enabled",
+    )
+    vad_threshold: float = Field(
+        default=_DEFAULT_VAD_CONFIG.threshold,
+        alias="vad_config.threshold",
+        ge=0.0,
+        le=1.0,
+    )
+    vad_neg_threshold: float | None = Field(
+        default=_DEFAULT_VAD_CONFIG.neg_threshold,
+        alias="vad_config.neg_threshold",
+        ge=0.0,
+        le=1.0,
+    )
+    vad_min_speech_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_speech_duration_ms,
+        alias="vad_config.min_speech_duration_ms",
+        ge=0,
+    )
+    vad_max_speech_duration_s: float = Field(
+        default=_DEFAULT_VAD_CONFIG.max_speech_duration_s,
+        alias="vad_config.max_speech_duration_s",
+        gt=0.0,
+    )
+    vad_min_silence_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_duration_ms,
+        alias="vad_config.min_silence_duration_ms",
+        ge=0,
+    )
+    vad_speech_pad_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.speech_pad_ms,
+        alias="vad_config.speech_pad_ms",
+        ge=0,
+    )
+    vad_min_silence_at_max_speech_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_at_max_speech_ms,
+        alias="vad_config.min_silence_at_max_speech_ms",
+        ge=0,
+    )
+    vad_use_max_poss_sil_at_max_speech: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.use_max_poss_sil_at_max_speech,
+        alias="vad_config.use_max_poss_sil_at_max_speech",
+    )
+
     stream: bool | None = False
     """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
@@ -197,6 +247,19 @@ class TranslationRequest(OpenAIBaseModel):
             request_prompt=self.prompt,
             to_language=self.to_language,
             hotwords=self.hotwords,
+        )
+
+    def build_vad_config(self) -> VADConfig:
+        return VADConfig(
+            enabled=self.vad_enabled,
+            threshold=self.vad_threshold,
+            neg_threshold=self.vad_neg_threshold,
+            min_speech_duration_ms=self.vad_min_speech_duration_ms,
+            max_speech_duration_s=self.vad_max_speech_duration_s,
+            min_silence_duration_ms=self.vad_min_silence_duration_ms,
+            speech_pad_ms=self.vad_speech_pad_ms,
+            min_silence_at_max_speech_ms=self.vad_min_silence_at_max_speech_ms,
+            use_max_poss_sil_at_max_speech=(self.vad_use_max_poss_sil_at_max_speech),
         )
 
     def to_beam_search_params(

@@ -24,6 +24,8 @@ pqdm
 ray[default]>=2.56.0,<2.57 # Match the CUDA/CPU test series.
 sentence-transformers>=5.6.0 # required for embedding tests
 soundfile # required for audio tests
+silero-vad==6.2.3 # required for VAD audio tests
+onnxruntime==1.27.0 # required for silero-vad
 jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm>=1.0.17 # required for internvl and gemma3n-mm test

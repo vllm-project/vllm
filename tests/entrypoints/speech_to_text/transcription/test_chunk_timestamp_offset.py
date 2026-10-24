@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test for chunk timestamp offset drift in _preprocess_speech_to_text."""
+"""Regression tests for chunk timestamp offsets in _preprocess_speech_to_text."""
 
 from __future__ import annotations
 
@@ -9,31 +9,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
+from vllm.multimodal.audio import VAD
 
 SR = 16_000
 _PATCH = "vllm.entrypoints.speech_to_text.base.serving"
 
 
-@pytest.mark.asyncio
-async def test_chunk_offsets_are_cumulative_not_nominal():
-    """chunk_start_offsets must be cumulative actual chunk lengths, not the old approach
-    of 'idx * max_audio_clip_s'.  When split_audio places a boundary before the
-    nominal 30 s mark, the old formula drifts; the fixed formula stays exact.
-    """
-    # Chunks shorter than exactly 30 s, as split_audio produces when a quiet
-    # region falls inside the 1 s overlap window before the nominal boundary.
-    chunk_lengths = [int(29.5 * SR), int(29.7 * SR), int(5.0 * SR)]
-    chunks = [np.zeros(n, dtype=np.float32) for n in chunk_lengths]
-
-    duration = sum(chunk_lengths) / SR
-
-    expected_offsets = [0.0, 29.5, 29.5 + 29.7]  # cumulative seconds
-    wrong_offsets = [0.0, 30.0, 60.0]  # what the old bug produced
-
+def _make_serving(audio: np.ndarray, vad: VAD | None = None):
     serving = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
-    serving._decode_and_chunk_speech_async = AsyncMock(return_value=(chunks, duration))
+    serving._decode_audio = MagicMock(  # type: ignore[method-assign]
+        return_value=(audio, SR, audio.shape[-1] / SR)
+    )
+    serving._decode_and_chunk_speech_async = AsyncMock(
+        side_effect=serving._decode_and_chunk_speech
+    )
+    serving._vad_executor = None
+    serving._vad_provider = MagicMock()
+    serving._vad_provider.get.return_value = vad
     serving.asr_config = SpeechToTextConfig(
         sample_rate=float(SR),
         max_audio_clip_s=30,
@@ -49,21 +43,49 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     serving.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     serving.renderer = MagicMock()
     serving.renderer.render_cmpl_async = AsyncMock(
-        return_value=[MagicMock()] * len(chunks)
+        side_effect=lambda prompts: [MagicMock() for _ in prompts]
     )
+    return serving
 
+
+def _make_request(vad_enabled: bool):
     request = MagicMock()
     request.language = "en"
     request.to_language = None
     request.response_format = "json"
     request.build_stt_params.return_value = MagicMock()
+    request.build_vad_config.return_value = VADConfig(enabled=vad_enabled)
+    return request
 
+
+async def _preprocess(serving, request):
     with patch(f"{_PATCH}.parse_model_prompt", return_value=MagicMock()):
-        _, _, offsets = await serving._preprocess_speech_to_text(
+        return await serving._preprocess_speech_to_text(
             request=request,
             audio_data=b"\x00",
             request_id="test",
         )
+
+
+@pytest.mark.asyncio
+async def test_chunk_offsets_are_cumulative_not_nominal():
+    """chunk_start_offsets must be cumulative actual chunk lengths, not the old approach
+    of 'idx * max_audio_clip_s'.  When split_audio places a boundary before the
+    nominal 30 s mark, the old formula drifts; the fixed formula stays exact.
+    """
+    # Chunks shorter than exactly 30 s, as split_audio produces when a quiet
+    # region falls inside the 1 s overlap window before the nominal boundary.
+    chunk_lengths = [int(29.5 * SR), int(29.7 * SR), int(5.0 * SR)]
+    chunks = [np.zeros(n, dtype=np.float32) for n in chunk_lengths]
+    audio = np.concatenate(chunks)
+
+    expected_offsets = [0.0, 29.5, 29.5 + 29.7]  # cumulative seconds
+    wrong_offsets = [0.0, 30.0, 60.0]  # what the old bug produced
+
+    serving = _make_serving(audio)
+    with patch("vllm.multimodal.audio.split_audio", return_value=chunks):
+        _, _, timings = await _preprocess(serving, _make_request(vad_enabled=False))
+    offsets = [timing.start_s for timing in timings]
 
     assert offsets == pytest.approx(expected_offsets, abs=1e-6)
     assert offsets != pytest.approx(wrong_offsets, abs=1e-6)
