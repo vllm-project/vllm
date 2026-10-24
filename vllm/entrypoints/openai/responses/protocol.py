@@ -701,7 +701,10 @@ class ResponsesRequest(OpenAIBaseModel):
         - function_call -> ResponseFunctionToolCall
         - reasoning     -> ResponseReasoningItem (auto-generates id)
         - message(role=assistant) -> ResponseOutputMessage (auto-generates
-          id/status and annotations)
+          id/status and annotations). This also covers assistant message items
+          that omit the "type" field (OpenAI accepts these when replaying
+          multi-turn history; e.g. ECA), which would otherwise fail validation
+          because EasyInputMessageParam only allows "input_text" content parts.
 
         Invalid structures are left for Pydantic to reject.
         """
@@ -751,7 +754,9 @@ class ResponsesRequest(OpenAIBaseModel):
                     )
                     processed_input.append(item)
 
-            elif item_type == "message" and item.get("role") == "assistant":
+            elif (item_type == "message" or "type" not in item) and item.get(
+                "role"
+            ) == "assistant":
                 content = item.get("content")
                 if not isinstance(content, list):
                     # String content is a valid EasyInputMessageParam,
@@ -761,6 +766,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
                 original_item = item
                 item = dict(item)
+                if item.get("type") != "message":
+                    item["type"] = "message"
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
