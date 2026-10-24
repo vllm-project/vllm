@@ -551,3 +551,80 @@ chargé en prod) :
 
 **Ce que ça ne règle pas** : le débit de prefill. Un LRU parfait évite de
 recalculer ce qui était encore chaud, il n'accélère pas ce qui est froid.
+
+## 24/10 00:25Z — ⚠ RÉTRACTION PARTIELLE : le pruneur n'explique PAS tous les creux
+
+**Ce que j'ai mesuré sur 20 min d'échantillonnage (44 points, 30 s).** Trois
+régimes distincts, et le plus mauvais n'a rien à voir avec le pruneur :
+
+| régime | `d_prompt`/30 s | débit | cache | KV |
+|---|---|---|---|---|
+| prefill lourd | 150 K – 600 K | 48 – 205 tok/s | 59 – 100 % | 0,20 – 0,95 |
+| décodage calme | 16 | 82 – 168 tok/s | n/a | 0,28 – 0,78 |
+| **creux** | **0 – 16** | **0,3 – 0,9 tok/s** | n/a | 0,41 – 0,74 |
+
+**Six fenêtres de creux en 20 min**, à 00:05:47, 00:06:17, 00:12:49, 00:13:19,
+00:14:19, 00:14:49 — **aucune pendant une purge** (elles tombent à :20 et :50),
+**aucune avec du prefill en cours**, **aucune avec KV saturé**, et
+`num_preemptions_total` reste à 45 tout du long. **Le pruneur n'est donc pas
+la cause de ces creux**, et mon attribution du « compte-goutte » au seul
+pruneur (section précédente, PR #157) était **trop large**. Ce qui reste
+établi : la purge du 23:50 a bien fait tomber le cache à 25 % cette fenêtre-là.
+
+**La mesure qui explique les creux** — métriques `kv_offload` du journal moteur
+(`[metrics.py:103]`, toutes les 10 s) :
+
+```
+00:18:57  lookup_async_delay ('1:fs') count=130  sum=2.76    -> 21 ms/appel
+00:19:27  lookup_async_delay ('1:fs') count=104  sum=17.28   -> 166 ms/appel
+00:19:47  lookup_async_delay ('1:fs') count=83   sum=199.88  -> 2,41 S/appel
+00:19:47  tiering_write_time ('1:fs') = 9,51 s pour 3,94 GB écrits (414 MB/s)
+```
+
+Le **lookup** du tier fs est une simple vérification d'existence de fichier,
+attendue sous la milliseconde. Elle prend **2,4 s** au moment exact où une
+rafale d'écriture de 3,9 GB traverse le même disque. Le scheduler attend cette
+réponse avant de progresser : le moteur ne décode plus, ne prefille plus, et
+les compteurs avancent à peine — exactement la signature des six creux.
+
+**Hypothèse testée et REJETÉE : les rafales d'écriture.** J'ai corrélé sur
+**284 intervalles de 10 s** (21:41:14Z → 00:22:07Z) la latence de lookup du
+tier fs et son volume d'écriture :
+
+```
+latence lookup ('1:fs') : med 19,3 ms   p90 767 ms   p99 6 111 ms   max 11 366 ms
+intervalles > 500 ms : 32 / 284 = 11,3 %     > 2 000 ms : 27 / 284
+  écriture > 0,5 s dans l'intervalle : n=110, latence moyenne   553 ms
+  écriture <= 0,5 s                  : n=174, latence moyenne   438 ms
+pires pics : 23:49:52 11,4 s (0,39 GB écrits) · 23:35:30 10,8 s (ZÉRO écrit)
+```
+
+Il n'y a **pas de séparation** entre les intervalles qui écrivent et les
+autres (553 vs 438 ms), et le **pire pic de toute la fenêtre n'écrit rien**.
+L'hypothèse « l'écriture sature le disque et bloque la lecture » est donc
+**rejetée**. Elle était séduisante sur une fenêtre unique ; 284 intervalles la
+désavouent. C'est la deuxième hypothèse que je retire dans cette note — et la
+règle qui l'a attrapée est celle du dépôt : un point ne fait pas une pente.
+
+**Ce qui reste, et qui est solide** : le lookup du tier fs, qui est une simple
+vérification d'existence de fichier, a une **médiane de 19 ms** (trois ordres
+de grandeur au-dessus de l'attendu), un **p90 de 767 ms** et **11,3 % des
+intervalles au-dessus de 500 ms**. Le scheduler attend cette réponse avant de
+progresser. C'est une cause candidate des creux, indépendante du pruneur **et**
+du volume d'écriture.
+
+**Ce qu'on ne sait pas encore** : si ces latences sont intrinsèques au chemin
+`FileSystemTierManager` (pool de threads, machinerie asynchrone, `faccessat`
+par clé) ou à son environnement (vhdx, page cache, contention CPU). La façon
+de trancher n'est pas une analyse de plus, c'est un **A/B** : le même moteur,
+mêmes charges, **sans tier fs** (RAM seule) — un redémarrage. À faire en
+fenêtre, et c'est le seul geste qui répond à « ce tier aide-t-il ou coûte-t-il
+plus qu'il ne rapporte ». **Ne pas relancer d'hypothèse avant cette mesure.**
+
+**Leçons d'instrument** (deux erreurs corrigées avant publication) :
+- moyenner un ratio de cache sur des fenêtres à 16 tokens de prompt donne
+  53 % de « cache » là où la vraie valeur est 92 % — un dénominateur
+  négligeable fabrique un chiffre faux ;
+- `docker logs` a **manqué des échantillons** (un intervalle de 60 s au lieu
+  de 30) : toujours calculer le débit sur le `dt` réel, jamais sur la cadence
+  supposée.
