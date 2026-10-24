@@ -340,7 +340,7 @@ vLLM supports connecting to external tool servers via the `--tool-server` argume
 Passing `--tool-server demo` enables built-in demo tools that work with any model that supports tool calling. The tool implementations are not part of vLLM — they are provided by the separately installed [`gpt-oss`](https://github.com/openai/gpt-oss) package. vLLM provides thin wrappers that delegate to `gpt-oss`.
 
 - **Code interpreter** (`python`): Python execution via Docker (via `gpt_oss.tools.python_docker`)
-- **Web browser** (`browser`): Search via Exa API, requires `EXA_API_KEY` (via `gpt_oss.tools.simple_browser`)
+- **Web browser** (`browser`): Search via Exa API (default, requires `EXA_API_KEY`) or You.com API (`BROWSER_BACKEND=youcom`, requires `YDC_API_KEY`) (via `gpt_oss.tools.simple_browser`)
 
 #### Code Interpreter (Python Tool) Security Risks
 

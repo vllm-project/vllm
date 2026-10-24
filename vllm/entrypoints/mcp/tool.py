@@ -58,16 +58,24 @@ class Tool(ABC):
 class HarmonyBrowserTool(Tool):
     def __init__(self):
         self.enabled = True
-        exa_api_key = os.getenv("EXA_API_KEY")
-        if not exa_api_key:
+        backend_name = os.getenv("BROWSER_BACKEND", "exa")
+        key_env = {"exa": "EXA_API_KEY", "youcom": "YDC_API_KEY"}.get(backend_name)
+        if key_env is None:
             self.enabled = False
-            logger.warning_once("EXA_API_KEY is not set, browsing is disabled")
+            logger.warning_once(
+                "Unsupported BROWSER_BACKEND %r, browsing is disabled", backend_name
+            )
+            return
+        api_key = os.getenv(key_env)
+        if not api_key:
+            self.enabled = False
+            logger.warning_once("%s is not set, browsing is disabled", key_env)
             return
 
         try:
             validate_gpt_oss_install()
             from gpt_oss.tools.simple_browser import SimpleBrowserTool
-            from gpt_oss.tools.simple_browser.backend import ExaBackend
+            from gpt_oss.tools.simple_browser.backend import ExaBackend, YouComBackend
         except ImportError as e:
             self.enabled = False
             logger.warning_once(
@@ -75,7 +83,12 @@ class HarmonyBrowserTool(Tool):
             )
             return
 
-        browser_backend = ExaBackend(source="web", api_key=exa_api_key)
+        if backend_name == "youcom":
+            # YouComBackend reads YDC_API_KEY itself; released gpt-oss has no
+            # api_key field on it.
+            browser_backend = YouComBackend(source="web")
+        else:
+            browser_backend = ExaBackend(source="web", api_key=api_key)
         self.browser_tool = SimpleBrowserTool(backend=browser_backend)
         logger.info_once("Browser tool initialized")
 
