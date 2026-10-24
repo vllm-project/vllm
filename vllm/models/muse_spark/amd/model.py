@@ -326,13 +326,16 @@ class MuseSpark1xMoE(nn.Module):
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
+            quant_method = self.experts.routed_experts.quant_method
+            assert isinstance(quant_method, MuseSparkQuarkOCPMXFusedMoE)
+            route_native = quant_method.uses_route_native(hidden_states.shape[0])
             return fused_rmsnorm_expand(
                 hidden_states,
                 norm.weight if norm.has_weight else None,
                 norm.variance_epsilon,
                 norm.fused_gain_center,
                 norm.applies_weight_before_norm and norm.has_weight,
-                self.top_k,
+                1 if route_native else self.top_k,
             )
         return norm(hidden_states)
 
