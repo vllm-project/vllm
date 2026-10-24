@@ -1514,6 +1514,10 @@ class BeamSearchParams(
     skip_special_tokens: bool = True
     watermarking: bool | None = None
     allowed_token_ids: list[int] | None = None
+    extra_args: dict[str, Any] | None = None
+    """Arbitrary additional args, forwarded to the per-step SamplingParams so that
+    custom logits processors and other plugins are reachable under beam search as
+    they are under ordinary sampling."""
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")

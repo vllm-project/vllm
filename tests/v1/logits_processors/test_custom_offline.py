@@ -21,6 +21,8 @@ from tests.v1.logits_processors.utils import (
     setup_fake_entrypoint,
 )
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
@@ -191,6 +193,67 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
         kwargs["logits_processors"] = [DummyLogitsProcessor]
 
     _run_test(kwargs, logitproc_loaded=True)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("structured", [False, True])
+def test_custom_logitsprocs_beam_search(monkeypatch, structured: bool):
+    """A custom logits processor must receive `extra_args` under beam search.
+
+    `BeamSearchParams` had no `extra_args` field and the per-step `SamplingParams`
+    did not carry one, so the processor declined every request and generation
+    proceeded unconstrained -- with no error. Before the fix the generated tokens
+    are ordinary model output; after it, every token is the forced target.
+
+    The `structured` case covers the second construction site: when structured
+    outputs are active the offline path builds a *per-beam* `SamplingParams` from
+    the grammar, and forwarding only the per-step one would leave that path
+    dropping the arguments. A maximally permissive regex is used so the grammar
+    does not itself exclude the forced token.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    set_random_seed(40)
+
+    target_token = 128
+    llm = LLM(
+        model=MODEL_NAME,
+        gpu_memory_utilization=0.1,
+        logits_processors=[DummyLogitsProcessor],
+    )
+    tokenizer = llm.get_tokenizer()
+    assert target_token != tokenizer.eos_token_id, (
+        "the forced token must not be EOS, or generation stops after one step "
+        "and the test stops covering repeated beam steps"
+    )
+    token_prompts = [
+        TokensPrompt(prompt_token_ids=tokenizer.encode(prompt)) for prompt in prompts
+    ]
+
+    outputs = llm.beam_search(
+        token_prompts,
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMP_GREEDY,
+            extra_args={DUMMY_LOGITPROC_ARG: target_token},
+            structured_outputs=(
+                StructuredOutputsParams(regex=".*") if structured else None
+            ),
+        ),
+    )
+
+    assert len(outputs) == len(token_prompts)
+    for bdx, (prompt, output) in enumerate(zip(token_prompts, outputs)):
+        prompt_len = len(prompt["prompt_token_ids"])
+        # `sequences` is sorted best-first.
+        generated = output.sequences[0].tokens[prompt_len:]
+        assert generated, f"Request {bdx} generated nothing"
+        if not all(tok == target_token for tok in generated):
+            raise AssertionError(
+                f"Request {bdx} generated {generated}, should all be {target_token}; "
+                "the logits processor did not receive extra_args under beam search"
+            )
 
 
 @create_new_process_for_each_test()
