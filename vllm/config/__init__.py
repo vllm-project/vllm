@@ -45,6 +45,7 @@ from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
+from vllm.config.tensor_dump import TensorDumpConfig
 from vllm.config.utils import (
     ConfigType,
     SupportsMetricsInfo,
@@ -136,6 +137,7 @@ __all__ = [
     "StructuredOutputsConfig",
     # From vllm.config.profiler
     "ProfilerConfig",
+    "TensorDumpConfig",
     # From vllm.config.fault_tolerance
     "FaultToleranceConfig",
     # From vllm.config.utils

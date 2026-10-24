@@ -52,6 +52,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
+from .tensor_dump import TensorDumpConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
@@ -418,6 +419,8 @@ class VllmConfig:
     """
     profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
     """Profiling configuration."""
+    tensor_dump_config: TensorDumpConfig = Field(default_factory=TensorDumpConfig)
+    """Debug tensor capture configuration for eager Model Runner V2."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -3309,7 +3312,7 @@ class VllmConfig:
             )
 
     def _validate_tensor_dump(self) -> None:
-        if not envs.VLLM_TENSOR_DUMP_DIR:
+        if self.tensor_dump_config.output_dir is None:
             return
         if not self.use_v2_model_runner or not self.model_config.enforce_eager:
             raise ValueError("Tensor dumping requires eager Model Runner V2")

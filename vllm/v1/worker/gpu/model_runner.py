@@ -164,6 +164,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.tensor_dump import TensorDumper
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -197,14 +198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
-        self.tensor_dumper = None
-        if envs.VLLM_TENSOR_DUMP_DIR:
-            from vllm.v1.worker.gpu.tensor_dump import TensorDumpConfig, TensorDumper
-
-            self.tensor_dumper = TensorDumper(
-                envs.VLLM_TENSOR_DUMP_DIR,
-                TensorDumpConfig.model_validate_json(envs.VLLM_TENSOR_DUMP_CONFIG),
-            )
+        self.tensor_dumper: TensorDumper | None = None
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -409,8 +403,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
-            if self.tensor_dumper is not None:
-                self.tensor_dumper.register(self.model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

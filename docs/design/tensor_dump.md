@@ -8,21 +8,34 @@ Microbatch execution (including dual batch overlap) is not supported.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
-VLLM_TENSOR_DUMP_DIR=/tmp/vllm-dumps \
-VLLM_TENSOR_DUMP_CONFIG='{"patterns":["*self_attn*"],"max_steps":2}' \
-vllm serve MODEL --enforce-eager
+vllm serve MODEL --enforce-eager \
+  --tensor-dump-config '{"output_dir":"/tmp/vllm-dumps","patterns":["*self_attn*"],"max_steps":2}'
 ```
 
-`VLLM_TENSOR_DUMP_DIR` opts workers into dumping and enables the serving control
-routes. Ray forwards these `VLLM_` variables using its existing environment policy.
-`VLLM_TENSOR_DUMP_CONFIG` is an optional JSON object:
+Like `--profiler-config`, `--tensor-dump-config` accepts a JSON object or individual
+keys such as `--tensor-dump-config.max_steps 2`. Setting `output_dir` opts workers
+into dumping and enables the serving control routes. The configuration travels
+with `VllmConfig` to workers, including Ray workers; no dumper environment variables
+are required. The directory is local to each worker, so use a shared filesystem
+if dumps from multiple nodes should be collected in one place.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `output_dir` | `null` | Worker output directory; null disables dumping. Startup only. |
 | `enabled` | `true` | Whether to capture real model forwards. |
 | `patterns` | `["*"]` | Shell-style globs matched against dump names, such as `*self_attn*`. |
 | `ranks` | `null` | Distributed ranks to capture; null selects all. |
 | `max_steps` | `1` | Maximum captured forwards per worker between resets; must be positive. |
+
+Offline callers can pass the same configuration through `LLM`:
+
+```python
+llm = LLM(
+    model=MODEL,
+    enforce_eager=True,
+    tensor_dump_config={"output_dir": "/tmp/vllm-dumps", "max_steps": 2},
+)
+```
 
 Warmup/dummy forwards do not consume steps. Failed forwards can leave partial
 records and consume a step. Step numbers count captured forwards only, not all
@@ -65,8 +78,8 @@ This uses the same filters and limits. Calls outside an active capture do nothin
 
 The serving API exposes `POST /dumper/configure`, `/dumper/get_state` and
 `/dumper/reset` only when the directory is set at startup. Configure accepts the
-JSON fields above and replaces the complete configuration; omitted fields use
-their defaults. Reset restarts the step budget while keeping step numbers increasing
+capture fields above, excluding `output_dir`, and replaces the capture options;
+omitted fields use their defaults. Reset restarts the step budget while keeping step numbers increasing
 and retaining the configuration, hooks and existing files. It does not overwrite
 earlier dumps. Responses contain
 worker states; with data-parallel serving, the existing collective RPC returns

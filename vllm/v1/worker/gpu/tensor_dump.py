@@ -3,27 +3,20 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import asdict
 from fnmatch import fnmatchcase
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field
+from torch.utils._pytree import tree_map_only
 
+from vllm.config.tensor_dump import TensorDumpConfig, TensorDumpOptions
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
-
-
-class TensorDumpConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-    patterns: list[str] = Field(default_factory=lambda: ["*"])
-    ranks: list[int] | None = None
-    max_steps: int = Field(default=1, ge=1)
 
 
 _current_dumper: ContextVar["TensorDumper | None"] = ContextVar(
@@ -49,14 +42,17 @@ def _tensors(value: Any, path: str = "") -> Iterator[tuple[str, torch.Tensor]]:
 
 
 class TensorDumper:
-    def __init__(self, directory: str, config: TensorDumpConfig):
+    def __init__(self, config: TensorDumpConfig):
         self.config = config
         self.rank = (
             torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         )
-        Path(directory).mkdir(parents=True, exist_ok=True)
+        assert config.output_dir is not None
+        Path(config.output_dir).mkdir(parents=True, exist_ok=True)
         self.directory = Path(
-            tempfile.mkdtemp(prefix=f"rank{self.rank}-pid{os.getpid()}-", dir=directory)
+            tempfile.mkdtemp(
+                prefix=f"rank{self.rank}-pid{os.getpid()}-", dir=config.output_dir
+            )
         )
         self.step = 0
         self._start_step = 0
@@ -96,19 +92,10 @@ class TensorDumper:
                 "batch",
                 {
                     "request_ids": list(batch.req_ids),
-                    "input_ids": batch.input_ids[: batch.num_tokens]
-                    .detach()
-                    .cpu()
-                    .clone(),
-                    "positions": batch.positions[: batch.num_tokens]
-                    .detach()
-                    .cpu()
-                    .clone(),
-                    "query_start_loc": batch.query_start_loc[: batch.num_reqs + 1]
-                    .detach()
-                    .cpu()
-                    .clone(),
-                    "seq_lens": batch.seq_lens[: batch.num_reqs].detach().cpu().clone(),
+                    "input_ids": batch.input_ids[: batch.num_tokens],
+                    "positions": batch.positions[: batch.num_tokens],
+                    "query_start_loc": batch.query_start_loc[: batch.num_reqs + 1],
+                    "seq_lens": batch.seq_lens[: batch.num_reqs],
                     "num_tokens": batch.num_tokens,
                     "num_tokens_after_padding": batch.num_tokens_after_padding,
                 },
@@ -126,9 +113,14 @@ class TensorDumper:
             if any(
                 fnmatchcase(tensor_name, pattern) for pattern in self.config.patterns
             ):
-                self._save(tensor_name, tensor.detach().to(device="cpu", copy=True))
+                self._save(tensor_name, tensor)
 
     def _save(self, name: str, value: Any) -> None:
+        value = tree_map_only(
+            torch.Tensor,
+            lambda tensor: tensor.detach().to(device="cpu", copy=True),
+            value,
+        )
         path = self.directory / f"{self._index:08d}.pt"
         self._index += 1
         torch.save(
@@ -143,13 +135,16 @@ class TensorDumper:
 
     def control(self, action: str, config: dict | None = None) -> dict:
         if action == "configure":
-            self.config = TensorDumpConfig.model_validate(config or {})
+            options = TensorDumpOptions(**(config or {}))
+            self.config = TensorDumpConfig(
+                output_dir=self.config.output_dir, **asdict(options)
+            )
         elif action == "reset":
             self._start_step = self.step
         elif action != "get_state":
             raise ValueError(f"Unknown tensor dump action: {action}")
         return {
-            "config": self.config.model_dump(),
+            "config": asdict(self.config),
             "step": self.step,
             "captured_steps": self.step - self._start_step,
             "rank": self.rank,

@@ -1,12 +1,15 @@
+from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import torch
+from pydantic import TypeAdapter
 
+from vllm.config import TensorDumpConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.tensor_dump import TensorDumpConfig, TensorDumper, dump
+from vllm.v1.worker.gpu.tensor_dump import TensorDumper, dump
 
 
 @pytest.fixture
@@ -26,9 +29,50 @@ def records(dumper):
     ]
 
 
+@pytest.mark.parametrize("style", ["json", "nested"])
+def test_cli_config_round_trip(tmp_path, style, monkeypatch):
+    import json
+
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.platforms import current_platform
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert EngineArgs.from_cli_args(parser.parse_args([])).tensor_dump_config == (
+        TensorDumpConfig()
+    )
+    expected = TensorDumpConfig(
+        output_dir=str(tmp_path), patterns=["*attn*"], ranks=[0], max_steps=2
+    )
+    options = (
+        ["--tensor-dump-config", json.dumps(asdict(expected))]
+        if style == "json"
+        else [
+            "--tensor-dump-config.output_dir",
+            str(tmp_path),
+            "--tensor-dump-config.patterns",
+            '["*attn*"]',
+            "--tensor-dump-config.ranks",
+            "[0]",
+            "--tensor-dump-config.max_steps",
+            "2",
+        ]
+    )
+    parsed = EngineArgs.from_cli_args(parser.parse_args(options)).tensor_dump_config
+    assert parsed == expected
+    assert (
+        EngineArgs(tensor_dump_config=asdict(expected)).tensor_dump_config == expected
+    )
+    adapter = TypeAdapter(TensorDumpConfig)
+    assert adapter.validate_json(adapter.dump_json(parsed)) == expected
+    with pytest.raises(ValueError):
+        TensorDumpConfig(output_dir="")
+
+
 def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
     model = torch.nn.Sequential(torch.nn.ReLU(inplace=True))
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     dumper.register(model)
     inputs = torch.tensor([-2.0, 3.0])
     expected = model(inputs.clone())
@@ -41,10 +85,15 @@ def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
     assert saved["batch"]["input_ids"].tolist() == [10, 11]
     assert saved["batch"]["query_start_loc"].tolist() == [0, 2]
     assert saved["batch"]["num_tokens_after_padding"] == 4
+    for name in ("input_ids", "positions", "query_start_loc", "seq_lens"):
+        snapshot = saved["batch"][name]
+        assert snapshot.untyped_storage().nbytes() == (
+            snapshot.numel() * snapshot.element_size()
+        )
 
 
 def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     value = torch.tensor([3.0], requires_grad=True)
     dump("outside", value)
     with dumper.capture(batch):
@@ -62,14 +111,16 @@ def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
 
 @pytest.mark.parametrize("config", [{"enabled": False}, {"ranks": [999]}])
 def test_disabled_capture_writes_nothing(tmp_path, batch, config):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig(**config))
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path), **config))
     with dumper.capture(batch):
         dump("value", torch.ones(1))
     assert records(dumper) == []
 
 
 def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig(patterns=["selected*"]))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path), patterns=["selected*"])
+    )
     for _ in range(2):
         with dumper.capture(batch):
             dump("selected", torch.ones(1))
@@ -90,10 +141,13 @@ def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
     assert dumper.control("get_state")["step"] == 2
     assert dumper.control("get_state")["captured_steps"] == 1
     assert records(dumper)[-1]["step"] == 1
+    assert dumper.config.output_dir == str(tmp_path)
+    with pytest.raises(ValueError):
+        dumper.control("configure", {"output_dir": "/other"})
 
 
 def test_failed_forward_clears_capture_context(tmp_path, batch):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     with pytest.raises(RuntimeError, match="forward failed"), dumper.capture(batch):
         raise RuntimeError("forward failed")
     dump("outside", torch.ones(1))
@@ -103,7 +157,7 @@ def test_failed_forward_clears_capture_context(tmp_path, batch):
 
 def test_reregister_and_close_do_not_leave_hooks(tmp_path, batch):
     model = torch.nn.Identity()
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     dumper.register(model)
     dumper.register(model)
     with dumper.capture(batch):
@@ -115,8 +169,8 @@ def test_reregister_and_close_do_not_leave_hooks(tmp_path, batch):
 
 
 def test_workers_do_not_overwrite_each_other(tmp_path, batch):
-    first = TensorDumper(str(tmp_path), TensorDumpConfig())
-    second = TensorDumper(str(tmp_path), TensorDumpConfig())
+    first = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    second = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     assert first.directory != second.directory
     for dumper in (first, second):
         with dumper.capture(batch):
@@ -125,7 +179,7 @@ def test_workers_do_not_overwrite_each_other(tmp_path, batch):
 
 
 def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig())
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
     value = torch.ones(100_000)
     with dumper.capture(batch):
         dump("slice", value[10:13])
@@ -134,7 +188,9 @@ def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
 
 
 def test_filter_can_select_a_nested_tensor(tmp_path, batch):
-    dumper = TensorDumper(str(tmp_path), TensorDumpConfig(patterns=["capture.items.1"]))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path), patterns=["capture.items.1"])
+    )
     with dumper.capture(batch):
         dump("capture", {"items": [torch.zeros(1), torch.ones(1)]})
     assert [entry["name"] for entry in records(dumper)] == ["batch", "capture.items.1"]
@@ -144,40 +200,41 @@ def test_filter_can_select_a_nested_tensor(tmp_path, batch):
     "use_v2,eager,ubatching",
     [(False, True, False), (True, False, False), (True, True, True)],
 )
-def test_unsupported_execution_rejected(
-    tmp_path, monkeypatch, use_v2, eager, ubatching
-):
+def test_unsupported_execution_rejected(tmp_path, use_v2, eager, ubatching):
     from vllm.config import VllmConfig
 
-    monkeypatch.setenv("VLLM_TENSOR_DUMP_DIR", str(tmp_path))
     config = SimpleNamespace(
+        tensor_dump_config=TensorDumpConfig(output_dir=str(tmp_path)),
         use_v2_model_runner=use_v2,
         model_config=SimpleNamespace(enforce_eager=eager),
         parallel_config=SimpleNamespace(use_ubatching=ubatching),
     )
     with pytest.raises(ValueError, match="Tensor dumping"):
         VllmConfig._validate_tensor_dump(config)
-    monkeypatch.delenv("VLLM_TENSOR_DUMP_DIR")
+    config.tensor_dump_config = TensorDumpConfig()
     VllmConfig._validate_tensor_dump(config)
 
 
-def test_runtime_control_validation_and_auth(tmp_path, monkeypatch):
+def test_runtime_control_validation_and_auth(tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from vllm.entrypoints.serve.middleware.authenticate import AuthenticationMiddleware
     from vllm.entrypoints.serve.tensor_dump.api_router import attach_router
 
-    monkeypatch.setenv("VLLM_TENSOR_DUMP_DIR", str(tmp_path))
     app = FastAPI()
     app.add_middleware(AuthenticationMiddleware, tokens=["test-key"])
+    app.state.args = SimpleNamespace(tensor_dump_config=TensorDumpConfig())
+    attach_router(app)
+    headers = {"Authorization": "Bearer test-key"}
+    assert TestClient(app).post("/dumper/get_state", headers=headers).status_code == 404
+    app.state.args.tensor_dump_config.output_dir = str(tmp_path)
     app.state.engine_client = SimpleNamespace(
         collective_rpc=AsyncMock(return_value=[{"step": 0}])
     )
     attach_router(app)
     client = TestClient(app)
     assert client.post("/dumper/get_state").status_code == 401
-    headers = {"Authorization": "Bearer test-key"}
     assert client.post("/dumper/configure", headers=headers).status_code == 422
     assert (
         client.post(
@@ -187,7 +244,7 @@ def test_runtime_control_validation_and_auth(tmp_path, monkeypatch):
     )
     assert (
         client.post(
-            "/dumper/configure", headers=headers, json={"directory": "/other"}
+            "/dumper/configure", headers=headers, json={"output_dir": "/other"}
         ).status_code
         == 422
     )
