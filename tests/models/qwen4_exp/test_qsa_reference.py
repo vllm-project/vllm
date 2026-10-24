@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import indexer_qsa
@@ -1127,6 +1128,313 @@ def test_qsa_sparse_paged_attention_correctness(
     expected = expected * torch.sigmoid(output_gate)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+requires_qsa_sm90_native = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not HAS_TRITON
+    or not qsa_ops._is_sm90()
+    or not qsa_ops._sm90_native_built(),
+    reason="QSA SM90 native prefill requires an SM90 build",
+)
+
+
+def _qsa_sm90_case(
+    rows_per_request: int,
+    context: int,
+    num_requests: int,
+    num_kv_heads: int,
+    group_size: int,
+    page_size: int,
+    ragged: bool = False,
+    holes: bool = False,
+    invalid_requests: bool = False,
+    empty_rows: bool = False,
+    block_pad: int = 0,
+) -> tuple[torch.Tensor, ...]:
+    """Prefill chunks at the end of each request's context, selecting whole
+    compressed blocks plus the causal tail, over the production cache layout
+    ([blocks, kv_heads, page, K|V] viewed as [blocks, page, kv_heads, D])."""
+    head_dim, budget, ratio = 256, 2048, 4
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    pages_per_request = math.ceil(context / page_size)
+    num_blocks = pages_per_request * num_requests + 3
+    block_elems = num_kv_heads * page_size * 2 * head_dim
+    # Hybrid models pad each attention block to the Mamba page size, so the
+    # block stride need not be a multiple of the token stride.
+    flat = torch.randn(
+        num_blocks * (block_elems + block_pad), device="cuda", generator=gen
+    ).to(torch.bfloat16)
+    kv_cache = flat.as_strided(
+        (num_blocks, num_kv_heads, page_size, 2 * head_dim),
+        (block_elems + block_pad, page_size * 2 * head_dim, 2 * head_dim, 1),
+    )
+    k_cache, v_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
+    block_table = (
+        torch.randperm(num_blocks, device="cuda", generator=gen)[
+            : pages_per_request * num_requests
+        ]
+        .to(torch.int32)
+        .view(num_requests, pages_per_request)
+    )
+    num_rows = rows_per_request * num_requests
+    q = (
+        torch.randn(
+            num_rows,
+            num_kv_heads * group_size,
+            head_dim,
+            device="cuda",
+            generator=gen,
+        )
+        * 2
+    ).to(torch.bfloat16)
+    output_gate = torch.randn(q.shape, device="cuda", generator=gen).to(q.dtype)
+    token_to_req = torch.arange(
+        num_requests, dtype=torch.int32, device="cuda"
+    ).repeat_interleave(rows_per_request)
+    if invalid_requests:
+        token_to_req[::7] = -1
+
+    width = budget + ratio - 1
+    indices = torch.full((num_rows, width + 1), -1, dtype=torch.int32, device="cuda")
+    for row in range(num_rows):
+        position = context - rows_per_request + row % rows_per_request
+        visible_blocks = (position + 1) // ratio
+        blocks = torch.randperm(max(visible_blocks, 1), device="cuda", generator=gen)
+        blocks = blocks[: min(budget // ratio, visible_blocks)]
+        tokens = (
+            blocks[:, None] * ratio + torch.arange(ratio, device="cuda")
+        ).flatten()
+        tail = torch.arange(visible_blocks * ratio, position + 1, device="cuda")
+        tokens = torch.cat([tokens, tail])[:width].to(torch.int32)
+        indices[row, : tokens.numel()] = tokens
+        indices[row, width] = tokens.numel()
+    columns = torch.arange(width, device="cuda")[None, :]
+    if ragged:
+        counts = torch.randint(1, width + 1, (num_rows,), device="cuda", generator=gen)
+        indices[:, :width].masked_fill_(columns >= counts[:, None], -1)
+        indices[:, width] = torch.minimum(counts.to(torch.int32), indices[:, width])
+    if holes:
+        hole = torch.rand(num_rows, width, device="cuda", generator=gen) < 0.03
+        indices[:, :width].masked_fill_(hole, -1)
+    if empty_rows:
+        indices[::5] = -1
+        indices[::5, width] = 0
+    return q, k_cache, v_cache, indices, block_table, token_to_req, output_gate
+
+
+@requires_qsa_sm90_native
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            dict(
+                rows_per_request=64,
+                context=21000,
+                num_requests=1,
+                num_kv_heads=2,
+                group_size=12,
+                page_size=1568,
+            ),
+            id="g12_full",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=40,
+                context=9000,
+                num_requests=3,
+                num_kv_heads=2,
+                group_size=12,
+                page_size=1568,
+                ragged=True,
+                holes=True,
+                empty_rows=True,
+            ),
+            id="g12_ragged_holes_empty",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=96,
+                context=700,
+                num_requests=2,
+                num_kv_heads=2,
+                group_size=12,
+                page_size=1568,
+            ),
+            id="g12_short_context",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=50,
+                context=5000,
+                num_requests=2,
+                num_kv_heads=2,
+                group_size=12,
+                page_size=64,
+                ragged=True,
+                holes=True,
+                invalid_requests=True,
+            ),
+            id="g12_invalid_requests_page64",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=48,
+                context=12000,
+                num_requests=1,
+                num_kv_heads=1,
+                group_size=6,
+                page_size=784,
+                ragged=True,
+                holes=True,
+            ),
+            id="g6_tp4",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=48,
+                context=12000,
+                num_requests=2,
+                num_kv_heads=1,
+                group_size=3,
+                page_size=1568,
+                holes=True,
+            ),
+            id="g3_tp8",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=32,
+                context=6000,
+                num_requests=1,
+                num_kv_heads=1,
+                group_size=16,
+                page_size=1600,
+                ragged=True,
+            ),
+            id="g16",
+        ),
+        pytest.param(
+            dict(
+                rows_per_request=64,
+                context=9000,
+                num_requests=2,
+                num_kv_heads=2,
+                group_size=12,
+                page_size=1568,
+                ragged=True,
+                holes=True,
+                block_pad=1032,
+            ),
+            id="g12_padded_block_stride",
+        ),
+    ],
+)
+def test_qsa_sparse_prefill_sm90_correctness(
+    monkeypatch: pytest.MonkeyPatch, case: dict
+) -> None:
+    """The SM90 native kernel matches the one-split Triton kernel and the dense
+    reference, including invalid rows, -1 holes and padded block strides."""
+    q, k_cache, v_cache, indices, block_table, token_to_req, gate = _qsa_sm90_case(
+        **case
+    )
+    actual = torch.full_like(q, float("nan"))
+    ops.qsa_sparse_prefill_sm90(
+        q, k_cache, v_cache, indices, block_table, token_to_req, gate, actual
+    )
+    monkeypatch.setenv("VLLM_QSA_SM90_NATIVE", "0")
+    triton_out = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        k_cache,
+        v_cache,
+        indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=True,
+        output_gate=gate,
+    )
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, triton_out, rtol=1e-2, atol=1e-2)
+
+    valid = token_to_req >= 0
+    width = indices.shape[1] - 1
+    expected = _qsa_sparse_paged_attention_reference(
+        q[valid],
+        k_cache,
+        v_cache,
+        indices[valid, :width],
+        block_table,
+        token_to_req[valid],
+        q.shape[2] ** -0.5,
+    ) * torch.sigmoid(gate[valid])
+    torch.testing.assert_close(actual[valid], expected, rtol=2e-2, atol=2e-2)
+    # Rows of invalid requests attend to nothing.
+    assert not actual[~valid].any()
+
+
+@requires_qsa_sm90_native
+def test_qsa_sparse_prefill_sm90_opcheck() -> None:
+    q, k_cache, v_cache, indices, block_table, token_to_req, gate = _qsa_sm90_case(
+        rows_per_request=16,
+        context=3000,
+        num_requests=1,
+        num_kv_heads=2,
+        group_size=12,
+        page_size=1568,
+    )
+    torch.library.opcheck(
+        torch.ops._C.qsa_sparse_prefill_sm90,
+        (
+            q,
+            k_cache,
+            v_cache,
+            indices,
+            block_table,
+            token_to_req,
+            gate,
+            q.new_empty(q.shape),
+        ),
+    )
+
+
+@requires_qsa_sm90_native
+def test_qsa_sparse_prefill_sm90_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large prefill launches take the native kernel unless disabled; decode-
+    config launches and VLLM_QSA_SM90_NATIVE=0 keep the Triton kernel."""
+    q, k_cache, v_cache, indices, block_table, token_to_req, gate = _qsa_sm90_case(
+        rows_per_request=1100,
+        context=3000,
+        num_requests=1,
+        num_kv_heads=2,
+        group_size=12,
+        page_size=1568,
+    )
+    assert q.shape[0] * k_cache.shape[2] > qsa_ops._SM90_NATIVE_MIN_PROGRAMS
+    native = torch.empty_like(q)
+    ops.qsa_sparse_prefill_sm90(
+        q, k_cache, v_cache, indices, block_table, token_to_req, gate, native
+    )
+
+    def run(use_prefill_config: bool) -> torch.Tensor:
+        return qsa_ops.qsa_sparse_paged_attention(
+            q,
+            k_cache,
+            v_cache,
+            indices,
+            block_table,
+            token_to_req,
+            use_prefill_config=use_prefill_config,
+            output_gate=gate,
+        )
+
+    monkeypatch.setenv("VLLM_QSA_SM90_NATIVE", "1")
+    assert torch.equal(run(True), native)
+    decode_config = run(False)
+    monkeypatch.setenv("VLLM_QSA_SM90_NATIVE", "0")
+    triton_prefill = run(True)
+    assert not torch.equal(triton_prefill, native)
+    assert torch.equal(run(False), decode_config)
+    torch.testing.assert_close(triton_prefill, native, rtol=1e-2, atol=1e-2)
 
 
 @requires_qsa_kernels
