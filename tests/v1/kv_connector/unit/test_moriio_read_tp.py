@@ -340,6 +340,21 @@ def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
     _assert_released(_read_all(model, tp, tp, True, layouts, advertised_tp=0), tp)
 
 
+def test_read_without_advertised_prefill_tp_uses_the_prewarmed_session(monkeypatch):
+    """Without the prefill TP size (0) the eager handshake opens the equal-TP
+    session the read then uses."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    producers, consumers = _ranks("gqa", 2, 2, True, LAYOUTS[0], state)
+    for consumer in consumers:
+        consumer.worker.moriio_config = SimpleNamespace(backend="xgmi")
+        prewarmed = _prewarm(consumer, _meta(["full"], 0), monkeypatch)
+        released = _make_reader(consumer, producers, "xgmi", prewarmed=prewarmed)
+        consumer.worker._read_blocks_for_req("req", _meta(["full"], 0))
+        assert consumer.worker._pop_done_transfers() == {"t"}
+        assert [p for p, _, _ in released] == [consumer.tp_rank]
+
+
 def test_flexible_mirror_spreads_reads_and_releases_every_holder(monkeypatch):
     """MLA decode TP1 under prefill TP4 over RDMA: the round-robin picks a
     different prefill rank per request, and all four are released each time."""

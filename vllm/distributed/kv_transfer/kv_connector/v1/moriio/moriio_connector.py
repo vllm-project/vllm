@@ -193,7 +193,6 @@ def get_moriio_remote_tp_rank(
     return local_tp_rank // (local_tp_size // remote_tp_size)
 
 
-
 def validate_moriio_heterogeneous_tp_kv_heads(
     local_tp_size: int,
     remote_tp_size: int,
@@ -2310,9 +2309,10 @@ class MoRIIOConnectorWorker:
         elif (
             self.mode == MoRIIOMode.READ
             and not self.is_producer
-            and tp_size != self.world_size
+            and tp_size not in (0, self.world_size)
         ):
-            # Heterogeneous-TP READ keys its sessions per (dp, tp) source.
+            # Heterogeneous-TP READ keys its sessions per (dp, tp) source. A
+            # peer that does not advertise its TP size (0) runs equal TP.
             write_target_tp_ranks = self._read_handshake_tp_ranks(tp_size)
 
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
@@ -3197,8 +3197,9 @@ class MoRIIOConnectorWorker:
                     for dp in range(remote_dp_size)
                     for tp in range(max(1, tp_size))
                 ]
-            elif tp_size != self.world_size:
-                # Heterogeneous TP: one session per prefill rank this rank reads.
+            elif tp_size not in (0, self.world_size):
+                # Heterogeneous TP: one session per prefill rank this rank reads
+                # (0: the peer did not advertise its TP size, so equal TP).
                 targets = [
                     (self.get_engine_name_with_dp_tp(remote_engine_id, dp, tp), dp, tp)
                     for dp in range(remote_dp_size)
@@ -3443,8 +3444,8 @@ class MoRIIOConnectorWorker:
         Layers may differ (e.g. Gemma4 sliding vs full attention), and the
         model-wide count is their maximum. Without a layer: the model-wide count.
         """
-        arch = getattr(self.model_config, "model_arch_config", None)
-        if layer_name is None or arch is None or arch.per_layer_overrides is None:
+        arch = self.model_config.model_arch_config
+        if layer_name is None or arch.per_layer_overrides is None:
             return self.model_config.get_total_num_kv_heads()
         return arch[extract_layer_index(layer_name)].total_num_kv_heads
 
@@ -3984,8 +3985,8 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         request_id: str,
         deadline: float,
-        remote_moriio_meta: MoRIIOAgentMetadata | None = None,
-        source: ReadSource | None = None,
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        source: ReadSource | None,
     ) -> list:
         """Post one KDA layer's conv and ssm reads; return their statuses.
 
@@ -4002,7 +4003,6 @@ class MoRIIOConnectorWorker:
                 remote_tp_size=remote_tp_size,
             )
         else:
-            assert remote_moriio_meta is not None
             local, remote, sizes, n_conv = self._compute_mamba_slice_read_offsets(
                 layer_name, local_slots, remote_slots, remote_moriio_meta, source
             )
