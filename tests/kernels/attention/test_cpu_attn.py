@@ -40,7 +40,7 @@ NUM_HEADS = [
     (9, 3),
 ]
 HEAD_SIZES = [96, 128, 512]
-HEAD_SIZES_VEC16 = [96, 80, 112, 128]
+HEAD_SIZES_VEC16 = [48, 96, 80, 112, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]
 NUM_BLOCKS = [
@@ -1593,13 +1593,20 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
 
 
-def _select_attn_backend(kv_cache_dtype: str, use_mla: bool = False) -> str:
+def _select_attn_backend(
+    kv_cache_dtype: str = "auto",
+    use_mla: bool = False,
+    head_size: int = 64,
+    dtype: torch.dtype = torch.bfloat16,
+    attn_type: str = AttentionType.DECODER,
+) -> str:
     config = AttentionSelectorConfig(
-        head_size=576 if use_mla else 64,
-        dtype=torch.bfloat16,
+        head_size=576 if use_mla else head_size,
+        dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
         block_size=128,
         use_mla=use_mla,
+        attn_type=attn_type,
     )
     return CpuPlatform.get_attn_backend_cls(None, config)
 
@@ -1626,3 +1633,23 @@ def test_cpu_mla_rejects_quantized_kv_cache() -> None:
     assert "MLA" in _select_attn_backend("auto", use_mla=True)
     with pytest.raises(ValueError, match="fp8"):
         _select_attn_backend("fp8", use_mla=True)
+
+
+@pytest.mark.parametrize("head_size", sorted({*HEAD_SIZES, *HEAD_SIZES_VEC16}))
+def test_cpu_attn_accepts_kernel_head_sizes(head_size: int) -> None:
+    assert _select_attn_backend(head_size=head_size).endswith("CPUAttentionBackend")
+
+
+@pytest.mark.parametrize("head_size", [26, 40, 72])
+def test_cpu_attn_rejects_unsupported_head_size(head_size: int) -> None:
+    with pytest.raises(ValueError, match=f"Head size {head_size}"):
+        _select_attn_backend(head_size=head_size)
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+def test_cpu_attn_head_size_check_skips_zentorch_encoder(dtype: torch.dtype) -> None:
+    backend = _select_attn_backend(
+        head_size=26, dtype=dtype, attn_type=AttentionType.ENCODER_ONLY
+    )
+    assert backend.endswith("CPUAttentionBackend")

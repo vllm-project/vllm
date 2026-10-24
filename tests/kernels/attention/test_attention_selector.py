@@ -137,7 +137,7 @@ def test_backend_selection(
     with set_current_vllm_config(vllm_config):
         if device == "cpu":
             with patch("vllm.platforms.current_platform", CpuPlatform()):
-                backend = get_attn_backend(16, torch.float16, None)
+                backend = get_attn_backend(64, torch.float16, None)
             assert backend.get_name() == "CPU_ATTN"
 
         elif device == "hip":
@@ -319,7 +319,7 @@ def test_fp32_fallback(device: str):
     with set_current_vllm_config(vllm_config):
         if device == "cpu":
             with patch("vllm.platforms.current_platform", CpuPlatform()):
-                backend = get_attn_backend(16, torch.float32, None)
+                backend = get_attn_backend(64, torch.float32, None)
             assert backend.get_name() == "CPU_ATTN"
 
         elif device == "cuda":
@@ -380,7 +380,7 @@ def test_auto_backend_selection_behavior():
         set_current_vllm_config(vllm_config_auto),
         patch("vllm.platforms.current_platform", CpuPlatform()),
     ):
-        backend_auto = get_attn_backend(16, torch.float16, None)
+        backend_auto = get_attn_backend(64, torch.float16, None)
 
     _cached_get_attn_backend.cache_clear()
 
@@ -388,7 +388,7 @@ def test_auto_backend_selection_behavior():
         set_current_vllm_config(vllm_config_none),
         patch("vllm.platforms.current_platform", CpuPlatform()),
     ):
-        backend_none = get_attn_backend(16, torch.float16, None)
+        backend_none = get_attn_backend(64, torch.float16, None)
 
     # Both should select the same backend
     assert backend_auto.get_name() == backend_none.get_name()
