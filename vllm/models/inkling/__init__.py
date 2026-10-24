@@ -4,13 +4,18 @@ from typing import TYPE_CHECKING
 
 from vllm.platforms import current_platform
 
+
+def _use_common_impl() -> bool:
+    return current_platform.is_rocm() or current_platform.is_xpu()
+
+
 if TYPE_CHECKING:
-    if current_platform.is_rocm():
-        from .amd.model import (
+    if _use_common_impl():
+        from .common.model import (
             InklingForCausalLM,
             InklingForConditionalGeneration,
         )
-        from .amd.mtp import InklingMTP as InklingMTP
+        from .common.mtp import InklingMTP as InklingMTP
     else:
         from .nvidia.model import (
             InklingForCausalLM,
@@ -27,20 +32,20 @@ __all__ = [
 
 def __getattr__(name: str):
     if name == "InklingMTP":
-        if current_platform.is_rocm():
-            from .amd import mtp as amd_mtp
+        if _use_common_impl():
+            from .common import mtp as common_mtp
 
-            return amd_mtp.InklingMTP
+            return common_mtp.InklingMTP
 
         from .nvidia import mtp as nvidia_mtp
 
         return nvidia_mtp.InklingMTP
 
     if name in __all__:
-        if current_platform.is_rocm():
-            from .amd import model as amd_model
+        if _use_common_impl():
+            from .common import model as common_model
 
-            return getattr(amd_model, name)
+            return getattr(common_model, name)
 
         from .nvidia import model as nvidia_model
 
