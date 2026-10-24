@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    KVCacheSpecKind,
     MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -212,6 +213,12 @@ class KVCacheManager:
                 get_kv_cache_spec_sliding_window(group.kv_cache_spec),
             )
             for group in kv_cache_config.kv_cache_groups
+        )
+        self.block_pool.chain_group_ids = frozenset(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if get_kv_cache_spec_kind(group.kv_cache_spec)
+            in (KVCacheSpecKind.FULL_ATTENTION, KVCacheSpecKind.MLA_ATTENTION)
         )
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
@@ -605,6 +612,14 @@ class KVCacheManager:
             num_tokens_main_model,
             num_encoder_tokens,
         )
+
+        # A cache-hit request can finish without publishing another full block.
+        # Apply its intent only after admission succeeds and the local hits have
+        # been touched. Remote slots are not reusable content until loaded.
+        if request.kv_hints is not None and num_new_computed_tokens > 0:
+            self.coordinator.apply_retention_to_computed_blocks(
+                request, new_computed_block_list, num_new_computed_tokens
+            )
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.

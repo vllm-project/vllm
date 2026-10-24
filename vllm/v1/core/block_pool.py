@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -27,6 +29,8 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
     to_event_extra_keys,
 )
+from vllm.v1.core.priority_eviction_queue import PriorityEvictionQueue
+from vllm.v1.kv_hints.retain import RetainDirective, parse_retain_actions
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -194,6 +198,25 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Sidecar storage for priority-based KV-cache eviction (empty until a
+        # kv.retain hint is applied).
+        self.priority_eviction_queue = PriorityEvictionQueue()
+        # Hash chain as a tree: parent block hash -> the ids of the cached
+        # blocks whose content follows it, and each cached block's parent hash.
+        # A block is only reachable through its parent, so when the last copy
+        # of a hash leaves the cache its children are dead weight (reaped at
+        # once), and a scope lowering its hold on a block caps its holds on
+        # the block's descendants.
+        # Both are kept from the first kv.retain hint on (see
+        # PriorityEvictionQueue.ever_used): blocks cached before that carry
+        # no links, so a cascade or reap does not reach them.
+        self._children: dict[BlockHashWithGroupId, set[int]] = {}
+        self._parent_key: dict[int, BlockHashWithGroupId] = {}
+        # KV-cache groups whose lookups walk the hash chain from the first
+        # block (full attention), set by KVCacheManager; None means every
+        # group. A sliding-window or Mamba group can hit a block whose parent
+        # is gone, so its blocks keep no chain links.
+        self.chain_group_ids: frozenset[int] | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -267,6 +290,10 @@ class BlockPool:
         )
 
         new_block_hashes = block_hashes[num_cached_blocks:]
+        pq = self.priority_eviction_queue
+        if request.kv_hints is not None:
+            pq.ever_used = True  # link this request's blocks before its hook
+        chain = pq.active
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -296,9 +323,24 @@ class BlockPool:
                 block_hash_with_group_id,
                 blk,
                 num_tokens=num_hash_tokens,
+                retention=chain,
             )
+            parent_idx = num_cached_blocks + i - 1
+            if (
+                chain
+                and parent_idx >= 0
+                and blk.block_hash == block_hash_with_group_id
+                and self._chain_group(kv_cache_group_id)
+            ):
+                parent_key = make_block_hash_with_group_id(
+                    block_hashes[parent_idx], kv_cache_group_id
+                )
+                self._parent_key[blk.block_id] = parent_key
+                self._children.setdefault(parent_key, set()).add(blk.block_id)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+
+        self._apply_retention_hook(request, blocks, num_full_blocks, block_size)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -605,6 +647,15 @@ class BlockPool:
                 is not None
             ):
                 removed_hashes.append(block_hash)
+        parent_key = (
+            self._parent_key.pop(block.block_id, None) if self._parent_key else None
+        )
+        if parent_key is not None:
+            siblings = self._children.get(parent_key)
+            if siblings is not None:
+                siblings.discard(block.block_id)
+                if not siblings:
+                    del self._children[parent_key]
         block.reset_hash()
         return removed_hashes
 
@@ -628,6 +679,7 @@ class BlockPool:
         block_hash_with_group_id: BlockHashWithGroupId,
         block: KVCacheBlock,
         num_tokens: int | None,
+        retention: bool | None = None,
     ) -> None:
         if block.block_hash == block_hash_with_group_id:
             return
@@ -644,6 +696,44 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+
+        # Recomputed content can duplicate a free copy, including when replaying
+        # the last prompt block for logits. Insert the new copy before retiring
+        # the old one so the hash stays live and its descendants are not reaped.
+        if retention is None:
+            retention = self.priority_eviction_queue.active
+        if retention:
+            self._drop_stale_copies(block_hash_with_group_id, block)
+
+    def _drop_stale_copies(
+        self, key: BlockHashWithGroupId, new_block: KVCacheBlock
+    ) -> None:
+        existing = self.cached_block_hash_to_block._cache.get(key)
+        if existing is None:
+            return
+        olds = (
+            [existing]
+            if isinstance(existing, KVCacheBlock)
+            else list(existing.values())
+        )
+        for old in olds:
+            if old is new_block or old.is_null or old.ref_cnt != 0:
+                continue
+            queued = old in self.priority_eviction_queue
+            if (
+                not queued
+                and old.prev_free_block is None
+                and old.next_free_block is None
+            ):
+                continue
+            if self._chain_group(get_group_id(key)):
+                self.priority_eviction_queue.inherit_holds(old, new_block)
+            if queued:
+                self.priority_eviction_queue.unprotect(old.block_id)
+            else:
+                self.free_block_queue.remove(old)
+            self._maybe_evict_cached_block(old)
+            self.free_block_queue.prepend_n([old])
 
     def move_block_hashes(
         self,
@@ -663,6 +753,109 @@ class BlockPool:
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
+    def _chain_group(self, kv_cache_group_id: int) -> bool:
+        return self.chain_group_ids is None or kv_cache_group_id in self.chain_group_ids
+
+    def _owns(self, block: KVCacheBlock) -> bool:
+        return block.pool is None or block.pool is self
+
+    def apply_retention_to_cached_blocks(
+        self,
+        request: Request,
+        blocks: Sequence[KVCacheBlock],
+        block_size: int,
+    ) -> None:
+        """Update adopted cache hits, retaining their original token offsets."""
+        cached_blocks = [
+            block
+            if self._owns(block) and block.block_hash is not None
+            else self.null_block
+            for block in blocks
+        ]
+        self._apply_retention_hook(
+            request, cached_blocks, len(cached_blocks), block_size
+        )
+
+    def _apply_retention_hook(
+        self,
+        request: Request,
+        blocks: list[KVCacheBlock],
+        num_full_blocks: int,
+        block_size: int,
+    ) -> None:
+        """Apply the request's kv.retain directives to its full blocks.
+
+        A request without hints returns before anything is touched. A
+        covers_output directive protects the generated tail, so it resolves
+        to [num_prompt_tokens, None) rather than defaulting to start=0 (which
+        would pin the whole prompt).
+        """
+        if request.kv_hints is None:
+            return
+        parsed = parse_retain_actions(request.kv_hints, strict=False)
+        if parsed is None:
+            return
+        scope = parsed.scope if parsed.scope is not None else request.session_id
+        directives: list[RetainDirective] = [
+            replace(d, start=request.num_prompt_tokens, end=None)
+            if d.covers_output
+            else d
+            for d in parsed.directives
+        ]
+        full_blocks = blocks[:num_full_blocks]
+        if any(not self._owns(block) for block in full_blocks):
+            # Another pool's blocks (a HiSparse host group) are not this pool's
+            # to protect or route; the null block keeps the token offsets.
+            full_blocks = [
+                block if self._owns(block) else self.null_block for block in full_blocks
+            ]
+        released, lowered = self.priority_eviction_queue.apply_directives_ex(
+            full_blocks, directives, scope, block_size
+        )
+        # A queued free block that loses its entry is in neither free
+        # structure, so it goes back to the LRU list, the way release_expired()'s
+        # blocks do. A free block whose entry sits on the LRU list with it stays
+        # where it is, and a referenced block reaches the LRU list when freed.
+        if released:
+            self.free_block_queue.append_n(
+                [self.blocks[block_id] for block_id in released]
+            )
+        if lowered:
+            self._cap_descendant_holds(
+                lowered, scope, {b.block_id for b in full_blocks}
+            )
+
+    def _cap_descendant_holds(
+        self,
+        lowered: list[tuple[KVCacheBlock, int]],
+        scope: str | None,
+        just_set: set[int],
+    ) -> None:
+        """A scope that lowered its hold on a block lowers it on the block's
+        descendants too: without the block they cannot serve a hit, so a
+        stale higher hold from an earlier turn would only keep dead content.
+        Other scopes' holds are untouched, blocks the same directives just set
+        are authoritative, and the walk stops where the scope holds nothing
+        (directives cover contiguous ranges, so nothing of its lies beyond)."""
+        pq = self.priority_eviction_queue
+        released: list[KVCacheBlock] = []
+        stack = [(b.block_hash, p) for b, p in lowered if b.block_hash is not None]
+        seen: set[int] = set()
+        while stack:
+            key, priority = stack.pop()
+            for child_id in self._children.get(key, ()):
+                if child_id in just_set or child_id in seen:
+                    continue
+                seen.add(child_id)
+                child = self.blocks[child_id]
+                had, freed = pq.cap_hold(child, scope, priority)
+                if freed:
+                    released.append(child)
+                if had and child.block_hash is not None:
+                    stack.append((child.block_hash, priority))
+        if released:
+            self.free_block_queue.append_n(released)
+
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
@@ -678,15 +871,40 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # Demote expired protections to the LRU tail rather than evicting them:
+        # expiry means "protection released," not "evict now," so treating a
+        # lapsed protection as freshly freed avoids mass-evicting a still-live
+        # working set on a TTL underestimate.
+        pq = self.priority_eviction_queue
+        if pq.active:
+            expired = [self.blocks[block_id] for block_id in pq.release_expired()]
+            if expired:
+                self.free_block_queue.append_n(expired)
+
+        # LRU first, then top up from the priority queue (lowest priority
+        # first); the while loop never runs when nothing is prioritized.
+        num_from_free = min(num_blocks, self.free_block_queue.num_free_blocks)
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_from_free)
+        # A block can reach the LRU list with an entry still on it: a block
+        # unpinned rather than freed, or any other path that leaves an entry on
+        # a block in the LRU list. It is being reused for new content now, so
+        # the entry goes.
+        if pq.active:
+            for block in ret:
+                pq.unprotect(block.block_id)
+        while len(ret) < num_blocks:
+            evicted = pq.pop_lowest()
+            assert evicted is not None, "Priority queue empty but more blocks required"
+            ret.append(evicted)
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
+            retention = pq.active
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                self._maybe_evict_cached_block(block, retention)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -726,28 +944,74 @@ class BlockPool:
                 released.append(block)
         self.free_block_queue.append_n(released)
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self, block: KVCacheBlock, retention: bool | None = None
+    ) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            retention: Whether retention is active (reap the orphans the
+                eviction leaves behind); looked up when None.
 
         Returns:
             True if the block is evicted, False otherwise.
 
         """
-        # Clean up metrics tracking first to prevent leaks
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
-
-        evicted_hashes = self._remove_cached_block_hashes(block)
+        evicted_hashes = self._evict_from_cache(block)
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
-
-        self._emit_block_removed_events(evicted_hashes)
+        if retention is None:
+            retention = self.priority_eviction_queue.active
+        if retention:
+            self._reap_orphans(evicted_hashes)
         return True
+
+    def _evict_from_cache(self, block: KVCacheBlock) -> list[BlockHashWithGroupId]:
+        """Drop the block's hashes from the prefix cache (metrics and events
+        included) and return the hashes removed."""
+        # Clean up metrics tracking first to prevent leaks
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
+        evicted_hashes = self._remove_cached_block_hashes(block)
+        if evicted_hashes:
+            self._emit_block_removed_events(evicted_hashes)
+        return evicted_hashes
+
+    def _reap_orphans(self, keys: list[BlockHashWithGroupId]) -> None:
+        """When the last copy of a hash leaves the cache, every cached block
+        whose content follows it is unreachable: a lookup walks the chain
+        from the first block and stops at the first miss. Such blocks would
+        otherwise sit in the cache, protected, until eviction reached them.
+        Free ones are dropped from the cache right away and put at the head
+        of the LRU list; a referenced one is left alone (its own free will
+        route it, and the stale-copy rule catches it if recomputed)."""
+        cache = self.cached_block_hash_to_block
+        stack = [k for k in keys if cache.get_one_block(k) is None]
+        while stack:
+            key = stack.pop()
+            children = self._children.pop(key, None)
+            if not children:
+                continue
+            for child_id in children:
+                child = self.blocks[child_id]
+                self._parent_key.pop(child_id, None)
+                if child.is_null or child.ref_cnt != 0:
+                    continue
+                if child in self.priority_eviction_queue:
+                    self.priority_eviction_queue.unprotect(child_id)
+                elif (
+                    child.prev_free_block is not None
+                    or child.next_free_block is not None
+                ):
+                    self.free_block_queue.remove(child)
+                else:
+                    continue  # not in either free structure: leave it alone
+                removed = self._evict_from_cache(child)
+                self.free_block_queue.prepend_n([child])
+                stack.extend(k for k in removed if cache.get_one_block(k) is None)
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
@@ -758,13 +1022,21 @@ class BlockPool:
             blocks: A list of blocks to touch.
 
         """
+        pq = self.priority_eviction_queue
+        queued = pq.active
         for block in blocks:
             if block.is_null:
                 continue
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 means the block is logically free; remove it from
+            # whichever queue holds it (priority queue or LRU free list).
             if block.ref_cnt == 0:
-                self.free_block_queue.remove(block)
+                if queued and block in pq:
+                    pq.suspend(block)
+                elif (
+                    block.prev_free_block is not None
+                    or block.next_free_block is not None
+                ):
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -786,7 +1058,16 @@ class BlockPool:
         blocks_to_evict_last = []
         blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
-        for block in ordered_blocks:
+        # Stamp monotonic time for the priority-queue heap tiebreak, with a
+        # per-block nanosecond offset so pop_lowest evicts tail-first,
+        # matching LRU order (ordered_blocks arrives tail->head). This avoids
+        # an arbitrary block_id tiebreak that could strand a mid-prefix block
+        # and break the cached chain; the offset is far smaller than real
+        # inter-free gaps, so cross-request recency ordering is unaffected.
+        pq = self.priority_eviction_queue
+        queued = pq.active
+        now = time.monotonic() if queued else 0.0
+        for pos, block in enumerate(ordered_blocks):
             if block.is_null:  # never pooled; its ref_cnt is not maintained
                 continue
             if block.pool is not None and block.pool is not self:
@@ -794,6 +1075,10 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
+                # Protected blocks go to the priority queue (try_insert falls
+                # through to LRU for the rest).
+                if queued and pq.try_insert(block, last_freed_time=now + pos * 1e-9):
+                    continue
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
@@ -827,6 +1112,12 @@ class BlockPool:
             )
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
+            # A free protected block leaves the queue here; route it to the
+            # LRU list so it stays allocatable.
+            was_queued = block in self.priority_eviction_queue
+            self.priority_eviction_queue.unprotect(block_id)
+            if was_queued:
+                self.free_block_queue.prepend_n([block])
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -850,10 +1141,20 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self._children.clear()
+        self._parent_key.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
             )
+
+        # Return priority-queue blocks to the LRU free list before clearing:
+        # clear() alone leaks them, since they belong to no other queue.
+        drained: list[KVCacheBlock] = []
+        while (block := self.priority_eviction_queue.pop_lowest()) is not None:
+            drained.append(block)
+        self.free_block_queue.append_n(drained)
+        self.priority_eviction_queue.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
@@ -873,10 +1174,13 @@ class BlockPool:
         """Get the number of free blocks in the pool.
 
         Returns:
-            The number of free blocks.
+            The number of free blocks (LRU + prioritized).
 
         """
-        return self.free_block_queue.num_free_blocks
+        return (
+            self.free_block_queue.num_free_blocks
+            + self.priority_eviction_queue.num_blocks
+        )
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
