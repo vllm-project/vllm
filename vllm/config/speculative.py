@@ -1465,6 +1465,11 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                         self.target_model_config.max_model_len,
                     )
+                    # Draft RoPE comes from the draft config only (#61231).
+                    SpeculativeConfig._maybe_log_draft_rope(
+                        self.draft_model_config,
+                        self.target_model_config,
+                    )
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
@@ -1800,6 +1805,98 @@ class SpeculativeConfig:
             target_max_model_len,
         )
         draft_hf_config.max_position_embeddings = target_max_model_len
+
+    _ROPE_CONFIG_KEYS = ("rope_theta", "rope_scaling", "rope_parameters")
+
+    @staticmethod
+    def _resolve_rope_base_and_type(
+        hf_config: PreTrainedConfig,
+    ) -> tuple[float, str]:
+        """Return the RoPE base and type that ``get_rope`` would use.
+
+        Prefer ``rope_parameters`` (first entry if nested), else top-level
+        ``rope_theta`` / ``rope_scaling``, else base 10000 / type ``default``.
+        """
+        for params in iter_rope_parameters(hf_config):
+            base = params.get("rope_theta", 10000)
+            rope_type = params.get("rope_type") or params.get("type") or "default"
+            return float(base), str(rope_type)
+
+        base = getattr(hf_config, "rope_theta", None)
+        scaling = getattr(hf_config, "rope_scaling", None)
+        rope_type = "default"
+        if isinstance(scaling, Mapping):
+            rope_type = str(
+                scaling.get("rope_type") or scaling.get("type") or "default"
+            )
+            if base is None:
+                base = scaling.get("rope_theta")
+        if base is None:
+            base = 10000
+        return float(base), rope_type
+
+    @staticmethod
+    def _checkpoint_declares_rope(model: str | None) -> bool | None:
+        """Whether the draft checkpoint's ``config.json`` declares rope keys.
+
+        Returns ``None`` when the raw config cannot be read (offline cache
+        miss, custom path, etc.), so callers can skip the omission warning.
+        """
+        if not model:
+            return None
+        # PreTrainedConfig is Any outside TYPE_CHECKING; import for the call.
+        from transformers import PreTrainedConfig as HFPreTrainedConfig
+
+        try:
+            config_dict, _ = HFPreTrainedConfig.get_config_dict(model)
+        except Exception:
+            return None
+        if not isinstance(config_dict, dict):
+            return None
+        return any(key in config_dict for key in SpeculativeConfig._ROPE_CONFIG_KEYS)
+
+    @staticmethod
+    def _maybe_log_draft_rope(
+        draft_model_config: ModelConfig,
+        target_model_config: ModelConfig,
+    ) -> None:
+        """Log the draft RoPE resolution; warn when keys were omitted (#61231).
+
+        EAGLE draft rotary embeddings are built from the draft ``hf_config``
+        alone. When the draft ``config.json`` omits rope keys, transformers
+        and ``get_rope`` both default to base 10000, which can silently
+        disagree with a long-context target (e.g. Llama-3.1 at 500000).
+        Numerics are left unchanged; this only makes the resolution visible.
+        """
+        draft_base, draft_type = SpeculativeConfig._resolve_rope_base_and_type(
+            draft_model_config.hf_config
+        )
+        target_base, target_type = SpeculativeConfig._resolve_rope_base_and_type(
+            target_model_config.hf_config
+        )
+        logger.info(
+            "Draft model RoPE: base=%s, rope_type=%s "
+            "(method uses draft config only; target base=%s, rope_type=%s).",
+            draft_base,
+            draft_type,
+            target_base,
+            target_type,
+        )
+        declares = SpeculativeConfig._checkpoint_declares_rope(draft_model_config.model)
+        if declares is False and draft_base != target_base:
+            logger.warning(
+                "Draft model config omits rope keys "
+                "(rope_theta / rope_scaling / rope_parameters); using default "
+                "RoPE base %s (rope_type=%s). Target model uses base %s "
+                "(rope_type=%s). EAGLE draft RoPE is not inherited from the "
+                "target. If the draft was trained at a different base, set "
+                "rope_theta (and rope_scaling if needed) in the draft "
+                "config.json.",
+                draft_base,
+                draft_type,
+                target_base,
+                target_type,
+            )
 
     @staticmethod
     def _verify_and_get_draft_tp(
