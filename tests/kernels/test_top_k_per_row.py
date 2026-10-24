@@ -2479,8 +2479,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     batch_size = 4
     num_rows = batch_size * next_n
 
-    # Per-row effective lens in the (B, next_n) "native spec decode" form;
-    # cooperative/persistent_topk require lengths.numel() == num_rows.
+    # Per-row effective lens in the (B, next_n) "native spec decode" form.
     row_ends = torch.randint(4000, 16000, (num_rows,), dtype=torch.int32, device="cuda")
     seq_lens = row_ends.reshape(batch_size, next_n)
     max_seq_len = int(row_ends.max())
@@ -2515,25 +2514,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     ), f"{backend} results don't match torch.topk"
 
 
-@pytest.mark.parametrize(
-    "backend",
-    [
-        "torch",
-        pytest.param(
-            "per_row",
-            marks=pytest.mark.skipif(
-                not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
-            ),
-        ),
-        pytest.param(
-            "flashinfer",
-            marks=pytest.mark.skipif(
-                not _has_flashinfer_topk(), reason="requires flashinfer top-k"
-            ),
-        ),
-        pytest.param("deep_select", marks=requires_sm100),
-    ],
-)
+@pytest.mark.parametrize("backend", SPARSE_INDEXER_EXPLICIT_BACKENDS)
 @torch.inference_mode()
 def test_sparse_indexer_decode_topk_short_seq_lens(
     backend: str, workspace_init
