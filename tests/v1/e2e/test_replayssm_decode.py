@@ -486,14 +486,19 @@ def _generate_with_preemption(llm, block_size: int):
         ),
     }
     before = _stress_metric_counts(llm)
-    for request_id, (prompt, length) in requests.items():
-        engine.add_request(
-            request_id,
-            prompt,
-            SamplingParams(
-                temperature=0.0, max_tokens=length, ignore_eos=True, logprobs=5
-            ),
-        )
+    # Queue both requests before scheduling either engine's initial batch.
+    llm.sleep(level=0, mode="keep")
+    try:
+        for request_id, (prompt, length) in requests.items():
+            engine.add_request(
+                request_id,
+                prompt,
+                SamplingParams(
+                    temperature=0.0, max_tokens=length, ignore_eos=True, logprobs=5
+                ),
+            )
+    finally:
+        llm.wake_up(tags=["scheduling"])
     latest = {}
     preempted = False
     observed_turnover = False
@@ -524,7 +529,11 @@ def _generate_with_preemption(llm, block_size: int):
             prompt_len = len(output.prompt_token_ids)
             crossed = (prompt_len + length - 1) // block_size - prompt_len // block_size
             assert crossed >= 3, (prompt_len, length, block_size, crossed)
-            print(f"ReplaySSM stress: block_size={block_size}, crossings={crossed}")
+            print(
+                f"ReplaySSM stress: block_size={block_size}, crossings={crossed}, "
+                "preemptions="
+                f"{after['vllm:num_preemptions'] - before['vllm:num_preemptions']}"
+            )
         result.append((completion.token_ids, completion.text, completion.logprobs))
     return result
 
@@ -654,7 +663,6 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     score = sum(
                         actual == expected for actual, expected in zip(answers, labels)
                     )
-                    assert score >= 12, (score, answers, labels)
                     scores.append(score)
                     quality_outputs.append(
                         [
@@ -666,13 +674,31 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                             for output in outputs
                         ]
                     )
+                    prefix_hits = (
+                        after["vllm:prefix_cache_hits"]
+                        - before["vllm:prefix_cache_hits"]
+                    )
                     print(
                         f"ReplaySSM={use_replayssm}: GSM8K={score}/16, "
-                        f"accepted={accepted}/{drafted}, answers={answers}"
+                        f"accepted={accepted}/{drafted}, answers={answers}, "
+                        f"prefix_hits={prefix_hits}, "
+                        f"lengths={[len(o.outputs[0].token_ids) for o in outputs]}, "
+                        "finish_reasons="
+                        f"{[o.outputs[0].finish_reason for o in outputs]}"
                     )
+                    for index, (answer, label, output) in enumerate(
+                        zip(answers, labels, outputs)
+                    ):
+                        if answer != label:
+                            print(
+                                f"ReplaySSM={use_replayssm}: GSM8K case={index}, "
+                                f"expected={label}, actual={answer}, "
+                                f"text={output.outputs[0].text!r}"
+                            )
     finally:
         envs.disable_envs_cache()
 
+    assert all(score >= 12 for score in scores), scores
     assert scores[1] >= scores[0], scores
     for name, outputs in (
         ("stress", stress_outputs),
