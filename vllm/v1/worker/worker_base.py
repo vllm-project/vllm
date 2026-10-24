@@ -165,7 +165,13 @@ class WorkerBase:
         """Return a transformers-style hierarchical view of the model."""
         from vllm.model_inspection import format_model_inspection
 
-        return format_model_inspection(self.get_model())
+        model = self.get_model()
+        if not isinstance(model, nn.Module):
+            # Out-of-tree platforms (e.g. vllm-metal serving MLX models) can
+            # use non-torch objects. Fall back to repr() instead of crashing
+            # in format_model_inspection's named_children() walker. See #61366.
+            return repr(model)
+        return format_model_inspection(model)
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
