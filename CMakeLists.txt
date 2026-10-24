@@ -1625,12 +1625,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
-  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100|gfx1151")
     set(VLLM_ROCM_HAS_GFX1100 ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
-      "csrc/rocm/moe_q_gemm_rdna3.cu")
+      "csrc/rocm/mxfp4_gemm_rdna3.cu"
+      "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/moe_mxfp4_gemm_rdna3.cu")
   endif()
 
   define_extension_target(
