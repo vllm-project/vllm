@@ -44,10 +44,12 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
+    get_fused_act_quant_key,
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -136,6 +138,51 @@ def test_bridge_marks_supporting_and_skips_others():
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
     assert get_input_quant_key(layer) is None
+
+
+@pytest.mark.parametrize("act_type", [ReLUSquaredActivation, SiluAndMul])
+def test_activation_policy_reexposure(default_vllm_config, act_type):
+    """Backend changes must clear stale keys and producer restrictions."""
+    layer = torch.nn.Module()
+    act = act_type(compile_native=False)
+    for kernel_cls, allowed in (
+        (FlashInferCuteDslNvFp4LinearKernel, True),
+        (FlashInferCutlassNvFp4LinearKernel, act_type is SiluAndMul),
+        (FlashInferTrtllmNvFp4LinearKernel, False),
+        (FlashInferCuteDslNvFp4LinearKernel, True),
+        (CutlassFP8ScaledMMLinearKernel, True),
+    ):
+        kernel = _probe(kernel_cls)
+        expose_input_quant_key(layer, kernel)
+        assert get_input_quant_key(layer) == kernel.input_quant_key()
+        assert (get_fused_act_quant_key(layer, act) is not None) is allowed
+    layer.requires_unquantized_input = True
+    assert get_input_quant_key(layer) is get_fused_act_quant_key(layer, act) is None
+
+
+def test_nvfp4_policy_preserves_silu_fusion(default_vllm_config, monkeypatch):
+    """Both existing NVFP4 consumers retain their SiLU producer selection."""
+    from vllm.model_executor.layers.fusion import fused_act_quant as fusion
+
+    act = SiluAndMul(compile_native=False)
+    act._forward_method = act.forward_native
+    layer = torch.nn.Module()
+    x = torch.ones((2, 4), device="cpu")
+    qa = QuantizedActivation(
+        data=torch.zeros((2, 1), dtype=torch.uint8, device="cpu"),
+        scale=torch.ones((), device="cpu"),
+        orig_dtype=x.dtype,
+        orig_shape=torch.Size((2, 2)),
+        quant_key=kNvfp4Dynamic,
+    )
+    key = (SiluAndMul, kNvfp4Dynamic)
+    monkeypatch.setitem(fusion._FUSED_ACT_QUANT, key, lambda x, linear: qa)
+    for kernel_cls in (
+        FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCutlassNvFp4LinearKernel,
+    ):
+        expose_input_quant_key(layer, _probe(kernel_cls))
+        assert fusion.maybe_fused_act_quant(act, x, layer) is qa
 
 
 def test_as_quantized_activation_validates_key():
