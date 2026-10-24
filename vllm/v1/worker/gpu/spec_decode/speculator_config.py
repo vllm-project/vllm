@@ -163,7 +163,8 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         draft = self.spec_config.draft_model_config
         if draft is None or (
             # Its max_position_embeddings was raised to the target's.
-            self.shares_target_positions and _rope_only_sizes_cache(draft.hf_config)
+            self.shares_target_positions
+            and _rope_only_sizes_cache(draft.hf_text_config)
         ):
             return None
         return draft.max_model_len
@@ -217,7 +218,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
         if config_cls.shares_target_positions:
             SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-                spec.draft_model_config.hf_config, target.max_model_len
+                spec.draft_model_config.hf_text_config, target.max_model_len
             )
         config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
