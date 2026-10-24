@@ -600,4 +600,10 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         for groups in self.attn_groups:
             for group in groups:
+                if not self.draft_decode_reads(group.layer_names):
+                    continue
                 group.update_draft_decode_metadata(attn_metadata)
+
+    def draft_decode_reads(self, layer_names: list[str]) -> bool:
+        """Whether draft decode steps read these layers' attention metadata."""
+        return True
