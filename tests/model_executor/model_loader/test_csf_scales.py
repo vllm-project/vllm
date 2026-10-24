@@ -90,15 +90,19 @@ def test_hub_download_finds_shards_listed_by_the_index(
     tmp_path, monkeypatch, shard_name
 ):
     """A Hub snapshot whose shards sit under tensors/ is found once the index
-    is fetched; a .bin-only snapshot never asks for the index."""
+    is fetched, also by the IPC weight cache key; a .bin-only snapshot never
+    asks for the index."""
     import json
+
+    from safetensors.torch import save_file
 
     from vllm.config.load import LoadConfig
     from vllm.model_executor.model_loader import default_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import hash_checkpoint
 
     shard = tmp_path / shard_name
     shard.parent.mkdir(exist_ok=True)
-    shard.write_bytes(b"")
+    save_file({"w": torch.zeros(1)}, str(shard))
     index = {"weight_map": {"w": shard_name}}
     fetched = []
 
@@ -122,3 +126,4 @@ def test_hub_download_finds_shards_listed_by_the_index(
 
     assert use_safetensors == bool(fetched) == shard_name.endswith(".safetensors")
     assert files == [str(shard)]
+    assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors

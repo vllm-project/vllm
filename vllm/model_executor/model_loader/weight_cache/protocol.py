@@ -31,6 +31,9 @@ import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.default_loader import (
+    _indexed_safetensors_files,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
 )
@@ -291,6 +294,9 @@ def hash_checkpoint(model: str) -> str | None:
     if not os.path.isdir(model):
         return None
     files = glob.glob(os.path.join(model, "*.safetensors"))
+    if not files:
+        # Shards may live in a subdirectory named by the index.
+        files = _indexed_safetensors_files(model, SAFE_WEIGHTS_INDEX_NAME)
     if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
         files = filter_duplicate_safetensors_files(
             files, model, SAFE_WEIGHTS_INDEX_NAME
