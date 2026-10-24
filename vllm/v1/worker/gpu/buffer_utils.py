@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from array import array
 from collections.abc import Iterable, Sequence
 from functools import partial
 
@@ -82,18 +83,35 @@ class UvaBufferPool:
         # Current buffer index
         self._curr = 0
 
-    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+    def _next_buf(self, n: int) -> UvaBuffer | NonUvaBuffer:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
-        n = len(x)
         if n > buf.cpu.shape[0]:
             capacity = 1 << (n - 1).bit_length()
             buf = self._buffer_cls((capacity, *buf.cpu.shape[1:]), self.dtype)
             self._uva_bufs[self._curr] = buf
+        return buf
+
+    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+        n = len(x)
+        buf = self._next_buf(n)
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
         dst[:n] = x
+        return buf.uva(n)
+
+    def copy_chunks_to_uva(
+        self, chunks: Sequence[np.ndarray | list], n: int
+    ) -> torch.Tensor:
+        """`copy_to_uva` of the concatenation of `chunks` (n elements in all)."""
+        buf = self._next_buf(n)
+        offset = 0
+        for chunk in chunks:
+            end = offset + len(chunk)
+            buf.np[offset:end] = chunk
+            offset = end
+        assert offset == n
         return buf.uva(n)
 
     def copy_to_gpu(
@@ -166,6 +184,8 @@ class StagedWriteTensor:
         self._staged_write_starts: list[int] = []
         self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
+        self._staged_write_chunks: list[list[int | float] | np.ndarray] = []
+        self._staged_write_len = 0
 
         new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
 
@@ -183,15 +203,30 @@ class StagedWriteTensor:
             return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
-        self._staged_write_contents.extend(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        if (
+            isinstance(x, array)
+            and x.typecode == "i"
+            and x.itemsize == 4
+            and self.dtype == torch.int32
+        ):
+            self._staged_write_chunks.append(self._staged_write_contents)
+            # A view: `x` must stay unchanged until apply_write copies it.
+            self._staged_write_chunks.append(np.frombuffer(x, dtype=np.int32))
+            self._staged_write_contents = []
+            self._staged_write_len += len(x)
+        else:
+            n = len(self._staged_write_contents)
+            self._staged_write_contents.extend(x)
+            self._staged_write_len += len(self._staged_write_contents) - n
+        self._staged_write_cu_lens.append(self._staged_write_len)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(0)
         self._staged_write_contents.append(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_len += 1
+        self._staged_write_cu_lens.append(self._staged_write_len)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -203,8 +238,21 @@ class StagedWriteTensor:
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
         if self.write_contents is None:
+            contents = self._staged_write_contents
+            if self._staged_write_chunks:
+                contents = np.concatenate(
+                    [
+                        np.asarray(c, dtype=np.int32)
+                        for c in (*self._staged_write_chunks, contents)
+                    ]
+                )
             write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
+                contents, device=self.device, dtype=self.dtype
+            )
+        elif self._staged_write_chunks:
+            write_contents = self.write_contents.copy_chunks_to_uva(
+                [*self._staged_write_chunks, self._staged_write_contents],
+                self._staged_write_len,
             )
         else:
             write_contents = self.write_contents.copy_to_uva(
@@ -231,6 +279,8 @@ class StagedWriteTensor:
         self._staged_write_starts.clear()
         self._staged_write_contents.clear()
         self._staged_write_cu_lens.clear()
+        self._staged_write_chunks.clear()
+        self._staged_write_len = 0
 
 
 class FusedStagedWriter:
@@ -258,8 +308,10 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int | float] = []
+        # Each tensor's contents in staging order: its chunks, then its list.
+        chunks: list[np.ndarray | list[int | float]] = []
         cu_lens: list[int] = []
+        num_contents = 0
 
         for group_id, t in enumerate(tensors):
             n = len(t._staged_write_indices)
@@ -269,8 +321,10 @@ class FusedStagedWriter:
             group_ids.extend([group_id] * n)
             indices.extend(t._staged_write_indices)
             starts.extend(t._staged_write_starts)
-            content_base = len(contents)
-            contents.extend(t._staged_write_contents)
+            content_base = num_contents
+            chunks.extend(t._staged_write_chunks)
+            chunks.append(t._staged_write_contents)
+            num_contents += t._staged_write_len
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
 
         if not group_ids:
@@ -280,7 +334,11 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
-        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+        contents_gpu = async_tensor_h2d(
+            np.concatenate([np.asarray(c, dtype=np.int32) for c in chunks]),
+            device=self.device,
+            dtype=torch.int32,
+        )
 
         _apply_write_kernel[(len(group_ids),)](
             output_ptrs,

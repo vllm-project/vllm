@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from array import array
+
 import numpy as np
 import pytest
 import torch
@@ -97,6 +99,39 @@ def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
     assert staged.gpu[2, 3:6].tolist() == [11, 12, 13]
     assert staged.gpu[1, 7:9].tolist() == [21, 22]
     assert staged.gpu[0, 1020:2520].tolist() == list(range(1500))
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("device", DEVICES)
+def test_staged_write_packed_int32_array(device, monkeypatch):
+    def fail_async_tensor_h2d(*args, **kwargs):
+        pytest.fail("UVA-backed targets should not copy write contents to the GPU")
+
+    monkeypatch.setattr(buffer_utils, "async_tensor_h2d", fail_async_tensor_h2d)
+    staged = StagedWriteTensor(
+        (4, 8192),
+        dtype=torch.int32,
+        device=torch.device(device),
+        max_concurrency=2,
+        uva_instead_of_gpu=True,
+    )
+    big = array("i", range(100_000, 106_000))
+    for _ in range(3):  # reuse both pool slots, growing and shrinking
+        staged.stage_write_elem(3, 7)
+        staged.stage_write(0, 0, big)
+        staged.stage_write(1, 5, [1, 2, 3])
+        staged.stage_write(2, 10, array("i", [-1, 0, 2**31 - 1]))
+        staged.stage_write(1, 8, [4])
+        staged.apply_write()
+        torch.accelerator.synchronize()
+        assert staged.gpu[0, :6000].tolist() == big.tolist()
+        assert staged.gpu[1, 5:9].tolist() == [1, 2, 3, 4]
+        assert staged.gpu[2, 10:13].tolist() == [-1, 0, 2**31 - 1]
+        assert staged.gpu[3, 0].item() == 7
+        staged.stage_write(1, 0, array("i", [9, 9]))
+        staged.apply_write()
+        torch.accelerator.synchronize()
+        assert staged.gpu[1, :2].tolist() == [9, 9]
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
