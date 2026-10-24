@@ -682,6 +682,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
     io_processor_plugin: str | None = None
+    tokenizer_cache_gb: float = 0.0
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
@@ -1074,6 +1075,9 @@ class EngineArgs:
         model_group.add_argument(
             "--renderer-num-workers",
             **model_kwargs["renderer_num_workers"],
+        )
+        model_group.add_argument(
+            "--tokenizer-cache-gb", **model_kwargs["tokenizer_cache_gb"]
         )
 
         # Model loading arguments
@@ -2062,6 +2066,7 @@ class EngineArgs:
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
+            tokenizer_cache_gb=self.tokenizer_cache_gb,
         )
 
     def validate_tensorizer_args(self):
