@@ -1696,7 +1696,7 @@ def test_batched_load_localizes_rank_without_changing_request_or_destination(
 @pytest.mark.parametrize("tp_rank", [0, 3])
 @pytest.mark.parametrize("fast_path", [False, True])
 def test_batched_store_localizes_rank_without_changing_scheduler_batch(
-    fail_store, tp_rank, fast_path
+    fail_store, tp_rank, fast_path, monkeypatch
 ):
     """Fast and fallback stores target the same rank and publish alike."""
     codec = BlockIdentityCodec(UMBPNamespace("rank-local"), tp_rank=tp_rank)
@@ -1716,9 +1716,9 @@ def test_batched_store_localizes_rank_without_changing_scheduler_batch(
             job.complete()
         return job
 
-    handle.store = store
+    monkeypatch.setattr(handle, "store", store)
     if fast_path:
-        handle.store_blocks = store
+        monkeypatch.setattr(handle, "store_blocks", store, raising=False)
     layout = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
     layout.register_kv_caches(make_kv_caches())
     worker = UMBPStoreConnectorWorker(handle, layout, codec=codec)
