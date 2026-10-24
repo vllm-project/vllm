@@ -24,6 +24,7 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -535,6 +536,49 @@ def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) ->
 
     assert communicator.all_reduce(torch.empty(1)) is output
     nccl_selector.assert_not_called()
+
+
+def test_disable_custom_all_reduce_falls_back_to_nccl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--disable-custom-all-reduce sends TP all-reduce to NCCL, not to the
+    FlashInfer or symmetric-memory all-reduce."""
+    backends = {}
+    for module, cls in (
+        ("custom_all_reduce", "CustomAllreduce"),
+        ("flashinfer_all_reduce", "FlashInferAllReduce"),
+        ("flashinfer_pcie_ipc_all_reduce", "FlashInferPcieIpcAllReduce"),
+        ("pynccl", "PyNcclCommunicator"),
+        ("symm_mem", "SymmMemCommunicator"),
+    ):
+        backends[cls] = Mock(disabled=False, world_size=2)
+        monkeypatch.setattr(
+            f"vllm.distributed.device_communicators.{module}.{cls}",
+            Mock(return_value=backends[cls]),
+        )
+    # Symmetric-memory all-reduce is only created on CUDA.
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "1")
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state._ENABLE_CUSTOM_ALL_REDUCE", False
+    )
+
+    # Not registered with torch.distributed, so it is used as a stateless group.
+    group = Mock(rank=Mock(return_value=0), size=Mock(return_value=2))
+    communicator = CudaCommunicator(
+        group,
+        device_group=Mock(),
+        unique_name="tp:0",
+        global_ranks=[0, 1],
+        global_world_size=2,
+    )
+    input_ = torch.ones(4)
+    communicator.all_reduce(input_)
+
+    backends["PyNcclCommunicator"].all_reduce.assert_called_once_with(input_)
+    backends["FlashInferAllReduce"].all_reduce.assert_not_called()
+    backends["FlashInferPcieIpcAllReduce"].all_reduce.assert_not_called()
+    backends["SymmMemCommunicator"].all_reduce.assert_not_called()
 
 
 def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> None:
