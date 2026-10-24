@@ -324,6 +324,31 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def _tighten_ipc_socket_permissions(path: str) -> None:
+    """Restrict a bound IPC socket file to its owner.
+
+    Defense in depth on top of the 0700 default base directory: the socket
+    file created by ``bind()`` inherits its permissions from the umask, so
+    it is explicitly restricted to the owner. Only sockets inside the
+    managed default base directory (``envs.get_default_rpc_base_path``)
+    are touched; when ``VLLM_RPC_BASE_PATH`` is set explicitly to any
+    other path, the operator owns the trust decision for that directory.
+    (An override pointing at the managed default path itself receives the
+    same treatment as the default.)
+    """
+    socket_file = path[len("ipc://") :]
+    try:
+        if os.path.dirname(socket_file) != envs.get_default_rpc_base_path():
+            return
+        os.chmod(socket_file, 0o600)
+    except OSError as e:
+        logger.warning(
+            "Could not restrict permissions of IPC socket %s: %s",
+            socket_file,
+            e,
+        )
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 # Apply the existing make_zmq_socket memory policy to every socket owner.
 _ZMQ_LARGE_BUFFER_SIZE = 512 * 1024**2
@@ -400,6 +425,8 @@ def make_zmq_socket(
 
     if bind:
         socket.bind(path)
+        if scheme == "ipc":
+            _tighten_ipc_socket_permissions(path)
     else:
         socket.connect(path)
 
