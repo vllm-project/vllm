@@ -23,7 +23,24 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for transfer performance metrics.
+
+    Each TP rank records its own per-transfer telemetry via
+    :meth:`record_transfer`. Before summary statistics are computed, stats from
+    all ranks are concatenated by :meth:`aggregate` (``list.extend``), so every
+    metric reported by :meth:`reduce` is computed over the combined pool of
+    observations from all ranks:
+
+    - "Num successful transfers" is the total count across all ranks, not
+      per-rank.
+    - "Avg MB per transfer" is the average over all individual rank-level
+      transfers, not the total bytes moved by one KV cache transfer operation.
+    - "Throughput (MB/s)" is total MB over total time across all ranks --
+      effectively an average per-rank throughput, not aggregate system
+      throughput.
+    - Percentiles (P90) are computed over the combined distribution of all
+      ranks' transfer times.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -90,6 +107,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        # Concatenate the other rank's observations into this pool
+        # (list.extend). Stats from all TP ranks end up in a single combined
+        # pool before reduce() computes summary statistics over it.
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -99,6 +119,11 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     def reduce(self) -> dict[str, int | float]:
         # Compute compact representative stats suitable for CLI logging.
+        # NOTE on multi-rank semantics: aggregate() has concatenated the
+        # per-rank observations into one combined pool by now, so the
+        # averages/percentiles below are computed over all ranks' observations.
+        # "Throughput (MB/s)" is total_MB_all_ranks / total_time_all_ranks --
+        # an average per-rank throughput, not the aggregate system throughput.
         # Failure counts are reported on every interval: transfer, handshake
         # and notification failures are grouped as sporadic
         # lower-transport-layer events, while KV expiry is reported separately
