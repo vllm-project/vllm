@@ -18,6 +18,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_transfer.kv_checksum.scheduler import KVChecksumScheduler
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -193,6 +194,9 @@ class Scheduler(SchedulerInterface):
                 self.defer_block_free = True
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
+        self.kv_checksum = KVChecksumScheduler.create(
+            self.vllm_config, self.kv_cache_config, self.connector
+        )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1483,6 +1487,11 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.kv_checksum is not None:
+                        blocks = self.kv_cache_manager.get_blocks(request_id)
+                        self.kv_checksum.add_recv(
+                            request, blocks, num_new_local_computed_tokens
+                        )
                     if self.aux_output_connector is not None:
                         self.aux_output_connector.request_loading(
                             request, num_computed_tokens
@@ -1699,6 +1708,10 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
+            if self.kv_checksum is not None:
+                scheduler_output.kv_checksums_to_send = (
+                    self.kv_checksum.take_kv_checksums_to_send()
+                )
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
@@ -1718,6 +1731,7 @@ class Scheduler(SchedulerInterface):
 
         # Connector-only block state must not be dispatched to workers.
         scheduler_output.kv_connector_block_state = None
+        scheduler_output.kv_checksums_to_send = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
@@ -1797,10 +1811,15 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        kv_checksum = self.kv_checksum
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
+            if kv_checksum is not None:
+                kv_checksum.add_send(
+                    request, num_scheduled_token, self.kv_cache_manager
+                )
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1813,6 +1832,9 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
+
+        if kv_checksum is not None:
+            scheduler_output.kv_checksum_scheduled = kv_checksum.build_checksum_meta()
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -2246,6 +2268,16 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if self.kv_checksum is not None:
+            # Loads already known to have failed are not verified.
+            failed_checksum_req_ids = self.kv_checksum.update_from_output(
+                kv_connector_output,
+                skip_req_ids=failed_kv_load_req_ids | self.failed_recving_kv_req_ids,
+            )
+            if failed_checksum_req_ids:
+                failed_req_ids = self._handle_failed_recving(failed_checksum_req_ids)
+                failed_kv_load_req_ids.update(failed_req_ids)
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2824,6 +2856,8 @@ class Scheduler(SchedulerInterface):
                 )
             if self.connector is not None:
                 self.connector.on_new_request(request)
+                if self.kv_checksum is not None:
+                    self.kv_checksum.on_new_request(request)
                 kv_transfer_params = request.kv_transfer_params
                 if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
                     # Count P/D requests on arrival: connector matching is
@@ -3241,6 +3275,10 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+
+        if self.kv_checksum is not None:
+            self.kv_checksum.request_finished(request, kv_xfer_params)
+
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:

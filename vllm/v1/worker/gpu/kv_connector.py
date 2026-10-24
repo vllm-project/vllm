@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
     kv_transfer_state,
 )
+from vllm.distributed.kv_transfer.kv_checksum.worker import create_kv_checksum_worker
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import (
     get_forward_context,
@@ -18,12 +19,15 @@ from vllm.forward_context import (
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
+    AsyncModelRunnerOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.gpu.async_utils import AsyncKVChecksumOutput, KVChecksumCopy
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -49,6 +53,12 @@ class KVConnector:
     def finalize_step(self) -> None:
         pass
 
+    def add_kv_checksums(
+        self, output: ModelRunnerOutput | AsyncModelRunnerOutput
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        """``output`` with the KV checksums of the last ``post_forward``."""
+        return output
+
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
@@ -61,15 +71,26 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: "KVCacheConfig",
+        kv_caches_dict: dict[str, torch.Tensor],
+        main_stream: torch.cuda.Stream,
+        output_copy_stream: torch.cuda.Stream,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
         # Register kv caches with KV Connector if applicable.
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
+        self.kv_checksum_worker = create_kv_checksum_worker(
+            vllm_config, kv_cache_config, kv_caches_dict
+        )
 
         self._pending_load_kwargs: dict[str, Any] | None = None
+        self._main_stream = main_stream
+        self._output_copy_stream = output_copy_stream
+        self._kv_checksums: KVChecksumCopy | None = None
         self._disabled = False
 
     def pre_forward(
@@ -88,6 +109,8 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_kwargs = self._build_load_kwargs(
             scheduler_output, input_batch, attn_metadata
         )
+        if self.kv_checksum_worker is not None:
+            self.kv_checksum_worker.bind(scheduler_output.kv_checksum_scheduled)
 
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
@@ -155,6 +178,17 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
+        if self.kv_checksum_worker is not None:
+            pending = self.kv_checksum_worker.post_forward(
+                transfer_results, finished_req_ids
+            )
+            if pending:
+                # Every post_forward's checksums must reach an output.
+                assert self._kv_checksums is None
+                # Copied on their own event, so other outputs do not wait for them.
+                self._kv_checksums = KVChecksumCopy(
+                    pending, self._main_stream, self._output_copy_stream
+                )
         if not defer_finalize:
             self.kv_connector.clear_connector_metadata()
         return output
@@ -164,6 +198,14 @@ class ActiveKVConnector(KVConnector):
             return
         self.kv_connector.wait_for_save()
         self.kv_connector.clear_connector_metadata()
+
+    def add_kv_checksums(
+        self, output: ModelRunnerOutput | AsyncModelRunnerOutput
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        kv_checksums, self._kv_checksums = self._kv_checksums, None
+        if kv_checksums is None:
+            return output
+        return AsyncKVChecksumOutput(output, kv_checksums)
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
@@ -185,10 +227,16 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig",
+    kv_caches_dict: dict[str, torch.Tensor],
+    main_stream: torch.cuda.Stream,
+    output_copy_stream: torch.cuda.Stream,
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(
+        vllm_config, kv_cache_config, kv_caches_dict, main_stream, output_copy_stream
+    )

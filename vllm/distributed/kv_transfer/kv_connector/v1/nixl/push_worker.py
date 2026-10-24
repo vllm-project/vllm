@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    KV_CHECKSUM_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
@@ -111,14 +112,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: finished request blocks received from scheduler metadata
         # that have not yet been matched with an incoming D registration.
         self._push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: KV checksums of finished requests, sent on their WRITE
+        # completion notifs; kept until the request is evicted.
+        self._push_kv_checksums: dict[ReqId, bytes] = {}
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
+        self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds, bytes | None]] = (
+            queue.Queue()
+        )
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
+        # D-side, main thread: KV checksums received on completion notifs,
+        # reported by the get_transfer_results that drains the notifs.
+        self._received_kv_checksums: dict[ReqId, bytes] = {}
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
@@ -225,7 +234,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
             for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
+                checksums = metadata.push_finished_kv_checksums.get(req_id)
+                self._finished_blocks_inbox.put((req_id, block_ids, checksums))
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).
@@ -274,9 +284,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 # 3. P-side finished blocks; match against pending regs.
                 while True:
                     try:
-                        rid, blocks = self._finished_blocks_inbox.get_nowait()
+                        rid, blocks, checksums = (
+                            self._finished_blocks_inbox.get_nowait()
+                        )
                     except queue.Empty:
                         break
+                    if checksums is not None:
+                        self._push_kv_checksums[rid] = checksums
                     matched = self._pop_matching_registration(rid)
                     if matched is not None:
                         self._do_start_push_kv(rid, blocks, matched)
@@ -293,6 +307,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     except queue.Empty:
                         break
                     self._push_finished_blocks.pop(rid, None)
+                    self._push_kv_checksums.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
 
                 # 4. NIXL notifs: route PUSH_REG; forward the rest.
@@ -678,7 +693,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 )
             )
 
-        notif_id = f"{remote_request_id}:{self.world_size}".encode()
+        # The notif D receives when the WRITE completes, with the request's KV
+        # checksums if the scheduler sent any.
+        if (checksums := self._push_kv_checksums.get(request_id)) is not None:
+            notif_id = KV_CHECKSUM_NOTIF_PREFIX + msgspec.msgpack.encode(
+                (remote_request_id, self.world_size, checksums)
+            )
+        else:
+            notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
@@ -777,12 +799,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             except queue.Empty:
                 break
 
-            msg = notif.decode("utf-8")
-            if msg.startswith("HB:"):
-                self._handle_heartbeat(msg[3:])
-                continue
-
-            req_id, tp_size = msg.rsplit(":", 1)
+            if notif.startswith(KV_CHECKSUM_NOTIF_PREFIX):
+                try:
+                    req_id, tp_size, checksums = msgspec.msgpack.decode(
+                        notif[len(KV_CHECKSUM_NOTIF_PREFIX) :],
+                        type=tuple[str, int, bytes],
+                    )
+                except msgspec.DecodeError:
+                    logger.exception("Failed to decode a KV checksum notif")
+                    continue
+                if req_id in self._recving_metadata:
+                    self._received_kv_checksums[req_id] = checksums
+            else:
+                msg = notif.decode("utf-8")
+                if msg.startswith("HB:"):
+                    self._handle_heartbeat(msg[3:])
+                    continue
+                req_id, tp_size = msg.rsplit(":", 1)
 
             if (meta := self._recving_metadata.get(req_id)) is None:
                 # The lease may have expired before the notif arrived.
@@ -844,4 +877,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
+        results.kv_checksums = self._received_kv_checksums
+        self._received_kv_checksums = {}
         return results
