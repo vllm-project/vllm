@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    HeartbeatInfo,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -100,9 +101,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
-        # request_id. Mutated by writer (submit) and main thread
-        # (``_pop_done_transfers``); guarded by
-        # ``_sending_transfers_lock``.
+        # request_id. Shared with the model thread through result queues.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.Lock()
@@ -119,6 +118,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
+        self._heartbeat_inbox: queue.Queue[NixlConnectorMetadata] = queue.Queue()
+        self._push_result_inbox: queue.Queue[tuple[set[ReqId], set[ReqId]]] = (
+            queue.Queue()
+        )
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
@@ -134,6 +137,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
+        # NIXL is not thread-safe. Serialize writer calls with handshake setup.
+        self._nixl_io_lock = threading.Lock()
 
     # --- Lifecycle ----------------------------------------------------- #
 
@@ -245,15 +250,45 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-        # Heartbeats still leave from the main thread (base worker behaviour).
-        self._send_heartbeats(metadata)
+        # Heartbeats call NIXL. Run them on the writer, not the model thread.
+        # Copy the map: the uni executor hands the scheduler's live object here.
+        if metadata.heartbeat_by_engine:
+            metadata.heartbeat_by_engine = {
+                engine_id: HeartbeatInfo(
+                    req_ids=set(info.req_ids),
+                    host=info.host,
+                    port=info.port,
+                    tp_size=info.tp_size,
+                    dcp_size=info.dcp_size,
+                    pp_size=info.pp_size,
+                )
+                for engine_id, info in metadata.heartbeat_by_engine.items()
+            }
+            self._heartbeat_inbox.put(metadata)
+            self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
+
+    def _drain_heartbeats(self) -> None:
+        while True:
+            try:
+                metadata = self._heartbeat_inbox.get_nowait()
+            except queue.Empty:
+                break
+            super()._send_heartbeats(metadata)
+
+    def _poll_sending_transfers(self) -> None:
+        # Do not hold _sending_transfers_lock across check_xfer_state. The
+        # model thread takes that lock in get_transfer_results.
+        done, failed = super()._pop_done_transfers(self._sending_transfers)
+        if done or failed:
+            self._push_result_inbox.put((done, failed))
 
     def _push_writer_loop(self) -> None:
         sleep_s = _PUSH_WRITER_POLL_INTERVAL_MS / 1000.0
 
         while not self._push_writer_stop.is_set():
+            self._nixl_io_lock.acquire()
             try:
                 # 1. D registrations to send.
                 while True:
@@ -295,24 +330,37 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._push_finished_blocks.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
 
-                # 4. NIXL notifs: route PUSH_REG; forward the rest.
+                # 4. Heartbeats.
+                self._drain_heartbeats()
+
+                # 5. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
                     for notif in notifs:
                         if notif.startswith(PUSH_REG_NOTIF_PREFIX):
                             self._handle_push_reg_notif(notif)
                         else:
                             self._pending_completion_notifs.put(notif)
+
+                # 6. Poll outgoing WRITE handles.
+                self._poll_sending_transfers()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
+            finally:
+                self._nixl_io_lock.release()
 
-            # Self-poll only while there is no other wake source: P-side
-            # finished blocks waiting for a D PUSH_REG match. All other
-            # progress is event-driven (see module docstring).
-            if self._push_finished_blocks:
+            # Self-poll while unmatched blocks or outgoing WRITEs remain.
+            with self._sending_transfers_lock:
+                has_inflight_writes = bool(self._sending_transfers)
+            if self._push_finished_blocks or has_inflight_writes:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
                 self._push_writer_wake.clear()
+
+    def _nixl_handshake(self, *args, **kwargs):
+        """Serialize endpoint setup with push data-plane operations."""
+        with self._nixl_io_lock:
+            return super()._nixl_handshake(*args, **kwargs)
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:
@@ -807,20 +855,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return set()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        # Engine main thread asking for completions: also wake the writer
-        # so it gets a chance to drain NIXL notifs (heartbeats, completion
-        # notifs, late PUSH_REGs) even if it had been parked.
+        # Wake the writer. It owns NIXL progress.
         self._push_writer_wake.set()
 
         results = super().get_transfer_results()
         done_sending = results.finished_sending
 
-        # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
-        # writer thread also appends to it, so guard the pop.
+        done_pushing: set[ReqId] = set()
+        failed_pushing: set[ReqId] = set()
+        while True:
+            try:
+                done, failed = self._push_result_inbox.get_nowait()
+            except queue.Empty:
+                break
+            done_pushing.update(done)
+            failed_pushing.update(failed)
+
         with self._sending_transfers_lock:
-            done_pushing, failed_pushing = self._pop_done_transfers(
-                self._sending_transfers
-            )
             # Remember failures until the final sibling WRITE completes.
             self._send_failures.update(failed_pushing)
             successful = {
