@@ -106,11 +106,13 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
-            log_online_quantization_time(vllm_config)
+            # Meta tensors hold no data, so there is nothing to repack.
+            if target_device.type != "meta":
+                process_weights_after_loading(model, model_config, target_device)
+                log_online_quantization_time(vllm_config)
 
-            gc.collect()
-            torch.accelerator.empty_cache()
+                gc.collect()
+                torch.accelerator.empty_cache()
 
         return model.eval()
 
