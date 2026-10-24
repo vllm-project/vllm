@@ -624,6 +624,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "jinaai/jina-embeddings-v5-text-small",
         trust_remote_code=True,
     ),
+    "Lfm2BidirectionalModel": _HfExamplesInfo(
+        "LiquidAI/LFM2.5-Embedding-350M",
+    ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
