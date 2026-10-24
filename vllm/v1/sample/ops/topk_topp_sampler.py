@@ -532,7 +532,7 @@ def apply_top_k_top_p_pytorch(
     If a top-p is used, this function will sort the logits tensor,
     which can be slow for large batches.
 
-    The logits tensor may be updated in-place.
+    Exact ties favor lower token IDs. The logits tensor may be updated in-place.
     """
     if p is None:
         if k is None:
@@ -542,21 +542,23 @@ def apply_top_k_top_p_pytorch(
             # Avoid sorting vocab for top-k only case.
             return apply_top_k_only(logits, k)
 
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+    # Reverse a stable descending sort so lower IDs survive cutoff ties.
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=True, stable=True)
+    logits_sort = logits_sort.flip(dims=(-1,))
+    logits_idx = logits_idx.flip(dims=(-1,))
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-        # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-        top_k_mask = logits_sort < top_k_mask
+        cutoff = logits_sort.size(1) - k.to(torch.long)
+        top_k_mask = torch.arange(logits_sort.size(1), device=logits.device)
+        top_k_mask = top_k_mask < cutoff.unsqueeze(dim=1)
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     if p is not None:
         # Apply top-p.
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        top_p_mask = (probs_sum <= 1 - p.unsqueeze(dim=1)) & (p.unsqueeze(1) < 1)
         # at least one
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
@@ -572,19 +574,47 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     Note however that it involves a GPU->CPU sync which can be detrimental for
     async scheduling performance.
 
-    The logits tensor may be updated in-place.
+    Exact ties favor lower token IDs. The logits tensor may be updated in-place.
     """
     no_top_k_mask = k == logits.shape[1]
     # Set non-top-k rows to 1 so that we can gather.
     k = k.masked_fill(no_top_k_mask, 1)
     max_top_k = k.max()
+    if logits.device.type == "cpu":
+        max_top_k = min(int(max_top_k) + 1, logits.shape[1])
     # topk.values tensor has shape [batch_size, max_top_k].
     # Convert top k to 0-based index in range [0, max_top_k).
-    k_index = k.sub_(1).unsqueeze(1)
-    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
+    k_index = k.sub(1).unsqueeze(1)
+    topk_result = logits.topk(max_top_k, dim=1)
+    topk_values = topk_result.values
+    cutoff = topk_values.gather(1, k_index.long())
+    if logits.device.type == "cpu":
+        # Skip the vocabulary-wide tie scan when no cutoff splits a tie.
+        next_index = k.unsqueeze(1).clamp_max(max_top_k - 1).long()
+        next_value = topk_values.gather(1, next_index)
+        extra_ties = (cutoff == next_value) & ~no_top_k_mask.unsqueeze(1)
+        if not extra_ties.any():
+            cutoff.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
+            return logits.masked_fill_(logits < cutoff, -float("inf"))
+    num_above = (topk_values > cutoff).sum(dim=1, keepdim=True)
+    num_ties_to_keep = k.unsqueeze(1) - num_above
     # Handle non-topk rows.
-    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
-    return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+    cutoff.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
+    if logits.device.type == "cpu":
+        # The selected ties bound the prefix containing enough lower-ID ties.
+        candidate_ids = topk_result.indices.masked_fill(
+            (topk_values != cutoff) | (cutoff == -float("inf")), 0
+        )
+        prefix = int(candidate_ids.max()) + 1
+        tied = logits[:, :prefix] == cutoff
+        tie_rank = tied.cumsum(dim=1, dtype=torch.int32)
+        mask = logits <= cutoff
+        mask[:, :prefix] &= ~(tied & (tie_rank <= num_ties_to_keep))
+        return logits.masked_fill_(mask, -float("inf"))
+    tied = logits == cutoff
+    tie_rank = tied.cumsum(dim=1, dtype=torch.int32)
+    mask = (logits < cutoff) | (tied & (tie_rank > num_ties_to_keep))
+    return logits.masked_fill_(mask, -float("inf"))
 
 
 def empty_exponential_noise_like(

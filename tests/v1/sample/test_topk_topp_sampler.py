@@ -11,6 +11,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
     random_sample,
+    sample_with_exponential_noise,
 )
 from vllm.v1.sample.sampler import Sampler
 
@@ -167,6 +168,200 @@ def test_topk_impl_equivalence():
     assert torch.allclose(result1, result2)
 
 
+@pytest.fixture(params=["cpu", "cuda"])
+def pytorch_fallback_device(request):
+    if request.param == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    return request.param
+
+
+@pytest.mark.parametrize("allow_cpu_sync", [False, True])
+@pytest.mark.parametrize("with_top_p", [False, True])
+@pytest.mark.parametrize("k_dtype", [torch.int32, torch.int64])
+def test_pytorch_topk_ties_prefer_lower_token_ids(
+    pytorch_fallback_device, allow_cpu_sync: bool, with_top_p: bool, k_dtype
+):
+    device = pytorch_fallback_device
+    neginf = float("-inf")
+    logits = torch.tensor(
+        [
+            [5, 4, 4, 4, 3, 2, 1, 0],
+            [4, 1, 4, 4, 0, 0, 0, 0],
+            [1] * 8,
+            [neginf, 2, neginf, 2, neginf, 1, neginf, neginf],
+            [neginf, 2, neginf, 2, neginf, 1, neginf, neginf],
+            [8, 7, 6, 5, 4, 3, 2, 1],
+            [neginf] * 8,
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    k = torch.tensor([3, 1, 3, 2, 5, 8, 3], dtype=k_dtype, device=device)
+    p = torch.ones(7, device=device) if with_top_p else None
+    expected = torch.full_like(logits, neginf)
+    kept_ids: tuple[list[int], ...] = (
+        [0, 1, 2],
+        [0],
+        [0, 1, 2],
+        [1, 3],
+        [1, 3, 5],
+        list(range(8)),
+        [],
+    )
+    for row, ids in enumerate(kept_ids):
+        expected[row, ids] = logits[row, ids]
+    parameters = [param for param in (k, p) if param is not None]
+    snapshots = [(param.clone(), param._version) for param in parameters]
+
+    actual = apply_top_k_top_p_pytorch(
+        logits.clone(), k, p, allow_cpu_sync=allow_cpu_sync
+    )
+
+    assert torch.equal(actual, expected)
+    for param, (original, version) in zip(parameters, snapshots):
+        assert torch.equal(param, original)
+        assert param._version == version
+
+
+def test_pytorch_topk_cpu_without_cutoff_ties():
+    logits = torch.tensor([[1.0, 4.0, 2.0, 3.0]] * 3, device="cpu")
+    k = torch.tensor([1, 2, 4], device="cpu")
+    expected = torch.tensor(
+        [
+            [-float("inf"), 4, -float("inf"), -float("inf")],
+            [-float("inf"), 4, -float("inf"), 3],
+            [1, 4, 2, 3],
+        ],
+        device="cpu",
+    )
+    actual = apply_top_k_top_p_pytorch(logits, k, None, allow_cpu_sync=True)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("mixed_batch", [False, True])
+def test_pytorch_topk_cpu_handles_ties_at_distant_ids(mixed_batch: bool):
+    logits = torch.zeros(4, 64, device="cpu")
+    logits[0, 63] = 5
+    logits[0, [0, 7, 31]] = 2
+    logits[1, 0] = 5
+    logits[1, [17, 48, 63]] = 2
+    logits[2] = 1
+    logits[3] = -float("inf")
+    logits[3, [9, 40]] = 2
+    k = torch.tensor([2, 3, 64, 3], device="cpu")
+    expected = torch.full_like(logits, -float("inf"))
+    for row, ids in enumerate(([0, 63], [0, 17, 48], list(range(64)), [9, 40])):
+        expected[row, ids] = logits[row, ids]
+    if not mixed_batch:
+        logits, k, expected = logits[:1], k[:1], expected[:1]
+
+    actual = apply_top_k_top_p_pytorch(logits, k, None, allow_cpu_sync=True)
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("batch_size", [1, 8, 65, 128])
+def test_pytorch_cutoff_ties_ignore_batch_composition(batch_size: int):
+    logits = torch.tensor([[4.0, 3.0, 3.0, 3.0, 2.0, 1.0]], device="cpu")
+    batched = logits.repeat(batch_size, 1)
+    k = torch.full((batch_size,), 6, dtype=torch.int32, device="cpu")
+    k[0] = 3
+    k[1::2] = 1
+    p = torch.ones(batch_size, device="cpu")
+    p[1::2] = 0.7
+    expected = torch.tensor(
+        [[4, 3, 3, -float("inf"), -float("inf"), -float("inf")]], device="cpu"
+    )
+    for allow_cpu_sync in (False, True):
+        for top_p in (None, p):
+            actual = apply_top_k_top_p_pytorch(
+                batched.clone(), k, top_p, allow_cpu_sync=allow_cpu_sync
+            )
+            assert torch.equal(actual[:1], expected)
+
+
+@pytest.mark.parametrize("with_top_k", [False, True])
+def test_pytorch_topp_ties_prefer_lower_token_ids(
+    pytorch_fallback_device, with_top_k: bool
+):
+    device = pytorch_fallback_device
+    logits = torch.tensor(
+        [[0] * 8, [2, 1, 2, 1, 0, 0, 0, 0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    k = torch.tensor([5, 3], device=device) if with_top_k else None
+    p = torch.tensor([0.61, 0.7], device=device)
+    expected = torch.full_like(logits, float("-inf"))
+    expected[0, : 4 if with_top_k else 5] = 0
+    ids = [0, 2] if with_top_k else [0, 1, 2]
+    expected[1, ids] = logits[1, ids]
+
+    actual = apply_top_k_top_p_pytorch(logits.clone(), k, p)
+
+    assert torch.equal(actual, expected)
+
+
+def test_pytorch_topp_preserves_disabled_rows_and_small_tails(pytorch_fallback_device):
+    """A disabled top-p must retain even finite logits with zero softmax mass."""
+    device = pytorch_fallback_device
+    vocab_size = 128 * 1024
+    logits = torch.linspace(-40, 40, vocab_size, device=device).repeat(2, 1)
+    logits[1, 0] = 0
+    logits[1, 1:] = -1000
+    p = torch.tensor([0.9999, 1.0], device=device)
+    # Double precision resolves the low-probability tail independently of
+    # float32 cumulative sums near one.
+    tail_mass = logits[0].double().softmax(-1).cumsum(-1)
+    expected_mask = tail_mass > (1 - p[0].double())
+    assert (~expected_mask).sum() > vocab_size // 2
+
+    actual = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+
+    assert torch.equal(torch.isfinite(actual[0]), expected_mask)
+    assert torch.equal(actual[1], logits[1])
+
+
+@pytest.mark.parametrize("noise_dtype", [torch.float32, torch.float64])
+def test_pytorch_topk_paths_sample_identically(pytorch_fallback_device, noise_dtype):
+    device = pytorch_fallback_device
+    logits = torch.tensor(
+        [[3, 2, 2, 2, 1, 0], [1, 1, 1, 0, 0, 0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    k = torch.tensor([3, 2], device=device)
+    sorted_result = apply_top_k_top_p_pytorch(logits.clone(), k, None)
+    topk_result = apply_top_k_top_p_pytorch(
+        logits.clone(), k, None, allow_cpu_sync=True
+    )
+    assert torch.equal(sorted_result, topk_result)
+    assert torch.equal(sorted_result.log_softmax(-1), topk_result.log_softmax(-1))
+    generator = Generator(device=device).manual_seed(42)
+    q = torch.empty(logits.shape, dtype=noise_dtype, device=device)
+    q.exponential_(generator=generator)
+
+    sorted_sample = sample_with_exponential_noise(sorted_result.softmax(-1), q.clone())
+    topk_sample = sample_with_exponential_noise(topk_result.softmax(-1), q.clone())
+
+    assert torch.equal(sorted_sample, topk_sample)
+
+
+@pytest.mark.parametrize("is_cpu", [False, True])
+def test_pytorch_topk_ties_through_public_fallback(monkeypatch, is_cpu: bool):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setattr(topk_topp_sampler, "HAS_TRITON", False)
+    monkeypatch.setattr(topk_topp_sampler.current_platform, "is_cpu", lambda: is_cpu)
+    logits = torch.tensor([[3, 2, 2, 2, 1]], dtype=torch.float32, device="cpu")
+    k = torch.tensor([3], device="cpu")
+
+    actual = topk_topp_sampler.apply_top_k_top_p(logits, k, None)
+
+    expected = torch.tensor([[3, 2, 2, -float("inf"), -float("inf")]], device="cpu")
+    assert torch.equal(actual, expected)
+
+
 @pytest.mark.skipif(
     not FLASHINFER_TOPK_TOPP_SUPPORTED,
     reason="Requires CUDA and flashinfer",
@@ -220,6 +415,32 @@ class TestTritonTopkTopp:
         torch.set_default_device(DEVICE_TYPE)
         self.generator = Generator(device=DEVICE_TYPE).manual_seed(42)
 
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+    )
+    def test_topk_cutoff_ties_match_pytorch(self):
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab_size = 1024
+        token_ids = torch.arange(vocab_size, device=DEVICE_TYPE)
+        logits = (token_ids % 7).float().repeat(2, 1)
+        logits[:, :4] = torch.tensor([12, 11, 10, 9], device=DEVICE_TYPE)
+        k = torch.tensor([17, 63], dtype=torch.int32, device=DEVICE_TYPE)
+        # Integer logits give a unique key without floating-point perturbations.
+        scores = logits.long() * vocab_size - token_ids
+        expected = torch.full_like(logits, float("-inf"))
+        for row, count in enumerate((17, 63)):
+            ids = scores[row].topk(count).indices
+            expected[row, ids] = logits[row, ids]
+
+        actual = apply_top_k_top_p_triton(logits.clone(), k, None)
+        assert torch.equal(actual, expected)
+        for allow_cpu_sync in (False, True):
+            fallback = apply_top_k_top_p_pytorch(
+                logits.clone(), k, None, allow_cpu_sync=allow_cpu_sync
+            )
+            assert torch.equal(fallback, actual)
+
     def _compare_results(
         self,
         logits: torch.Tensor,
@@ -231,6 +452,7 @@ class TestTritonTopkTopp:
         For top-k only, we expect exact match.
         For top-p (with or without top-k), we allow small differences due to
         floating-point precision in probability sum calculations.
+        Degenerate-row safety fallbacks are tested separately.
         """
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
@@ -251,17 +473,7 @@ class TestTritonTopkTopp:
         triton_kept = (result_triton != float("-inf")).sum(dim=-1)
 
         if p is None:
-            # Top-k only: Triton keeps exactly k (index-ordered tie-break at
-            # the k-th value) while the sort-based reference keeps all ties,
-            # so PyTorch may only keep extra tokens tied with the k-th value.
-            pytorch_mask = result_pytorch != float("-inf")
-            triton_mask = result_triton != float("-inf")
-            kth = torch.where(triton_mask, logits.float(), float("inf"))
-            kth = kth.amin(dim=-1, keepdim=True).expand_as(logits)
-            extra = pytorch_mask & ~triton_mask
-            assert not (triton_mask & ~pytorch_mask).any() and torch.equal(
-                logits.float()[extra], kth[extra]
-            ), (
+            assert torch.equal(result_pytorch, result_triton), (
                 f"Top-k mask mismatch: PyTorch kept {pytorch_kept.tolist()}, "
                 f"Triton kept {triton_kept.tolist()}"
             )

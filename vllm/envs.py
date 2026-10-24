@@ -882,7 +882,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
     # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
     # by default when the hardware supports it — set to 0 to opt out
-    # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
+    # explicitly, which forces the native path (Triton when available).
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
