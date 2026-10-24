@@ -488,3 +488,34 @@ def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
     assert output.shape == (2, N)
     assert captured["qzeros"] is None
     assert captured["zp_bias"] == scalar_types.uint4b8.bias
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    M = 2**31 // max(K, N) + 128
+
+    set_random_seed(0)
+    G = 128
+    a = (0.25 * torch.randn((M, K), device=device)).to(torch.bfloat16)
+    w_int4 = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    b_packed = _pack_int4_along_n(w_int4)
+    scales = (0.05 * torch.rand((K // G, N), device=device)).to(torch.bfloat16)
+
+    out = triton_w4a16_gemm(
+        a=a, b_q=b_packed, scales=scales, qzeros=None, group_size=G, zp_bias=8
+    )
+    # Dequantize in bfloat16 as the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=0)
+    ref = (a[-64:].float() @ w.float()).to(torch.bfloat16)
+
+    torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=1e-2)
