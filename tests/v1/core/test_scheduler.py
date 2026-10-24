@@ -1429,6 +1429,76 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_long_prefill_context_budget_shrinks_chunks_with_context():
+    """The context budget caps the first chunk at the budget and later
+    chunks at budget / (1 + num_computed_tokens / scale)."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=2048,
+        long_prefill_token_threshold=1000,
+        long_prefill_context_budget=800,
+        long_prefill_context_scale=1024,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=4000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 800
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+    output = scheduler.schedule()
+    # int(800 / (1 + 800 / 1024)) = 449
+    assert output.num_scheduled_tokens[long_req.request_id] == 449
+
+
+@pytest.mark.parametrize(
+    "num_new_tokens,num_computed_tokens,expected",
+    [
+        # Short prefill (< scale // 16 left, < scale // 2 computed): threshold.
+        (2000, 0, 1000),
+        # Enough tokens left: the budget applies from the start.
+        (20000, 0, 800),
+        # Deep context: the budget applies to the tail of the prompt too.
+        (2000, 262144, 400),
+        # The cap never drops below 256 tokens.
+        (20000, 4 * 262144, 256),
+        # The cap never exceeds what is left to prefill.
+        (100, 262144, 100),
+    ],
+)
+def test_long_prefill_context_budget_cap(
+    num_new_tokens: int, num_computed_tokens: int, expected: int
+):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=2048,
+        long_prefill_token_threshold=1000,
+        long_prefill_context_budget=800,
+    )
+    cap = scheduler._cap_long_prefill(num_new_tokens, num_computed_tokens, 1000)
+    assert cap == expected
+
+
+def test_long_prefill_context_budget_ignored_when_alone():
+    """Like the threshold, the context budget does not cap a lone prefill."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        long_prefill_context_budget=300,
+        long_prefill_context_scale=1024,
+    )
+    request = create_requests(num_requests=1, num_tokens=2000)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1024
+
+
+def test_long_prefill_context_budget_requires_threshold():
+    with pytest.raises(ValueError, match="long_prefill_token_threshold"):
+        create_scheduler(long_prefill_context_budget=1000)
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()

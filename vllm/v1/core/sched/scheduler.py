@@ -674,6 +674,25 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _cap_long_prefill(
+        self, num_new_tokens: int, num_computed_tokens: int, threshold: int
+    ) -> int:
+        """Cap a long prefill chunk at the long prefill threshold, shrunk by
+        long_prefill_context_budget as the prefill's context deepens.
+
+        Attention cost per chunk token grows with the context already
+        computed, so a fixed-size chunk stalls the decodes batched with it
+        longer and longer as a very long prompt proceeds.
+        """
+        budget = self.scheduler_config.long_prefill_context_budget
+        scale = self.scheduler_config.long_prefill_context_scale
+        if budget <= 0 or (
+            num_new_tokens < scale // 16 and num_computed_tokens < scale // 2
+        ):
+            return min(num_new_tokens, threshold)
+        cap = int(budget / (1.0 + num_computed_tokens / scale))
+        return min(num_new_tokens, threshold, max(min(256, budget), cap))
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -820,7 +839,11 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
             )
             if 0 < long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = long_prefill_token_threshold
+                num_new_tokens = self._cap_long_prefill(
+                    num_new_tokens,
+                    request.num_computed_tokens,
+                    long_prefill_token_threshold,
+                )
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1293,7 +1316,11 @@ class Scheduler(SchedulerInterface):
                             pad_spec_decode = True
 
                     if 0 < long_prefill_token_threshold < num_new_tokens:
-                        num_new_tokens = long_prefill_token_threshold
+                        num_new_tokens = self._cap_long_prefill(
+                            num_new_tokens,
+                            num_computed_tokens,
+                            long_prefill_token_threshold,
+                        )
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
