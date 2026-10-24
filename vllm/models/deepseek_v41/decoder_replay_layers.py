@@ -35,6 +35,7 @@ class ReplayBatch:
     rows: torch.Tensor
     forward_context: ForwardContext
     run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
+    num_padded: int | None = None
 
 
 class DecoderReplayLayers:
@@ -119,12 +120,23 @@ class DecoderReplayLayers:
             if replay_batch.run_graph is not None:
                 row_outputs = replay_batch.run_graph(rows, inputs)
             else:
-                row_outputs = self.run_layers(
-                    *(None if t is None else t.index_select(0, rows) for t in inputs)
-                )
+                row_inputs = [
+                    None if t is None else t.index_select(0, rows) for t in inputs
+                ]
+                if replay_batch.num_padded is not None:
+                    padding = replay_batch.num_padded - rows.numel()
+                    row_inputs = [
+                        None
+                        if t is None
+                        else torch.cat((t, t.new_zeros((padding, *t.shape[1:]))))
+                        for t in row_inputs
+                    ]
+                row_outputs = self.run_layers(*row_inputs)
         # The trimmed rows' outputs stay zero; nothing reads them.
         num_tokens = hidden_states.shape[0]
         return tuple(
-            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(0, rows, out)
+            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(
+                0, rows, out[: rows.numel()]
+            )
             for out in row_outputs
         )

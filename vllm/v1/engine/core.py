@@ -2545,7 +2545,8 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
-        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
+        parallel_config = self.vllm_config.parallel_config
+        has_unfinished, pause_consensus = parallel_config.sync_dp_state(
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,

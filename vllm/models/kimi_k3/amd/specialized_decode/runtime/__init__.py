@@ -89,6 +89,7 @@ def unsupported(vllm_config) -> list[str]:
         vllm_config.cache_config,
     )
     spec, oc = vllm_config.speculative_config, vllm_config.offload_config
+    kv = vllm_config.kv_transfer_config
     checks = (
         (pc.tensor_parallel_size != TP, f"TP {pc.tensor_parallel_size} (TP{TP} only)"),
         (pc.pipeline_parallel_size != 1, "pipeline parallelism"),
@@ -103,7 +104,16 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
-        (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
+        # MoRIIO consumers finish loads before execution, without per-layer hooks.
+        (
+            kv is not None
+            and (
+                kv.kv_connector != "MoRIIOConnector"
+                or kv.kv_connector_module_path is not None
+                or kv.kv_role != "kv_consumer"
+            ),
+            "KV transfer connectors other than a MoRIIO consumer",
+        ),
         (
             vllm_config.aux_output_config.enable_return_routed_experts,
             "routed-expert capture",

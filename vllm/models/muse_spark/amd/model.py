@@ -29,6 +29,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaMLP, LlamaModel
@@ -488,8 +489,18 @@ class MuseSpark1xAttention(nn.Module):
         )
 
         # GPT-J style: rotates interleaved adjacent channel pairs.
-        self.rotary_emb = (
-            RotaryEmbedding(
+        self.rotary_emb: RotaryEmbedding | None = None
+        self.shares_rotary_emb = self.use_rope and not is_draft
+        if self.shares_rotary_emb:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -497,13 +508,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -585,6 +593,9 @@ class MuseSpark1xAttention(nn.Module):
             rotary_dim = self.rotary_emb.rotary_dim
 
         if self.fused_qk_norm_rope_kv_insert:
+            assert not self.shares_rotary_emb or (
+                cos_sin_cache is not None and cos_sin_cache.dtype == torch.float32
+            ), "the shared target RoPE cache must stay fp32"
             rocm_fused_qk_norm_rope_kv_insert(
                 qkv,
                 positions,
@@ -704,9 +715,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -1101,6 +1116,14 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
             return None
+        return self._apply_output_transform(logits)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(self.lm_head.weight.dtype)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        return self._apply_output_transform(logits)
+
+    def _apply_output_transform(self, logits: torch.Tensor) -> torch.Tensor:
         if logits.dtype != torch.float32:
             logits = logits.to(torch.float32)
         if self.mul_tanh_soft_cap is not None:

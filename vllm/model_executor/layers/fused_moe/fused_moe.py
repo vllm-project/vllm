@@ -885,9 +885,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -1538,6 +1540,12 @@ direct_register_custom_op(
 )
 
 
+def _weights_host_resident(*weights: torch.Tensor) -> bool:
+    """True when any of the expert weights is read from host memory in place,
+    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
+
+
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1550,14 +1558,18 @@ def _prepare_expert_assignment(
     use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     ignore_invalid_experts: bool = False,
+    weights_host_resident: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # path of the fused_moe_kernel kernel, which reads an expert's weights once
+    # per (token, expert) pair. Not for weights in host memory: there every
+    # repeated read crosses PCIe, so group each expert's tokens instead.
     naive_block_assignment = (
         expert_map is None
+        and not weights_host_resident
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
@@ -1782,6 +1794,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(

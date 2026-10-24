@@ -6,7 +6,7 @@ accelerate==1.13.0
     # via peft
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -171,7 +171,7 @@ cryptography==50.0.1
     #   pyjwt
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.79.0
+datamodel-code-generator==0.86.0
     # via -r requirements/test/rocm.in
 dataproperty==1.1.0
     # via
@@ -200,7 +200,7 @@ dill==0.3.8
     #   evaluate
     #   lm-eval
     #   multiprocess
-distlib==0.4.0
+distlib==0.4.4
     # via virtualenv
 distro==1.9.0
     # via
@@ -530,11 +530,11 @@ mbstrdecoder==1.1.4
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==2.1.1
+mcp==2.3.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-mcp-types==2.1.1
+mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -570,8 +570,10 @@ msgspec==0.21.0
     # via -r requirements/test/../common.txt
 mteb==2.11.5
     # via -r requirements/test/rocm.in
-multidict==6.7.1
+multidict==7.1.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   aiohttp
     #   yarl
 multiprocess==0.70.16
@@ -735,7 +737,7 @@ outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==26.2
+packaging==26.3
     # via
     #   -c requirements/rocm.txt
     #   accelerate
@@ -760,6 +762,7 @@ packaging==26.2
     #   statsmodels
     #   transformers
     #   typepy
+    #   virtualenv
 pandas==3.0.1
     # via
     #   datasets
@@ -782,7 +785,7 @@ perceptron==0.1.4
     # via -r requirements/test/rocm.in
 perf-analyzer==0.1.0
     # via genai-perf
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -795,12 +798,11 @@ pillow==12.3.0
     #   scikit-image
     #   segmentation-models-pytorch
     #   torchvision
-platformdirs==4.3.6
+platformdirs==4.13.5
     # via
     #   black
     #   jupyter-core
     #   pooch
-    #   python-discovery
     #   virtualenv
 plotly==6.6.0
     # via
@@ -968,7 +970,7 @@ python-dateutil==2.9.0.post0
     #   matplotlib
     #   pandas
     #   typepy
-python-discovery==1.2.0
+python-discovery==1.6.4
     # via virtualenv
 python-dotenv==1.2.2
     # via
@@ -1019,7 +1021,7 @@ rapidfuzz==3.12.1
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.55.1
+ray==2.56.1
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
@@ -1131,7 +1133,7 @@ scipy==1.17.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/rocm.in
-sentence-transformers==5.3.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/rocm.in
     #   mteb
@@ -1320,7 +1322,7 @@ typer==0.24.1
     #   transformers
 types-requests==2.33.0.20260712
     # via cohere
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1336,6 +1338,7 @@ typing-extensions==4.15.0
     #   azure-storage-blob
     #   chz
     #   cohere
+    #   datamodel-code-generator
     #   fastapi
     #   grpcio
     #   httpx2
@@ -1397,7 +1400,7 @@ uvloop==0.22.1
     # via uvicorn
 vector-quantize-pytorch==1.28.0
     # via -r requirements/test/rocm.in
-virtualenv==21.2.0
+virtualenv==21.14.12
     # via
     #   -r requirements/test/rocm.in
     #   ray
@@ -1411,7 +1414,7 @@ wcwidth==0.6.0
     # via ftfy
 websockets==16.0
     # via uvicorn
-werkzeug==3.1.6
+werkzeug==3.1.9
     # via
     #   -r requirements/test/rocm.in
     #   schemathesis
@@ -1427,7 +1430,7 @@ xxhash==3.6.0
     # via
     #   datasets
     #   evaluate
-yarl==1.23.0
+yarl==1.25.1
     # via aiohttp
 z3-solver==4.15.4.0
     # via tilelang

@@ -361,6 +361,19 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,
 
+    /// When `--max-logprobs` is specified, represents single tokens as
+    /// strings of the form 'token_id:{token_id}' so that tokens that are not
+    /// JSON-encodable can be identified.
+    ///
+    /// A request's own `return_tokens_as_token_ids` overrides this default.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub return_tokens_as_token_ids: bool,
+
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
     #[arg(long)]
@@ -766,6 +779,7 @@ impl SharedRuntimeArgs {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,

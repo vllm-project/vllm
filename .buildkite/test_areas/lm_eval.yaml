@@ -1326,9 +1326,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload Medium"
+      label: ":amd: (MI355) LM Eval KV-Offload Medium"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd

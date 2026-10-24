@@ -170,10 +170,11 @@ def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
     Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
     lightning-indexer top-k block selection; the rest reuse the selection the
     preceding compute layer wrote into the shared ``topk_indices_buffer`` this
-    same forward pass. This cuts the indexer score + top-k cost ~``freq``x with
-    negligible accuracy impact (adjacent sparse layers pick nearly the same
-    blocks; ATOM validated GSM8K with freq=4). Gated by ``use_index_cache``;
-    enable via ``--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'``.
+    same forward pass. This cuts the indexer score + top-k cost ~``freq``x but
+    approximates the per-layer selection, so validate accuracy on long-context
+    inputs. Gated by ``use_index_cache`` in the text config; enable via
+    ``--hf-overrides '{"text_config": {"use_index_cache": true,
+    "index_topk_freq": 4}}'``.
     """
     if not getattr(config, "use_index_cache", False):
         return False
