@@ -490,6 +490,9 @@ class FusedMoEExperts(ABC):
     # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
     # the active experts kernel.
     consumes_expert_mask: bool = False
+    # Experts that route every token to the fused shared experts themselves
+    # (at weight 1.0) take only the routed top-k from the router.
+    appends_fused_shared_experts: bool = False
 
     def __init__(
         self,
