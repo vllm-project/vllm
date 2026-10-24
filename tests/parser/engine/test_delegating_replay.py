@@ -103,6 +103,10 @@ def _discover_pairings() -> list[_PairingInfo]:
             # Granite has a JSON-array tool body with no TOOL_END terminal;
             # its replay coverage lives in test_granite.py.
             continue
+        if cfg.name == "llama_json":
+            # llama_json is a bare-JSON format with no TOOL_END terminal;
+            # combined-parser replay coverage lives in test_llama_json.py.
+            continue
 
         parser_cls = type(
             f"_Delegating{engine_cls.__name__}",
