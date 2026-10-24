@@ -108,6 +108,15 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine = cls(vllm_config, role, self)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
+        self._shutdown = False
+
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        shutdown = getattr(self._lmcache_engine, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+        self._shutdown = True
 
     # ==============================
     # Worker-side methods
