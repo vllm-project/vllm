@@ -263,6 +263,8 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        *,
+        validate_tool_parser: bool = True,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -281,7 +283,9 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(
+            request, validate_tool_parser=validate_tool_parser
+        )
 
     async def create_chat_completion(
         self,

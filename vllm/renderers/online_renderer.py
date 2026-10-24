@@ -226,6 +226,7 @@ class OnlineRenderer:
         self,
         request: ChatCompletionRequest,
         *,
+        validate_tool_parser: bool = True,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
@@ -258,9 +259,10 @@ class OnlineRenderer:
         )
 
         # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
+        if (
+            validate_tool_parser
+            and tool_parsing_unavailable
+            and request.tool_choice not in (None, "none")
         ):
             if request.tool_choice == "auto" and not self.enable_auto_tools:
                 # for hf tokenizers, "auto" tools requires

@@ -1260,7 +1260,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
-        result = await self.render_chat_request(chat_req)
+        result = await self.render_chat_request(chat_req, validate_tool_parser=False)
         if isinstance(result, ErrorResponse):
             return result
 
