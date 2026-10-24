@@ -148,17 +148,21 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        # On SM120, batches whose 16-segment decode grid under-fills the SMs use
-        # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
-        # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
-        # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
+        # On SM86 and SM120, batches whose 16-segment decode grid under-fills the
+        # SMs use 64. This counts requests, not Q blocks, on purpose: for 1..11
+        # verify requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments
+        # were faster or within 6% at 2k, and 1.1-3.6x faster from 8k up on SM120.
         self.max_seqs_64_segments = 0
-        if current_platform.is_cuda() and current_platform.is_device_capability(
-            (12, 0)
+        if current_platform.is_cuda() and any(
+            current_platform.is_device_capability(cap) for cap in ((8, 6), (12, 0))
         ):
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
+        # On SM86, 64 segments slow short-context multi-query verification.
+        self.single_query_only_64 = current_platform.is_cuda() and (
+            current_platform.is_device_capability((8, 6))
+        )
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config
@@ -263,9 +267,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         if self.max_seqs_64_segments > 0 and (
             self.max_seqs_64_segments < seq_lens.shape[0]
             or self.softmax_segm_max.shape[0] < num_actual_tokens
+            or (self.single_query_only_64 and max_query_len > 1)
         ):
-            # The 16-segment grid fills the SMs, or the 64-segment rows cannot
-            # hold every query token: same scratch, 16-segment layout.
+            # The 16-segment grid fills the SMs, the 64-segment rows cannot hold
+            # every query token, or SM86 multi-query: same scratch, 16 segments.
             segments = NUM_PAR_SOFTMAX_SEGMENTS
             attn_metadata.num_par_softmax_segments = segments
             attn_metadata.softmax_segm_output = self.softmax_segm_output.view(
