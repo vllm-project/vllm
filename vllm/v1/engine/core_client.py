@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -1806,12 +1807,37 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         self._prepared_elastic_ep = None
 
+    async def _wait_for_scale_down_cleanup(self, timeout_s: float = 120.0) -> None:
+        """Wait until the last scale-down's removed engines have shut down.
+
+        A scale-down returns once the remaining engines switched, but the
+        engine manager drops the removed engines only when each reports
+        SHUTDOWN_COMPLETE (eep_process_engine_core_notification), so a scale
+        right after it would still count them.
+        """
+        if self.eep_scaling_cache is None:
+            return
+        start = time.monotonic()
+        while self.eep_scaling_cache is not None:
+            if time.monotonic() - start > timeout_s:
+                raise RuntimeError(
+                    "Elastic EP: the engines removed by the last scale-down "
+                    f"did not shut down within {timeout_s:.0f} s"
+                )
+            await asyncio.sleep(0.1)
+        logger.info(
+            "[Elastic EP] Waited %.2f s for the last scale-down's removed "
+            "engines to shut down",
+            time.monotonic() - start,
+        )
+
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Prepare elastic EP scaling without routing requests to new engines."""
         if (prepared := self._prepared_elastic_ep) is not None:
             if prepared[0] == new_data_parallel_size:
                 return
             raise RuntimeError("Elastic EP scaling is already prepared")
+        await self._wait_for_scale_down_cleanup()
         cur_data_parallel_size = len(self.core_engines)
         assert self.vllm_config.parallel_config.data_parallel_backend == "ray", (
             "Only ray DP backend supports scaling elastic EP"
