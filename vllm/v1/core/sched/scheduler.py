@@ -2346,6 +2346,18 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+                if (
+                    self.has_mamba_layers
+                    and not self.scheduler_config.async_scheduling
+                    and self.cache_config.enable_prefix_caching
+                    and status_before_stop == RequestStatus.RUNNING
+                    and not output_is_stale
+                ):
+                    # Publish finalized states before the next allocation retires
+                    # their blocks, or finishing the request frees them.
+                    self.kv_cache_manager.cache_blocks(
+                        request, request.num_computed_tokens
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED

@@ -5,11 +5,16 @@ from collections.abc import Callable
 from unittest.mock import Mock
 
 import pytest
+import torch
 
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
@@ -30,6 +35,75 @@ def _make_model_runner_output(
         prompt_logprobs_dict={},
         pooler_output=[],
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "finished", "preempted"])
+def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: str):
+    """Publish accepted checkpoints before retirement; never publish rejected work."""
+    block_size = 16
+    scheduler = create_scheduler(
+        model="Qwen/Qwen3-0.6B",
+        enable_prefix_caching=True,
+        async_scheduling=async_scheduling,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu",
+        block_size=block_size,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=1,
+        ),
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=block_size - 2,
+        block_size=block_size,
+        max_tokens=5 if outcome == "finished" else 32,
+    )
+    scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+    decode = scheduler.schedule()
+    assert decode.num_scheduled_tokens[request.request_id] == 4
+    assert len(decode.scheduled_spec_decode_tokens[request.request_id]) == 3
+    if outcome == "preempted":
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+        assert request.status == RequestStatus.PREEMPTED
+    accepted = 1 if outcome == "rejected" else 4
+    scheduler.update_from_output(
+        decode,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[list(range(1, accepted + 1))],
+        ),
+    )
+    if outcome == "accepted":
+        # The next allocation retires the checkpoint from the request's table.
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([request.request_id], [[5, 6, 7]])
+        )
+        assert scheduler.schedule().num_scheduled_tokens[request.request_id] == 4
+    elif outcome == "finished":
+        assert request.is_finished()
+    elif outcome == "preempted":
+        assert request.num_computed_tokens == 0
+        assert request.num_output_tokens == 1
+    else:
+        assert request.num_computed_tokens == block_size - 1
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=list(request.all_token_ids),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    _, cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
+    assert cached_tokens == (block_size if outcome in ("accepted", "finished") else 0)
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
@@ -294,7 +368,7 @@ def test_prefix_caching_for_multi_turn():
 
 
 def test_abort_request_when_structured_output_fsm_cannot_advance():
-    scheduler = object.__new__(AsyncScheduler)
+    scheduler = create_scheduler(async_scheduling=True)
     request = create_requests(num_requests=1, num_tokens=1)[0]
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
