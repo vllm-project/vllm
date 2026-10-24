@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_DSA_CANDIDATE_PAGED_DECODE: bool = False
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
@@ -1092,6 +1093,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Score only the candidate blocks in the DeepSeek V4.1 candidate-consuming
+    # decode indexers on SM90, instead of scoring the whole context and then
+    # masking down to the candidates. Reads candidate K in place from the
+    # paged FP8 indexer cache. Unsupported configurations keep the dense path.
+    # Experimental; default off.
+    "VLLM_DSA_CANDIDATE_PAGED_DECODE": lambda: bool(
+        int(os.getenv("VLLM_DSA_CANDIDATE_PAGED_DECODE", "0"))
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.

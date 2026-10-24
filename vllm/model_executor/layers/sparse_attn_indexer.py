@@ -29,6 +29,12 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.candidate_paged_logits import (
+    candidate_paged_decode_available,
+    candidate_paged_prepare,
+    candidate_paged_score_decode,
+    candidate_paged_workspace_specs,
+)
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
@@ -496,7 +502,42 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
-        current_workspace_manager().get_simultaneous(*profile_specs)
+        workspace_manager = current_workspace_manager()
+        workspace_manager.get_simultaneous(*profile_specs)
+
+        # Candidate-only decode uses a different simultaneously-live scratch
+        # set. Profiling has no decode metadata, so reserve the scheduler's
+        # maximum decode rows rather than max_num_batched_tokens (which
+        # includes prefill). Reserved on availability alone, which is a
+        # config-level predicate, so the reservation cannot disagree with what
+        # the hot path later requests.
+        if (
+            candidate_blocks is not None
+            and not candidate_write
+            and candidate_paged_decode_available(
+                use_fp4_cache=use_fp4_cache,
+                dcp_world_size=dcp_world_size,
+                use_pcp=use_pcp,
+                candidate_block_size=candidate_block_size,
+                num_candidates=candidate_blocks.shape[1],
+                topk_tokens=topk_tokens,
+                head_dim=head_dim,
+            )
+        ):
+            vllm_config = get_current_vllm_config()
+            max_decode_rows = min(
+                topk_indices_buffer.shape[0],
+                vllm_config.scheduler_config.max_num_seqs
+                * (1 + vllm_config.num_speculative_tokens),
+            )
+            workspace_manager.get_simultaneous(
+                *candidate_paged_workspace_specs(
+                    max_decode_rows,
+                    candidate_blocks.shape[1],
+                    candidate_block_size,
+                    topk_tokens,
+                )
+            )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -874,74 +915,152 @@ def sparse_attn_indexer(
                 max_model_len,
             )
         else:
-            padded_q_scale, decode_weights = mqa_logits_mx_inputs(
-                padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
-            )
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                decode_weights,
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                indices=decode_metadata.indices,
-            )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
-                logits = as_fp32_logits(logits, seq_lens.view(-1))
-        num_rows = logits.shape[0]
-        if candidate_blocks is not None:
-            # Two-level selection (v4.1) on the decode logits; columns are
-            # request-local compressed positions. seq_lens is (B, next_n)
-            # for native spec decode (per-row effective lens) and (B, 1)
-            # otherwise.
-            vis = seq_lens.reshape(-1)
-            row_repeat = next_n if vis.numel() != num_rows else 1
-            vis = vis[:num_rows]
-            decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
-                _select_candidate_blocks(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates.shape[1],
-                    candidate_block_size,
-                    decode_candidates,
-                    row_repeat,
+            use_cand_paged = (
+                candidate_blocks is not None
+                and not candidate_write
+                and candidate_paged_decode_available(
+                    use_fp4_cache=use_fp4_cache,
+                    dcp_world_size=dcp_world_size,
+                    use_pcp=use_pcp,
+                    candidate_block_size=candidate_block_size,
+                    num_candidates=candidate_blocks.shape[1],
+                    topk_tokens=topk_tokens,
+                    head_dim=head_dim,
                 )
+            )
+            if use_cand_paged:
+                # SM90 candidate consumers: score only the candidate blocks,
+                # reading K in place from the paged cache, instead of scoring
+                # the whole context and masking it down. Every input to the
+                # availability check is fixed by the model and platform
+                # config, so a captured CUDA graph cannot diverge from the
+                # path taken at capture.
+                logger.info_once(
+                    "SM90 candidate-only decode scoring active: consumer "
+                    "indexers score candidate blocks in place."
+                )
+                topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                # The candidate expansion is a deterministic function of the
+                # step-level candidate buffer and seq_lens, identical for
+                # every consumer layer, so compute it once per step and let
+                # the later layers reuse it (bit-identical memoization, as
+                # the SM100 path does with its kernel metadata). The decode
+                # metadata is rebuilt every step, so the cached plan cannot
+                # go stale, and during graph replay this host logic does not
+                # run while the recorded expansion kernel refreshes the
+                # builder-owned buffers.
+                plan = decode_metadata.candidate_plan
+                plan_buffers = decode_metadata.candidate_plan_buffers
+                if (
+                    plan is None
+                    and plan_buffers is not None
+                    and num_padded_tokens <= plan_buffers[0].shape[0]
+                ):
+                    candidate_paged_prepare(
+                        seq_lens,
+                        candidate_blocks,
+                        candidate_block_size,
+                        next_n,
+                        num_padded_tokens,
+                        out=plan_buffers,
+                    )
+                    plan = plan_buffers
+                    decode_metadata.candidate_plan = plan
+                candidate_paged_score_decode(
+                    padded_q_quant_decode_tokens.view(
+                        num_padded_tokens, *q_quant.shape[1:]
+                    ),
+                    # kv_cache was viewed as 4D for the paged kernel above;
+                    # squeeze recovers the raw 3D allocation.
+                    kv_cache.squeeze(-2),
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    candidate_blocks,
+                    candidate_block_size,
+                    next_n,
+                    topk_tokens,
+                    topk_backend,
+                    topk_indices,
+                    head_dim,
+                    plan=plan,
+                )
+                logits = None
             else:
-                _apply_candidate_mask(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates,
-                    candidate_block_size,
-                    row_repeat,
+                padded_q_scale, decode_weights = mqa_logits_mx_inputs(
+                    padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
                 )
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    decode_weights,
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    indices=decode_metadata.indices,
+                )
+                # Keeping bf16 halves top-k/candidate reads; other top-k
+                # backends and DCP need fp32. SM100 decode is varlen: one
+                # context length per row.
+                if topk_backend != "deep_select" or dcp_world_size != 1:
+                    logits = as_fp32_logits(logits, seq_lens.view(-1))
+        if logits is None:
+            # The candidate-only path already wrote request-local top-k
+            # positions; the shared selection below needs dense logits.
+            assert decode_metadata.global_seq_lens is None
+        else:
+            num_rows = logits.shape[0]
+            if candidate_blocks is not None:
+                # Two-level selection (v4.1) on the decode logits; columns are
+                # request-local compressed positions. seq_lens is (B, next_n)
+                # for native spec decode (per-row effective lens) and (B, 1)
+                # otherwise.
+                vis = seq_lens.reshape(-1)
+                row_repeat = next_n if vis.numel() != num_rows else 1
+                vis = vis[:num_rows]
+                decode_candidates = candidate_blocks[:num_rows]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates,
+                        candidate_block_size,
+                        row_repeat,
+                    )
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
-
-        if decode_metadata.global_seq_lens is not None:
-            _merge_dcp_topk_global(
+            # The backend comes from the layer (config is only readable at model
+            # construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
                 logits,
+                seq_lens,
+                next_n,
                 topk_indices,
                 topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
+                attn_metadata_narrowed.max_seq_len,
             )
+
+            if decode_metadata.global_seq_lens is not None:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                )
 
         if needs_padded_path:
             # if padded, we need to unpack
