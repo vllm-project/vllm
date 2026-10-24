@@ -280,7 +280,7 @@ docker logs -f myia_vllm-mini-zwz
 
 ## Critical Configuration Notes
 
-1. **Do NOT add `--enable-chunked-prefill` or `--num-scheduler-steps`** - These flags force V0 engine fallback. V1 engine (default on nightly) handles chunked prefill automatically.
+1. **Scheduler admission: keep the vLLM default `scheduler_reserve_full_isl=True`** (no `--no-scheduler-reserve-full-isl`). The default admits a waiting request only when its whole prompt fits in the KV cache; disabled, a ~200K request is admitted on its first 8192-token chunk and the engine regulates by preemption (66 preemptions/66 min, decode < 1 tok/s on 2026-10-24). Removed under Q32, record in `myia_vllm/_iteration_log/v0320_fstier/NOTES.md`. (The old "never `--enable-chunked-prefill`" rule dated from the V0 engine, which no longer exists; on V1 chunked prefill is the default and the flag is harmless.)
 
 2. **CUDA graphs (PIECEWISE mode) work well at 0.85 gpu-memory-utilization** - Piecewise CUDA graphs have minimal overhead. **gpu-memory-utilization reduced 0.92→0.88→0.85**: Marlin MoE `fused_marlin_moe.py` needs 852-994 MiB variable temporary allocations (`intermediate_cache13`). At 0.85: 335K tokens KV cache (still >262K max-model-len), ~2.3 GiB headroom. Bug tracked in vLLM RFC [#27951](https://github.com/vllm-project/vllm/issues/27951) — no fix as of Feb 27 2026. **Do NOT use `--enforce-eager`** (tested: 3-4x slower on all metrics - 12 tok/s vs 45 tok/s decode).
 
