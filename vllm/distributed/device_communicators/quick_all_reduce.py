@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -9,6 +10,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
@@ -88,6 +90,7 @@ class QuickAllReduce:
 
         """
         self.disabled = True
+        self._flydsl_int4: Any = None
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -256,7 +259,31 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
         self.create_shared_buffer()
+        self._flydsl_int4 = self._init_flydsl_int4()
         self.disabled = False
+
+    def _init_flydsl_int4(self) -> Any:
+        if (
+            self.qr_quant_level != QuickReduceRegime.INT4
+            or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
+        ):
+            return None
+        flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
+            group=self.group,
+            device=self.device,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        # compile() runs a real all-reduce on every rank. It moves the JIT
+        # out of the first prefill and out of CUDA graph capture.
+        warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
+        flydsl_int4.compile(warmup, torch.empty_like(warmup))
+        torch.accelerator.synchronize(self.device)
+        logger.info(
+            "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
+            "payloads use the HIP QuickReduce kernels."
+        )
+        return flydsl_int4
 
     @staticmethod
     def _get_qr_min_size(qr_max_size: int | None) -> int | None:
@@ -333,16 +360,72 @@ class QuickAllReduce:
             ]
         return inp_size <= self.qr_max_size and inp_size >= min_size
 
+    def should_fused_allreduce_rmsnorm(
+        self, inp: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+    ) -> bool:
+        """Whether FlyDSL INT4 QuickReduce can fuse the residual add + RMSNorm."""
+        if not self.uses_flydsl_int4(inp):
+            return False
+        hidden = inp.shape[-1]
+        return (
+            self._flydsl_int4.supports_rmsnorm(hidden, inp.numel() * inp.element_size())
+            and residual.shape == inp.shape
+            and residual.dtype == inp.dtype
+            and residual.is_contiguous()
+            and residual.data_ptr() % 16 == 0
+            and weight.dtype == inp.dtype
+            and weight.shape == (hidden,)
+            and weight.is_contiguous()
+            and weight.data_ptr() % 16 == 0
+        )
+
+    def fused_allreduce_rmsnorm(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+        gemma_norm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """FlyDSL INT4 all-reduce of ``inp`` fused with add + RMSNorm.
+
+        Returns ``(rmsnorm(allreduce(inp) + residual), allreduce(inp) +
+        residual)``; ``gemma_norm`` scales by ``1 + weight``.
+        """
+        assert self._flydsl_int4 is not None
+        out = torch.empty_like(inp)
+        residual_out = torch.empty_like(residual)
+        self._flydsl_int4.allreduce_rmsnorm(
+            inp, residual, weight, epsilon, out, residual_out, gemma_norm=gemma_norm
+        )
+        return out, residual_out
+
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
         # quick allreduce doesn't require a separate graph mode,
         # as QR uses static IPC buffer.
         if out is None:
             out = torch.empty_like(inp)
+        if self._use_flydsl_int4(inp):
+            self._flydsl_int4.allreduce(inp, out)
+            return out
         ops.qr_all_reduce(
             self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
         return out
+
+    def _use_flydsl_int4(self, inp: torch.Tensor) -> bool:
+        return (
+            self._flydsl_int4 is not None
+            and inp.dtype == torch.bfloat16
+            and inp.is_contiguous()
+            and inp.data_ptr() % 16 == 0
+            and self._get_qr_quant_level(inp) == QuickReduceRegime.INT4.value
+        )
+
+    def uses_flydsl_int4(self, inp: torch.Tensor) -> bool:
+        """Whether `all_reduce` runs `inp` through FlyDSL QuickReduce."""
+        return self.should_quick_allreduce(inp) and self._use_flydsl_int4(inp)
 
     def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
         quantization_min_size = self.qr_quantization_min_size
@@ -354,6 +437,9 @@ class QuickAllReduce:
         return self.qr_quant_level.value
 
     def close(self):
+        if self._flydsl_int4 is not None:
+            self._flydsl_int4.close()
+            self._flydsl_int4 = None
         if not self.disabled and getattr(self, "_ptr", None):
             if ops is not None:
                 ops.qr_destroy(self._ptr)
