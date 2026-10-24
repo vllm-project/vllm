@@ -190,6 +190,20 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END,),
             ),
+            # Stray DSML closers while reasoning: absorb them instead of
+            # leaking raw markup into the thinking stream
+            (ParserState.REASONING, "PARAM_CLOSE"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.REASONING, "INVOKE_END"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.REASONING, "TOOL_END"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (),
@@ -198,9 +212,101 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # An empty <tool_calls></tool_calls> block carries no call:
+            # skip it and return to CONTENT so any text around the block
+            # is still surfaced instead of being silently swallowed.
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
             (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
+            ),
+            # Absorb stray DSML closers with no open block: the model
+            # sometimes emits such fragments (e.g. right after a tool
+            # result); they carry no call and must not leak as content.
+            (ParserState.CONTENT, "PARAM_CLOSE"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.CONTENT, "INVOKE_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.CONTENT, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            # Bare DSML parameter opener with no open invoke (the model
+            # sometimes emits such fragments, e.g. after a failed tool
+            # call): swallow the tag markup so it does not leak, but keep
+            # the parameter value visible. STRAY_PARAM drops only the
+            # attribute region; the opener's "> returns to the origin
+            # state so the value text is surfaced as before.
+            (ParserState.CONTENT, "PARAM_START"): Transition(
+                ParserState.STRAY_PARAM,
+                (),
+            ),
+            (ParserState.REASONING, "PARAM_START"): Transition(
+                ParserState.STRAY_PARAM_REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "INVOKE_NAME_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "PARAM_CLOSE"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "INVOKE_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
+            ),
+            (ParserState.STRAY_PARAM, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.STRAY_PARAM, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "INVOKE_NAME_END"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "PARAM_CLOSE"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "INVOKE_END"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "TOOL_END"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.REASONING_END,),
+            ),
+            (ParserState.STRAY_PARAM_REASONING, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.REASONING_END,),
             ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,
