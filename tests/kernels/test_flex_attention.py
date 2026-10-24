@@ -412,7 +412,7 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
             kernel_options=kernel_options,
         )
 
-    def reference(num_reqs):
+    def reference(num_reqs, sliding_window=None):
         query_len = 32 // num_reqs
         q_idx = torch.arange(32, device=device)[:, None]
         kv_idx = torch.arange(640, device=device)[None, :]
@@ -420,6 +420,8 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
         logical_q = q_idx % query_len + 64 - query_len
         logical_kv = kv_idx - (request * 4 + 1) * 16
         mask = (logical_kv >= 0) & (logical_kv <= logical_q)
+        if sliding_window is not None:
+            mask &= logical_q - logical_kv < sliding_window
         return torch.nn.functional.scaled_dot_product_attention(
             query, key, value, attn_mask=mask
         )
@@ -442,6 +444,19 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
             torch.testing.assert_close(
                 output, reference(num_reqs), atol=1e-4, rtol=1e-4
             )
+
+    if direct_build:
+        for sliding_window in (16, None, 16):
+            metadata.sliding_window = sliding_window
+            metadata._sliding_window_tensor.fill_(metadata._effective_window())
+            metadata.block_mask = metadata._build_block_mask_direct()
+            torch.testing.assert_close(
+                attend(metadata),
+                reference(1, sliding_window),
+                atol=1e-4,
+                rtol=1e-4,
+            )
+        assert counter.frame_count == 1
 
 
 def test_physical_to_logical_mapping_handles_reused_blocks():
