@@ -204,6 +204,22 @@ To get prompt token IDs before generation, use
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
 
+To receive sampled-token probabilities for visible output text, include
+`message.output_text.logprobs` and optionally set `top_logprobs`:
+
+```python
+response = client.responses.create(
+    model="openai/gpt-oss-20b",
+    input="Say hello.",
+    include=["message.output_text.logprobs"],
+    top_logprobs=3,
+)
+```
+
+This is supported with GPT-OSS Harmony models for both streaming and
+non-streaming Responses. Probabilities are attached to final and commentary
+text; Harmony control tokens, reasoning, and tool-call arguments are excluded.
+
 #### Sampling parameters
 
 In addition to the OpenAI request fields, the Responses API forwards vLLM
