@@ -328,7 +328,13 @@ steps:
   - tests/v1/e2e/general/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - >-
+    pytest -v -s
+    v1/e2e/general
+    --ignore v1/e2e/general/test_async_scheduling.py
+    --ignore v1/e2e/general/test_async_scheduling_accuracy.py
+    --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py
+    -k "not test_mamba_prefix_cache_mrv2"
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -377,7 +383,10 @@ steps:
   - vllm/v1/engine/
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - >-
+    pytest -v -s
+    v1/engine
+    --ignore v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/test_tensor_ipc_queue.py
   - pytest -v -s config/test_mp_reducer.py
 
@@ -453,7 +462,22 @@ steps:
   - tests/utils.py
   - tests/models/test_vision.py
   commands:
-  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
+  - >-
+    case "$$BUILDKITE_PARALLEL_JOB" in
+    0)
+    TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
+    HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;;
+    1)
+    pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
+    pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
+    VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;;
+    2)
+    pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
+    --ignore models/multimodal/generation/test_whisper.py &&
+    VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' &&
+    pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;;
+    *) exit 2 ;;
+    esac
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
@@ -584,7 +608,10 @@ steps:
   - vllm/v1/
   optional: true
   commands:
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  - >-
+    pytest -s -v
+    compile/passes
+    --ignore compile/passes/distributed
 
 - label: ":amd: (MI300) PyTorch Fullgraph" # TBD
   timeout_in_minutes: 90
@@ -1142,7 +1169,15 @@ steps:
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   optional: true
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/core
+    --ignore=kernels/core/test_minimax_reduce_rms.py
+    kernels/test_fused_qk_norm_rope_gate.py
+    kernels/test_concat_mla_q.py
+    kernels/test_top_k_per_row.py
+    kernels/test_rocm_fp32_router_gemm.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
@@ -1194,7 +1229,12 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/moe
+    --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    --ignore=kernels/moe/test_modular_kernel_combinations.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -1260,7 +1300,15 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/utils/flashinfer.py
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/attention
+    --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
@@ -1313,7 +1361,12 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   # Run the ROCm AttnRes/KDA decode counterparts plus existing KDA coverage.
-  - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_amd_kda_decode.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+  - >-
+    pytest -v -s
+    models/kimi_k3/test_amd_attn_res.py
+    models/kimi_k3/test_amd_kda_decode.py
+    models/kimi_k3/test_kda.py
+    models/kimi_k3/test_kda_metadata.py
 
 - label: ":amd: (MI355) Kimi K3" # TBD
   timeout_in_minutes: 60
@@ -1837,7 +1890,11 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+  - >-
+    pytest -v -s
+    tool_use
+    --ignore=tool_use/mistral
+    --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
@@ -1868,7 +1925,12 @@ steps:
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.18.0
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s
+    quantization/
+    --ignore quantization/test_blackwell_moe.py
+    --ignore quantization/test_rocm_moe.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
 
@@ -2073,7 +2135,10 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - >-
+    pytest -v -s
+    v1/engine
+    --ignore v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/test_tensor_ipc_queue.py
 
 - label: ":amd: (MI300) Extract Hidden States Integration" # TBD
@@ -2128,7 +2193,11 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/models/deepseek_v32/amd/rocm.py
   commands:
-  - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    v1/attention
+    --ignore=v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
   - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -2657,7 +2726,11 @@ steps:
   - vllm/model_executor/models/llama.py
   commands:
   - amd-smi
-  - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+  - >-
+    pytest -v -s
+    tests/compile/passes/test_fusion_attn.py
+    tests/compile/passes/test_silu_mul_quant_fusion.py
+    tests/compile/passes/test_silu_mul_quant_manual_fusion.py
   - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"
@@ -3219,7 +3292,15 @@ steps:
   - vllm/triton_utils/
   - vllm/utils/
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  - >-
+    pytest -v -s
+    engine
+    test_sequence.py
+    test_config.py
+    test_logger.py
+    test_vllm_port.py
+    jit_monitor/test_hooks.py
+    jit_monitor/test_hooks_gpu.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
@@ -3236,7 +3317,12 @@ steps:
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - >-
+    pytest -v -s
+    entrypoints/llm
+    --ignore=entrypoints/llm/test_generate.py
+    --ignore=entrypoints/llm/test_collective_rpc.py
+    --ignore=entrypoints/llm/offline_mode
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
@@ -3256,10 +3342,18 @@ steps:
   - tests/entrypoints/rl
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/serve
+    --ignore=entrypoints/serve/dev/rpc
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/rl
+    --ignore=entrypoints/rl/weight_transfer
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 65
@@ -3274,8 +3368,17 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - >-
+    pytest -v -s
+    entrypoints/openai/completion
+    --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - >-
+    pytest -v -s
+    entrypoints/openai
+    --ignore=entrypoints/openai/completion
+    --ignore=entrypoints/openai/chat_completion
+    --ignore=entrypoints/openai/responses
+    --ignore=entrypoints/openai/correctness
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)" # TBD
   timeout_in_minutes: 70
@@ -4310,7 +4413,11 @@ steps:
   - tests/kernels/test_gate_linear_rocm_dispatch.py
   - tests/kernels/test_bf16x3_router_gemm_rocm.py
   commands:
-  - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
+  - >-
+    pytest -v -s
+    tests/kernels/test_rocm_fp32_router_gemm.py
+    tests/kernels/test_gate_linear_rocm_dispatch.py
+    tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 - label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
   timeout_in_minutes: 35
@@ -4440,7 +4547,15 @@ steps:
   - vllm/utils/flashinfer.py
   optional: true
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/attention
+    --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
@@ -4691,7 +4806,18 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+  - >-
+    pytest -v -s
+    lora
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    --ignore=lora/test_chatglm3_tp.py
+    --ignore=lora/test_llama_tp.py
+    --ignore=lora/test_qwen3_with_multi_loras.py
+    --ignore=lora/test_olmoe_tp.py
+    --ignore=lora/test_deepseekv2_tp.py
+    --ignore=lora/test_gptoss_tp.py
+    --ignore=lora/test_qwen3moe_tp.py
+    --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
 
@@ -4712,7 +4838,13 @@ steps:
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl_stream_weights.py
+  - >-
+    pytest -v -s
+    models/test_terratorch.py
+    models/transformers/test_backend.py
+    models/test_registry.py
+    models/test_deepseek_v4_vl_rocm.py
+    models/test_deepseek_v4_vl_stream_weights.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4729,7 +4861,10 @@ steps:
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
-  - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
+  - >-
+    pytest -v -s
+    models/qwen4_exp/test_qsa_amd.py
+    models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
 
@@ -4960,7 +5095,11 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - >-
+    pytest -v -s
+    models/multimodal/generation
+    -m 'not core_model'
+    --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
 
 - label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)" # TBD
@@ -5000,7 +5139,19 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - >-
+    pytest -v -s
+    models/multimodal
+    -m core_model
+    --ignore models/multimodal/generation/test_common.py
+    --ignore models/multimodal/generation/test_ultravox.py
+    --ignore models/multimodal/generation/test_qwen2_5_vl.py
+    --ignore models/multimodal/generation/test_qwen2_vl.py
+    --ignore models/multimodal/generation/test_whisper.py
+    --ignore models/multimodal/generation/test_mm_prefix_lm.py
+    --ignore models/multimodal/generation/test_memory_leak.py
+    --ignore models/multimodal/generation/test_vit_cudagraph.py
+    --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
@@ -5058,7 +5209,13 @@ steps:
   commands:
   - uv pip install --system torchao==0.18.0
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --ignore quantization/test_gfx950_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s
+    quantization/
+    --ignore quantization/test_blackwell_moe.py
+    --ignore quantization/test_rocm_moe.py
+    --ignore quantization/test_gfx950_moe.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
 
 #---------------------------------------------------------  mi355 · samplers  ----------------------------------------------------------#
@@ -5593,7 +5750,10 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+  - >-
+    pytest -v -s
+    v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2
+    v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
 
 - label: ":amd: (MI355 DPX) Extract Hidden States Integration Single GPU"
   timeout_in_minutes: 45
@@ -5632,8 +5792,17 @@ steps:
   - vllm/models/deepseek_v32/amd/rocm.py
   optional: true
   commands:
-  - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    v1/attention
+    --ignore=v1/attention/test_mla_backends.py
+    --ignore=v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    VLLM_ROCM_USE_AITER=1 pytest -v -s
+    v1/attention/test_mla_backends.py
+    v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) CUDAGraph"
   timeout_in_minutes: 55
@@ -5717,7 +5886,13 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/conftest.py
   commands:
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+  - >-
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+    pytest -v -s
+    v1/e2e/spec_decode/acceptance_rates/mtp_other/
+    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
+    fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
 

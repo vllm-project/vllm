@@ -19,7 +19,12 @@ steps:
   - uv pip install --system conch-triton-kernels
   # The SM90-only checkpoint currently contains a removed weight_chan_scale
   # parameter. It was not exercised by the previous L4 job.
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+  - >-
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s
+    quantization/
+    --ignore quantization/test_blackwell_moe.py
+    --ignore quantization/test_rocm_moe.py
+    -k 'not test_compressed_tensors_w4a8_fp8'
   mirror:
     amd:
       label: ":amd: (MI300) Quantization"
@@ -43,7 +48,11 @@ steps:
       commands:
       - uv pip install --system torchao==0.17.0
       - uv pip install --system conch-triton-kernels
-      - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py
+      - >-
+        VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s
+        quantization/
+        --ignore quantization/test_blackwell_moe.py
+        --ignore quantization/test_rocm_moe.py
       - pytest -v -s rocm/test_moe_weight_replay.py
       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py
 
