@@ -25,6 +25,9 @@ CALLS = (
     "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
 )
 
+# V4's ``tool_calls`` wrapper name with V4.1's spacing (#62051).
+V4_NAMED_CALLS = CALLS.replace("｜DSML｜ calls>", "｜DSML｜ tool_calls>")
+
 
 def tokenizer_for(text, special_calls):
     vocab = {"<think>": 50, "</think>": 51}
@@ -94,6 +97,56 @@ def test_registered_adapters_parse_complete_output(thinking):
     assert not (content or "").strip()
     assert [call.name for call in calls] == ["get_weather", "add"]
     assert json.loads(calls[0].arguments) == {"city": "杭州", "count": 42}
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+def test_v4_wrapper_name_opens_tool_block(thinking, chunk_size):
+    text = ("Plan.</think>" if thinking else "") + "Checking." + V4_NAMED_CALLS
+    tokenizer, tokens = tokenizer_for(text, False)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": thinking}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": thinking}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert output.reasoning == (reasoning or "") == ("Plan." if thinking else "")
+    assert output.content.strip() == (content or "").strip() == "Checking."
+    assert [call["name"] for call in output.tool_calls] == ["get_weather", "add"]
+    assert [call.name for call in calls] == ["get_weather", "add"]
+    assert (
+        [json.loads(call["arguments"]) for call in output.tool_calls]
+        == [json.loads(call.arguments) for call in calls]
+        == [{"city": "杭州", "count": 42}, {"x": 1.5, "y": 2.25}]
+    )
+
+
+def test_v4_wrapper_name_ends_reasoning():
+    text = "Plan." + V4_NAMED_CALLS
+    tokenizer, tokens = tokenizer_for(text, False)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": True}),
+            tokens,
+            chunk_size=1,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50],
+        )
+    )
+    assert output.reasoning == "Plan."
+    assert not output.content.strip()
+    assert [call["name"] for call in output.tool_calls] == ["get_weather", "add"]
 
 
 @pytest.mark.parametrize(
