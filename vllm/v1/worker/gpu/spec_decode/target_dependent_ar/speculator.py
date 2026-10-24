@@ -93,6 +93,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
+            # Draft prefill shares the target's padded attention metadata.
+            varlen_decode=self.enable_adaptive_verification,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -262,6 +264,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            max_query_len=None if input_batch.has_prefill else int(max_query_len),
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
         )
