@@ -34,9 +34,10 @@ else()
   # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
   # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
   # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
-  # (vllm-project/DeepGEMM#39).
+  # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
+  # (vllm-project/DeepGEMM#43).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "87bc3fbcaee9d694109d881aa37cb2963955c8ee")
+  set(_DEEPGEMM_UPSTREAM_TAG "0820030756945b2daec208e8e8255268360f337d")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
