@@ -45,6 +45,8 @@ from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import numa_utils
 from vllm.utils.gc_utils import (
+    collect_deferred_gc,
+    defer_full_gc,
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
 )
@@ -236,6 +238,12 @@ class EngineCore:
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # Full collections traverse every in-flight request's token lists; run
+        # them only when idle (_process_input_queue), not between steps.
+        self.defer_full_gc = envs.VLLM_ENGINE_DEFER_FULL_GC
+        self._full_gc_pending = False
+        if self.defer_full_gc:
+            defer_full_gc()
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
         # Enable environment variable cache (e.g. assume no more
@@ -1642,6 +1650,9 @@ class EngineCoreProc(EngineCore):
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
                     self.aborts_queue.queue.clear()
+                if self._full_gc_pending:
+                    self._full_gc_pending = False
+                    collect_deferred_gc()
                 if logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
@@ -1669,6 +1680,7 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        self._full_gc_pending = self.defer_full_gc
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)

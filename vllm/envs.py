@@ -301,6 +301,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
+    VLLM_ENGINE_DEFER_FULL_GC: bool = False
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
@@ -2096,6 +2097,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # If set, the engine core stops automatic collections of the oldest GC
+    # generation and runs them when it idles instead. A full collection
+    # traverses every in-flight request's token lists; at high concurrency
+    # with long prompts it pauses the scheduler for ~0.5 s, which under data
+    # parallelism stalls every rank.
+    "VLLM_ENGINE_DEFER_FULL_GC": lambda: bool(
+        int(os.getenv("VLLM_ENGINE_DEFER_FULL_GC", "0"))
+    ),
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
