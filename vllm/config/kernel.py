@@ -247,6 +247,7 @@ LinearBackend = Literal[
     "cutlass",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
+    "nvfp4_dynamic",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
@@ -279,6 +280,18 @@ class KernelConfig:
     Deprecated: vLLM IR is being removed, and this option will be removed in
     v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
+
+    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
+    """NVFP4 A16 cutoff. Zero selects W4A4 for every call."""
+
+    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
+    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
+
+    nvfp4_dynamic_w4a4_backend: str = "flashinfer_cutlass"
+    """Canonical-layout W4A4 candidate for nvfp4_dynamic."""
+
+    nvfp4_dynamic_w4a16_backend: str = "flashinfer_cutedsl_native"
+    """Canonical-layout W4A16 candidate for nvfp4_dynamic."""
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """Benchmark FlashInfer kernel implementations during warmup and use the
