@@ -400,10 +400,13 @@ def triton_w4a16_skinny_fmt_gemm(
     num_stages: int | None = None
     packed_dequant = False
     if _on_gfx12x():
-        # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
-        # using Llama-3.1-8B AWQ weight shapes with group_size=128.
+        # Tiles for gfx1201 (32-wide wavefronts), group_size=128. The small-M
+        # row below was retuned on Qwen2.5-7B and Llama-3.1-8B weight shapes.
         if M <= 32:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 16, 16, 128, 4
+            if N > K and M <= 16:
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 16, 64, 128, 4
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 32, 64, 128, 4
         elif M <= 64:
             if K >= 2 * N:  # tall K (e.g. down_proj)
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 128, 8

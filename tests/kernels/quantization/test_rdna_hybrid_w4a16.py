@@ -225,6 +225,10 @@ def _make_prefill_case(M, K, N, G, dtype, has_zp):
 @pytest.mark.parametrize(
     "M,K,N,G",
     [
+        # M=16 exercises both sides of the gfx12 small-M tile row: N>K (wide,
+        # BLOCK_M=16) and N<K (BLOCK_M=32).
+        (16, 256, 512, 32),
+        (16, 512, 256, 64),
         (17, 256, 512, 32),
         (32, 512, 256, 64),
         (33, 512, 512, 128),
