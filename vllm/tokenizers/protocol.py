@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, overload
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
@@ -18,7 +18,7 @@ class TokenizerLike(Protocol):
     # can keep mid-conversation system messages in place instead of merging
     # them into the leading system block, which breaks prefix caching for
     # clients that append a system reminder on every turn.
-    supports_inline_system_messages: bool = False
+    supports_inline_system_messages: ClassVar[bool] = False
 
     @classmethod
     def from_pretrained(
