@@ -2008,3 +2008,37 @@ XFF : interne, nominal.
 **État moteur** : health 200, StartedAt 21:26:46Z inchangé, 0 assert (18 h), préemptions 16,
 VRAM GPU 0 **22 725 MiB** (ligne d'alerte 23 000, à surveiller — rollback GPU_UTIL 0.70 si
 franchie), GPU 1 21 398, /dev/shm 25 G sous le seuil 45 G, 2 223 req/34,5 h depuis boot.
+
+## 25/10 08:41Z — restart 09:02:45Z : crash NCCL TP1 (nouveau mode), watchdog correct, /dev/shm purgé
+
+**Événement.** Le moteur a redémarré à 09:02:45Z sur décision du watchdog — **vrai wedge** :
+`WEDGE: API up but decode stuck, counters flat` (p=270 451 159, g=2 401 688 identiques à 09:00:45
+et 09:02:45). ExitCode 0 (docker restart), nouveau boot 09:04:20Z, sain depuis (sondes OK
+continues, 0 assert). Intervention 2 min 20 s après le figage des compteurs — comportement
+nominal de v6.1/v6.2.
+
+**Cause racine (log moteur).** À 09:00:28, `Worker_TP1` meurt sur
+`RuntimeError: NCCL error: unhandled cuda error` dans `all_gather` — pile complète :
+`sample_tokens` → `compute_logits` (qwen3_5.py:430) → `_gather_logits` →
+`tensor_model_parallel_all_gather` → pynccl. « unhandled cuda error » au collectif = erreur
+CUDA **asynchrone** qui remonte au premier appel synchronisant — le fautif réel est en amont
+dans le stream (kernel de quant/attn non identifié). Moteur mort-vivant ensuite (health 200,
+génération figée, `shm_broadcast … 60 seconds` ×3) jusqu'au restart.
+
+**Contexte de charge.** Matinée très chargée : ~48 M tokens de prompt traités entre 06:48 et
+09:00 (~5 900 tok/s), préfixe hit 72,9 % / externe 80,1 %, KV 40,7 %, 4 req en vol au crash.
+Épisodes `WEDGE fail 1/2` répétés 06:48→08:17 (chaque fois RECOVERED) = pattern prefill
+documenté, pas des précurseurs du crash. **Première occurrence** de ce mode : 0 NCCL error
+dans les 11,5 h de runtime précédentes (depuis le boot 21:26Z 24/10). Coïncidence d'horaire
+avec la cascade de stalls du 20/10 09:02Z notée — deux points, pas une pente.
+
+**Suites.** (1) `/dev/shm` était repassé à 49G/63G (orphelins de la génération tuée) → purge
+bornée au StartedAt : 7 fichiers, retour **24G = 39 %** (plancher = tier RAM). (2) Claude signé
+pour exclure 09:00-09:10Z de ses tables (comme le wedge hub 00-01Z). (3) Impact standard du
+restart : ~1 h de re-prefill à froid + les 4 requêtes en vol perdues. (4) Aucun geste moteur
+sans GO ; si le mode récidive → chercher l'erreur CUDA amont avec `NCCL_DEBUG=INFO` (une
+seule occurrence ne justifie pas un restart-config).
+
+**Watch.** Post-restart : VRAM 22 183/21 136 à froid (0.73), préemptions remises à 0,
+nbaudit ok (vague 2 Image/ active), commit hôte 78,1 % (marge 86,5 GB), G: OK, condensation
+nominale (re-credentials 05:44 = post-wedge hub).
