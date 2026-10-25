@@ -221,7 +221,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             score_elements = (
                 PREFILL_FMHA_SCRATCH_BYTES // 5
-                if self.index_k_tp == 2
+                if self.index_k_tp in (2, 4)
                 else PREFILL_SCORE_BYTES // 4
             )
             max_seq_len = vllm_config.model_config.max_model_len
@@ -242,12 +242,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 device=device,
             )
             max_reqs = vllm_config.scheduler_config.max_num_seqs
-            min_chunk = 128 if self.index_k_tp == 2 else 64
+            min_chunk = 128 if self.index_k_tp in (2, 4) else 64
             windows = (max_tokens + min_chunk - 1) // min_chunk
             self.prefill_window_metadata = torch.empty(
                 windows, 5, max_reqs + 1, dtype=torch.int32, device=device
             )
-            if self.index_k_tp == 2:
+            if self.index_k_tp in (2, 4):
                 self.prefill_work_ranges = torch.empty(
                     windows,
                     num_compute_units(device.index or 0),
@@ -410,7 +410,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     PREFILL_CHUNK_SIZE,
                     max(64, PREFILL_SCORE_BYTES // (heads * score_cols * 4) // 64 * 64),
                 )
-                if self.index_k_tp == 2:
+                if self.index_k_tp in (2, 4):
                     from vllm.third_party.fmha_sm100.api import (
                         fmha_index_score_sharded_plan_device,
                     )
@@ -441,7 +441,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     k_lens = window_metadata[2, : hi - lo]
                     prefixes = window_metadata[3, : hi - lo]
                     chunk_plan = None
-                    if self.index_k_tp == 2:
+                    if self.index_k_tp in (2, 4):
                         assert self.prefill_work_ranges is not None
                         assert self.prefill_work_info is not None
                         assert self.prefill_workspace is not None
@@ -756,6 +756,7 @@ def prefill_local_score(
                 chunk.block_table,
                 chunk.plan,
                 rank=comm.rank,
+                tp=comm.world,
                 max_score=scores,
                 sm_scale=1.0,
                 initialize=False,
