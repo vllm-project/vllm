@@ -40,6 +40,25 @@ def _compare(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
     }
 
 
+def write_input_ids(
+    batch: BenchBatch, input_batch: InputBatch, input_ids: torch.Tensor | None
+) -> None:
+    """Decode/verify inputs otherwise come from sampler state."""
+    if input_ids is None:
+        return
+    # PCP can split a request into two disjoint rows or replicate it.
+    segments = []
+    for i, req_id in enumerate(input_batch.req_ids):
+        start = int(input_batch.num_computed_tokens_np[i]) - batch.expected[req_id][1]
+        count = int(input_batch.num_scheduled_tokens[i])
+        tokens = batch.query_token_ids[req_id]
+        assert 0 <= start <= start + count <= len(tokens)
+        segments.append(tokens[start : start + count])
+    ids = np.concatenate(segments)
+    assert len(ids) == input_batch.num_tokens
+    input_ids[: len(ids)].copy_(torch.from_numpy(ids))
+
+
 class ForwardBench:
     """Runs one batch through the runner's `execute_model`, timing its forward.
 
@@ -80,7 +99,13 @@ class ForwardBench:
 
         def prepare_and_check(*args, **kwargs) -> InputBatch:
             self._input_batch = prepare_inputs(*args, **kwargs)
-            self._check_batch(self._input_batch)
+            pcp = runner.pcp_manager
+            self._check_batch(pcp.global_batch if pcp else self._input_batch)
+            self.result["num_local_tokens"] = self._input_batch.num_tokens
+            self.result["num_tokens_after_padding"] = (
+                self._input_batch.num_tokens_after_padding
+            )
+            self.result["batch_order"] = self._input_batch.req_ids
             return self._input_batch
 
         # Instance attributes shadow the methods for these two steps only.
@@ -96,7 +121,7 @@ class ForwardBench:
         return self.result
 
     def _forward(self, **inputs) -> Any:
-        self._write_input_ids(self._input_batch, inputs["input_ids"])
+        write_input_ids(self.batch, self._input_batch, inputs["input_ids"])
         # Models may update the forward context in place (e.g. sequence
         # parallelism shards is_padding); every call must start from the
         # context the runner built.
@@ -128,19 +153,6 @@ class ForwardBench:
                 f"wanted {expected[req_id]}"
             )
         assert input_batch.num_tokens == self.batch.num_tokens
-        self.result["num_tokens_after_padding"] = input_batch.num_tokens_after_padding
-        self.result["batch_order"] = input_batch.req_ids
-
-    def _write_input_ids(
-        self, input_batch: InputBatch, input_ids: torch.Tensor | None
-    ) -> None:
-        """Decode/verify inputs otherwise come from sampler state."""
-        if input_ids is None:
-            return
-        ids = np.concatenate(
-            [self.batch.query_token_ids[req_id] for req_id in input_batch.req_ids]
-        )
-        input_ids[: len(ids)].copy_(torch.from_numpy(ids))
 
     def _capture_and_time(self) -> Any:
         world = get_world_group()
