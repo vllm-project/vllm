@@ -1151,7 +1151,9 @@ def test_worker_polls_async_load_without_forward_execution(fail_load):
 
 @pytest.mark.parametrize("bulk", [False, True])
 @pytest.mark.parametrize("fail_load", [False, True])
-def test_sync_load_finishes_before_forward_without_layer_hooks(bulk, fail_load):
+def test_sync_load_finishes_before_forward_without_layer_hooks(
+    bulk, fail_load, monkeypatch
+):
     """FULL graph replay skips layer hooks, so sync loads must settle on entry."""
 
     class _SyncLoadHandle(_WaitRecordingDelayedLoadHandle):
@@ -1164,7 +1166,7 @@ def test_sync_load_finishes_before_forward_without_layer_hooks(bulk, fail_load):
 
     handle = _SyncLoadHandle()
     if bulk:
-        handle.load_blocks = handle.load
+        monkeypatch.setattr(handle, "load_blocks", handle.load, raising=False)
     worker = UMBPStoreConnectorWorker(handle)
     batch = BlockLoadBatch(["sync-load"], [7], [0], "req")
 
