@@ -1083,6 +1083,11 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    if request.resumable and self.num_hash_lookahead_tokens:
+                        # Resident KV can retain a discarded streaming token's
+                        # hash. Recomputing KV must use the current token sequence.
+                        request.block_hashes.clear()
+                        request.update_block_hashes()
                     did_prefix_cache_lookup = True
                     (
                         new_computed_blocks,

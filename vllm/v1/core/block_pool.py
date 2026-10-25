@@ -151,6 +151,7 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        num_hash_lookahead_tokens: Tokens after each block covered by its hash.
         medium: Storage medium reported in KV cache events.
 
     """
