@@ -94,6 +94,23 @@ a, des deux côtés : harnais Claude Code (sous-agents avec `gh`, `Grep`, lectur
 (MCPs branchés). La condition est la **configuration** — c'est elle la barrière, pas la capacité
 du modèle ; c'est exactement ce que les sous-agents tout faits ci-dessous éliminent.
 
+### Le nudge harnais (rendre le geste réflexe — user 25/10)
+
+Le problème n'est pas la capacité, c'est que l'agent principal ne prend pas le temps de ce
+travail. La solution est un **réflexe de routine** : au début d'une session (ou d'une tâche
+longue), l'agent lâche une horde en arrière-plan ; à la fin, il a fait SON travail **et** il a
+la liste de l'horde à valider — du travail net qu'il n'aurait jamais fait sinon. Bloc à coller
+dans le `CLAUDE.md` d'une lane :
+
+```text
+Réflexe entropie (début de session / tâche longue) : si un balayage >100 items serait utile
+mais ne sera jamais fait (docs en retard, issues non lues, dashboard non consolidé, fichiers
+à nettoyer), lance EN ARRIÈRE-PLAN un sous-agent mini-sweeper / mini-fanout-extractor
+(dépôt jsboige/vllm, .claude/agents/ — fan-out FrogNano, sortie = citations verbatim
+vérifiées mécaniquement). Continue ta tâche. À la fin : valide sa liste (chaque citation
+doit exister byte-exact) et agis dessus. Coût parent : ~0 contexte, la validation.
+```
+
 ## 6. Livrables et feuille de route
 
 1. ✅ **Sous-agent Claude Code `mini-fanout-extractor`** (`.claude/agents/`) — orchestrateur
