@@ -2273,20 +2273,18 @@ def test_host_budget_rejects_a_block_count_that_cannot_serve_the_context():
     assert "--num-gpu-blocks-override" not in message
 
 
-def test_host_budget_caps_headroom_by_the_slurm_allocation(monkeypatch):
-    """An unenforced Slurm quota is still the real host-memory limit."""
+def test_host_memory_budget_override_caps_available_headroom(monkeypatch):
+    """Schedulers that enforce memory outside cgroups provide the budget here."""
     from types import SimpleNamespace
 
     from vllm.distributed.aux_output_connector import memory
 
-    monkeypatch.setenv("SLURM_MEM_PER_NODE", "1024")
-    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    monkeypatch.setenv("VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES", str(768 << 20))
     monkeypatch.setattr(
         memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1 << 40)
     )
     monkeypatch.setattr(memory, "get_cgroup_memory_limit", lambda: None)
     monkeypatch.setattr(memory, "get_cgroup_memory_usage", lambda: None)
-    monkeypatch.setattr(memory, "_cgroup_memory_current", lambda: 256 << 20)
     assert memory.get_available_host_memory() == 768 << 20
 
 
