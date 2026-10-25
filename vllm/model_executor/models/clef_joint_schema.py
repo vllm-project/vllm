@@ -24,6 +24,7 @@ from collections.abc import Callable, Set
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -313,31 +314,45 @@ class JointSchemaPooler(Pooler):
         """The schema's indices, plus the option tokens' positions (on the CPU)
         and their option spans, for the lexical embeddings."""
         num_questions = len(types)
-        lengths = torch.tensor([end - start for start, end in spans])
-        span_ids = torch.repeat_interleave(torch.arange(len(spans)), lengths)
-        positions = torch.cat([torch.arange(start, end) for start, end in spans])
+        lengths = np.array([end - start for start, end in spans], dtype=np.int64)
+        span_ids = np.repeat(np.arange(len(spans)), lengths)
+        positions = np.concatenate([np.arange(start, end) for start, end in spans])
         num_question_tokens = int(lengths[:num_questions].sum())
-
-        counts_cpu = torch.tensor(counts)
+        counts_cpu = np.array(counts)
         max_options = max(counts)
-        option_question = torch.repeat_interleave(
-            torch.arange(num_questions), counts_cpu
+        option_question = np.repeat(np.arange(num_questions), counts_cpu)
+        option_slots = np.concatenate(
+            [np.arange(count) + q * max_options for q, count in enumerate(counts)]
         )
-        option_slots = torch.cat(
-            [torch.arange(count) + q * max_options for q, count in enumerate(counts)]
-        )
+        vectors = [
+            positions,
+            span_ids,
+            lengths,
+            np.array(types),
+            option_question,
+            option_slots,
+            span_ids[num_question_tokens:] - num_questions,
+        ]
+        packed = async_tensor_h2d(np.concatenate(vectors), device, dtype=torch.long)
+        (
+            positions_d,
+            span_ids_d,
+            lengths_d,
+            types_d,
+            option_question_d,
+            option_slots_d,
+            lexical_span_ids,
+        ) = packed.split([len(vector) for vector in vectors])
         schema = SchemaIndices(
-            positions=async_tensor_h2d(positions, device),
-            span_ids=async_tensor_h2d(span_ids, device),
-            span_lengths=async_tensor_h2d(lengths, device),
-            question_types=async_tensor_h2d(types, device, dtype=torch.long),
-            option_question=async_tensor_h2d(option_question, device),
-            option_slots=async_tensor_h2d(option_slots, device),
+            positions=positions_d,
+            span_ids=span_ids_d,
+            span_lengths=lengths_d,
+            question_types=types_d,
+            option_question=option_question_d,
+            option_slots=option_slots_d,
             option_mask=async_tensor_h2d(
-                torch.arange(max_options) < counts_cpu[:, None], device
+                np.arange(max_options) < counts_cpu[:, None], device
             ),
         )
-        lexical_span_ids = async_tensor_h2d(
-            span_ids[num_question_tokens:] - num_questions, device
-        )
-        return schema, positions[num_question_tokens:], lexical_span_ids
+        lexical_ids = torch.from_numpy(positions[num_question_tokens:])
+        return schema, lexical_ids, lexical_span_ids
