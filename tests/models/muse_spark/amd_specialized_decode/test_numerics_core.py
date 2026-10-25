@@ -37,6 +37,7 @@ as MRV2 does (crossing pages and the sliding window); every replay equals an
 eager run of the same step on the same contents, 300 replays, health zero.
 """
 
+import functools
 import math
 from types import SimpleNamespace
 
@@ -138,11 +139,17 @@ def _schedule(steps: int = REPLAYS) -> list[tuple[int, ...]]:
 
 def _scales(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """The layer's K / V scales as vLLM holds them (fp32 0-d, the cache's
-    device): ``KV8_SCALES`` for an fp8 cache, else 1."""
-    ks, vs = KV8_SCALES if kv.dtype == torch.uint8 else (1.0, 1.0)
+    device): ``KV8_SCALES`` for an fp8 cache, else 1. Made once per device,
+    so a graph capture after the eager warm-up reuses them."""
+    return _scale_tensors(kv.dtype == torch.uint8, kv.device)
+
+
+@functools.cache
+def _scale_tensors(kv8: bool, device) -> tuple[torch.Tensor, torch.Tensor]:
+    ks, vs = KV8_SCALES if kv8 else (1.0, 1.0)
     return (
-        torch.tensor(ks, dtype=f32, device=kv.device),
-        torch.tensor(vs, dtype=f32, device=kv.device),
+        torch.tensor(ks, dtype=f32, device=device),
+        torch.tensor(vs, dtype=f32, device=device),
     )
 
 
@@ -472,8 +479,10 @@ def _check_chain(runner, w, kind, case, gated, split, s_front, step, kvs):
         # the gated rows: vs vLLM's gated core on the stock attention, and
         # never further from the fp64 gated attention than stock (E9)
         q = qkvo_g[:, :CORE].reshape(S, spec.HEADS, 64)
+        kv8 = kvs[1].dtype == torch.uint8
         kv_ref = kvs[1]
-        if kv_ref.dtype == torch.uint8:
+        if kv8:
+            # the fp64 reference reads the values the cache holds
             kv_ref = ref.kv_from_fp8(kv_ref, *KV8_SCALES)
             _check_fp8_insert(qkvo_g, kvs[1], step.slot_mapping[NAME[kind]], pad)
         a64 = ref.gqa_decode(
@@ -482,18 +491,26 @@ def _check_chain(runner, w, kind, case, gated, split, s_front, step, kvs):
         g64 = gate64(a64, qkvo_g[:, spec.ROW_G :].cpu())[live.cpu()]
         got = xo.cpu().reshape(S, spec.HEADS, 64)[live]
         stock = stock_core.cpu().reshape(S, spec.HEADS, 64)[live]
-        assert ref.cos(got, stock) > COS_CORE, (where, ref.cos(got, stock))
         e_got = (got.double() - g64).abs().max().item()
         e_stock = (stock.double() - g64).abs().max().item()
         ulp = 2.0 ** (math.floor(math.log2(g64.abs().max().item())) - 7)
-        assert e_got <= e_stock + 2 * ulp, (where, e_got, e_stock)
         u = ref.row_ulps(got, stock)
         print(
-            f"{where}: xo vs stock gate: max {u.max().item():.2f} row ulps, "
-            f"<= 1 on {(u <= 1).float().mean().item():.5f}; fp64 err "
+            f"{where}: xo vs stock gate: cos {ref.cos(got, stock):.7f}, max "
+            f"{u.max().item():.2f} row ulps, <= 1 on "
+            f"{(u <= 1).float().mean().item():.5f}; vs fp64 cos "
+            f"{ref.cos(got, g64):.7f} (stock {ref.cos(stock, g64):.7f}), err "
             f"{e_got:.3g} (stock {e_stock:.3g})",
             flush=True,
         )
+        # bf16: the split core agrees with stock. fp8: stock's paged attention
+        # is itself lossy on an fp8 cache, so the split core is held to the
+        # fp64 attention of the cache's values instead
+        if kv8:
+            assert ref.cos(got, g64) > COS_CORE, (where, ref.cos(got, g64))
+        else:
+            assert ref.cos(got, stock) > COS_CORE, (where, ref.cos(got, stock))
+        assert e_got <= e_stock + 2 * ulp, (where, e_got, e_stock)
         assert (xo[pad.to(xo.device)].float() == 0).all()
         # the layer's outputs. stream_out: vs the K2(gated) step and the stock
         # span. The tail after the core is Phase A's: bit for bit K2(tensor)
@@ -502,9 +519,20 @@ def _check_chain(runner, w, kind, case, gated, split, s_front, step, kvs):
         # not vs the gated / stock chain: two cores that differ by an ulp on
         # ~40 % of the rows' elements (split vs paged_attention_v1, both held
         # above) take the stock span itself to branch cos 0.973 .. 0.995
-        # (``stock span`` printed)
-        assert ref.cos(ss[lv], sg[lv]) > tn.COS_STAGE, where
-        assert ref.cos(ss[lv], span["stream"][lv]) > tn.COS_STAGE, where
+        # (``stock span`` printed). fp8: the gated chain and the stock span
+        # carry stock's lossy core, so stream_out is held to the stock span on
+        # the split core's own gated rows
+        print(
+            f"{where}: stream cos vs K2(gated) {ref.cos(ss[lv], sg[lv]):.7f}, "
+            f"vs stock span {ref.cos(ss[lv], span['stream'][lv]):.7f}, vs "
+            f"stock span on xo {ref.cos(ss[lv], span_xo['stream'][lv]):.7f}",
+            flush=True,
+        )
+        if kv8:
+            assert ref.cos(ss[lv], span_xo["stream"][lv]) > tn.COS_STAGE, where
+        else:
+            assert ref.cos(ss[lv], sg[lv]) > tn.COS_STAGE, where
+            assert ref.cos(ss[lv], span["stream"][lv]) > tn.COS_STAGE, where
         assert torch.equal(st, ss) and torch.equal(bt, bs), (where, "K2(tensor)")
         assert ref.cos(bs[lv], own[lv]) > tn.COS_CHAIN, where
         assert (ss[~lv] == 0).all() and (bs[~lv].float() == 0).all(), where
