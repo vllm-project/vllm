@@ -2203,6 +2203,7 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/backends
     --ignore=v1/attention/test_gdn_aiter_flydsl.py
     --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py
@@ -2613,6 +2614,105 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k"
+
+- label: ":amd: (MI355) ROCM_FLASHMLA_SPARSE_DSV41 Backend Shard %N"
+  timeout_in_minutes: 40
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/amd/rocm.py
+  - vllm/models/deepseek_v41/amd/model.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/sparse_mla.py
+  - vllm/models/deepseek_v41/common/ops
+  - vllm/v1/attention/backends/mla/sparse_swa.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_indexer.py
+  - vllm/v1/attention/backends/mla/rocm_paged_mxfp4_indexer.py
+  - vllm/v1/attention/backends/mla/compressor_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/ops/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backend.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends/rocm_flashmla_sparse_dsv41
+  - tests/models/test_dsv41_mono_layers.py
+  commands:
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/backends/rocm_flashmla_sparse_dsv41 --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_FLASHMLA_SPARSE_DSV41 Engine Runtime Shard %N"
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/amd/rocm.py
+  - vllm/models/deepseek_v41/amd/model.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/sparse_mla.py
+  - vllm/models/deepseek_v41/common/ops
+  - vllm/v1/attention/backends/mla/sparse_swa.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_indexer.py
+  - vllm/v1/attention/backends/mla/rocm_paged_mxfp4_indexer.py
+  - vllm/v1/attention/backends/mla/compressor_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/ops/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backend.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - vllm/v1/worker
+  - vllm/v1/core/sched
+  - vllm/compilation
+  - tests/v1/attention/backends/rocm_flashmla_sparse_dsv41/dsv41_harness.py
+  - tests/v1/e2e/attention/test_rocm_flashmla_sparse_dsv41_runtime.py
+  commands:
+  - pytest -v -s v1/e2e/attention/test_rocm_flashmla_sparse_dsv41_runtime.py -k 'not tensor_parallel and not dcp' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_FLASHMLA_SPARSE_DSV41 TP2 and DCP Rejection"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/amd/rocm.py
+  - vllm/models/deepseek_v41/amd/model.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/sparse_mla.py
+  - vllm/models/deepseek_v41/common/ops
+  - vllm/v1/attention/backends/mla/sparse_swa.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_indexer.py
+  - vllm/v1/attention/backends/mla/rocm_paged_mxfp4_indexer.py
+  - vllm/v1/attention/backends/mla/compressor_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/ops/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/rocm_paged_mxfp4_indexer.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backend.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends/rocm_flashmla_sparse_dsv41/dsv41_harness.py
+  - tests/v1/e2e/attention/test_rocm_flashmla_sparse_dsv41_runtime.py
+  commands:
+  - pytest -v -s v1/e2e/attention/test_rocm_flashmla_sparse_dsv41_runtime.py -k 'tensor_parallel or dcp'
 
 #----------------------------------------------------------  mi355 · compile  ----------------------------------------------------------#
 
@@ -5902,6 +6002,7 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/backends
     --ignore=v1/attention/test_gdn_aiter_flydsl.py
     --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py
