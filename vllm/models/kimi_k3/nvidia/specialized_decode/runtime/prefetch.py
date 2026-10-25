@@ -10,13 +10,12 @@ the weights the next kernels read into L2, so that they start warm.
 
 Prefetch points (``fork(point, layer, batch)``), each with its batches per TP:
 
-- ``oproj_down``: after the o-projection (B3-8), the MoE front's packed
+- ``oproj_down``: TP16 only, after the o-projection (B3-8), the MoE front's packed
   router + latent-down rows.
-- ``attention_moe``: at TP8 only, after the KDA input projection (B5-8) or the MLA
-  core (B8), the same front rows plus the shared expert's weights.
 - ``next_attention``: once the routed experts are launched, the next layer's
-  attention weights, capped in MiB per batch (``NEXT_ATTENTION``). Not above B8,
-  where the HBM-bound experts lose more bandwidth than the attention gains.
+  attention weights, capped in MiB per batch (``NEXT_ATTENTION``): TP8 B1 only, TP16
+  B1-8. At TP8 B2-8 any prefetch kernel beside the persistent experts or the tail
+  costs them more SMs and HBM bandwidth than the warm weights save.
 
 The front and shared-expert ranges are on the critical path. They launch with the
 highest stream priority and the maximum shared-memory carveout, which needs a driver
@@ -44,7 +43,7 @@ from ..cutedsl.common.prefetch import compile_kernel
 # Per-TP batch -> MiB cap (or cap.carveout) of the next layer's attention weights,
 # prefetched once the routed experts finish.
 # Not at B>8: the HBM-bound experts lose more bandwidth than the attention gains.
-NEXT_ATTENTION = {8: "1:96.100,2-3:96,4-7:64,8:32", 16: "1-8:1024"}
+NEXT_ATTENTION = {8: "1:96.100", 16: "1-8:1024"}
 
 
 def attention_weights(attention):
@@ -128,16 +127,13 @@ class PrefetchController:
         for position, layer in enumerate(layers):
             if not layer.is_moe_layer:
                 continue
-            index, moe, attention = layer.layer_idx, layer.mlp, layer.self_attn
-            # The front GEMM reads [router shard; down shard] from the packed copy.
-            ranges = urgent((packed[index],), grid=8)
-            self._add("oproj_down", index, range(3, 9), ranges)
-            if tp == 8:
-                shared = moe.shared_experts
-                shared = shared.gate_up_proj.weight, shared.down_proj.weight
-                ranges = urgent((packed[index], *shared), grid=32)
-                batches = range(5, 9) if hasattr(attention, "in_proj_qkvgfab") else (8,)
-                self._add("attention_moe", index, batches, ranges)
+            index = layer.layer_idx
+            # TP8 B2-8 prefetch nothing: the prefetch kernel competes with the persistent
+            # experts for SMs and HBM and costs more than the warm weights save.
+            if tp != 8:
+                # The front GEMM reads [router shard; down shard] from the packed copy.
+                ranges = urgent((packed[index],), grid=8)
+                self._add("oproj_down", index, range(3, 9), ranges)
             if position + 1 < len(layers):
                 weights = attention_weights(layers[position + 1].self_attn)
                 self._add_capped("next_attention", index, weights, following)

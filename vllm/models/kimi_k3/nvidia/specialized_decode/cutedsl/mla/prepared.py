@@ -222,7 +222,9 @@ class PreparedMla:
         if self.cores[batch, q] == "trtllm":
             trtllm_decode(query, *args, self.stock_scales, out)
             return
-        split = fill_splits(batch, self.device)
+        # No more splits than 1024-token chunks of the longest local KV shard: with a
+        # short max context, SM-filling splits would cover empty KV ranges.
+        split = min(fill_splits(batch, self.device), max(1, -(-self.max_seq // 1024)))
         stock_decode(query, *args, self.stock_scales, out, lse, split, **cp)
 
     def run(

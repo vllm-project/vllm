@@ -117,9 +117,9 @@ class PersistentExperts:
         self.tp, self.grid = (8, 136) if rows == 768 else (16, 152)
         self.device, self.experts = w13.device, experts
         self.weights = (w13, s13, w2, s2)
-        # TP8: B3-4 on 148 CTAs; B5-8 publish on 128-136 CTAs, leaving SMs for the
-        # one-wave tail; grouped B9-64 on 152.
-        grids = "3-4:148,5-6:128,7:132,9-64:152" if self.tp == 8 else ""
+        # TP8: B3-8 publish on 128-136 CTAs, leaving SMs for the shared down, its push
+        # and the one-wave tail; grouped B9-64 on 152.
+        grids = "5-6:128,7:132,9-64:152" if self.tp == 8 else ""
         self.grids = batch_table(grids)
         scalars = (beta * linear_beta, 1 / beta, 1 / linear_beta)
         self.scalars = tuple(map(c.Float32, scalars))

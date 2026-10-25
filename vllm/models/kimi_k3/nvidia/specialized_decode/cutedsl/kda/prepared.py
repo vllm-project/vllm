@@ -19,7 +19,7 @@ from .kernel import KdaSplit
 # 2 also stages the state rows in shared memory, 3 also the F_B operands), lanes per
 # state row, minimum CTAs per SM, CTAs per head (0: defaults) and L2 evict-first state
 # traffic (staged only).
-SCHEDULE = {12: "16-32:3.16.3.2.1,64:3.16.4.2.1", 6: "16:1.0.0,32-64:3.16.3.2"}
+SCHEDULE = {12: "3-32:3.16.3.2.1,64:3.16.4.2.1", 6: "16:1.0.0,32-64:3.16.3.2"}
 # Verify (q > 1) schedules by request count B, from GB300
 # sweeps over q 4-8: no staging; eight-CTA clusters, then fewer as B grows.
 SPEC_SCHEDULE = {

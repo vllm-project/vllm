@@ -26,7 +26,7 @@ from .front_tp16 import MoeFrontTP16, initialize_designated
 
 # Kernel class and trailing scalar arguments of each small-batch launch.
 _KERNELS = {
-    "front": (MoeFrontTP8, (Int32,) * 3 + (Uint64, Float32)),
+    "front": (MoeFrontTP8, (Int32,) * 3 + (Uint64, Float32, Uint64)),
     "front16": (MoeFrontTP16, (Int32,) * 3 + (Uint64,) + (Float32,) * 4 + (Float64,)),
     "experts_tp16": (ClusterExpertsTP16, (Float32,) * 3),
     "experts_tp8": (ClusterExpertsTP8, (Float32,) * 3),
@@ -72,7 +72,10 @@ class SmallBatchBox:
         self.w, self.s = armed((3, POLL_CAP, 16), -1), armed((3, POLL_CAP, 7168), -1)
         self.g = armed((3, POLL_CAP * 16, 3584), -1)
         self.h2 = OprojMailbox(group, device, tp, rank, (2, POLL_CAP, 3584))
-        self.latent = zeros(3584, dtype=torch.bfloat16)
+        # TP8 B1 score records [parity, token, 896] x 8 B, multicast by
+        # the rank owning each router row (replaces the local, fully recomputed scores).
+        self.route = OprojMailbox(group, device, tp, rank, (2, 2, 3584)) if tp == 8 else None
+        self.latent = armed((3584,), -0x80000000)  # polled latent row (0x80000000: empty)
         self.hg, self.counter = zeros(6144), zeros(1)
         self.tables = {}
         self.batches = (1,) if tp == 8 else (1, 2)
@@ -116,9 +119,11 @@ class SmallBatchChain:
         scales = tuple(experts.weights[i].view(torch.uint8).reshape(-1) for i in (1, 3))
         scale, renorm = moe.routed_scaling_factor, moe.moe_renormalize
         self.scalars: tuple = (Int32(box.rank), Uint64(box.h2.mc), Float32(scale))
+        if box.tp == 8:  # the score mailbox's multicast base
+            self.scalars += (Uint64(box.route.mc),)
         head: tuple = (router, bias, box.xmoe, u32(box.epoch))
         if box.tp == 8:
-            tensors = head + (u32(box.scores), box.ids, box.w, down, box.h2.buffer)
+            tensors = head + (u32(box.route.buffer), box.ids, box.w, down, box.h2.buffer)
             tensors += (box.latent, gate_up, u32(box.hg))
             self.front = _launch("front", tensors, grid=box.sms - 8, renorm=renorm)
             tables = box.situ_tables(beta, linear_beta)

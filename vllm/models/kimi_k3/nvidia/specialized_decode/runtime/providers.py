@@ -32,6 +32,10 @@ def projection_policies(tp, rows, batches):
         n = next(b for b in (8, 16, 32, 64) if batch <= b)
         if rows == 6288 and (tp == 8 or n > 8):
             tactic = (64, 64, 1, 6) if n == 64 else (128, n, 2, 5 if n == 32 else 6)
+        elif tp == 8 and n == 8:
+            # TP8 MLA (3648 rows): 128-row tiles give 116 one-per-SM CTAs in one wave;
+            # 64-row tiles (228 CTAs) ran two waves on 152 SMs (10.5 vs 8.9 us cold).
+            tactic = (128, 8, 4, 6)
         else:  # TP16 KDA B64: a sixth stage, -0.7 us per layer in the KDA chain
             stages = {8: 8, 16: 10, 32: 8, 64: 6 if rows == 3216 else 5}[n]
             tactic = (64, n, 4 if n == 8 else 2, stages)
@@ -76,7 +80,8 @@ class Attention:
         self.projection = SkinnyProjection(weight, split_k)
         self.core: Any  # PreparedKda or PreparedMla
         if kind == "kda":
-            mode = lambda b: (1 if b == 1 else 2 if b <= 8 else 0) if tp == 8 else 0
+            # TP8: gate mode 1 at B1, the scalar mode 2 at B2, the MMA mode 0 from B3.
+            mode = lambda b: (1 if b == 1 else 2 if b == 2 else 0) if tp == 8 else 0
             policies = {b: (pitch, mode(b)) for b in runtime.batches}
             q = runtime.q  # verify steps: B requests x q tokens
             verify = [b // q for b in runtime.batches if q > 1 and b % q == 0]

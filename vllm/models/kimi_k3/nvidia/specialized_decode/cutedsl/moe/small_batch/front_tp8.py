@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TP8 B1 small-batch front (full router staged in SMEM, x_moe polling, threshold top16,
-latent multicast and gather, shared gate/up) and the shared-expert finisher."""
+"""TP8 B1 small-batch front (this rank's router shard staged in SMEM, x_moe polling, score
+multicast, threshold top16 over every rank's scores, latent multicast and gather, shared
+gate/up) and the shared-expert finisher."""
 
 import cutlass
 import cutlass.cute as cute
@@ -176,10 +177,21 @@ class SharedSituTables:
 
 
 class MoeFrontTP8:
+    """Each rank computes only its 112-row router shard (not all 896
+    rows, 8x redundant across TP) and multicasts the (score, score + bias) records into
+    every rank's score mailbox (``scores``: the local [parity, token, 896] view; scores_mc:
+    its multicast base). CTA 0's top16 polls all 896 records as before. Each logit is the
+    same per-row GEMV (same K split and warp-partial order), so ids and weights are
+    bitwise unchanged. With at most one router row per CTA, every gate/up row is staged
+    at entry (slots 1-13) instead of after the router GEMV."""
+
+    sharded_router = True
     row_bytes = 14400
     shared_bytes = 15 * row_bytes + (16 * 16 + 16 * 4) * 4 + 24
 
     def __init__(self, grid=140, *, renorm=True):
+        # One router row per CTA (slot 0) and <= 13 gate/up rows per CTA (slots 1-13).
+        assert grid >= 120, "B1-ROUTER layout needs >= 120 CTAs"
         self.grid = grid
         self.renorm = renorm
 
@@ -230,18 +242,19 @@ class MoeFrontTP8:
     def kernel(self, args):
         router, bias, xmoe, epoch, scores, ids, weights, down = args[:8]
         latent, latent_out, gate_up, hg, par, par3, rank, multicast_base = args[8:16]
-        scale = args[16]
+        scale, scores_mc = args[16], args[17]
         tid, warp, lane, cta = thread()
-        first_router, router_rows = split(896, cta, self.grid)
+        # This rank's router shard (896 / TP rows), at most one row per CTA.
+        first_router, router_rows = split(112, cta, self.grid)
+        first_router += rank * 112
         first_pair, pairs = split(224, cta, self.grid)
         gu_start, gu_rows = Int32(0), Int32(0)
         if cta > 0:
             gu_start, gu_rows = split(1536, cta - 1, self.grid - 1)
-        gu_first = min(gu_rows, 7)
-        gu_second = gu_rows - gu_first
         storage = alloc(cutlass.utils.SmemAllocator(), Uint8, self.shared_bytes, 128)
         slots = storage.iterator
-        activation = slots + 7 * self.row_bytes
+        # Slot 0: the router row; slots 1-13: every gate/up row (<= 11); slot 14: x_moe.
+        activation = slots + 14 * self.row_bytes
         dst = (slots, self.row_bytes)
         top = 15 * self.row_bytes
         partials = view(slots, top, Float32, 256)
@@ -264,15 +277,18 @@ class MoeFrontTP8:
         if tid == 0:
             init_barriers(bars, 3, async_proxy=True)
             stage_rows(*dst, 0, router, first_router, router_rows, bars)
+            if cta > 0:  # all gate/up rows at entry: the router shard leaves the slots free
+                stage_rows(*dst, 1, gate_up, gu_start, gu_rows, bars + 1)
             if cta == 0:
                 mailbox_store(epoch.iterator + (par ^ 1) * 32, (Uint32(0),))
             observed = mailbox_load(epoch.iterator + par * 32)[0]
             while observed < 28:
                 observed = mailbox_load(epoch.iterator + par * 32)[0]
         else:
-            for i in range(tid - 1, 2 * router_rows, 511):
-                token, row = i // router_rows, i % router_rows
-                index = ((par ^ 1) * 2 + token) * 896 + first_router + row
+            # Re-arm the other parity's local score records (every expert, both token
+            # slots): remote ranks multicast into them, so each rank re-arms all of its own.
+            for i in range(cta * 511 + tid - 1, 2 * 896, self.grid * 511):
+                index = (par ^ 1) * 2 * 896 + i
                 mailbox_store(scores.iterator + index * 2, (Uint32(0x80000000),) * 2)
             if cta > 0:
                 for i in range(tid - 1, 2 * gu_rows, 511):
@@ -311,24 +327,18 @@ class MoeFrontTP8:
                 multicast_words(multicast_base + Uint64(offset), (packed,), kind="b32")
         else:
             named_barrier(3, 512, arrive=True)
-        if tid == 0:  # noqa: SIM102
-            if gu_first > 0:
-                stage_rows(*dst, 8, gate_up, gu_start, gu_first, bars + 1)
-        wait(bars)
-        self.gemv(slots, router_rows, activation, partials, warp, lane)
-        cute.arch.sync_threads()
-        if tid == 0:  # noqa: SIM102
-            if gu_second > 0:
-                cute.arch.fence_proxy("async.shared", space="cta")
-                stage_rows(*dst, 0, gate_up, gu_start, gu_second, bars + 2, gu_first)
-        if tid < router_rows:
-            logit = Float32(0)
-            for w in cutlass.range_constexpr(16):
-                logit += partials[w * 16 + tid]
-            score = routing_sigmoid(logit)
-            record = score_record(score, routing_add(score, my_bias))
-            index = par * 2 * 896 + first_router + tid
-            mailbox_store(scores.iterator + index * 2, record)
+        if router_rows > 0:
+            wait(bars)
+            self.gemv(slots, router_rows, activation, partials, warp, lane)
+            cute.arch.sync_threads()
+            if tid < router_rows:
+                logit = Float32(0)
+                for w in cutlass.range_constexpr(16):
+                    logit += partials[w * 16 + tid]
+                score = routing_sigmoid(logit)
+                record = score_record(score, routing_add(score, my_bias))
+                index = par * 2 * 896 + first_router + tid
+                multicast_words(scores_mc + Uint64(index * 8), record)  # .v2.f32: a plain store
         if cta == 0:
             if warp < 8:
                 selected = Top16Fast(2).run(scores, ids, slots, par, 0)
@@ -353,9 +363,5 @@ class MoeFrontTP8:
         else:
             cute.arch.sync_threads()
             ctx = (activation, partials, hg, par, tid, warp, lane)
-            if gu_first > 0:
-                self.gate_pass(
-                    slots + 8 * self.row_bytes, gu_first, gu_start, bars + 1, ctx
-                )
-            if gu_second > 0:
-                self.gate_pass(slots, gu_second, gu_start + gu_first, bars + 2, ctx)
+            if gu_rows > 0:
+                self.gate_pass(slots + self.row_bytes, gu_rows, gu_start, bars + 1, ctx)

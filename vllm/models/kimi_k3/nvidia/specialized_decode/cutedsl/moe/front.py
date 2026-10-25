@@ -54,7 +54,9 @@ class RouteSitu:
     ):  # fmt: skip
         # B>8: few registers, so routing CTAs co-reside with the front and the fused
         # shared expert, and polled logits skip the front's completion wait.
-        self.lean = batch > 8
+        # Polled routing (any batch) takes the lean path too: the Lamport poll already
+        # orders the logits, so it does not also wait for the front grid's completion.
+        self.lean = batch > 8 or polled
         self.batch, self.shared, self.experts, self.renorm = batch, shared, 896, renorm
         # early: release the persistent experts at entry (safe once down drains first);
         # polled: logits arrive as FP32 words in mailbox columns [3584, 5376) (Lamport);
@@ -407,7 +409,8 @@ def front_geometry(batch, n, ks, kb=None, tg=None, rt=None, ch=None):
 
 @functools.cache
 def compile_route(batch, shared, renorm, roles, device, polled=False, plan=False):
-    kernel = RouteSitu(batch, shared, renorm, batch <= 2, roles, polled, plan)
+    # Routing releases the persistent experts at entry (their prologue overlaps routing).
+    kernel = RouteSitu(batch, shared, renorm, batch <= 8, roles, polled, plan)
     f32 = c.Float32
     args: tuple = (fake((batch, 896), None, f32), fake((896,), None, f32))
     args += (fake((batch, 16), None, c.Int32), fake((batch, 16)), fake((1, 64, WIDTH)))

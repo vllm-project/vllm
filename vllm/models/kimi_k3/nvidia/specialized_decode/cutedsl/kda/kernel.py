@@ -126,8 +126,13 @@ class KdaSplit:
         self.gate_staged, self.tokens = early == 3, tokens
         assert gate_mode != 2 or not (early or cluster)
         assert tokens == 1 or not (self.staged or gate_mode == 2 or cluster == 16)
-        # TP8 (12 heads) uses fast math; B1 releases dependents at entry.
-        self.fast_math, self.trigger_at_entry = heads == 12, batch == 1
+        # TP8 (12 heads) uses fast math. Release the o-proj at entry so its weight loads
+        # overlap KDA: TP8 B1-8 (the producer waits before reading KDA's output), TP16 B1
+        # only: TP16's fused o-proj reads the AttnRes prefix/blocks at launch, which only
+        # the B1-2 skinny projection (it triggers after its PDL wait) guarantees complete;
+        # the B3-8 split-K projection triggers before its wait.
+        self.fast_math = heads == 12
+        self.trigger_at_entry = batch == 1 or (heads == 12 and batch <= 8)
         self.cluster = cluster or (8 if batch == 1 else 4)
         self.lanes_per_row = lanes or (8 if batch <= (4 if heads == 6 else 2) else 16)
         self.rows, self.groups = 128 // self.cluster, 128 // self.lanes_per_row

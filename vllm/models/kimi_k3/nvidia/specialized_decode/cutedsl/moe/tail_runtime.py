@@ -32,7 +32,7 @@ CAP, POLL_CAP = 64, 8
 # 65.05/60.51.
 TWOSHOT = {8: "", 16: "33-64:1"}
 # WaveMoeTail batches that release the next AttnRes at entry.
-EARLY = {8: "9-64:1", 16: "9-64:1"}
+EARLY = {8: "3-64:1", 16: "9-64:1"}
 # WaveMoeTail batches whose up projection runs on tcgen05 (B9+; 1-GPU WaveMoeTail us
 # mma.sync vs tcgen05, B16/32/64: TP8 4.53/5.80/9.05 vs 4.45/5.26/7.80, TP16 two-shot
 # 4.50/5.39/7.75 vs 4.52/5.46/7.21).
@@ -46,7 +46,7 @@ def flat(t):
 def published(tp, batch):
     """The experts publish the latent and WaveMoeTail runs the tail (else MoeTail
     front)."""
-    return batch > (4 if tp == 8 else 8)
+    return batch > (2 if tp == 8 else 8)
 
 
 def twoshot_batches(tp):

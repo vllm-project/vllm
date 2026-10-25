@@ -14,6 +14,7 @@ from cutlass.cute.arch import store_async_dsmem
 from ...common.primitives import (
     acquire_tensormap_asm,
     alloc,
+    asm,
     chunk_mma,
     commit_asm,
     copy_evict,
@@ -41,6 +42,7 @@ from ...common.primitives import (
     split,
     store_bf16_pair,
     store_pair,
+    store_relaxed,
     store_shared_words,
     thread,
     unpack_bf16,
@@ -71,12 +73,14 @@ def quantize_mx8(packed, row):
 class _ClusterExperts:
     """Shared launch of the six-CTA-cluster expert kernels."""
 
+    grid = 96
+
     kernel: Any
     threads: int
 
     @cute.jit
     def __call__(self, *args):
-        launch(self.kernel, args, 96, self.threads, cluster=6, min_blocks_per_mp=1)
+        launch(self.kernel, args, self.grid, self.threads, cluster=6, min_blocks_per_mp=1)
 
 
 class ClusterExpertsTP16(_ClusterExperts):
@@ -336,6 +340,13 @@ def _align_1024(value):
     return (value + 1023) // 1024 * 1024
 
 
+@asm(Uint32)
+def _ticket(pointer, value):
+    """Acq_rel GPU-scope fetch-add (the latent row's grid ticket)."""
+    code = "atom.acq_rel.gpu.global.add.u32 $0,[$1],$2;"
+    return code, "=r,l,r,~{memory}", (pointer, Uint32(value))
+
+
 class ClusterExpertsTP8(_ClusterExperts):
     """FP4 x MXFP8 FC1 -> SiTU -> MXFP8 -> FC2 of x BF16 [3584] and IDs int32 [16] into
     BF16 [16, 3584]. Weights stay in the loaded MoE weights' shuffled layout (three TMA
@@ -404,10 +415,14 @@ class ClusterExpertsTP8(_ClusterExperts):
         fence_tmem()
         tmem = tmem_base[0]
         cute.arch.griddepcontrol_launch_dependents()
-        cute.arch.griddepcontrol_wait()
+        # No wait for the whole MoE front grid (its shared gate/up passes
+        # and exit) here: poll the published routing slot and latent row, as ClusterExpertsTP16
+        # does; the grid wait moves to the exit (one thread) to keep the completion chain.
         if warp == 0:
             if lane == 0:
-                expert = ids[j]
+                expert = Int32(load_volatile(ids.iterator + j)[0])
+                while expert < 0:
+                    expert = Int32(load_volatile(ids.iterator + j)[0])
                 for n in range(14):
                     row, chunk = expert * 768 + rank * 128, 2 * n
                     offset = Int64(expert) * 86016 + rank * 14336 + n * 1024
@@ -476,11 +491,13 @@ class ClusterExpertsTP8(_ClusterExperts):
             packed = cute.make_rmem_tensor((3, 4), Uint32)
             for i in cutlass.range_constexpr(3):
                 if 32 * (warp - 2) + 192 * i < 448:
-                    words = load_words(
-                        x.iterator + 8 * (xtid + 192 * i), count=4, mutable=True
-                    )
-                    for k in cutlass.range_constexpr(4):
-                        packed[i, k] = words[k]
+                    pointer = x.iterator + 8 * (xtid + 192 * i)
+                    ready = False
+                    while not ready:
+                        words = load_volatile(pointer, count=4)
+                        ready = published(words)
+                        for k in cutlass.range_constexpr(4):
+                            packed[i, k] = words[k]
             for i in cutlass.range_constexpr(3):
                 f = xtid + 192 * i
                 if 32 * (warp - 2) + 192 * i < 448:
@@ -495,6 +512,17 @@ class ClusterExpertsTP8(_ClusterExperts):
             cute.arch.sync_warp()
             if lane == 0:
                 cute.arch.mbarrier_arrive(xbar)
+            if warp == 2:  # every x read of this CTA has completed
+                wait(xbar)
+                old = Uint32(0)
+                if lane == 0:
+                    old = _ticket(counter.iterator, 1)
+                old = cute.arch.shuffle_sync(old, 0)
+                if old == Uint32(self.grid - 1):
+                    for v in range(lane, 448, 32):
+                        store_relaxed(x.iterator + 8 * v, (Uint32(0x80000000),) * 4)
+                    if lane == 0:
+                        store_relaxed(counter.iterator, (Uint32(0),))
             if warp >= 4:
                 ew = warp % 4
                 address = tmem + (Uint32(32 * ew) << 16)
@@ -539,3 +567,7 @@ class ClusterExpertsTP8(_ClusterExperts):
                         dst = output.iterator + j * 3584 + column
                         store_bf16_pair(dst, value, other)
         release_tmem(tmem, 256, warp, 1)
+        if (tid == 0) & (rank == 0):  # every peer read ids[j] before FC1
+            ids[j] = Int32(-1)
+        if (cta == 0) & (tid == 0):  # one-thread exit wait (TP16 pattern)
+            cute.arch.griddepcontrol_wait()
