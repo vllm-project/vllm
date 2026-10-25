@@ -415,9 +415,10 @@ class MMEncoderAttention(CustomOp):
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
                     "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
-                    "cuDNN backend with cuDNN >= 9.17.1 on Blackwell (SM 100) "
-                    "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
-                    "not available on Hopper (H100/H200) or earlier."
+                    "cuDNN backend with cuDNN >= 9.17.1 on data-center "
+                    "Blackwell (SM 100/103). cuDNN's FP8 SDPA path with "
+                    "bf16/fp16 output is not available on Hopper (H100/H200) "
+                    "or earlier, nor on SM 12x (e.g. DGX Spark GB10)."
                 )
         else:
             raise ValueError(
