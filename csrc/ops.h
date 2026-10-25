@@ -261,7 +261,9 @@ void fused_deepseek_v4_kv_rope_insert(
     torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> fp8_scale, bool kv_mxfp8);
+    std::optional<torch::stable::Tensor> fp8_scale, bool kv_mxfp8,
+    std::optional<torch::stable::Tensor> kv_norm_weight = std::nullopt,
+    double kv_norm_eps = 1e-6);
 
 torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
