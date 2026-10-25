@@ -9,8 +9,9 @@ summary (`<case>.rank<r>.kernels.json`): per-kernel time per forward, sorted.
 Summarize one file or compare two (e.g. before/after a change):
 `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.
 
-The same replays run between `cudaProfilerStart`/`Stop` in an NVTX range per
-case (with or without `--profile-dir`), so Nsight Systems can record just them:
+Without `--profile-dir`, the same replays run between
+`cudaProfilerStart`/`Stop` in an NVTX range per case, so Nsight Systems can
+record just them:
 `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat
 --cuda-graph-trace=node vllm bench forward ...`.
 """
@@ -157,27 +158,33 @@ def profile_graph(
     this (replays may contain collectives).
     """
 
-    def run() -> None:
-        # `cudaProfilerStart`/`Stop` and NVTX ranges are CUDA-only (for
-        # Nsight Systems); other accelerators just replay.
+    def run(mark_for_nsys: bool) -> None:
+        # cudaProfilerStart/Stop controls CUPTI collection for nsys. Do not
+        # nest it inside torch.profiler, which also owns CUPTI and may then
+        # produce an empty trace with "bufferCompleted called with unknown
+        # buffer" errors.
+        # The profiler controls and NVTX ranges are CUDA-only; XPU just
+        # replays the graph for torch.profiler to observe.
         if current_platform.is_xpu():
             for _ in range(replays):
                 graph.replay()
                 torch.accelerator.synchronize()
-        else:
+            return
+        if mark_for_nsys:
             torch.cuda.profiler.start()
-            with torch.cuda.nvtx.range(f"forward/{name}"):
-                for _ in range(replays):
-                    graph.replay()
-                    torch.accelerator.synchronize()
+        with torch.cuda.nvtx.range(f"forward/{name}"):
+            for _ in range(replays):
+                graph.replay()
+                torch.accelerator.synchronize()
+        if mark_for_nsys:
             torch.cuda.profiler.stop()
 
     if prefix is None:
-        run()
+        run(mark_for_nsys=True)
         return None
     activities = get_default_torch_profiler_activities()
     with torch.profiler.profile(activities=activities) as prof:
-        run()
+        run(mark_for_nsys=False)
     trace = f"{prefix}.trace.json.gz"
     prof.export_chrome_trace(trace)
     with gzip.open(trace, "rt") as f:
