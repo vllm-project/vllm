@@ -11,7 +11,6 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.forward_context import (
@@ -23,7 +22,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -395,56 +394,23 @@ class UBatchRunner:
         if (
             parallel.all2all_backend != "nixl_ep"
             or type(self.model_state) is not DefaultModelState
-            or self.model_state.supports_mm_inputs
-            or self.model_state.rope_state is not None
             or model.enable_prompt_embeds
             or model.dtype != torch.bfloat16
             or model.quantization is not None
-            or any(
-                size != 1
-                for size in (
-                    parallel.tensor_parallel_size,
-                    parallel.pipeline_parallel_size,
-                    parallel.prefill_context_parallel_size,
-                    self.dcp_size,
-                )
-            )
-            or config.lora_config is not None
-            or config.speculative_config is not None
+            or parallel.tensor_parallel_size != 1
             or parallel.enable_eplb
             or config.kv_transfer_config is not None
             or config.aux_output_config.enable_return_routed_experts
         ):
             return False
-        groups = [group for groups in self.attn_groups for group in groups]
-        for group in groups:
-            spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec) or spec.dtype != torch.bfloat16:
-                return False
-            name = group.backend.get_name()
-            if name == "FLASH_ATTN_MLA":
-                continue
-            if name != "FLASH_ATTN" or envs.VLLM_BATCH_INVARIANT:
-                return False
-            from vllm.v1.attention.backends.flash_attn import (
-                FlashAttentionMetadataBuilder,
-            )
-
-            if (
-                type(spec) is not FullAttentionSpec
-                or spec.sliding_window
-                or spec.attention_chunk_size
-                or spec.non_causal
-                or len(group.metadata_builders) != self.num_ubatches
-                or any(
-                    not isinstance(builder, FlashAttentionMetadataBuilder)
-                    or not builder.aot_schedule
-                    or not builder.use_full_cuda_graph
-                    for builder in group.metadata_builders
-                )
-            ):
-                return False
-        return bool(groups)
+        # General DBO feature exclusions are validated by VllmConfig.
+        return all(
+            group.backend.get_name() == "FLASH_ATTN_MLA"
+            and isinstance(group.kv_cache_spec, MLAAttentionSpec)
+            and group.kv_cache_spec.dtype == torch.bfloat16
+            for groups in self.attn_groups
+            for group in groups
+        )
 
     def prepare(
         self,

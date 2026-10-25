@@ -133,7 +133,6 @@ markers = [
     "cpu_test: mark test as CPU-only test",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
-    "cuda_only: requires NVIDIA CUDA",
     "nixl_ep: requires the NIXL EP backend",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]

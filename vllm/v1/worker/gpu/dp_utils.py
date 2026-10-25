@@ -143,7 +143,6 @@ def sync_cudagraph_and_dp_padding(
                     bool(torch.all(tensor[7] == 1))
                     and ubatch_desc.cg_mode == CUDAGraphMode.FULL
                     and synced_uniform_token_count == 1
-                    and int(num_tokens_across_dp.min()) >= num_ubatches
                 )
                 if (
                     is_last_ubatch_empty(
