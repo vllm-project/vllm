@@ -515,6 +515,7 @@ class DeepseekSparseSWAIndexBatch:
         self._params_host_rows: np.ndarray | None = None
         self._params_device: torch.Tensor | None = None
         self._params_copied: torch.cuda.Event | None = None
+        self._params_last: np.ndarray | None = None
 
     @property
     def open(self) -> bool:
@@ -659,47 +660,63 @@ class DeepseekSparseSWAIndexBatch:
             num_valid_tokens,
         ) = shared
         num_groups = len(self._groups)
-        rows = [
+        rows_np = np.asarray(
             [
-                swa_indices.data_ptr(),
-                swa_lens.data_ptr(),
-                is_valid_token.data_ptr(),
-                slot_mapping.data_ptr(),
-                block_table.data_ptr(),
-                replay_start.data_ptr(),
-                swa_indices.stride(0),
-                block_table.stride(0),
-            ]
-            for (
-                swa_indices,
-                swa_lens,
-                is_valid_token,
-                slot_mapping,
-                block_table,
-                replay_start,
-            ) in self._groups
-        ]
+                [
+                    swa_indices.data_ptr(),
+                    swa_lens.data_ptr(),
+                    is_valid_token.data_ptr(),
+                    slot_mapping.data_ptr(),
+                    block_table.data_ptr(),
+                    replay_start.data_ptr(),
+                    swa_indices.stride(0),
+                    block_table.stride(0),
+                ]
+                for (
+                    swa_indices,
+                    swa_lens,
+                    is_valid_token,
+                    slot_mapping,
+                    block_table,
+                    replay_start,
+                ) in self._groups
+            ],
+            dtype=np.int64,
+        )
+        # Every row holds addresses and strides of persistent per-group
+        # buffers, so the table only changes when a builder reallocates or
+        # the group count moves; the copy runs on change, not per step.
+        # _params_device is None only before the first upload, so its check
+        # changes nothing and only lets mypy narrow the launch slice below.
         if (
-            self._params_host is None
-            or self._params_host_rows is None
-            or self._params_device is None
-            or self._params_host.shape[0] < num_groups
-            or (self._params_copied is not None and not self._params_copied.query())
+            self._params_device is None
+            or self._params_last is None
+            or not np.array_equal(self._params_last, rows_np)
         ):
-            self._params_host = torch.empty(
-                num_groups, 8, dtype=torch.int64, pin_memory=True
+            if (
+                self._params_host is None
+                or self._params_host_rows is None
+                or self._params_device is None
+                or self._params_host.shape[0] < num_groups
+                or (self._params_copied is not None and not self._params_copied.query())
+            ):
+                self._params_host = torch.empty(
+                    num_groups, 8, dtype=torch.int64, pin_memory=True
+                )
+                self._params_host_rows = self._params_host.numpy()
+                self._params_device = torch.empty(
+                    num_groups, 8, dtype=torch.int64, device=self._device
+                )
+                self._params_copied = None
+            self._params_host_rows[:num_groups] = rows_np
+            self._params_device[:num_groups].copy_(
+                self._params_host[:num_groups], non_blocking=True
             )
-            self._params_host_rows = self._params_host.numpy()
-            self._params_device = torch.empty(
-                num_groups, 8, dtype=torch.int64, device=self._device
-            )
-            self._params_copied = None
-        self._params_host_rows[:num_groups] = rows
+            if self._params_copied is None:
+                self._params_copied = torch.cuda.Event()
+            self._params_copied.record()
+            self._params_last = rows_np
         params = self._params_device[:num_groups]
-        params.copy_(self._params_host[:num_groups], non_blocking=True)
-        if self._params_copied is None:
-            self._params_copied = torch.cuda.Event()
-        self._params_copied.record()
         _COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL(
             params,
             query_start_loc,
