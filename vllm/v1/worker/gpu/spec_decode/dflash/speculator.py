@@ -87,6 +87,24 @@ class DFlashSpeculator(DraftModelSpeculator):
                 "is the bonus token."
             )
         self.sample_from_anchor = False
+        if self.enable_adaptive_verification and dflash_config.get(
+            "use_thresh_head_two_model", False
+        ):
+            if not dflash_config.get("thresh_head_direct_len", False):
+                raise ValueError("AdaFlash requires thresh_head_direct_len=true")
+            block_size = getattr(
+                self.draft_model_config.hf_config, "block_size", self.num_query_per_req
+            )
+            if block_size != self.num_query_per_req:
+                raise ValueError(
+                    "AdaFlash requires num_speculative_tokens + 1 to match the "
+                    f"checkpoint block_size ({block_size})"
+                )
+            self.draft_token_lengths = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=device
+            )
+            self.use_acceptance_estimator = False
+            logger.info("Using AdaFlash length head with adaptive verification")
 
         # Context positions for the K/V precompute, populated by prepare_dflash_inputs.
         self.context_positions = torch.zeros(
@@ -354,6 +372,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
+        if self.draft_token_lengths is not None:
+            head = self.model.model.thresh_head_two_model
+            assert head is not None
+            block_hidden = last_hidden_states[: num_reqs * self.num_query_per_req].view(
+                num_reqs, self.num_query_per_req, -1
+            )
+            ratios = head(block_hidden).squeeze(-1)
+            # The trained verification length includes the anchor query.
+            self.draft_token_lengths[:num_reqs] = (
+                ratios * self.num_query_per_req
+            ).round().clamp(1, self.num_query_per_req).to(torch.int32) - 1
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
         # sample_pos is the predicted token's position P. Sampling keys a draw

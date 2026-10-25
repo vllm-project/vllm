@@ -578,7 +578,7 @@ class SpeculativeConfig:
 
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence, or from the trained length head in AdaFlash checkpoints."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:

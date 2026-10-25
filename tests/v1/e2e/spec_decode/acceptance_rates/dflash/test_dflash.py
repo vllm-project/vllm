@@ -7,9 +7,10 @@ import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from tests.utils import single_gpu_only
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
-from ...utils import compute_acceptance_len
+from ...utils import compute_acceptance_len, get_spec_decode_metric_value
 from ..utils import run_acceptance_length_eval
 
 
@@ -36,6 +37,58 @@ QWEN3_DFLASH = DFlashCorrectnessConfig(
     expected_accuracy=0.8,
     expected_acceptance_len=3.5,
 )
+
+
+@single_gpu_only
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
+    """Load the released head and verify real, optionally shortened drafts."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    with vllm_runner(
+        "Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "dflash",
+            "model": "AdaFlash/Qwen3-8B-AdaFlash",
+            "revision": "6d9b5c2fd6a0c7bab8436bbca67c380dcdfc547f",
+            "num_speculative_tokens": 15,
+            "enable_adaptive_verification": adaptive,
+        },
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        attention_config={"backend": "TRITON_ATTN"},
+        gpu_memory_utilization=0.7,
+        disable_log_stats=False,
+        compilation_config=CompilationConfig(
+            cudagraph_mode="FULL_DECODE_ONLY",
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32],
+        ),
+    ) as runner:
+        llm = runner.llm
+        prompt = llm.get_tokenizer().apply_chat_template(
+            [{"role": "user", "content": "What is 2 + 2? Answer briefly."}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        result = llm.generate([prompt], SamplingParams(temperature=0, max_tokens=32))
+        assert "4" in result[0].outputs[0].text
+        metrics = llm.get_metrics()
+        drafts = get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+        proposed = get_spec_decode_metric_value(
+            metrics, "vllm:spec_decode_num_draft_tokens"
+        )
+        accepted = get_spec_decode_metric_value(
+            metrics, "vllm:spec_decode_num_accepted_tokens"
+        )
+        assert drafts > 0 and accepted > 0
+        if adaptive:
+            assert 0 < proposed < 15 * drafts
+        else:
+            assert proposed == 15 * drafts
+
 
 QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
     model="nvidia/Qwen3.8-27B-NVFP4",

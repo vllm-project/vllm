@@ -2399,28 +2399,37 @@ def test_block_drafters_cap_requests_instead_of_draft_slots(
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
-    "spec_tokens,output_tokens,expected,expected_per_req",
+    "spec_tokens,output_tokens,expected,expected_per_req,verified",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1]), [[0, 0, 0, 1]]),  # perfect
-        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0]), [[0, 1, 0, 0]]),  # early mismatch
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1]), [[0, 0, 0, 1]], None),
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0]), [[0, 1, 0, 0]], None),
         (
             [[1, 2], [3]],
             [[1, 2, 5], [3, 4]],
             (2, 3, 3, [2, 1]),
             [[0, 0, 1], [0, 1, 0]],
+            None,
         ),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1, 1, [1]), [[0, 1]]),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0]), [[0, 0]]),  # empty sequence -> empty accumulator
+        ([[1]], [[1, 2]], (1, 1, 1, [1]), [[0, 1]], None),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0]), [[0, 0]], None),  # empty sequence
         (
             [[1, 2, 3], [4, 5, 6]],
             [[1, 2, 7], [4, 8]],
             (2, 6, 3, [2, 1, 0]),
             [[0, 0, 1, 0], [0, 1, 0, 0]],
+            None,
         ),  # multiple mismatches
+        (
+            [[1, 2, 3], [4, 5, 6]],
+            [[1, 7], [8]],
+            (1, 2, 1, [1, 0, 0]),
+            [[0, 1, 0, 0], [1, 0, 0, 0]],
+            [2, 0],
+        ),  # A zero-length adaptive prefix must preserve earlier batch stats.
     ],
 )
 def test_schedule_spec_decoding_stats(
-    spec_tokens, output_tokens, expected, expected_per_req
+    spec_tokens, output_tokens, expected, expected_per_req, verified
 ):
     """Test scheduling behavior with speculative decoding.
 
@@ -2502,6 +2511,7 @@ def test_schedule_spec_decoding_stats(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        num_verified_draft_tokens=verified,
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
@@ -2527,11 +2537,15 @@ def test_schedule_spec_decoding_stats(
     for i, req_id in enumerate(req_ids):
         payload = scheduler.requests[req_id].spec_decode_metrics.to_dict()
         assert payload["acceptance_histogram"] == expected_per_req[i]
-        assert payload["num_draft_tokens"] == len(spec_tokens[i])
+        assert payload["num_draft_tokens"] == (
+            len(spec_tokens[i]) if verified is None else verified[i]
+        )
         assert "per_step_accepted" not in payload  # summary level
 
 
-def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
+def _run_spec_verify_steps(
+    scheduler, rounds, num_invalid_per_round=None, num_verified_per_round=None
+):
     """Drive prefill + one draft/verify step per round for a single request.
 
     ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
@@ -2561,8 +2575,33 @@ def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
         output = scheduler.schedule()
         if num_invalid_per_round is not None and num_invalid_per_round[i]:
             output.num_invalid_spec_tokens = {rid: num_invalid_per_round[i]}
-        scheduler.update_from_output(output, _mk_output([out]))
+        runner_output = _mk_output([out])
+        if num_verified_per_round is not None:
+            runner_output.num_verified_draft_tokens = [num_verified_per_round[i]]
+        scheduler.update_from_output(output, runner_output)
     return req
+
+
+@pytest.mark.parametrize("verified,proposed", [(0, 0), (1, 1), (3, 2)])
+def test_adaptive_verified_metrics_preserve_scheduled_placeholder_rollback(
+    verified, proposed
+):
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        per_request_spec_decode_metrics="detailed",
+    )
+    sampled = [1, 9] if verified else [9]
+    req = _run_spec_verify_steps(
+        scheduler,
+        [([1, 2, 3], sampled)],
+        num_invalid_per_round=[1],
+        num_verified_per_round=[verified],
+    )
+    metrics = req.spec_decode_metrics.to_dict()
+    assert metrics["num_draft_tokens"] == proposed
+    assert metrics["per_step_drafted"] == [proposed]
+    assert metrics["num_accepted_draft_tokens"] == len(sampled) - 1
+    assert req.num_computed_tokens == req.num_tokens - 1
 
 
 def test_per_request_spec_decode_detailed_records_per_step():

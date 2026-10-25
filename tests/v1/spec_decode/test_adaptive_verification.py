@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -16,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def make_manager(
@@ -35,6 +37,81 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+@pytest.mark.parametrize(
+    ("max_logits", "scheduled", "expected"),
+    [
+        (128, [15, 15, 15], [0, 5, 15]),
+        (128, [15, 3, 15], [0, 3, 15]),
+        (7, [15, 15, 15], [0, 4, 0]),
+        (2, [15, 15, 15], [0, 0, 0]),
+    ],
+)
+def test_direct_lengths_reuse_compaction_with_exact_reordered_offsets(
+    max_logits, scheduled, expected
+):
+    """Head lengths must respect scheduler capacity and sampler chunk bounds."""
+    device = torch.device("cuda")
+    states = RequestState(3, 64, 64, 15, 32, device)
+    req_ids = ["short", "medium", "full"]
+    for req_id in req_ids:
+        states.add_request(req_id, 1, [1], 1, 32)
+    query_start_loc = torch.zeros(4, dtype=torch.int32, device=device)
+    manager = AdaptiveVerificationManager(
+        states, query_start_loc, 1, max_logits, use_draft_lengths=True
+    )
+    slots = torch.tensor([states.req_id_to_index[r] for r in req_ids], device=device)
+    manager.record_draft_lengths(
+        torch.tensor([0, 5, 15], dtype=torch.int32, device=device), slots
+    )
+    num_tokens = manager.get_num_tokens(
+        dict(zip(req_ids, [n + 1 for n in scheduled], strict=True)),
+        dict(zip(req_ids, [list(range(n)) for n in scheduled], strict=True)),
+    )
+    compacted, _ = manager.compact_batch(
+        np.array(scheduled, dtype=np.int32),
+        np.array(scheduled, dtype=np.int32) + 1,
+        np.cumsum([0] + [n + 1 for n in scheduled], dtype=np.int32),
+    )
+    assert int(compacted.sum()) == num_tokens == 3 + sum(expected)
+    order = [2, 0, 1]
+    logits, queries, budget = manager.reallocate_drafts(
+        [req_ids[i] for i in order], slots[order]
+    )
+    offsets = np.cumsum([0] + [expected[i] + 1 for i in order])
+    np.testing.assert_array_equal(logits.cpu().numpy(), offsets)
+    np.testing.assert_array_equal(queries.cpu().numpy(), offsets)
+    assert budget == sum(expected)
+
+
+def test_direct_lengths_reset_reused_request_slots_after_pending_copy():
+    device = torch.device("cuda")
+    states = RequestState(1, 64, 64, 15, 32, device)
+    states.add_request("old", 1, [1], 1, 32)
+    manager = AdaptiveVerificationManager(
+        states,
+        torch.zeros(2, dtype=torch.int32, device=device),
+        1,
+        64,
+        use_draft_lengths=True,
+    )
+    slot = states.req_id_to_index["old"]
+    mapping = torch.tensor([slot], device=device)
+    manager.record_draft_lengths(
+        torch.tensor([0], dtype=torch.int32, device=device), mapping
+    )
+    states.remove_request("old")
+    states.add_request("new", 1, [1], 1, 32)
+    manager.add_request(states.req_id_to_index["new"])
+    assert manager.get_num_tokens({"new": 16}, {"new": list(range(15))}) == 16
+    manager.record_draft_lengths(
+        torch.tensor([2], dtype=torch.int32, device=device), mapping
+    )
+    assert manager.get_num_tokens({"new": 16}, {"new": list(range(15))}) == 3
+    logits, queries, budget = manager.reallocate_drafts(["new"], mapping)
+    assert logits.tolist() == queries.tolist() == [0, 3]
+    assert budget == 2
 
 
 @pytest.mark.parametrize(

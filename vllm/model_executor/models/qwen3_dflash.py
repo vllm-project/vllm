@@ -59,6 +59,21 @@ _SLIDING_ATTENTION = "sliding_attention"
 _DRAFT_LAYER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.])layers\.(\d+)")
 
 
+class AdaFlashLengthHead(nn.Module):
+    """Predict a verification-length ratio from a complete draft block."""
+
+    def __init__(self, hidden_size: int, bottleneck_dim: int = 256):
+        super().__init__()
+        self.down = nn.Linear(2 * hidden_size, bottleneck_dim)
+        self.res = nn.Sequential(nn.Linear(bottleneck_dim, bottleneck_dim), nn.SiLU())
+        self.out = nn.Linear(bottleneck_dim, 1)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        features = torch.cat((hidden_states.mean(dim=1), hidden_states[:, -1]), dim=-1)
+        hidden = F.silu(self.down(features))
+        return torch.sigmoid(self.out(hidden + self.res(hidden)))
+
+
 def _add_global_draft_layer_exclusions(
     quant_config: QuantizationConfig | None,
     start_layer_id: int,
@@ -509,6 +524,12 @@ class DFlashQwen3Model(nn.Module):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+        self.thresh_head_two_model: AdaFlashLengthHead | None = None
+        if drafter_config.get("use_thresh_head_two_model", False):
+            self.thresh_head_two_model = AdaFlashLengthHead(
+                self.config.hidden_size,
+                drafter_config.get("thresh_head_bottleneck_dim", 256),
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
