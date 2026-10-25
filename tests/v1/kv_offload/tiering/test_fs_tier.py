@@ -972,7 +972,9 @@ def _canonical_gqa_spec(tp_size: int, layout: str = "LBNHC"):
         tensor_parallel_size=tp_size,
         extra_config={"canonical_layout": True, "cpu_bytes_to_use": 1 << 20},
     )
-    config.model_config.get_total_num_kv_heads.return_value = 1
+    get_kv_heads = config.model_config.get_total_num_kv_heads
+    assert isinstance(get_kv_heads, MagicMock)
+    get_kv_heads.return_value = 1
     config.cache_config.kv_cache_layout = layout
     config.parallel_config.distributed_executor_backend = "mp"
     # Larger than the platform alignment, so padding cannot hide duplicate heads.
