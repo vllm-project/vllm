@@ -1283,6 +1283,8 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
 def test_deep_gemm_mega_moe_output_does_not_depend_on_buffer_size(dist_init):
     """A sequence-parallel caller sizes the symmetric buffer for its shard only;
     outputs must match a buffer sized for the whole batch bit for bit."""
+    # DeepGEMM rounds the token capacity up to a multiple of 1920.
+    shard_tokens = 1920
     torch.manual_seed(0)
     with torch.device("cuda"):
         full, shard = (
@@ -1297,7 +1299,7 @@ def test_deep_gemm_mega_moe_output_does_not_depend_on_buffer_size(dist_init):
                 max_num_tokens=max_num_tokens,
                 prefix=f"model.layers.0.buffer_{max_num_tokens}.experts",
             )
-            for max_num_tokens in (8 * NUM_TOKENS, NUM_TOKENS)
+            for max_num_tokens in (8 * shard_tokens, shard_tokens)
         )
     for expert_id in range(NUM_EXPERTS):
         for shard_id, param, rows, cols in (
@@ -1318,9 +1320,12 @@ def test_deep_gemm_mega_moe_output_does_not_depend_on_buffer_size(dist_init):
                     return_success=True,
                 )
     shard.load_state_dict(full.state_dict())
-    assert shard.get_symm_buffer() is not full.get_symm_buffer()
+    assert (
+        shard.get_symm_buffer().num_max_tokens_per_rank
+        < full.get_symm_buffer().num_max_tokens_per_rank
+    )
 
-    for num_tokens in (1, 7, NUM_TOKENS - 1, NUM_TOKENS):
+    for num_tokens in (1, 7, NUM_TOKENS, 500, shard_tokens):
         hidden_states = torch.randn(num_tokens, HIDDEN, device="cuda").bfloat16()
         scores = torch.randn(num_tokens, NUM_EXPERTS, device="cuda")
         topk_weights, topk_ids = torch.topk(scores.softmax(-1), TOP_K, dim=-1)
@@ -1328,9 +1333,9 @@ def test_deep_gemm_mega_moe_output_does_not_depend_on_buffer_size(dist_init):
         assert torch.isfinite(expected.float()).all()
         assert torch.equal(shard(hidden_states, topk_weights, topk_ids), expected)
 
-    with pytest.raises(ValueError, match=f"sized for {NUM_TOKENS}"):
+    with pytest.raises(ValueError, match=f"sized for {shard_tokens}"):
         shard(
-            torch.zeros(NUM_TOKENS + 1, HIDDEN, device="cuda", dtype=torch.bfloat16),
-            topk_weights[:1].expand(NUM_TOKENS + 1, -1),
-            topk_ids[:1].expand(NUM_TOKENS + 1, -1),
+            torch.zeros(shard_tokens + 1, HIDDEN, device="cuda", dtype=torch.bfloat16),
+            topk_weights[:1].expand(shard_tokens + 1, -1),
+            topk_ids[:1].expand(shard_tokens + 1, -1),
         )
