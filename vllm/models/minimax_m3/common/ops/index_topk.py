@@ -19,7 +19,6 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
-from vllm.utils.platform_utils import num_compute_units
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
@@ -103,8 +102,6 @@ def _index_block_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
     USE_SPLIT_K: tl.constexpr,
-    K_TP: tl.constexpr = 1,
-    K_RANK: tl.constexpr = 0,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -138,7 +135,7 @@ def _index_block_score_kernel(
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
-    off_k = tl.arange(0, BLOCK_SIZE_K // K_TP)
+    off_k = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, head_dim)
     # Block table row for this request.
     bt_row = block_table_ptr + pid_b * stride_bt_b
@@ -158,7 +155,7 @@ def _index_block_score_kernel(
     for blk in tl.range(block_start, block_end):
         i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
-        pos = i + off_k * K_TP + K_RANK
+        pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
         # we don't need masked load for K, because KV cache ensures
         # allocation is multiple of BLOCK_SIZE_K.
@@ -684,10 +681,6 @@ def minimax_m3_index_score(
     max_query_len: int,
     max_seq_len: int,
     num_kv_heads: int,
-    *,
-    rank: int = 0,
-    tp: int = 1,
-    score_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute per-token index scores for each visible sparse block.
 
@@ -703,19 +696,11 @@ def minimax_m3_index_score(
 
     # Keep score strides 16-divisible to avoid Triton recompiles.
     score_block_stride = round_up(max_block, 16)
-    assert tp in (1, 2, 4) and 0 <= rank < tp
-    assert index_kv_cache.shape[1] == SPARSE_BLOCK_SIZE // tp
-    if score_out is None:
-        score_out = torch.empty(
-            (num_idx_heads, total_q, score_block_stride),
-            dtype=torch.float32,
-            device=idx_q.device,
-        )
-    assert score_out.shape[:2] == (num_idx_heads, total_q)
-    assert score_out.shape[2] >= max_block
-    score = score_out
-    if tp > 1:
-        score.fill_(float("-inf"))
+    score = torch.empty(
+        (num_idx_heads, total_q, score_block_stride),
+        dtype=torch.float32,
+        device=idx_q.device,
+    )
     BLOCK_SIZE_Q = 64
     n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
     # Splits write disjoint score columns, preserving the unsplit result.
@@ -731,15 +716,7 @@ def minimax_m3_index_score(
         1,
         min(max_block, score_target_grid // max(1, n_q_tiles * batch * num_idx_heads)),
     )
-    if tp > 1:
-        split_k = min(
-            max_block,
-            triton.cdiv(
-                2 * num_compute_units(idx_q.device.index or 0),
-                max(1, n_q_tiles * batch * num_idx_heads),
-            ),
-        )
-    elif not (
+    if not (
         current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
     ):
         split_k = 1
@@ -767,8 +744,6 @@ def minimax_m3_index_score(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_SPLIT_K=split_k > 1,
-        K_TP=tp,
-        K_RANK=rank,
     )
     return score
 
