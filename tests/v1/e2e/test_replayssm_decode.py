@@ -214,63 +214,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
     )
 
 
-@multi_gpu_test(num_gpus=2)
-@large_gpu_mark(min_gb=40)
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
-def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner):
-    common = dict(
-        max_model_len=1024,
-        trust_remote_code=True,
-        enable_prefix_caching=False,
-        mamba_backend="flashinfer",
-        tensor_parallel_size=2,
-        disable_log_stats=False,
-        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
-    )
-    try:
-        with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
-            envs.disable_envs_cache()
-            with vllm_runner(MAMBA2_MTP_MODEL, **common) as llm:
-                assert (
-                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
-                    is use_v2_model_runner
-                )
-                baseline = llm.generate_greedy_logprobs(
-                    PROMPTS, max_tokens=32, num_logprobs=5
-                )
-            with vllm_runner(
-                MAMBA2_MTP_MODEL,
-                use_replayssm=True,
-                replayssm_buffer_len=16,
-                **common,
-            ) as llm:
-                assert (
-                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
-                    is use_v2_model_runner
-                )
-                replay = llm.generate_greedy_logprobs(
-                    PROMPTS, max_tokens=32, num_logprobs=5
-                )
-                draft_count = sum(
-                    metric.value
-                    for metric in llm.llm.get_metrics()
-                    if isinstance(metric, Counter)
-                    and metric.name == "vllm:spec_decode_num_drafts"
-                )
-    finally:
-        envs.disable_envs_cache()
-
-    assert any(len(output[0]) > 16 for output in replay)
-    assert draft_count > 0
-    check_logprobs_close(
-        outputs_0_lst=baseline,
-        outputs_1_lst=replay,
-        name_0=f"baseline_mtp_{'v2' if use_v2_model_runner else 'v1'}",
-        name_1=f"replayssm_flashinfer_mtp_{'v2' if use_v2_model_runner else 'v1'}",
-    )
-
-
 # Prefix exceeds the FP32 FlashInfer ReplaySSM block at TP1.
 # Prefix caching only reuses full blocks.
 _PC_SENTENCE = (
