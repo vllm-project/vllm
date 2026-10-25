@@ -2172,3 +2172,64 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+def test_pp_worker_owning_no_uniform_group_layers_gets_no_foreign_tensors():
+    """A PP rank that owns none of a UniformType group's layers must not be
+    handed tensors naming other ranks' layers.
+
+    The worker-side projection keeps the global (unfiltered)
+    UniformTypeKVCacheSpecs on a group when the rank owns none of its
+    layers; the planner must then emit no tensors for that group, or
+    allocate_kv_cache's next()-based group lookup raises StopIteration
+    (observed on a PP2 hybrid-KV deployment where one rank owned none of
+    a group's layers and died at final KV allocation).
+    """
+    spec = new_kv_cache_spec()
+    shared = UniformTypeKVCacheSpecs(
+        block_size=spec.block_size,
+        kv_cache_specs={"layer1": spec, "layer2": spec},
+    )
+    groups = [
+        KVCacheGroupSpec(["layer1", "layer2"], shared),
+        KVCacheGroupSpec(["layer3"], spec),
+    ]
+    # This worker owns layer3 only: the UniformType group has none of its
+    # layers, so the projection leaves the global spec unfiltered.
+    worker_spec = {"layer3": spec}
+    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+        groups, worker_spec
+    )
+    assert projected[0].layer_names == []
+    assert set(projected[0].kv_cache_spec.kv_cache_specs) == {"layer1", "layer2"}
+
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128),
+            max_model_len=16,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=1,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, projected, available_memory=2**30
+    )
+    owned = {"layer3"}
+    for tensor in cache_config.kv_cache_tensors:
+        assert set(tensor.layers) <= owned, (
+            "planner emitted tensors for layers the worker does not own: "
+            f"{tensor.layers}"
+        )
