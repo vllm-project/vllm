@@ -894,7 +894,7 @@ def test_models_fse_init(
 
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
             monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
-        # The gate allows fusion only at TP4/TP8 on gfx950, and this test
+        # The gate allows fusion only at TP2/TP4/TP8 on gfx950, and this test
         # runs at TP1; the gate has its own test.
         monkeypatch.setattr(
             glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
@@ -984,7 +984,8 @@ def test_models_fse_init(
     [
         ("tensor_parallel_size", 4, None),
         ("tensor_parallel_size", 8, None),
-        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("tensor_parallel_size", 2, None),
+        ("tensor_parallel_size", 1, "tensor_parallel_size is 1"),
         ("data_parallel_size", 2, "data_parallel_size is 2"),
         ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
         ("enable_expert_parallel", True, "expert parallelism is enabled"),
