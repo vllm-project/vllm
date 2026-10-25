@@ -105,11 +105,7 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 class MiniMaxM3IndexerMSAPrefillChunk:
     start: int
     end: int
-    max_seq_len: int
     block_table: torch.Tensor
-    cu_seqlens_q: torch.Tensor
-    seq_lens: torch.Tensor
-    prefix_lens: torch.Tensor
     plan: dict | None = None
 
 
@@ -450,11 +446,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                         MiniMaxM3IndexerMSAPrefillChunk(
                             start=start,
                             end=end,
-                            max_seq_len=max_seq_len,
                             block_table=block_table[lo:hi],
-                            cu_seqlens_q=cu_q,
-                            seq_lens=k_lens,
-                            prefix_lens=prefixes,
                             plan=chunk_plan,
                         )
                     )
