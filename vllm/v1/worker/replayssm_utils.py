@@ -430,13 +430,16 @@ class _ReplaySSMGroupContext:
             materialize_prefixes=cache_mode == "align",
         )
 
-    def materialize(self, rand_seed: torch.Tensor | None = None) -> None:
+    def materialize(self) -> None:
         """Publish the canonical prefix snapshots prepared by ``postprocess``."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
+        rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
-            assert rand_seed is not None
+            rand_seed = torch.randint(
+                0, 2**32, (1,), device=self.src_slots.device, dtype=torch.int64
+            )
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
         _load_replayssm_materialize()(
             *self.materialize_tables,
@@ -508,24 +511,6 @@ class ReplaySSMModelContext:
             dtype=torch.int32,
             device=first.src_slots.device,
         )
-        self.rand_seeds: torch.Tensor | None = None
-        self.group_seeds: list[torch.Tensor | None] = [None] * len(self.groups)
-        if first.materialize_prefixes:
-            stochastic_groups = [
-                i
-                for i, group in enumerate(self.groups)
-                if group.mixers[0].mamba_config.enable_stochastic_rounding
-            ]
-            if stochastic_groups:
-                self.rand_seeds = torch.empty(
-                    len(stochastic_groups),
-                    dtype=torch.int64,
-                    device=first.src_slots.device,
-                )
-                for seed_idx, group_idx in enumerate(stochastic_groups):
-                    self.group_seeds[group_idx] = self.rand_seeds[
-                        seed_idx : seed_idx + 1
-                    ]
 
     @classmethod
     def create(
@@ -622,10 +607,8 @@ class ReplaySSMModelContext:
             MAX_NUM_REQS=first.max_num_reqs,
             BLOCK_SIZE=triton.next_power_of_2(first.max_num_reqs),
         )
-        if self.rand_seeds is not None:
-            self.rand_seeds.random_(0, 2**32)
-        for group, rand_seed in zip(self.groups, self.group_seeds):
-            group.materialize(rand_seed)
+        for group in self.groups:
+            group.materialize()
 
 
 def _cuda_i64_ptrs(tensors: list[torch.Tensor]) -> torch.Tensor:
