@@ -46,26 +46,6 @@ KNOWN_DEFECTS["mrv2-batch-order"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["prefill-features"] = Defect(
-    "AITER varlen prefill/extend drops the logits soft cap, the head-128 "
-    "asm kernel ignores sinks (and extend double counts them across "
-    "context chunks), and ALiBi positions restart in each context chunk.",
-    (
-        _FEATURE + "[*softcap-prefill]",
-        _FEATURE + "[*softcap-extend]",
-        _FEATURE + "[*softcap-mixed]",
-        _FEATURE + "[*-alibi-extend]",
-        _FEATURE + "[*-alibi-mixed]",
-        _FEATURE + "[d128-*-sinks-prefill]",
-        _FEATURE + "[d128-*-sinks-extend]",
-        _FEATURE + "[d128-*-sinks-mixed]",
-        _FEATURE + "[d256-auto-sinks-extend]",
-        _FEATURE + "[d64-auto-sinks-extend]",
-        _DISPATCH + "test_logits_soft_cap_every_phase[prefill]",
-        _DISPATCH + "test_logits_soft_cap_every_phase[extend]",
-        _DISPATCH + "test_logits_soft_cap_every_phase[extend-swa]",
-    ),
-)
 
 KNOWN_DEFECTS["non-causal"] = Defect(
     "Non-causal extend runs with causal=True, and non-causal decode with an "
@@ -135,3 +115,17 @@ def mark_known_defects(items: list[pytest.Item]) -> None:
                 item.add_marker(pytest.mark.xfail(strict=True, reason=defect.reason))
                 item.stash[_MARKED] = True
                 break
+
+
+# Defects outside this backend.
+
+KNOWN_DEFECTS["aiter-gluon-buffer-offset"] = Defect(
+    "AITER's gfx950 Gluon unified_attention enables 32-bit buffer loads when "
+    "k.nelement() * element_size fits in int32, but vLLM's K and V are "
+    "interleaved views of one cache, so the K view spans twice that. With a "
+    "1-2 GiB K view, blocks past the 2 GiB offset are read wrong.",
+    (
+        _FA + "test_correctness.py::test_full_matrix"
+        "[gpt-oss-120b-tp1-h64kv8d64-sinks-extend-8192-128-*-auto]",
+    ),
+)
