@@ -765,8 +765,15 @@ def split_decodes_prefills_and_extends(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
 ) -> tuple[int, int, int, int, int, int]:
-    """Assuming a reordered batch, finds the boundary between prefill and decode
-    requests.
+    """Splits a batch whose decode requests lead into three contiguous regions:
+
+    - decodes: the leading requests with query_len <= decode_threshold.
+    - prefills: the trailing run of requests without any computed context.
+    - extends: everything in between.
+
+    Requests with and without context may be interleaved after the decodes
+    (MRV2 does not order them), so the extend region may also contain
+    requests without context; the extend path handles them correctly.
 
     Args:
         common_attn_metadata: CommonAttentionMetadata object containing the
@@ -790,39 +797,29 @@ def split_decodes_prefills_and_extends(
     if max_query_len <= decode_threshold:
         return num_reqs, 0, 0, num_tokens, 0, 0
 
-    # Upper bound is exact for prefill rows; decode rows still satisfy
-    # seq_len > query_len under the optimistic bound, so `seq_lens ==
-    # query_lens` identifies prefills correctly either way.
+    # Upper bound is exact for rows without context; rows with context still
+    # satisfy seq_len > query_len under the optimistic bound, so
+    # `seq_lens > query_lens` identifies context correctly either way.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
     seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill_or_extend = query_lens > decode_threshold
-    is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
-    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
-    num_decodes = first_extend
-    num_decode_tokens = query_start_loc[first_extend].item()
-    if not torch.any(is_prefill_or_extend):
-        return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
+    query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+    # Only the leading run: MRV1 places short new prompts at the end.
+    num_decodes = int((query_lens <= decode_threshold).int().argmin().item())
 
-    num_prefills_or_extends = num_reqs - num_decodes
-    num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
-    if not torch.any(is_prefill):
-        return (
-            num_decodes,
-            num_prefills_or_extends,
-            0,
-            num_decode_tokens,
-            num_prefill_or_extend_tokens,
-            0,
-        )
+    has_context = seq_lens[num_decodes:num_reqs] > query_lens[num_decodes:]
+    if bool(has_context.any()):
+        last_with_context = len(has_context) - 1
+        last_with_context -= int(has_context.flip(0).int().argmax().item())
+        first_prefill = num_decodes + last_with_context + 1
+    else:
+        first_prefill = num_decodes
 
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
-
-    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    num_decode_tokens = int(query_start_loc[num_decodes].item())
+    num_prefill_tokens = num_tokens - int(query_start_loc[first_prefill].item())
+    num_extend_tokens = num_tokens - num_decode_tokens - num_prefill_tokens
     return (
         num_decodes,
         num_extends,
