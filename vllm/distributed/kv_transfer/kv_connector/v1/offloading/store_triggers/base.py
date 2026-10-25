@@ -100,6 +100,7 @@ class StoreTriggerHandler(ABC):
             is_store=True,
             deferred_fence_block_ids=deferred_fence_block_ids,
             fenced_block_ids=fenced_block_ids,
+            trigger=self.trigger,
         )
         return job, job_status
 
