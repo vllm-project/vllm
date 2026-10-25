@@ -69,6 +69,7 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.admission import BackpressureAdmissionPolicy
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     SecondaryTierManager,
@@ -304,6 +305,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 labelnames=(TIER_LABEL,),
             )
         )
+        metrics.update(BackpressureAdmissionPolicy.build_metric_definitions())
 
         return metrics
 
@@ -421,10 +423,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
                 # secondary tier managers and need no additional workers here.
+                # The backpressure policy needs the constructed tier instances.
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
                     tier_poll_interval_s=self.tier_poll_interval_s,
+                    admission_policy=BackpressureAdmissionPolicy(secondary_tiers),
                 )
                 self._manager = tiering_manager
             except Exception:

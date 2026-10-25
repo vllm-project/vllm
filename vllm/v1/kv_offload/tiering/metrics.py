@@ -12,13 +12,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
-    SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
 )
 
 TierLabel = tuple[str]
 PRIMARY_TIER_LABEL: TierLabel = ("0:primary",)
+
+
+def make_tier_label(tier_idx: int, tier_type: str) -> TierLabel:
+    return (f"{tier_idx + 1}:{tier_type}",)
 
 
 class _JobMetadataLike(Protocol):
@@ -60,7 +63,7 @@ class TieringMetricsTracker:
 
     @functools.cache  # noqa: B019
     def tier_label(self, tier_idx: int) -> TierLabel:
-        return (f"{tier_idx + 1}:{self._tier_types[tier_idx]}",)
+        return make_tier_label(tier_idx, self._tier_types[tier_idx])
 
     @property
     def primary_tier_label(self) -> TierLabel:
@@ -132,36 +135,6 @@ class TieringMetricsTracker:
         self._stats.increase_counter(
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         )
-
-    def record_backpressure(
-        self,
-        tiers: list[SecondaryTierManager],
-    ) -> None:
-        for i, tier in enumerate(tiers):
-            detector = tier.bp_detector
-            if detector is None:
-                continue
-            label = self.tier_label(i)
-            ema = detector.stats.get("store_latency_ema")
-            if ema is not None:
-                self._stats.set_gauge(
-                    TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA,
-                    ema,
-                    labelvalues=label,
-                )
-            stores_dropped, blocks_dropped = detector.policy.pop_stores_dropped()
-            if stores_dropped > 0:
-                self._stats.increase_counter(
-                    TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
-                    stores_dropped,
-                    labelvalues=label,
-                )
-            if blocks_dropped > 0:
-                self._stats.increase_counter(
-                    TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED,
-                    blocks_dropped,
-                    labelvalues=label,
-                )
 
     def take_stats(self) -> OffloadingConnectorStats | None:
         active_transfer_stats = OffloadingConnectorStats()

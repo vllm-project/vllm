@@ -15,6 +15,10 @@ class BackpressurePolicy(ABC):
     @abstractmethod
     def on_store_skipped(self, num_blocks: int) -> None: ...
 
+    def on_store_admitted(self) -> None:
+        """Record an admitted store if the policy needs admission state."""
+        return
+
     @abstractmethod
     def pop_stores_dropped(self) -> tuple[int, int]:
         """Return and reset (stores_dropped, blocks_dropped)."""
@@ -110,6 +114,13 @@ class ThrottledDropPolicy(DropAccountingPolicy):
             return False
         return True
 
+    def on_store_admitted(self) -> None:
+        self._call_count += 1
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        super().on_store_skipped(num_blocks)
+        self._call_count += 1
+
     def reset(self) -> None:
         """Clear the drop accumulator and dropped store and block counts."""
         super().reset()
@@ -152,11 +163,24 @@ class BackpressureDetector(ABC):
         self.on_store_completed(elapsed, num_bytes)
 
     def should_store(self, num_blocks: int) -> bool:
-        """Check policy and record skip if rejected."""
+        """Check policy and record the result."""
         if not self._policy.should_store(self):
             self._policy.on_store_skipped(num_blocks)
             return False
+        self._policy.on_store_admitted()
         return True
+
+    def should_store_without_side_effects(self) -> bool:
+        """Evaluate admission without recording policy or cooldown state."""
+        return self._policy.should_store(self)
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        """Record a rejected store and advance any detector state."""
+        self._policy.on_store_skipped(num_blocks)
+
+    def on_store_admitted(self) -> None:
+        """Record an admitted store and advance any detector state."""
+        self._policy.on_store_admitted()
 
     @classmethod
     def default_config(
@@ -366,6 +390,39 @@ class EMABackpressureDetector(BackpressureDetector):
                 self._policy.on_store_skipped(num_blocks)
                 return False
         return super().should_store(num_blocks)
+
+    def should_store_without_side_effects(self) -> bool:
+        under_pressure = self.is_under_pressure()
+        if self.is_healthy():
+            return True
+        in_cooldown = (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        )
+        if in_cooldown and (self._cooldown_count + 1) % 2 == 0:
+            return False
+        return self._policy.should_store(self)
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        under_pressure = self.is_under_pressure()
+        if (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        ):
+            self._cooldown_count += 1
+        super().on_store_skipped(num_blocks)
+
+    def on_store_admitted(self) -> None:
+        under_pressure = self.is_under_pressure()
+        if (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        ):
+            self._cooldown_count += 1
+        super().on_store_admitted()
 
     def reset(self) -> None:
         self._ema = 0.0
