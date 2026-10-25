@@ -50,6 +50,7 @@ class WheelFileInfo:
     abi_tag: str
     platform_tag: str
     variant: str | None
+    is_default: bool
     filename: str
     # Absolute URL for files hosted elsewhere (see --external-links)
     url: str | None = None
@@ -100,6 +101,10 @@ def parse_from_filename(file: str) -> WheelFileInfo:
                 version = version_part
             # Otherwise keep the full version string (variant stays None)
 
+    is_default = variant is None
+    if is_default and platform_tag.startswith("macosx_"):
+        variant = "cpu"
+
     return WheelFileInfo(
         package_name=package_name,
         version=version,
@@ -108,6 +113,7 @@ def parse_from_filename(file: str) -> WheelFileInfo:
         abi_tag=abi_tag,
         platform_tag=platform_tag,
         variant=variant,
+        is_default=is_default,
         filename=file,
     )
 
@@ -129,6 +135,7 @@ def parse_external_url(url: str) -> WheelFileInfo:
             abi_tag="none",
             platform_tag="any",
             variant=None,
+            is_default=True,
             filename=filename,
         )
     info.url = url
@@ -167,6 +174,7 @@ def generate_package_index_and_metadata(
         file_meta = asdict(file)
         if file_meta["url"] is None:
             del file_meta["url"]
+        del file_meta["is_default"]
         file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
     index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
@@ -179,7 +187,7 @@ def generate_index_and_metadata(
     wheel_base_dir: Path,
     index_base_dir: Path,
     default_variant: str | None = None,
-    alias_to_default: str | None = None,
+    fallback_variant: str | None = None,
     comment: str = "",
     external_urls: list[str] | None = None,
 ):
@@ -190,7 +198,7 @@ def generate_index_and_metadata(
         wheel_base_dir (Path): Base directory for wheel files.
         index_base_dir (Path): Base directory to store index files.
         default_variant (str | None): The default variant name, if any.
-        alias_to_default (str | None): Alias variant name for the default variant, if any.
+        fallback_variant (str | None): Index variant for wheels whose variant could not be inferred.
         external_urls (list[str] | None): Absolute URLs of files hosted on another index,
             listed in the generated indices without being copied.
         comment (str | None): Optional comment to include in the generated HTML files.
@@ -203,8 +211,8 @@ def generate_index_and_metadata(
     is purely a copy of the corresponding variant index, with only the links adjusted.
     Otherwise, all wheels without variant suffixes are treated as the default variant.
 
-    If `alias_to_default` is provided, an additional alias subdirectory is created, it has the same content
-    as the default variant index, but the links are adjusted accordingly.
+    Wheels without variant suffixes have `is_default=True`; macOS wheels also infer variant cpu.
+    If `fallback_variant` is provided, wheels with no inferred variant are also listed in that index.
 
     Index directory structure:
         index_base_dir/ (hosted at wheels.vllm.ai/{nightly,$commit,$version}/)
@@ -275,15 +283,18 @@ def generate_index_and_metadata(
                 file.variant.startswith("rocm") and file.variant != rocm_variant
             ):
                 file.variant = rocm_variant
+                file.is_default = False
                 print(f"Inherited variant '{rocm_variant}' for {file.filename}")
 
     # Group by variant
     variant_to_files: dict[str, list[WheelFileInfo]] = {}
     for file in parsed_files:
-        variant = file.variant or "default"
-        if variant not in variant_to_files:
-            variant_to_files[variant] = []
-        variant_to_files[variant].append(file)
+        if file.variant is not None:
+            variant_to_files.setdefault(file.variant, []).append(file)
+        if file.is_default:
+            variant_to_files.setdefault("default", []).append(file)
+        if file.variant is None and fallback_variant:
+            variant_to_files.setdefault(fallback_variant, []).append(file)
 
     print(f"Found variants: {list(variant_to_files.keys())}")
 
@@ -297,20 +308,6 @@ def generate_index_and_metadata(
             raise ValueError(
                 f"Default variant '{default_variant}' not found among wheel files."
             )
-
-    if alias_to_default:
-        if "default" not in variant_to_files:
-            # e.g. only some wheels are uploaded to S3 currently
-            print(
-                "[WARN] Alias to default variant specified, but no default variant found."
-            )
-        elif alias_to_default in variant_to_files:
-            raise ValueError(
-                f"Alias variant name '{alias_to_default}' already exists among wheel files."
-            )
-        else:
-            variant_to_files[alias_to_default] = variant_to_files["default"].copy()
-            print(f"Alias variant '{alias_to_default}' created for default variant.")
 
     # Generate comment in HTML header
     comment_str = f" ({comment})" if comment else ""
@@ -367,7 +364,7 @@ if __name__ == "__main__":
         --wheel-dir <wheel_directory> : directory containing wheel files (default to be same as `version`)
         --current-objects <path_to_json> : path to JSON file containing current S3 objects listing in this version directory
         --output-dir <output_directory> : directory to store generated index files
-        --alias-to-default <alias_variant_name> : (optional) alias variant name for the default variant
+        --fallback-variant <variant> : (optional) additional index for wheels with no inferred variant
         --comment <comment_string> : (optional) comment string to include in generated HTML files
     """
 
@@ -399,10 +396,10 @@ if __name__ == "__main__":
         help="Directory containing wheel files (default to be same as `version`)",
     )
     parser.add_argument(
-        "--alias-to-default",
+        "--fallback-variant",
         type=str,
         default=None,
-        help="Alias variant name for the default variant",
+        help="Additional index variant when neither the filename suffix nor the macOS platform identifies a variant",
     )
     parser.add_argument(
         "--external-links",
@@ -506,7 +503,7 @@ if __name__ == "__main__":
         wheel_base_dir=wheel_base_dir,
         index_base_dir=index_base_dir,
         default_variant=None,
-        alias_to_default=args.alias_to_default,
+        fallback_variant=args.fallback_variant,
         comment=args.comment.strip(),
         external_urls=(
             [

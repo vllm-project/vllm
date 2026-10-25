@@ -7,7 +7,7 @@ This guide will help you quickly get started with vLLM to perform:
 
 ## Prerequisites
 
-- OS: Linux
+- OS: Linux or macOS (experimental support only for Apple Silicon)
 - Python: 3.11 -- 3.14
 
 !!! note
@@ -103,11 +103,21 @@ This guide will help you quickly get started with vLLM to perform:
 
     Follow the installation instructions in the [vLLM-Metal documentation](https://github.com/vllm-project/vllm-metal#installation).
 
+    If you intend to use vLLM without Metal GPU-acceleration, which is generally less efficient, you can install vLLM using `uv`.
+
+    It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+
+    ```bash
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install vllm
+    ```
+
     !!! note
         vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires MLX-optimized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face.
 
     !!! tip
-        For more detailed instructions, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
+        For more detailed instructions on installation of GPU-accelerated vLLM, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 !!! note
     For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.

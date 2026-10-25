@@ -9,7 +9,7 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
+FALLBACK_VARIANT="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
@@ -31,15 +31,11 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 # these indices have relative paths that work as long as they are next to the wheel directory in s3
 # i.e., the wheels are always in s3://vllm-wheels/<commit>/
 # and indices can be placed in /<commit>/, or /nightly/, or /<version>/
-alias_args=()
-if [[ -n "$DEFAULT_VARIANT_ALIAS" ]]; then
-    alias_args=(--alias-to-default "$DEFAULT_VARIANT_ALIAS")
-fi
 
 # HACK: we do not need regex module here, but it is required by pre-commit hook
 # To avoid any external dependency, we simply replace it back to the stdlib re module
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" "${alias_args[@]}"
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" --fallback-variant "$FALLBACK_VARIANT"
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
@@ -73,6 +69,6 @@ if [[ "${UPDATE_VERSION_INDEX:-1}" == "1" && "$version" != *"dev"* ]]; then
     rm -rf "${INDICES_OUTPUT_DIR:?}"
     mkdir -p "$INDICES_OUTPUT_DIR"
     # wheel-dir is overridden to be the commit directory, so that the indices point to the correct wheel path
-    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" "${alias_args[@]}"
+    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" --fallback-variant "$FALLBACK_VARIANT"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi

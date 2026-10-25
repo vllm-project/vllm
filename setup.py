@@ -1392,7 +1392,8 @@ def get_vllm_version() -> str:
         elif _is_cpu():
             # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
             # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
-            if VLLM_TARGET_DEVICE == "cpu":
+            # Don't set prefix for macOS wheels, so they could be published to PyPI.
+            if VLLM_TARGET_DEVICE == "cpu" and not sys.platform.startswith("darwin"):
                 version += f"{sep}cpu"
         elif _is_xpu():
             version += f"{sep}xpu"
@@ -1521,6 +1522,14 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
+        if sys.platform.startswith("darwin"):
+            # remove triton @ https... when building macOS wheel, because
+            # PyPI does not allow wheels to have requirements that are
+            # installed from arbitrary sources, such as GitHub releases.
+            # Also triton does not build wheels for macOS.
+            requirements = [
+                req for req in requirements if not req.startswith("triton @")
+            ]
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:

@@ -77,9 +77,9 @@ Please note that not all variants are present on every commit. The available var
 
 Indices are organized by variant:
 
-- **Default variant**: Wheels without variant suffix (i.e., built with the current `VLLM_MAIN_CUDA_VERSION`) are placed in the root.
+- **Default variant**: Wheels without variant suffix (i.e., built with the current `VLLM_MAIN_CUDA_VERSION` or built for macOS) are placed in the root.
 - **Variant subdirectories**: Wheels with variant suffixes (e.g., `+cu130`, `.cpu`) are organized in subdirectories.
-- **Alias to default**: The default variant can have an alias (e.g., `cu129` for now) for consistency and convenience.
+- **Fallback variant**: Wheels which variant wasn't inferred automatically (e.g., `cu130` for now) are copied into dedicated directory.
 
 The variant is extracted from the wheel filename (as described in the [file name convention](https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-name-convention)):
 
@@ -88,6 +88,7 @@ The variant is extracted from the wheel filename (as described in the [file name
     - `vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl` → default variant
     - `vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl` → `cu129` variant
     - `vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl` → `cu130` variant
+    - `vllm-0.11.2rc1-cp38-abi3-macosx_11_0_arm64.whl` → macOS variant
 
 ## Index Generation Details
 
