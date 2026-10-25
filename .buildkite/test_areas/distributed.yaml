@@ -11,6 +11,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/config/aux_output.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
@@ -32,6 +34,8 @@ steps:
       - vllm/distributed
       - tests/distributed
       - vllm/platforms/rocm.py
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/config/aux_output.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
       - pytest -v -s distributed/test_shm_broadcast.py

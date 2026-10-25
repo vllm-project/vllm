@@ -37,10 +37,16 @@ def validate_shm_budget(
     max_bytes: int | None,
     available_host_bytes: int,
     staging_bytes: int,
+    min_blocks_for_context: int,
     local_output_workers: int = 1,
     required_context_tokens: int | None = None,
 ) -> int:
     """Validate KV coverage, warn about host memory and return bytes per worker.
+
+    The host-memory estimate covers the preallocated arena, staging, metadata
+    and runtime reserve at startup. It excludes serialized routing payloads,
+    background-store queued batches, the transient old-plus-new arena while the
+    store grows, and concurrent memory use, so it is not a runtime peak bound.
 
     Args:
         num_blocks: GPU KV blocks per worker.
@@ -50,9 +56,14 @@ def validate_shm_budget(
         max_bytes: Configured arena capacity, or None to match KV coverage.
         available_host_bytes: Current system/cgroup memory headroom.
         staging_bytes: Estimated staging memory per output worker.
-        local_output_workers: Output workers sharing this host-memory budget.
-        required_context_tokens: Tokens one request must be able to serve.
-            Suggested KV block counts must accommodate this context length.
+        min_blocks_for_context: Minimum device KV pool blocks that can serve one
+            request at max_model_len, including the BlockPool null block.
+            Smaller block counts must not be suggested as an override.
+        local_output_workers: Output workers assumed to share this host-memory
+            budget. Workers isolated in separate containers make the estimate
+            conservative.
+        required_context_tokens: Tokens one request must be able to serve, used
+            in the warning text.
 
     Returns:
         Arena capacity rounded down to complete SHM objects.
@@ -90,17 +101,22 @@ def validate_shm_budget(
     host_objects = worker_headroom // (object_bytes + _METADATA_BYTES_PER_OBJECT)
     max_host_shm_bytes = host_objects * object_bytes
     supported_blocks = host_objects // hashes_per_block
-    host_required = (
+    recommended_blocks = (
+        supported_blocks
+        if min_blocks_for_context <= supported_blocks < num_blocks
+        else None
+    )
+    estimated_startup_need = (
         local_output_workers * (arena_bytes + staging_bytes + metadata_bytes)
         + reserve_bytes
     )
     adjustment = ""
-    if host_required > available_host_bytes:
+    if estimated_startup_need > available_host_bytes:
         adjustment = (
-            " Estimated host memory need exceeds current headroom. "
+            " Estimated startup host-memory need exceeds current headroom. "
             "Startup will continue, but AuxOutput may run out of host memory. "
-            "This is a conservative estimate; cgroup usage may include "
-            "reclaimable page cache. "
+            "This is a conservative startup estimate, not a runtime peak bound; "
+            "cgroup usage may include reclaimable page cache. "
         )
         if max_bytes is not None:
             adjustment += (
@@ -120,38 +136,47 @@ def validate_shm_budget(
                 "The estimated headroom cannot fit one GPU KV block. Increase "
                 "available RAM/container memory or reduce staging memory."
             )
-        elif (
-            required_context_tokens is not None
-            and max_context_tokens < required_context_tokens
-        ):
+        elif supported_blocks < min_blocks_for_context:
+            if required_context_tokens is not None:
+                needed = (
+                    f"the {min_blocks_for_context} blocks needed to serve "
+                    f"max_model_len={required_context_tokens}"
+                )
+            else:
+                needed = (
+                    f"the {min_blocks_for_context} blocks needed for one "
+                    "max_model_len request"
+                )
             adjustment += (
-                f"The conservative estimate covers {max_context_tokens} tokens "
-                f"({supported_blocks} KV blocks), below "
-                f"max_model_len={required_context_tokens}. Increase available "
-                "RAM/container memory, reduce --max-model-len, or lower "
+                f"The conservative estimate supports {supported_blocks} KV blocks "
+                f"({max_context_tokens} tokens), fewer than {needed}. Increase "
+                "available RAM/container memory, reduce --max-model-len, or lower "
                 "--max-num-batched-tokens/--max-num-seqs to reduce staging memory."
             )
-        elif supported_blocks < num_blocks:
+        elif recommended_blocks is not None:
             if max_bytes is not None:
                 adjustment += "Along with that arena adjustment, consider "
             else:
                 adjustment += "Consider "
             adjustment += (
-                f"--num-gpu-blocks-override {supported_blocks} "
-                f"(Python: num_gpu_blocks_override={supported_blocks}) to fit "
+                f"--num-gpu-blocks-override {recommended_blocks} "
+                f"(Python: num_gpu_blocks_override={recommended_blocks}) to fit "
                 "the conservative estimate. Keep enough KV capacity for "
                 "--max-model-len if reducing further. Alternatively, lower "
                 "--kv-cache-memory-bytes or --gpu-memory-utilization; an explicit "
                 "--kv-cache-memory-bytes overrides --gpu-memory-utilization."
             )
-    log_fn = logger.warning if host_required > available_host_bytes else logger.info
+    log_fn = (
+        logger.warning if estimated_startup_need > available_host_bytes else logger.info
+    )
     log_fn(
-        "AuxOutput memory budget: available system/cgroup=%.3f GiB, "
+        "AuxOutput memory budget (startup estimate): "
+        "available system/cgroup=%.3f GiB, "
         "runtime reserve=%.3f GiB, local output workers=%d; "
         "per worker: required SHM=%.3f GiB, allocated SHM=%.3f GiB, "
         "estimated SHM headroom=%.3f GiB, staging=%.3f GiB, "
         "metadata estimate=%.3f GiB; total required SHM=%.3f GiB, "
-        "estimated host need=%.3f GiB; KV blocks=%d, "
+        "estimated startup need=%.3f GiB; KV blocks=%d, "
         "conservative KV block estimate=%d.%s",
         available_host_bytes / gib,
         reserve_bytes / gib,
@@ -162,7 +187,7 @@ def validate_shm_budget(
         staging_bytes / gib,
         metadata_bytes / gib,
         local_output_workers * required_bytes / gib,
-        host_required / gib,
+        estimated_startup_need / gib,
         num_blocks,
         supported_blocks,
         adjustment,

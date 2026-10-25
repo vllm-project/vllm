@@ -1012,6 +1012,26 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def get_num_device_blocks_per_request(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> int:
+    """Device-pool blocks one ``max_model_len`` request may hold at once.
+
+    Each device group contributes cdiv(per-request bytes, page bytes) of its
+    spec, so sliding windows, DCP sharding and mixed block sizes are accounted
+    for. The BlockPool null block is not included; callers sizing a pool must
+    add it separately.
+    """
+    return sum(
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_config.kv_cache_groups
+        if not group.host_resident
+    )
+
+
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
@@ -1027,17 +1047,17 @@ def get_max_concurrency_for_kv_cache_config(
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
-    num_blocks_per_request = 0
-    host_blocks_per_request = 0
-    for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
+    num_blocks_per_request = get_num_device_blocks_per_request(
+        vllm_config, kv_cache_config
+    )
+    host_blocks_per_request = sum(
+        cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-        if group.host_resident:
-            host_blocks_per_request += required
-        else:
-            num_blocks_per_request += required
+        for group in kv_cache_config.kv_cache_groups
+        if group.host_resident
+    )
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None

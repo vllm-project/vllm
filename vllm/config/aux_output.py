@@ -15,8 +15,10 @@ class AuxOutputConfig:
     """Capture and return routed-experts auxiliary outputs."""
 
     max_bytes: int | None = Field(default=None, gt=0)
-    """Initial capacity, or ``None`` to derive it from the KV cache capacity.
-    Grows when every object is referenced."""
+    """Initial SHM arena capacity, or ``None`` to derive it from the KV cache
+    capacity. An explicit value must cover every GPU KV block at startup or
+    startup fails. This is not a hard runtime memory limit: the arena grows when
+    every object is referenced."""
 
     @property
     def enabled(self) -> bool:

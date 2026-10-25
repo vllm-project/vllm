@@ -709,14 +709,22 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     capturer.snapshot_routing_data.assert_not_called()
 
 
-def test_aux_output_worker_connector_default_capacity(monkeypatch):
+def _patch_aux_output_worker(
+    monkeypatch,
+    *,
+    available_host_bytes: int,
+    block_sizes: tuple[int, int] = (32, 16),
+) -> tuple[types.ModuleType, Mock, Mock]:
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
     store_constructor = Mock()
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
-    monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
+    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
@@ -724,34 +732,108 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(
         aux_output_worker,
         "resolve_kv_cache_block_sizes",
-        lambda *_: (32, 16),
+        lambda *_: block_sizes,
     )
     monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    monkeypatch.setattr(
+        aux_output_worker, "get_available_host_memory", lambda: available_host_bytes
+    )
+    return aux_output_worker, store_constructor, background_store_constructor
 
-    config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
+
+def _aux_output_worker_config(*, max_bytes: int | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
         max_concurrent_batches=2,
+        parallel_config=SimpleNamespace(
+            data_parallel_size_local=1,
+            decode_context_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(max_model_len=1024),
     )
-    kwargs = dict(
+
+
+def _aux_output_worker_kwargs(config: SimpleNamespace, *, num_blocks: int = 10) -> dict:
+    return dict(
         vllm_config=config,
         model=Mock(),
         kv_cache_config=SimpleNamespace(
-            num_blocks=10,
+            num_blocks=num_blocks,
             kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
         ),
     )
 
-    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
+
+def test_aux_output_worker_connector_default_capacity(monkeypatch):
+    aux_output_worker, store_constructor, background_store_constructor = (
+        _patch_aux_output_worker(monkeypatch, available_host_bytes=2 << 30)
+    )
+    config = _aux_output_worker_config(max_bytes=None)
+
+    aux_output_worker.AuxOutputWorkerConnector(
+        **_aux_output_worker_kwargs(config),
+    )
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
+
+
+def test_aux_output_worker_connector_explicit_capacity(monkeypatch):
+    aux_output_worker, store_constructor, _ = _patch_aux_output_worker(
+        monkeypatch, available_host_bytes=2 << 30
+    )
+    config = _aux_output_worker_config(max_bytes=4096)
+
+    aux_output_worker.AuxOutputWorkerConnector(
+        **_aux_output_worker_kwargs(config),
+    )
+    assert store_constructor.call_args.kwargs["max_bytes"] == 4096
+    assert store_constructor.call_args.kwargs["object_nbytes"] == 128
+
+
+def test_aux_output_worker_connector_rejects_undersized_explicit_capacity(monkeypatch):
+    aux_output_worker, _, _ = _patch_aux_output_worker(
+        monkeypatch, available_host_bytes=2 << 30
+    )
+    config = _aux_output_worker_config(max_bytes=2559)
+
+    with pytest.raises(ValueError, match="cannot cover all GPU KV blocks"):
+        aux_output_worker.AuxOutputWorkerConnector(
+            **_aux_output_worker_kwargs(config),
+        )
+
+
+def test_aux_output_worker_connector_does_not_recommend_infeasible_blocks(
+    monkeypatch, caplog
+):
+    """64 blocks cover 1024 tokens only before the reserved null block."""
+    from vllm.distributed.aux_output_connector.memory import logger
+
+    aux_output_worker, store_constructor, _ = _patch_aux_output_worker(
+        monkeypatch,
+        available_host_bytes=(512 << 20) + 64 * (128 + 512) + 4096,
+        block_sizes=(16, 16),
+    )
+    config = _aux_output_worker_config(max_bytes=None)
+    logger.addHandler(caplog.handler)
+    try:
+        aux_output_worker.AuxOutputWorkerConnector(
+            **_aux_output_worker_kwargs(config, num_blocks=128),
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert store_constructor.call_args.kwargs["max_bytes"] == 128 * 16 * 8
+    assert "conservative KV block estimate=64" in caplog.text
+    assert "fewer than the 65 blocks needed" in caplog.text
+    assert "--num-gpu-blocks-override" not in caplog.text
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):

@@ -36,7 +36,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import (
+    get_num_device_blocks_per_request,
+    resolve_kv_cache_block_sizes,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -132,6 +135,10 @@ class AuxOutputWorkerConnector:
             staging_blocks * block_nbytes
             + self._max_concurrent_batches * max_num_batched_tokens * bytes_per_token
         )
+        # BlockPool reserves one shared pool block (id 0) as the null block.
+        min_blocks_for_context = (
+            get_num_device_blocks_per_request(vllm_config, kv_cache_config) + 1
+        )
         max_bytes = validate_shm_budget(
             num_blocks=kv_cache_config.num_blocks,
             scheduler_block_size=scheduler_block_size,
@@ -140,6 +147,7 @@ class AuxOutputWorkerConnector:
             max_bytes=vllm_config.aux_output_config.max_bytes,
             available_host_bytes=get_available_host_memory(),
             staging_bytes=staging_bytes,
+            min_blocks_for_context=min_blocks_for_context,
             local_output_workers=max(
                 1, vllm_config.parallel_config.data_parallel_size_local
             ),
