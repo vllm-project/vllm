@@ -157,15 +157,6 @@ torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
     --case prefill=8192 --case mix=2048,8*1@4096
 ```
 
-To combine PCP with DCP, also set `--decode-context-parallel-size` and use
-attention, communication, and KV cache settings supported by your model and
-hardware. DCP shares the existing workers.
-
-The benchmark captures the entire prefill forward in one graph. Serving may
-use eager execution or piecewise graphs with eager attention between segments.
-Serving TTFT also includes scheduling, input preparation, and sampling, so it
-can be substantially higher than the forward timing.
-
 See [vllm bench forward](./bench/forward.md) for the full reference of all available arguments.
 
 ### latency
