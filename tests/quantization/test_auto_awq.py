@@ -212,13 +212,30 @@ def test_auto_awq_quantization_method(
     )
 
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
-    assert isinstance(
-        qkv_proj.quant_method,
-        (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
-    ), (
-        "Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod, "
-        f"got {type(qkv_proj.quant_method)}"
-    )
+
+    # Import inside the guard: importing vllm.platforms.rocm reads gcnArchName,
+    # which must not happen on non-ROCm hosts.
+    is_rdna = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x
+
+        is_rdna = on_gfx1x()
+
+    if is_rdna:
+        # Regression guard for issue #63455: on RDNA, AutoAWQ must reach the
+        # mixed-precision W4A16 kernel instead of the generic AWQ kernels.
+        assert isinstance(qkv_proj.quant_method, AutoAWQMarlinLinearMethod), (
+            "Expected AutoAWQMarlinLinearMethod on RDNA, "
+            f"got {type(qkv_proj.quant_method)}"
+        )
+    else:
+        assert isinstance(
+            qkv_proj.quant_method,
+            (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
+        ), (
+            "Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod, "
+            f"got {type(qkv_proj.quant_method)}"
+        )
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=target_device)

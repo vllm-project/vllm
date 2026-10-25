@@ -80,3 +80,19 @@ AWQ models are also supported directly through the LLM entrypoint:
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
+
+## Kernel selection
+
+vLLM does not use one kernel for every AutoAWQ checkpoint. The layer method picks a kernel that
+can implement the layer's quantization parameters on the current hardware. The decision is made
+once per layer at construction time, so it depends on the platform and on the checkpoint's
+quantization parameters, not on the batch shape.
+
+On AMD GPUs, AutoAWQ checkpoints use the mixed-precision W4A16 kernels on RDNA (gfx1x), the same
+selection path that CPU and XPU already use. CDNA and earlier ROCm targets keep the generic AWQ
+kernels. The selected kernel is logged once at startup, for example
+`Using RDNAHybridW4A16LinearKernel for AutoAWQMarlinLinearMethod`.
+
+Because kernel availability depends on the GPU arch and on the checkpoint's group size, bit width
+and zero-point setting, an AutoAWQ model that works on one GPU may take a slower path on another.
+Check the startup log line before comparing throughput across machines.
