@@ -79,8 +79,6 @@ SUPPORTED_TP = (2, 4)
 # Receive slot sets the layers rotate over.
 NUM_SLOT_SETS = 3
 TOPK = 16
-PREFILL_CHUNK_SIZE = 1024
-PREFILL_SCORE_BYTES = 32 << 20
 PREFILL_FMHA_CHUNK_SIZE = 8192
 PREFILL_FMHA_SCRATCH_BYTES = 256 << 20
 SPIN_LIMIT = 1 << 26
@@ -720,7 +718,7 @@ def prefill_local_score(
 
     assert metadata.local_chunks is not None and metadata.local_scores is not None
     assert metadata.candidate_buffers is not None
-    total_tokens, heads, _ = index_q.shape
+    total_tokens = index_q.shape[0]
     send, received = metadata.candidate_buffers.unbind(0)
     for chunk in metadata.local_chunks:
         query = index_q[chunk.start : chunk.end]

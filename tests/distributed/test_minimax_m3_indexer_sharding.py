@@ -27,6 +27,9 @@ from vllm.platforms import current_platform
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
+PREFILL_CHUNK_SIZE = 1024
+PREFILL_SCORE_BYTES = 32 << 20
+
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
@@ -35,7 +38,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.setattr(msa, "PREFILL_FMHA_CHUNK_SIZE", msa.PREFILL_CHUNK_SIZE)
+        m.setattr(msa, "PREFILL_FMHA_CHUNK_SIZE", PREFILL_CHUNK_SIZE)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         config = create_vllm_config(
@@ -304,7 +307,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             query[:, :, :7] = (1 << bits) * (
                 1 - 2 * (((head_codes ^ (layer * 7)) >> bits) & 1)
             )
-            query[msa.PREFILL_CHUNK_SIZE :] *= -1
+            query[PREFILL_CHUNK_SIZE:] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
         for md, storage in zip(metadata[2:], prefill_storage, strict=True):
@@ -354,16 +357,14 @@ def _check_indexer_forwards(config, device, rank, comm):
                 metadata[1] = local_metadata
                 prefill = local_metadata.prefill_msa
                 scratch = prefill.local_scores
-                assert scratch.shape[0] <= msa.PREFILL_CHUNK_SIZE
-                assert (
-                    scratch.numel() * scratch.element_size() <= msa.PREFILL_SCORE_BYTES
-                )
+                assert scratch.shape[0] <= PREFILL_CHUNK_SIZE
+                assert scratch.numel() * scratch.element_size() <= PREFILL_SCORE_BYTES
                 chunks = prefill.local_chunks
                 assert chunks[0].start == 0
                 assert chunks[-1].end == prefill.candidate_buffers.shape[2]
-                if chunks[-1].end > msa.PREFILL_CHUNK_SIZE:
+                if chunks[-1].end > PREFILL_CHUNK_SIZE:
                     assert len(chunks) > 1
-                assert all((chunk.plan is not None) == (world == 2) for chunk in chunks)
+                assert all(chunk.plan is not None for chunk in chunks)
                 # Both dispatches reuse scratch across layers and steps; unified
                 # mixed scoring exchanges decode and prefill candidates together.
                 exchanges.clear()
