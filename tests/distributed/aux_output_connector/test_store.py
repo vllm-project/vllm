@@ -4,6 +4,7 @@
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -18,6 +19,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.memory import validate_shm_budget
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -2072,3 +2074,138 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
     assert not store._references
+
+
+def test_budget_covers_every_kv_block_without_silent_truncation():
+    assert (
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+        == 3200
+    )
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 9"):
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3199,
+            hash_block_size=16,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+
+
+def test_host_budget_counts_local_workers_and_hash_object_metadata():
+    """The inferred KV limit includes every local arena and all hash slots."""
+    validate_budget = partial(
+        validate_shm_budget,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        bytes_per_token=20,
+        max_bytes=None,
+        available_host_bytes=(512 << 20) + 2 * (4096 + 8 * (80 + 512)),
+        staging_bytes=4096,
+        local_output_workers=2,
+    )
+    assert validate_budget(num_blocks=2) == 640
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 2") as error:
+        validate_budget(num_blocks=3)
+    assert "--num-gpu-blocks-override 2" in str(error.value)
+
+
+def test_explicit_arena_larger_than_ram_requires_resizing_the_arena():
+    """Fewer KV blocks alone do not shrink an explicit arena allocation."""
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 3") as error:
+        validate_shm_budget(
+            num_blocks=2,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=4 * 320,
+            available_host_bytes=(512 << 20) + 4096 + 3 * (320 + 512),
+            staging_bytes=4096,
+        )
+    assert "--num-gpu-blocks-override 2" in str(error.value)
+    assert "Unset aux_output_config.max_bytes" in str(error.value)
+
+
+def test_arena_budget_matches_complete_store_slots():
+    assert (
+        validate_shm_budget(
+            num_blocks=2,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3 * 320 - 1,
+            available_host_bytes=(512 << 20) + 2 * (320 + 512),
+            staging_bytes=0,
+        )
+        == 640
+    )
+
+
+def test_staging_exhaustion_does_not_suggest_zero_gpu_blocks():
+    with pytest.raises(ValueError, match="Maximum Supported Blocks: 0") as error:
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=(512 << 20) + 4096,
+            staging_bytes=4096,
+        )
+    assert "No GPU KV block fits" in str(error.value)
+    assert "--num-gpu-blocks-override 0" not in str(error.value)
+
+
+def test_sub_block_arena_limit_is_distinguished_from_ram_exhaustion():
+    with pytest.raises(ValueError, match="cannot hold one KV block") as error:
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=319,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+        )
+    assert "No GPU KV block fits the current host budget" not in str(error.value)
+
+
+def test_host_budget_rejects_a_block_count_that_cannot_serve_the_context():
+    """A reduced block count must not be suggested when it cannot hold the request."""
+    with pytest.raises(
+        ValueError, match="No feasible AuxOutput configuration"
+    ) as error:
+        validate_shm_budget(
+            num_blocks=64,
+            scheduler_block_size=64,
+            hash_block_size=64,
+            bytes_per_token=100,
+            max_bytes=16 * 64 * 100,
+            available_host_bytes=(512 << 20) + 16 * 64 * 100,
+            staging_bytes=0,
+            required_context_tokens=8192,
+        )
+    message = str(error.value)
+    assert "at most 896 tokens" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+def test_host_memory_budget_override_caps_available_headroom(monkeypatch):
+    """Schedulers that enforce memory outside cgroups provide the budget here."""
+    from vllm.distributed.aux_output_connector import memory
+
+    monkeypatch.setenv("VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES", str(768 << 20))
+    host_memory = memory.psutil.virtual_memory()._replace(available=1 << 40)
+    monkeypatch.setattr(memory.psutil, "virtual_memory", lambda: host_memory)
+    monkeypatch.setattr(memory, "get_cgroup_memory_limit", lambda: None)
+    monkeypatch.setattr(memory, "get_cgroup_memory_usage", lambda: None)
+    assert memory.get_available_host_memory() == 768 << 20

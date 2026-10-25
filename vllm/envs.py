@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
+    VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES: int | None = None
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_CI_ENV: bool = False
@@ -895,6 +896,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
         if "VLLM_CPU_KVCACHE_SPACE" in os.environ
         else None
+    ),
+    # Host-memory budget, in bytes, for the AuxOutput shared-memory arenas.
+    # Schedulers that do not enforce their memory request through a cgroup
+    # controller (for example a Slurm --mem request on a cluster without
+    # memory cgroups) should have their job wrapper export this from the
+    # allocation. When unset the budget comes from the cgroup limit and the
+    # host's available memory.
+    "VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES": lambda: (
+        int(os.getenv("VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES", "0")) or None
     ),
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
