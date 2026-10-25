@@ -115,6 +115,8 @@ def test_strategy_selection():
         "Gemma4UnifiedForConditionalGeneration",
     ):
         assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
+    qwen3_vl = "Qwen3VLForConditionalGeneration"
+    assert select_read_strategy(model(qwen3_vl), generate) is NextTokenStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -262,9 +264,11 @@ def test_labels_start_the_reply(qwen):
         ("google/gemma-4-E2B-it", "<|turn>model\n"),
         # 12B, 26B and 31B: the template closes an empty thought first.
         ("google/gemma-4-12B-it", "<|turn>model\n<|channel>thought\n<channel|>"),
+        # Qwen3-VL Instruct: the reply starts right after the assistant turn.
+        ("Qwen/Qwen3-VL-4B-Instruct", "<|im_start|>assistant\n"),
     ],
 )
-def test_gemma4_labels_start_the_reply(model_name, reply_start):
+def test_multimodal_labels_start_the_reply(model_name, reply_start):
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(model_name)
