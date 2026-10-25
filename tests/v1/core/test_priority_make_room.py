@@ -582,6 +582,17 @@ def test_released_blocks(monkeypatch):
     assert scheduler._num_released_blocks([a, b], None) == 5
 
 
+def test_no_blocks_are_released_without_victims_or_deferred_frees():
+    """And the prefix-cache hit, as long as the request's prompt, is not read."""
+
+    class Unread(list):
+        def __iter__(self):
+            raise AssertionError("read the hit's blocks")
+
+    scheduler = _create_scheduler()
+    assert scheduler._num_released_blocks([], ((Unread(),), BLOCK_SIZE)) == 0
+
+
 def _create_encoder_decoder_scheduler(num_blocks: int) -> Scheduler:
     """A scheduler with a self-attention and a cross-attention KV cache group,
     patched to schedule as for an encoder-decoder model, as in

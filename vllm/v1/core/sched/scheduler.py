@@ -3541,6 +3541,8 @@ class Scheduler(SchedulerInterface):
         lands by then, but not the blocks of the prefix-cache hit `hit`, which
         its request takes as hits; and the blocks the in-flight prefills among
         `victims` still reserve."""
+        if not victims and not self.deferred_frees:
+            return 0
         hit_blocks = set() if hit is None else {id(b) for g in hit[0] for b in g}
         holders: dict[int, int] = defaultdict(int)
         blocks: dict[int, KVCacheBlock] = {}
