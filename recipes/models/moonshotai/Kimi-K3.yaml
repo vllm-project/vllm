@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-18
+  date_updated: 2026-10-22
   tasks:
     - multimodal
     - text
@@ -82,6 +82,18 @@ features:
           - "128"
           - "--speculative-config"
           - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
+      # GB200/GB300 run the draft on the target's TOKENSPEED_MLA backend, as the
+      # InferenceX AgentX lanes do (#3748, #4047, #4322); the top-level
+      # --attention-backend configures only the target model. The other
+      # speculative settings are the generic DSpark draft's.
+      gb200:
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "attention_backend":"TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
+      gb300:
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "attention_backend":"TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
       npu:
         args:
           - "--speculative-config"
@@ -122,6 +134,17 @@ features:
           VLLM_USE_DIRECT_DCP_A2A: "0"
           VLLM_USE_DIRECT_DCP_Q_GATHER: "0"
           VLLM_USE_DIRECT_DCP_KV_GATHER: "0"
+
+# DCP size selector, qualified on GB200/GB300 only. A size is offered when it
+# equals the tensor-parallel size of every role: TP8/PP2 aggregated -> DCP8
+# (InferenceX #4322), TP16 per disaggregated role -> DCP16 (#4322), TP8 GB300
+# pools -> DCP8 (#4047) and TP16 aggregated -> DCP16 (low-latency profile).
+decode_context_parallel:
+  sizes:
+    gb200: [8, 16]
+    gb300: [8, 16]
+  comm_backend: a2a
+  match_tp: true
 
 opt_in_features:
   - spec_decoding
@@ -266,7 +289,7 @@ hardware_overrides:
       - "--moe-backend"
       - "marlin"
       - "--disable-custom-all-reduce"
-      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
       - "--max-num-batched-tokens"
       - "4096"
       - "--attention-backend"
@@ -280,7 +303,7 @@ hardware_overrides:
     extra_args:
       - "--load-format"
       - "fastsafetensors"
-      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
       - "--max-model-len"
       - "1048576"
       - "--kv-cache-dtype"
@@ -397,6 +420,51 @@ strategy_overrides:
       # can hold a PP stage past vLLM's 300 s model-execution default.
       VLLM_ENGINE_READY_TIMEOUT_S: "3600"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+    # GB200: the InferenceX AgentX aggregated profile (SemiAnalysisAI/InferenceX#3748).
+    # A GB200 tray has 4 GPUs, so the strategy's TP-per-node x PP-across-nodes would
+    # give TP4 x PP4 on the 16-GPU floor; the lane runs TP8 x PP2 + DCP8 across the
+    # four trays instead (same --nnodes 4 rendezvous). Exact-GPU block: layers after
+    # the recipe Blackwell baseline, so its fastsafetensors, 1M context, fp8 KV and
+    # prefix caching stay.
+    hardware_overrides:
+      gb200:
+        extra_args:
+          - "--tensor-parallel-size"
+          - "8"
+          - "--pipeline-parallel-size"
+          - "2"
+          - "--decode-context-parallel-size"
+          - "8"
+          - "--dcp-comm-backend"
+          - "a2a"
+          - "--attention-config"
+          - '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
+          - "--mamba-ssm-cache-dtype"
+          - "bfloat16"
+          - "--gpu-memory-utilization"
+          - "0.88"
+          - "--moe-backend"
+          - "auto"
+          - "--language-model-only"
+          # The K4 draft matches the lane's concurrency 24-56 rows; 64 is the C=32 row.
+          - "--max-num-seqs"
+          - "64"
+          - "--speculative-config"
+          - '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
+        extra_env:
+          VLLM_USE_DIRECT_DCP_A2A: "1"
+          VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+          VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+          VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+          VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+          VLLM_RPC_TIMEOUT: "600000"
+          MC_SLICE_SIZE: "1048576"
+          MC_STORE_MEMCPY: "1"
+          MC_WORKERS_PER_CTX: "4"
+          MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+          UCX_MEMTYPE_CACHE: "n"
+          UCX_MEMTYPE_REG_WHOLE: "n"
 
   pd_cluster:
     router:
@@ -408,10 +476,77 @@ strategy_overrides:
       blackwell:
         extra_env:
           UCX_TLS: "rc,cuda_copy"
+      # GB200: the InferenceX AgentX 1P1D profile (SemiAnalysisAI/InferenceX#3748),
+      # one TP16 + DCP16 pool per role across four trays with the DSpark K4 draft.
+      # Shared serving flags restated here as for GB300 below; role blocks add the
+      # per-role memory and batch settings.
+      gb200:
+        extra_args:
+          - "--decode-context-parallel-size"
+          - "16"
+          - "--dcp-comm-backend"
+          - "a2a"
+          - "--attention-backend"
+          - "TOKENSPEED_MLA"
+          - "--attention-config"
+          - '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--mamba-ssm-cache-dtype"
+          - "bfloat16"
+          - "--enable-prefix-caching"
+          - "--prefix-match-unit"
+          - "128"
+          - "--enable-cumem-allocator"
+          - "--load-format"
+          - "safetensors"
+          - "--safetensors-load-strategy"
+          - "lazy"
+          - "--stream-interval"
+          - "10"
+          - "--language-model-only"
+          - "--speculative-config"
+          - '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
+        extra_env:
+          VLLM_USE_DIRECT_DCP_A2A: "1"
+          VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+          VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+          VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+          VLLM_USE_NCCL_SYMM_MEM: "0"
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+          VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
+          NCCL_CUMEM_ENABLE: "1"
+          NCCL_MNNVL_ENABLE: "1"
+          NCCL_NVLS_ENABLE: "1"
+          NCCL_P2P_LEVEL: "NVL"
+          NCCL_NET_PLUGIN: "none"
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+          MC_SLICE_SIZE: "1048576"
+          MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+          UCX_MEMTYPE_CACHE: "n"
+          UCX_MEMTYPE_REG_WHOLE: "n"
+          UCX_RCACHE_MAX_UNRELEASED: "1024"
+          UCX_TCP_AF_PRIO: "inet"
+          # The lane left UCX on its default transports and raised the startup
+          # timeouts (this block replaces the recipe Blackwell baseline).
+          UCX_TLS: "all"
+          # The prefill MoE workspace (about 3.3 GiB at 16384 tokens) failed to
+          # allocate from reserved but fragmented memory; blocks above 512 MiB
+          # are not split.
+          PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"
+          VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
       # GB300: the InferenceX AgentX xPyD profile (SemiAnalysisAI/InferenceX#4047),
       # TP8 + DCP8 pools across two trays with the DSpark K4 draft. The pd_cluster
       # Blackwell block above replaces the recipe Blackwell baseline, so the
       # shared serving flags are restated here; role blocks below add the rest.
+      # It renders the low-concurrency specialized-decode profile (#4373: c16-c32),
+      # so both roles keep FP32 KV-cache SSM state, pin the DCP KV interleave to 1
+      # and leave FlashInfer autotune off. NIXL P/D would otherwise raise the
+      # interleave to the KV block size after the specialized decode has read it,
+      # and its spec-verify causal mask would use the stale value. The uncapped
+      # c48+ points keep BF16 state, NIXL's interleave and autotune on (see the guide).
       gb300:
         extra_args:
           - "--decode-context-parallel-size"
@@ -423,7 +558,9 @@ strategy_overrides:
           - "--kv-cache-dtype"
           - "fp8"
           - "--mamba-ssm-cache-dtype"
-          - "bfloat16"
+          - "float32"
+          - "--cp-kv-cache-interleave-size"
+          - "1"
           - "--enable-prefix-caching"
           - "--prefix-match-unit"
           - "128"
@@ -432,7 +569,7 @@ strategy_overrides:
           - "--max-cudagraph-capture-size"
           - "512"
           - "--enable-cumem-allocator"
-          - "--enable-flashinfer-autotune"
+          - "--no-enable-flashinfer-autotune"
           - "--load-format"
           - "fastsafetensors"
           - "--stream-interval"
@@ -462,12 +599,38 @@ strategy_overrides:
           UCX_MEMTYPE_REG_WHOLE: "n"
           UCX_RCACHE_MAX_UNRELEASED: "1024"
           UCX_TCP_AF_PRIO: "inet"
+          # The qualified workers left UCX on its default transports; this
+          # replaces the Blackwell PD block's rc,cuda_copy restriction.
+          UCX_TLS: "all"
+          # The pd_cluster Blackwell block replaces the recipe baseline, so the
+          # startup timeouts are restated: loading and autotune take ~25 min.
+          VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+          VLLM_RPC_TIMEOUT: "600000"
     prefill:
-      parallelism: tep
+      # GB200 prefill is one TP16 + DCP16 pool across four trays (#3748); every
+      # other GPU keeps the TEP8 prefill pool.
+      parallelism:
+        default: tep
+        gb200: tp
       tp: 8
       nodes:
+        gb200: 4
         gb300: 2
       hardware_overrides:
+        gb200:
+          # The lane leaves FlashInfer autotune at vLLM's default (on); this undoes
+          # the shared prefill flag below.
+          extra_args:
+            - "--enable-flashinfer-autotune"
+            - "--gpu-memory-utilization"
+            - "0.88"
+            - "--max-num-seqs"
+            - "32"
+            - "--max-cudagraph-capture-size"
+            - "512"
+          extra_env:
+            VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
         gb300:
           extra_args:
             - "--moe-backend"
@@ -483,7 +646,7 @@ strategy_overrides:
         - "--max-num-batched-tokens"
         - "16384"
         - "--no-disable-hybrid-kv-cache-manager"
-        - "--no-enable-flashinfer-autotune"
+        - "--disable-flashinfer-autotune"
       env:
         VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "1"
     decode:
@@ -491,30 +654,59 @@ strategy_overrides:
       # every other GPU keeps the DEP decode pool.
       parallelism:
         default: dep
+        gb200: tp
         gb300: tp
       tp: 1
       nodes:
+        gb200: 4
         gb300: 2
       env: {}
       hardware_overrides:
+        # GB200 decode is one TP16 + DCP16 pool without expert parallelism (#3748).
+        # Same undo of the DEP-only decode flags as GB300 below; 32 sequences and a
+        # 160-token decode graph cap are the lane's concurrency-16 values. Decode
+        # batches at most 480 tokens, so 1024 bounds the FlashInfer MoE autotune;
+        # the 16384 default bucket needs a 2.9 GiB workspace that runs out of
+        # memory at 0.92 (InferenceX #4322).
         gb200:
           extra_args:
-            - "--moe-backend"
-            - "deep_gemm_mega_moe"
+            - "--no-data-parallel-hybrid-lb"
+            - "--max-num-batched-tokens"
+            - "1024"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+            - "--gpu-memory-utilization"
+            - "0.92"
+            - "--max-num-seqs"
+            - "32"
+            - "--max-cudagraph-capture-size"
+            - "160"
+          extra_env:
+            VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
         gb300:
           # Undo the DEP-only decode flags below for the TP pool. Hybrid LB is
           # invalid on the --headless follower; 16384 is vLLM's API-server default
           # on >=160 GB GPUs, which the qualified decode ran with.
           # FULL_AND_PIECEWISE is vLLM's V1 default; it replaces the strategy's
           # FULL_DECODE_ONLY, which the qualified decode did not set.
+          # Specialized decode (InferenceX #4373, c16-c32), decode only: it needs no
+          # expert parallelism and FULL decode CUDA graphs. --max-num-seqs is
+          # 64 // (K + 1) = 12 for the K4 draft, and graphs are captured for every
+          # batch size up to 64. The lane also drops tokenspeed_mla_min_split_kv.
           extra_args:
             - "--no-data-parallel-hybrid-lb"
             - "--max-num-batched-tokens"
             - "16384"
+            - "--additional-config"
+            - '{"decode_backend":"latency_specialized"}'
+            - "--max-num-seqs"
+            - "12"
+            - "--max-cudagraph-capture-size"
+            - "64"
             - "--compilation-config"
-            - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+            - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64]}'
             - "--attention-config"
-            - '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true,"tokenspeed_mla_min_split_kv":8}'
+            - '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
           extra_env:
             VLLM_ENABLE_GEMM_RS: "0"
       vllm_args:
@@ -594,7 +786,7 @@ guide: |
   - **mlx5 dmabuf registration failures**: if engine init fails with "NCCL error: unhandled system error" and the log shows `mlx5dv_reg_dmabuf_mr` errno 524, the kernel/driver lacks mlx5 dmabuf support (NCCL 2.28 registers dmabuf by default). Set `NCCL_DMABUF_ENABLE=0` to fall back to `nvidia_peermem` (must be loaded on the nodes) — still GPUDirect RDMA.
   - **FP8 KV**: If FP8 KV cache is needed, please also add `--attention-config '{"use_prefill_query_quantization":true,"mla_prefill_backend":"TOKENSPEED_MLA"}'` when serving vLLM. `TOKENSPEED_MLA` is what the Blackwell profile above emits (paired with `--attention-backend TOKENSPEED_MLA` for decode), but it is not the only supported choice: vLLM 0.27.1 registers three MLA prefill backends — `FLASHINFER`, `TRTLLM_RAGGED` and `TOKENSPEED_MLA` (see `vllm/v1/attention/backends/mla/prefill/registry.py`) — and any of them may be substituted for `mla_prefill_backend` alongside `use_prefill_query_quantization`. Which one wins depends on the input-length distribution, so benchmark before switching. Those backends do not run on ROCm: on MI355X the builder pairs FP8 KV with `--attention-config '{"mla_prefill_backend":"ROCM_AITER_FA"}'` instead.
   - **Prefix-match unit**: K3 is a hybrid model: its MLA attention layers and KDA (Mamba-like) layers form two KV-cache groups under the hybrid KV-cache manager. With prefix caching on, vLLM pads the attention block size up to match the Mamba state page, so both groups resolve to one (large) block size and the default prefix-cache hit boundary lands on that block — very coarse. The Blackwell profile sets `--prefix-match-unit 128`: the inflation formula always yields a multiple of 128, so 128 divides whatever block size results, and it aligns with the MLA kernel's native block boundary, giving finer prefix-hit granularity. The value is only effective when prefix caching (or a KV connector) is active; it is a no-op otherwise, and it is safe under all tensor-parallel layouts.
-  - **Decode context parallelism (DCP)**: enable the **Decode context parallelism** opt-in feature in the command builder to shard the decode KV cache across the tensor-parallel ranks for decode-heavy long-context serving. It emits `--decode-context-parallel-size 8 --dcp-comm-backend a2a --attention-backend TOKENSPEED_MLA` with `mla_prefill_backend: TRTLLM_RAGGED` (on MI355X: `--attention-backend ROCM_AITER_MLA` with `mla_prefill_backend: ROCM_AITER_FA`), and is scoped to the TP8 single-node profile because the DCP size must divide the tensor-parallel size. On builds that carry them, the `VLLM_USE_DIRECT_DCP_A2A`, `VLLM_USE_DIRECT_DCP_Q_GATHER` and `VLLM_USE_DIRECT_DCP_KV_GATHER` knobs default to auto and turn the direct DCP ops on where applicable; set them to `1` only to pin that path explicitly, or `0` to disable it. The MI355X DCP option sets all three to `0`, as InferenceX does.
+  - **Decode context parallelism (DCP)**: enable the **Decode context parallelism** opt-in feature in the command builder to shard the decode KV cache across the tensor-parallel ranks for decode-heavy long-context serving. It emits `--decode-context-parallel-size 8 --dcp-comm-backend a2a --attention-backend TOKENSPEED_MLA` with `mla_prefill_backend: TRTLLM_RAGGED` (on MI355X: `--attention-backend ROCM_AITER_MLA` with `mla_prefill_backend: ROCM_AITER_FA`), and is scoped to the TP8 single-node profile because the DCP size must divide the tensor-parallel size. On builds that carry them, the `VLLM_USE_DIRECT_DCP_A2A`, `VLLM_USE_DIRECT_DCP_Q_GATHER` and `VLLM_USE_DIRECT_DCP_KV_GATHER` knobs default to auto and turn the direct DCP ops on where applicable; set them to `1` only to pin that path explicitly, or `0` to disable it. The MI355X DCP option sets all three to `0`, as InferenceX does. On GB200 and GB300 the builder's **Decode context parallel** row (Off, DCP8, DCP16) sets `--decode-context-parallel-size` on every node tab and, under Prefill/Decode, on both roles. It offers only the size equal to the tensor-parallel size of every role, the layouts InferenceX qualified: GB200 TP8 x PP2 aggregated is DCP8 (#4322), TP16 per role disaggregated is DCP16 (#3748, #4322), and GB300 TP8 pools are DCP8 (#4047). Other layouts, such as a TP1 DEP decode pool, show no DCP row and drop the flag.
   - Ascend W4A8 checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
   - vLLM Ascend tutorial: https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K3.html
 
@@ -610,7 +802,7 @@ guide: |
   docker pull vllm/vllm-openai:nightly
   ```
 
-  For client concurrency 1 or 2, use TP16/DCP16 with five DSpark draft tokens. For concurrency 2 or 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
+  At client concurrency 1, use TP16/DCP16 with five DSpark draft tokens. At concurrency 2 and 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
 
   The explicit opt-in is `--additional-config '{"decode_backend":"latency_specialized"}'`; `auto` keeps the stock decode path in this image. The specialized path requires the V2 model runner, FULL decode CUDA graphs, and BF16 convolution state with FP32 recurrent state (`--mamba-ssm-cache-dtype float32`). Keep `FULL_AND_PIECEWISE` and the capture sizes together: the lists cover DSpark draft and verification shapes. Prefill and eager/piecewise steps still use the stock implementation. This recipe uses PP1, no expert parallelism, and at most seven draft tokens; do not combine it with `--enforce-eager`, ReplaySSM/RecoverSSM, or adaptive verification. See the pinned [backend requirements](https://github.com/vllm-project/vllm/blob/49cb2bbf71cfd36ee5aa33d1e184b1cddff55294/vllm/models/kimi_k3/nvidia/specialized_decode/runtime/__init__.py).
 
@@ -667,7 +859,7 @@ guide: |
     --compilation-config "{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"cudagraph_capture_sizes\":[$CAPTURES]}" \
     --speculative-config "{\"model\":\"Inferact/Kimi-K3-DSpark\",\"attention_backend\":\"TOKENSPEED_MLA\",\"method\":\"dspark\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\"}" \
     --enable-prefix-caching --prefix-match-unit 128 \
-    --no-enable-flashinfer-autotune \
+    --disable-flashinfer-autotune \
     --moe-backend auto --load-format fastsafetensors \
     --stream-interval 10 --language-model-only --trust-remote-code \
     --enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3 \
@@ -676,11 +868,11 @@ guide: |
 
   ## GB200: InferenceX AgentX alignment
 
-  The GB200 AgentX lanes in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-*`, [SemiAnalysisAI/InferenceX#3748](https://github.com/SemiAnalysisAI/InferenceX/pull/3748), pinned to [`49a8e45`](https://github.com/SemiAnalysisAI/InferenceX/tree/49a8e45349cf0b4a03ffa2c6d49da1fd861586f7/inferencex-e2e/benchmarks/multi_node/srt-slurm-recipes/kimik3/vllm/gb200-fp4/agentx)) serve the default `moonshotai/Kimi-K3` checkpoint (MXFP4 weights) with DSpark speculative decoding and a Mooncake KV store on 4-GPU NVL trays. They are benchmark configurations; the settings below are the production-useful parts. The builder's **Mooncake** option generates the `mooncake_master` and store config; the lane-specific connector settings are below. Throughput runs use InferenceX's golden acceptance lengths for DSpark.
+  The GB200 AgentX lanes in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-*`, [SemiAnalysisAI/InferenceX#4322](https://github.com/SemiAnalysisAI/InferenceX/pull/4322), pinned to [`b7eee97`](https://github.com/SemiAnalysisAI/InferenceX/tree/b7eee972451f9297941d4cbe6d42d489d7ec8363/inferencex-e2e/benchmarks/multi_node/srt-slurm-recipes/kimik3/vllm/gb200-fp4/agentx), which builds on #3748) serve the default `moonshotai/Kimi-K3` checkpoint (MXFP4 weights) with DSpark speculative decoding and a Mooncake KV store on 4-GPU NVL trays. They are benchmark configurations; the settings below are the production-useful parts. The builder's **Mooncake** option generates the `mooncake_master` and store config; the lane-specific connector settings are below. Throughput runs use InferenceX's golden acceptance lengths for DSpark.
 
   ### Aggregated: TP8 x PP2 + DCP8 (16 GPUs, 4 trays)
 
-  Image `vllm/vllm-openai:nightly-ac9126e58aa7bbab1856ba6593ba4d5003fea516`, run through Dynamo's vLLM frontend with an embedded RDMA Mooncake store (`global_segment_size` 200GB, `mlx5_0..mlx5_3`). The builder's TP+PP strategy uses one pipeline stage per node (TP4 x PP4 on these 4-GPU trays), so this lane is documented as an explicit command. `C` is client concurrency, `K` is `num_speculative_tokens` and `S` is `--max-num-seqs`:
+  Image `vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f` (the same nightly as the disaggregated lane), served by vLLM's own frontend (no Dynamo) with an embedded RDMA Mooncake store (`global_segment_size` 200GB, `mlx5_0..mlx5_3`). In the command builder, select GB200, **Multi-Node TP + Pipeline Parallel** and the **Python** frontend (the lane did not enable the Rust frontend): on GB200 it renders this TP8 x PP2 + DCP8 layout across four trays with the K4 draft and `--max-num-seqs 64` (the C=32 row). Leave **Spec decoding** off, because the toggle replaces the K4 draft with the generic `RedHatAI/Kimi-K3-speculator.dspark` K8 draft. The builder's **Mooncake** KV Offload option renders a plain `MooncakeStoreConnector` with a 100GB segment; use the lane's connector and 200GB store from the command below. The per-concurrency settings below stay manual. `C` is client concurrency, `K` is `num_speculative_tokens` and `S` is `--max-num-seqs`:
 
   | C | K | S | `cudagraph_capture_sizes` (before the shared tail) |
   |---:|---:|---:|---|
@@ -695,7 +887,10 @@ guide: |
   ```bash
   export VLLM_USE_DIRECT_DCP_A2A=1 VLLM_USE_DIRECT_DCP_Q_GATHER=1 VLLM_USE_DIRECT_DCP_KV_GATHER=1
   export VLLM_ALLREDUCE_USE_FLASHINFER=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_V2_MODEL_RUNNER=1
-  export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576
+  export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576 VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0
+  export MC_STORE_MEMCPY=1 MC_ENABLE_DEST_DEVICE_AFFINITY=1 MC_WORKERS_PER_CTX=4
+  export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 VLLM_RPC_TIMEOUT=600000
   vllm serve moonshotai/Kimi-K3 --trust-remote-code \
     --tensor-parallel-size 8 --pipeline-parallel-size 2 \
     --decode-context-parallel-size 8 --dcp-comm-backend a2a \
@@ -706,53 +901,85 @@ guide: |
     --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","method":"dspark","num_speculative_tokens":<K>,"attention_backend":"TOKENSPEED_MLA","draft_sample_method":"probabilistic"}' \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[<sizes from the table>,256,512,1024,2048,4096,8192]}' \
     --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_offload":false}}' \
+    --load-format fastsafetensors --moe-backend auto --no-enable-flashinfer-autotune \
     --tool-call-parser kimi_k3 --reasoning-parser kimi_k3 --enable-auto-tool-choice \
     --language-model-only
   ```
 
   ### Disaggregated: 1 prefill + 1 decode, TP16 + DCP16 per role (32 GPUs)
 
-  Image `vllm/vllm-openai:nightly-dev-arm64-cu13-3696c77` with Dynamo `ba83080ecd31c1ce918559e576d3c5bc9e092ff1` (etcd, NATS and an embedded RDMA Mooncake store). This is a different layout from the TEP8/DEP profile above, tuned for long-context agentic traffic with a shared Mooncake store, so it is documented here rather than in the builder. Each role is four trays. Both roles run:
+  Image `vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f` with Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`, etcd and an embedded RDMA Mooncake store. The lane's request plane is TCP (`DYN_REQUEST_PLANE=tcp`) and it starts no NATS service. Each role is one worker across four trays.
+
+  In the command builder, select GB200, **Prefill/Decode Disaggregation** and the **Dynamo** PD router, and keep the default TP prefill and TP decode pools: they render this TP16 + DCP16 layout with the concurrency-16 settings. The profile already includes the DSpark K4 draft and `--language-model-only`, so leave **Spec decoding** off (the toggle swaps in the generic RedHat K8 draft) and untick **Tool calling** (see the parser note below). The DEP decode pool is not supported on GB200: it renders TP1 with `--decode-context-parallel-size 16`, which vLLM rejects. The NIXL + Mooncake store connector, the Mooncake master, prefill `--kv-events-config` and the frontend's router mode and session affinity below are documented here only.
+
+  Run each command on all four trays of the role with the same `--master-addr` (the first tray's address), `--nnodes 4`, `--node-rank 0` to `3`, and `--headless` on ranks 1-3. Prefill (`P_GPU`/`P_CAP` and `S` from the table below):
 
   ```bash
-  vllm serve moonshotai/Kimi-K3 --trust-remote-code \
+  python3 -m dynamo.vllm --model moonshotai/Kimi-K3 --served-model-name moonshotai/Kimi-K3 \
+    --disaggregation-mode prefill --request-plane tcp \
+    --nnodes 4 --node-rank <0-3> --master-addr <first-tray-ip> --device-ids 0,1,2,3 \
     --tensor-parallel-size 16 --decode-context-parallel-size 16 --dcp-comm-backend a2a \
     --attention-backend TOKENSPEED_MLA \
     --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
     --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}' \
-    --kv-cache-dtype fp8 --enable-prefix-caching --prefix-match-unit 128 --language-model-only \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 --enable-prefix-caching --prefix-match-unit 128 --language-model-only \
+    --gpu-memory-utilization <P_GPU> --max-num-seqs <S> --max-cudagraph-capture-size <P_CAP> \
+    --enable-cumem-allocator --stream-interval 10 --load-format safetensors --safetensors-load-strategy lazy \
+    --trust-remote-code \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}' \
     --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
   ```
 
+  Decode (`D_GPU`/`D_CAP` and `S` from the table below). `--max-num-batched-tokens 1024` bounds the FlashInfer MoE autotune to the token counts decode can reach (at most 480); at vLLM's 16384-token default the autotune bucket needs a 2.9 GiB workspace that runs out of memory at 0.92, and the other ranks hang:
+
+  ```bash
+  python3 -m dynamo.vllm --model moonshotai/Kimi-K3 --served-model-name moonshotai/Kimi-K3 \
+    --disaggregation-mode decode --request-plane tcp \
+    --nnodes 4 --node-rank <0-3> --master-addr <first-tray-ip> --device-ids 0,1,2,3 \
+    --tensor-parallel-size 16 --decode-context-parallel-size 16 --dcp-comm-backend a2a \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
+    --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}' \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 --enable-prefix-caching --prefix-match-unit 128 --language-model-only \
+    --gpu-memory-utilization <D_GPU> --max-num-seqs <S> --max-num-batched-tokens 1024 --max-cudagraph-capture-size <D_CAP> \
+    --enable-cumem-allocator --stream-interval 10 --load-format safetensors --safetensors-load-strategy lazy \
+    --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
+  ```
+
+  For tool calling and reasoning output, add `--reasoning-parser kimi_k3 --dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` to both roles. `python3 -m dynamo.vllm` parses the remaining arguments as vLLM engine arguments only, so `--enable-auto-tool-choice` and `--tool-call-parser` are rejected there.
+
   Per-concurrency settings (`--max-num-seqs` is 2x concurrency on both roles; decode `--max-cudagraph-capture-size` is `max-num-seqs x (4 + 1)` tokens):
 
-  | C | `--max-num-seqs` | Prefill `--gpu-memory-utilization` / `--max-cudagraph-capture-size` | Decode `--gpu-memory-utilization` / `--max-cudagraph-capture-size` |
+  | C | `S` (`--max-num-seqs`) | Prefill `P_GPU` / `P_CAP` | Decode `D_GPU` / `D_CAP` |
   |---:|---:|---|---|
   | 16 | 32 | 0.88 / 512 | 0.92 / 160 |
+  | 32 | 64 | 0.88 / 512 | 0.92 / 320 |
   | 48 | 96 | 0.88 / 512 | 0.90 / 480 |
 
   Decode memory utilization is 0.92 while the capture size is at most 320 tokens and 0.90 above it.
 
-  - **Environment (both roles):** the three direct-DCP variables, `VLLM_ALLREDUCE_USE_FLASHINFER=1`, `VLLM_USE_V2_MODEL_RUNNER=1`, `NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `VLLM_MOONCAKE_LOAD_RECV_THREADS=4` and `MC_SLICE_SIZE=1048576`.
-  - **Frontend:** the Dynamo frontend runs with `--router-mode least-loaded --router-session-affinity-ttl-secs 900`, so each conversation sticks to one worker and reuses its prefix cache. The Rust frontend is selected with `VLLM_USE_RUST_FRONTEND=1`, with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600` and `DYN_TOKENIZER_CACHE_BYTES=8589934592`. AgentX sends the conversation ID as the Dynamo session ID.
+  - **Environment (both roles):** the three direct-DCP variables, `VLLM_ALLREDUCE_USE_FLASHINFER=1`, `VLLM_USE_V2_MODEL_RUNNER=1`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`, `VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_SSM_CONV_STATE_LAYOUT=DS`, `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0`, `NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `VLLM_MOONCAKE_LOAD_RECV_THREADS=4`, `MC_SLICE_SIZE=1048576`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `UCX_MEMTYPE_CACHE=n`, `UCX_MEMTYPE_REG_WHOLE=n`, `UCX_RCACHE_MAX_UNRELEASED=1024`, `UCX_TCP_AF_PRIO=inet`, `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, `VLLM_ENGINE_READY_TIMEOUT_S=3600`, `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `ETCD_LEASE_TTL=600`, `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` and `DYN_REQUEST_PLANE=tcp`.
+  - **Frontend:** the Dynamo frontend runs with `--router-mode least-loaded --router-session-affinity-ttl-secs 900`, so each conversation sticks to one worker and reuses its prefix cache. The Rust frontend is selected with `VLLM_USE_RUST_FRONTEND=1`, with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600` and `DYN_TOKENIZER_CACHE_BYTES=8589934592`. AgentX sends the conversation ID in the `X-Dynamo-Session-Id` request header.
   - **Mooncake master:** `--default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, 128GB global segment, 4GB local buffer, RDMA over `mlx5_0..mlx5_3`.
 
   ## GB300: InferenceX AgentX disaggregated (xPyD, TP8 + DCP8 prefill and decode)
 
-  The GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047)) runs Dynamo + vLLM with several prefill and decode workers. Prefill and decode workers are both TP8 + DCP8 across two 4-GPU GB300 trays; prefill workers also use EP8 with MegaMoE, and decode workers use no expert parallelism. KV moves over NIXL, and all workers share an RDMA Mooncake store. Image `vllm/vllm-openai:nightly-1b2a666391f2a24228a1436b64d547c34cc6b6ce`, Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`.
+  The GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047), points refined in [#4373](https://github.com/SemiAnalysisAI/InferenceX/pull/4373)) runs Dynamo + vLLM with several prefill and decode workers. Prefill and decode workers are both TP8 + DCP8 across two 4-GPU GB300 trays; prefill workers also use EP8 with MegaMoE, and decode workers use no expert parallelism. KV moves over NIXL, and all workers share an RDMA Mooncake store. Image `vllm/vllm-openai:nightly-1b2a666391f2a24228a1436b64d547c34cc6b6ce`, Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`.
 
-  | Clients | Prefill workers | Decode workers | GPUs | Decode `--max-num-seqs` |
-  |---:|---:|---:|---:|---:|
-  | 40 | 1 | 4 | 40 | 2 |
-  | 48 | 1 | 3 | 32 | 4 |
-  | 48 | 1 | 2 | 24 | 8 |
-  | 176 | 2 | 5 | 56 | 16 |
-  | 176 | 2 | 3 | 40 | 24 |
-  | 176-240 | 2 | 3 | 40 | 128 |
+  | Clients | Prefill workers | Decode workers | GPUs | Decode profile | Decode `--max-num-seqs` |
+  |---:|---:|---:|---:|---|---:|
+  | 16 | 1 | 3 | 32 | [Specialized](#specialized-decode-low-concurrency) | 12 |
+  | 24-32 | 1 | 2 | 24 | [Specialized](#specialized-decode-low-concurrency) | 12 |
+  | 48-64 | 1 | 2 | 24 | Regular | 128 |
+  | 240 | 2 | 3 | 40 | Regular | 128 |
+  | 240 | 3 | 4 | 56 | Regular | 128 |
 
-  Prefill workers always use `--max-num-seqs 64`.
+  Prefill workers always use `--max-num-seqs 64`. The regular profile is the Workers commands below; the specialized one changes both roles as described under [Specialized decode](#specialized-decode-low-concurrency).
 
-  The command builder renders one prefill pool and one decode pool of this profile: select GB300, **Prefill/Decode Disaggregation** and the **Dynamo** PD router. Worker counts beyond 1P1D, the Mooncake store connector and services, and the frontend's router mode and session affinity below are documented here only.
+  The command builder renders one prefill pool and one decode pool of the specialized profile (the 1P2D c24-c32 row): select GB300, **Prefill/Decode Disaggregation** and the **Dynamo** PD router, and keep the default TP prefill and TP decode pools. Its decode uses `--max-num-seqs 12`; for the regular points use the Workers commands below instead. The profile already includes the DSpark K4 draft and `--language-model-only`, so leave **Spec decoding** off: turning it on swaps in the generic `RedHatAI/Kimi-K3-speculator.dspark` K8 draft, which this profile was not qualified with and which specialized decode rejects (it allows at most 7 draft tokens). Untick **Tool calling** as well; see the parser note under Workers. Other pool modes are not supported on GB300: the DEP decode pool renders TP1 with `--decode-context-parallel-size 8`, which vLLM rejects.
+
+  Documented here only: worker counts beyond one pool per role, the Mooncake store connector (the builder's Mooncake option renders a plain `MooncakeStoreConnector` without the qualified NIXL MultiConnector, recompute policy and load options), the Mooncake services, prefill `--kv-events-config`, and the frontend's router mode and session affinity (the builder renders round-robin).
 
   ### Services
 
@@ -778,10 +1005,11 @@ guide: |
   export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576 MC_MAX_MR_SIZE=4294967296 MC_ENABLE_DEST_DEVICE_AFFINITY=1
   export VLLM_CONNECTOR_PREFETCH_DEPTH=8 VLLM_CONNECTOR_PREFETCH_KV_CAP=0.65
   export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n UCX_RCACHE_MAX_UNRELEASED=1024 UCX_TCP_AF_PRIO=inet
-  export DYN_REQUEST_PLANE=tcp
+  export DYN_REQUEST_PLANE=tcp DYN_TCP_REQUEST_TIMEOUT=120 ETCD_LEASE_TTL=600
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 VLLM_RPC_TIMEOUT=600000
   ```
 
-  Set `VLLM_ENABLE_GEMM_RS=1` on prefill workers and `VLLM_ENABLE_GEMM_RS=0` on decode workers. Loading the 2.8T checkpoint across trays takes a while, so raise `VLLM_ENGINE_READY_TIMEOUT_S`, `VLLM_RPC_TIMEOUT` and `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` well above their defaults.
+  Set `VLLM_ENABLE_GEMM_RS=1` on prefill workers and `VLLM_ENABLE_GEMM_RS=0` on decode workers. Loading the 2.8T checkpoint across trays and autotuning takes a while, which is why the engine-ready, execute-model and RPC timeouts are raised.
 
   ### Workers
 
@@ -807,7 +1035,7 @@ guide: |
     --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
   ```
 
-  Decode (set `--max-num-seqs` from the table):
+  Decode (regular profile, `--max-num-seqs 128`):
 
   ```bash
   python3 -m dynamo.vllm --model moonshotai/Kimi-K3 --served-model-name moonshotai/Kimi-K3 \
@@ -819,22 +1047,48 @@ guide: |
     --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
     --enable-prefix-caching --prefix-match-unit 128 \
-    --gpu-memory-utilization 0.92 --max-num-seqs <S> --max-cudagraph-capture-size 512 \
+    --gpu-memory-utilization 0.92 --max-num-seqs 128 --max-cudagraph-capture-size 512 \
     --enable-cumem-allocator --enable-flashinfer-autotune \
     --load-format fastsafetensors --stream-interval 10 --language-model-only --trust-remote-code \
     --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
   ```
 
-  Add `--enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3` for tool calling and reasoning output.
+  For tool calling and reasoning output, add `--reasoning-parser kimi_k3 --dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` to both roles. `python3 -m dynamo.vllm` parses the remaining arguments as vLLM engine arguments only, so the vLLM API-server flags `--enable-auto-tool-choice` and `--tool-call-parser` are rejected there.
+
+  ### Specialized decode (low concurrency)
+
+  The c16-c32 points use the `latency_specialized` decode backend from [Low latency serving](#low-latency-serving) on the decode workers (1P3D for c16, 1P2D for c24-c32), with the Workers commands above changed as follows. The backend's requirements are listed there: V2 model runner (set in Environment), FULL decode CUDA graphs, BF16 convolution state with FP32 recurrent state, DSpark with at most 7 draft tokens, no pipeline or expert parallelism, and DCP of 1 or TP. The decode workers already meet the last two.
+
+  Both roles:
+
+  ```bash
+  --mamba-ssm-cache-dtype float32 --cp-kv-cache-interleave-size 1 --no-enable-flashinfer-autotune
+  # replacing --mamba-ssm-cache-dtype bfloat16 and --enable-flashinfer-autotune
+  ```
+
+  Pin `--cp-kv-cache-interleave-size 1` on both roles. Left unset, NIXL P/D raises the DCP KV interleave to the KV block size after the specialized decode has read it, so its spec-verify causal mask uses the stale value.
+
+  Decode only:
+
+  ```bash
+  --additional-config '{"decode_backend":"latency_specialized"}' \
+  --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
+  --max-num-seqs 12 --max-cudagraph-capture-size 64 \
+  --compilation-config "{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"cudagraph_capture_sizes\":[$(seq -s, 1 64)]}"
+  # replacing the regular decode's --attention-config (it also sets tokenspeed_mla_min_split_kv),
+  # --max-num-seqs 128 and --max-cudagraph-capture-size 512
+  ```
+
+  `--max-num-seqs` is `64 // (K + 1)` with the K4 draft, so a full verify batch (12 x 5 = 60 tokens) fits the 64-token graph, and CUDA graphs are captured for every batch size up to 64. The prefill workers do not set `--additional-config`: the backend rejects the expert parallelism they use. The uncapped c48+ points keep the regular profile, so TTFT is not traded for ITL by a standing decode queue.
 
   ### Frontend
 
   ```bash
-  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592
+  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592 DYN_TCP_REQUEST_TIMEOUT=120
   python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 900
   ```
 
-  Session affinity keeps each conversation on one worker so it reuses that worker's prefix cache; send the conversation ID as the Dynamo session ID.
+  Session affinity keeps each conversation on one worker so it reuses that worker's prefix cache; send the conversation ID in the `X-Dynamo-Session-Id` request header.
 
   ## AMD MI355X: InferenceX AgentX alignment
 
