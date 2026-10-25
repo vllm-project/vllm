@@ -18,7 +18,6 @@ from ..common.policy import batch_table
 from .experts import (
     PLAN_BYTES,
     ExpertsGeometry,
-    ExpertsGroupKernel,
     ExpertsKernel,
     ExpertsPlanKernel,
     fc2_pairs,
@@ -35,25 +34,6 @@ def streamed(batch):
     return bool(batch_table("4-8:1").get(batch, 0))
 
 
-def pregrouped(tp, batch):
-    """B>8 experts read the unit table a one-CTA kernel builds after routing, beside
-    the fused shared expert (hidden at B9-32; at B64 its ~2.3 us after routing outlast
-    the shared expert)."""
-    table = batch_table(PREGROUP[tp])
-    return batch > 8 and bool(table.get(batch, 0))
-
-
-PREGROUP = {8: "9-32:1", 16: "9-32:1"}
-# With the shared join skipped (moe.prepared.JOIN), TP8 B16 releases at entry.
-EARLY = {8: "9-16:1", 16: ""}
-
-
-def early_group(tp, batch):
-    """Pregrouped batches whose unit-table kernel releases the experts at its entry."""
-    table = batch_table(EARLY[tp])
-    return pregrouped(tp, batch) and bool(table.get(batch, 0))
-
-
 def stealing(batch):
     """B>8 experts balance the FC2(B) tail by claims."""
     return batch > 8 and bool(batch_table("9-64:1").get(batch, 0))
@@ -62,11 +42,11 @@ def stealing(batch):
 @functools.cache
 def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
     """Only code and geometry are cached; no owner tensors or descriptors. ``knobs``:
-    (B<=8 stream, pregrouped, steal)."""
-    defaults = (streamed(batch), False, False)
-    stream, grouped, steal = knobs + defaults[len(knobs) :]
+    (B<=8 stream, steal)."""
+    defaults = (streamed(batch), False)
+    stream, steal = knobs + defaults[len(knobs) :]
     capacity = 1 << (batch - 1).bit_length()
-    moe = ExpertsKernel(tp, capacity, experts, grid, publish, stream, grouped, steal)
+    moe = ExpertsKernel(tp, capacity, experts, grid, publish, stream, steal)
     flat = lambda n, dtype=c.Uint8, align=16: fake((n,), (1,), dtype, align)
     box = (c.Int64(0), c.Int32(0), c.Int32(0)) if publish else ()
     if publish == "twoshot":  # receive slots, owners' bases, parity x TP + rank
@@ -80,18 +60,6 @@ def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
     scalars = (c.Int32(batch), *map(c.Float32, (100, 0.25, 0.04)), *box)
     with torch.accelerator.device_index(device):
         return cute.compile(moe, *tensors, *scalars, make_fake_stream())
-
-
-@functools.cache
-def compile_group(tp, experts, batch, grid, device, early=False):
-    """The pregrouped experts' unit-table kernel: (ids, workspace, batch); ``early``:
-    it releases the experts at entry."""
-    capacity = 1 << (batch - 1).bit_length()
-    kernel = ExpertsGroupKernel(tp, capacity, experts, grid, early=early)
-    flat = lambda n, dtype=c.Uint8: fake((n,), (1,), dtype, 16)
-    args = (flat(batch * 16, c.Int32), flat(kernel.workspace_bytes), c.Int32(batch))
-    with torch.accelerator.device_index(device):
-        return cute.compile(kernel, *args, make_fake_stream())
 
 
 @functools.cache
@@ -149,17 +117,13 @@ class PersistentExperts:
         self.all_maps = to_cute(self.maps, 64)  # TP8 FC2 pairs: maps 0-5
         self.prepared = {}
 
-    def prepare(
-        self, batch, buffers, out, publish=(), planned=False, twoshot=False, early=False
-    ):
+    def prepare(self, batch, buffers, out, publish=(), planned=False, twoshot=False):
         """``publish``: (multicast, parity, rank) of the WaveMoeTail latent slot to
         publish (``twoshot``: the ``common.twoshot`` push box); ``planned``: B>8 calls
-        find the plan written (by the routing kernel), else run writes it from x first;
-        ``early``: the caller runs ``group`` (pregrouped batches) before ``run``."""
+        find the plan written (by the routing kernel), else run writes it from x first."""
         mode = "twoshot" if twoshot else bool(publish)
-        grouped = pregrouped(self.tp, batch)
         args: tuple = (batch, self.grid_for(batch), self.device.index, mode)
-        args += (streamed(batch), grouped, stealing(batch))
+        args += (streamed(batch), stealing(batch))
         code = compile_experts(self.tp, self.experts, *args)
         # CTAs wait on other clusters' partials: the whole grid must be resident.
         check_residency(code, self.device.index, args[1], 384, "Kimi K3 MoE experts")
@@ -168,41 +132,23 @@ class PersistentExperts:
         capacity = 1 << (batch - 1).bit_length()
         if fc2_pairs(self.tp, capacity, batch > 8 or streamed(batch)):
             maps = self.all_maps
-        group = None
         if batch > 8:
             plan = (tensor(buffers["plan"]), compile_plan(batch, self.device.index))
             plan = plan[:1] if planned else plan
-        if grouped:
-            release = early_group(self.tp, batch)
-            grouping = compile_group(self.tp, self.experts, *args[:3], release)
-            group = grouping, ws, early
-        self.prepared[batch] = (out, tensor(out), ws, code, publish, plan, maps, group)
-
-    def group(self, ids):
-        """Pregrouped batches prepared ``early``: the unit-table kernel (run it on the
-        stream after routing; ``run`` then skips it)."""
-        group = self.prepared[ids.shape[0]][7]
-        if group is not None and group[2]:
-            self.launch_group(ids, group)
-
-    def launch_group(self, ids, group):
-        code, ws, _ = group
-        code(tensor(ids), ws, c.Int32(ids.shape[0]), stream(self.device))
+        self.prepared[batch] = (out, tensor(out), ws, code, publish, plan, maps)
 
     def grid_for(self, batch):
         return self.grids.get(batch, self.grid)
 
     def run(self, x, ids, weights=None):
         batch = x.shape[0]
-        out, output, workspace, code, box, plan, maps, group = self.prepared[batch]
+        out, output, workspace, code, box, plan, maps = self.prepared[batch]
         output = tensor(weights) if box else output
         source = to_cute(x, 16)
         if plan is not None:
             if len(plan) > 1:
                 plan[1](source, plan[0], stream(self.device))
             source = plan[0]
-        if group is not None and not group[2]:
-            self.launch_group(ids, group)
         args = (source, tensor(ids), maps, *self.views[1:], workspace, output)
         code(*args, c.Int32(batch), *self.scalars, *box, stream(self.device))
         return out

@@ -99,11 +99,8 @@ class ExpertsGeometry:
         # counters [160] and unit counts [2], hidden images [2, 1024].
         self.ws_calls = self.ws_stage + 1024 * 3584 * 2
         self.ws_units = self.ws_calls + 1024
-        # Pregrouped unit table (``ExpertsGroupKernel``): header (units, call, grouped
-        # call), experts [1024], rows [1024, 8].
-        self.ws_group = self.ws_units + 2 * 1024 * self.h_compact_bytes
         # FC2(B) tail claim counters [2 parities, 160] (``ExpertsKernel.steal``).
-        self.ws_steal = self.ws_group + 16 + 20 * 1024
+        self.ws_steal = self.ws_units + 2 * 1024 * self.h_compact_bytes
         self.workspace_bytes = self.ws_steal + 2 * 160 * 4
 
     def image(self, workspace, parity, unit):
@@ -288,8 +285,7 @@ class ExpertsKernel(ExpertsGeometry):
     (receive slots [3 x TP, 64, 3584/TP], their owners' bases, parity x TP + rank) of
     ``common.twoshot`` instead. Capacity > 8 (grouped) takes the plan (``PLAN_BYTES``:
     MXFP8 x) in place of x. ``stream`` runs capacity <= 8 on the incremental producer
-    and CTA-scoped waits (grouped always). ``pregrouped`` (grouped) reads the unit table
-    ``ExpertsGroupKernel`` left in the workspace instead of grouping the routes itself.
+    and CTA-scoped waits (grouped always).
     ``steal`` (grouped) balances the end: each CTA's last ``zone`` FC2(B) grains (TP8 a
     tile pair, TP16 three tiles) are claimed by the owner from the front and by the
     ``victims`` CTAs before it from the back, through one counter per CTA re-armed by
@@ -297,10 +293,9 @@ class ExpertsKernel(ExpertsGeometry):
 
     def __init__(
         self, tp, capacity, experts, grid, publish=False,
-        stream=True, pregrouped=False, steal=False,
+        stream=True, steal=False,
     ):  # fmt: skip
         super().__init__(tp, capacity)
-        self.pregrouped = pregrouped and self.grouped
         self.steal = steal and self.grouped
         self.streamed = stream or self.grouped
         self.paired = fc2_pairs(tp, capacity, self.streamed)
@@ -519,51 +514,6 @@ class ExpertsKernel(ExpertsGeometry):
                 rank += Int32(cute.arch.popc(word & below))
                 rows[(base[e] + (rank >> 3)) * 8 + (rank & 7)] = Int16(pair)
         cute.arch.sync_threads()
-
-    @cute.jit
-    def fetch_windows(self, sm, workspace):
-        """Pregrouped: the misc scalars from the unit table's header (every CTA's call
-        counters are equal between calls), then thread w * 16 + i copies unit i of
-        window w (FC1 A, FC1 B, FC2 A, FC2 B as ``partition``) out of the table. One
-        compact block (this code runs cold at kernel start)."""
-        tid, _, _, cta = thread()
-        scalars = view(sm.iterator, self.off_misc + 1140, Int32, 3)
-        table = workspace.iterator + self.ws_group
-        if tid == 0:
-            header = load_words(table, count=4, mutable=True)
-            for i in cutlass.range_constexpr(3):
-                scalars[i] = Int32(header[i])
-        cute.arch.sync_threads()
-        if tid < 64:
-            units, fc2, group = (scalars[0], tid >= 32, tid // 16 % 2 == 1)
-            middle = units
-            if units > 40:
-                middle = (units * 50 + 99) // 100
-            start, count = (Int32(0), middle)
-            if group:
-                start, count = (middle, units - middle)
-            per = self.tiles * 14
-            lo = cta * per * count // self.grid
-            hi = (cta + 1) * per * count // self.grid
-            first, last = (start + lo // per, start + (hi - 1) // per)
-            if fc2:
-                lo = cta * self.jobs * count // self.grid
-                hi = (cta + 1) * self.jobs * count // self.grid
-                if cutlass.const_expr(self.steal):
-                    stop = cta + self.victims + 1
-                    if stop > self.grid:
-                        stop = Int32(self.grid)
-                    if group:
-                        hi = stop * self.jobs * count // self.grid
-                first, last = (start + lo // self.jobs, start + (hi - 1) // self.jobs)
-            unit = first + tid % 16
-            if (lo < hi) & (unit <= last):
-                expert = load_words(table + 16 + 4 * unit, count=1, mutable=True)
-                row = load_words(table + 16 + 4096 + 16 * unit, count=4, mutable=True)
-                window_experts, _, window_words = self.tables(sm)
-                window_experts[tid] = Int32(expert[0])
-                for i in cutlass.range_constexpr(4):
-                    window_words[4 * tid + i] = row[i]
 
     @cute.jit
     def gather_x(self, sm, plan, ranges, batch):
@@ -1477,11 +1427,8 @@ class ExpertsKernel(ExpertsGeometry):
         if cutlass.const_expr(self.grouped):
             # Images and rearm alternate over grouped calls; ``x`` is the plan.
             routed = view(sm.iterator, self.off_misc + 1140, Int32, 3)
-            if cutlass.const_expr(self.pregrouped):
-                self.fetch_windows(sm, workspace)
-            else:
-                self.group(sm, ids, workspace, batch)
-                self.windows(sm, self.partition(routed[0], cta))
+            self.group(sm, ids, workspace, batch)
+            self.windows(sm, self.partition(routed[0], cta))
             # Retire the routing scratch's generic accesses before weight-ring reuse.
             cute.arch.fence_proxy("async.shared", space="cta")
             cute.arch.sync_threads()
@@ -1536,44 +1483,3 @@ class ExpertsKernel(ExpertsGeometry):
                     grouped[self.grid + cta] = generation + 1
                 if cta == 0:
                     grouped[160 + (generation & 1)] = distinct
-
-
-class ExpertsGroupKernel(ExpertsKernel):
-    """One CTA groups the routes into the workspace unit table that pregrouped
-    ``ExpertsKernel`` read (launched after routing, beside the shared expert). Every
-    experts call advances all 160 call counters, so entry 0 stands for each CTA's."""
-
-    def __init__(self, *args, early=False):
-        super().__init__(*args)
-        self.threads = 1024
-        # early: release the experts at entry, so their launch and prologue overlap
-        # this kernel's dependency wait and grouping (they still wait for its end).
-        self.early = early
-
-    @cute.jit
-    def __call__(self, *args):
-        launch(self.kernel, args, 1, self.threads)
-
-    @cute.kernel
-    def kernel(self, args):
-        ids, workspace, batch = args
-        tid = thread()[0]
-        sm = alloc(cutlass.utils.SmemAllocator(), Uint8, 32768 + 16, 1024)
-        units = view(sm.iterator, 32768, Int32, 3)
-        if cutlass.const_expr(self.early):
-            cute.arch.griddepcontrol_launch_dependents()
-        cute.arch.griddepcontrol_wait()
-        if cutlass.const_expr(not self.early):
-            cute.arch.griddepcontrol_launch_dependents()
-        self.group(sm, ids, workspace, batch, units)
-        experts, _, words = self.tables(sm, False)
-        table = workspace.iterator + self.ws_group
-        out_experts = view(table, 16, Int32, 1024)
-        for i in range(tid, units[0], self.threads):
-            out_experts[i] = experts[i]
-            row = tuple(words[4 * i + k] for k in range(4))
-            store_words(table + 16 + 4096 + 16 * i, row)
-        if tid == 0:
-            offsets = (self.ws_counter, self.ws_calls)
-            calls = [Uint32(view(workspace.iterator, o, Int32, 1)[0]) for o in offsets]
-            store_words(table, (Uint32(units[0]), *calls, Uint32(0)))

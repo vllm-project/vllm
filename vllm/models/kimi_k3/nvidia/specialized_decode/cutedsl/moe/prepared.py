@@ -54,7 +54,7 @@ class PreparedMoE:
             _, expanded, buffers = state.views[b]
             publish, planned = tail.publish.get(b, ()), front.planned(b)
             twoshot = b in tail.twoshots
-            experts.prepare(b, buffers, expanded, publish, planned, twoshot, True)
+            experts.prepare(b, buffers, expanded, publish, planned, twoshot)
 
     def run(self, x, out, *, consume=None):
         state, b = self.state, x.shape[0]
@@ -75,7 +75,6 @@ class PreparedMoE:
                 shared, beside = self.front.shared_expert(x, self.tail)
                 beside()
                 state.shared_done.record(state.stream)
-            self.experts.group(ids)
             return self.finish(b, out, latent, ids, weights, shared, consume)
         state.begin.record(main)
         with torch.cuda.stream(state.stream):
@@ -86,7 +85,6 @@ class PreparedMoE:
                 beside()
             state.shared_done.record(state.stream)
         ids, weights, latent = self.front.route(x)
-        self.experts.group(ids)  # pregrouped unit table, beside the shared expert
         if before or (beside is not None and self.join.get(b, 1)):
             main.wait_event(state.shared_done if before else state.gate_done)
         return self.finish(b, out, latent, ids, weights, shared, consume, before)
