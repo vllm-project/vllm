@@ -378,7 +378,6 @@ def _partial_tail_store_jobs(
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
     return scheduler._add_store_jobs(
-        handler,
         handler._build_partial_tail_store_jobs(scheduler_output, scheduler._req_status),
     )
 
@@ -388,7 +387,7 @@ def _store_jobs(
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
     return scheduler._add_store_jobs(
-        handler, handler._build_store_jobs(scheduler_output, scheduler._req_status)
+        handler._build_store_jobs(scheduler_output, scheduler._req_status)
     )
 
 
@@ -514,7 +513,6 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
 
     handler = _on_compute(scheduler)
     jobs = scheduler._add_store_jobs(
-        handler,
         handler._build_aligned_boundary_store_jobs(
             {"req": [(1, 98, 16)]}, scheduler._req_status
         ),
@@ -793,10 +791,9 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
     jobs = scheduler._add_store_jobs(
-        _on_compute(scheduler),
         _on_compute(scheduler)._build_aligned_boundary_store_jobs(
             {"req": [(1, 77, 16)]}, scheduler._req_status
-        ),
+        )
     )
     [job_id] = jobs
     stored.update(scheduler._job_statuses[job_id].keys)
@@ -3728,6 +3725,30 @@ def test_loads_do_not_populate_fence_index(request_runner):
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
     runner.run(decoded_tokens=[], complete_transfers=False)
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+def test_no_store_job_while_a_load_is_pending(request_runner):
+    """A request with a load in flight gets no store job in later steps, so
+    _add_store_jobs never sees a store next to a pending load."""
+    runner = request_runner(
+        blocks_per_chunk=3,
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    sched = runner.connector_scheduler
+    runner.new_request(token_ids=[0] * 24)
+    sched._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    req_status = sched._req_status[str(runner.req_id)]
+    (load_job_id,) = req_status.transfer_jobs
+    assert not sched._job_statuses[load_job_id].is_store
+
+    for _ in range(3):
+        runner.run(decoded_tokens=[], complete_transfers=False)
+        assert req_status.transfer_jobs == {load_job_id}
+        assert not any(s.is_store for s in sched._job_statuses.values())
 
 
 def test_fence_at_update_state_after_alloc(request_runner):
