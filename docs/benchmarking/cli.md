@@ -9,6 +9,11 @@ It's a living document, updated as new features and datasets become available.
 
     For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
 
+## Model Forward Benchmark
+
+For exact-batch model timing, including steady-state pipeline-parallel forwards,
+see [vllm bench forward](../cli/README.md#forward).
+
 ## Attention Kernel Benchmark
 
 Run the attention kernel smoke benchmark from the repository root using the

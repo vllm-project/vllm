@@ -109,6 +109,10 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
     engine_args = EngineArgs.from_cli_args(args)
     engine_args.distributed_executor_backend = "external_launcher"
+    if engine_args.pipeline_parallel_size > 1:
+        from vllm.benchmarks.forward.pipeline import ForwardPipelineExecutor
+
+        engine_args.distributed_executor_backend = ForwardPipelineExecutor
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE
     engine_args.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -138,6 +142,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
     from vllm.benchmarks.forward.batch import build_batch
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
+    from vllm.benchmarks.forward.pipeline import PipelineBench
     from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
@@ -160,7 +165,12 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         os.makedirs(args.profile_dir, exist_ok=True)
         rank = get_world_group().rank
         profile_prefix = os.path.join(args.profile_dir, f"{case.name}.rank{rank}")
-    bench = ForwardBench(
+    bench_cls = (
+        PipelineBench
+        if runner.parallel_config.pipeline_parallel_size > 1
+        else ForwardBench
+    )
+    bench = bench_cls(
         runner,
         batch,
         args.iters,
