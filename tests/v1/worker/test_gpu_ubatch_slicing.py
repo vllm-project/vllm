@@ -293,6 +293,8 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    staging_per_rank: list[bool] | None = None,
+    decode_threshold: int = DECODE_THRESHOLD,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -303,7 +305,7 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(7, dp_size, dtype=torch.int32)
+    reduced = torch.zeros(8, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
@@ -311,6 +313,7 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
     reduced[6] = 0  # allow_skip_drafts
+    reduced[7] = torch.tensor(staging_per_rank or [False] * dp_size)
 
     dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
     with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
@@ -328,7 +331,7 @@ def _sync_dp(
             dp_rank=0,
             parallel_config=ParallelConfig(
                 enable_dbo=True,
-                dbo_decode_token_threshold=DECODE_THRESHOLD,
+                dbo_decode_token_threshold=decode_threshold,
                 dbo_prefill_token_threshold=PREFILL_THRESHOLD,
             ),
             allow_ubatching=allow_ubatching,
@@ -958,7 +961,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
             decode_query_len=1,
-            ubatch_runner=cast(UBatchRunner, object()),
+            ubatch_runner=_make_execution_runner(vllm_config),
         )
     manager._graphs_captured = True
     return manager
@@ -990,7 +993,8 @@ def test_microbatched_graphs_are_only_offered_to_uniform_batches():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
-def test_microbatched_graph_needs_every_rank_to_reach_the_split():
+@pytest.mark.parametrize("tokens", [[33, 128], [64, 128]])
+def test_microbatched_graph_needs_every_rank_to_reach_the_split(tokens):
     """Fall back to eager on all ranks if any rank cannot reach the captured split."""
     manager = _make_cudagraph_manager([64, 128])
     uniform = [1, 1]
@@ -1000,7 +1004,7 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.num_ubatches == 2
 
     # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
-    desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    desc, dp_sync_state = _sync_dp(tokens, uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
@@ -1039,3 +1043,144 @@ def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k, overflow
     torch.testing.assert_close(slots[:, :n], torch.arange(n).unsqueeze(0))
     assert (slots[:, n:] == -1).all()
     assert not batch.is_padding[:n].any() and batch.is_padding[n:].all()
+
+
+@pytest.fixture
+def staging_runner(tmp_path, dist_init, request):
+    from transformers import Qwen3MoeConfig
+
+    from vllm.config import AttentionConfig, SchedulerConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+    from vllm.v1.worker.utils import AttentionGroup
+
+    padded, k = getattr(request, "param", (128, 2))
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        hidden_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_hidden_layers=1,
+        moe_intermediate_size=256,
+        num_experts=8,
+        num_experts_per_tok=2,
+        vocab_size=256,
+        max_position_embeddings=256,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        parallel_config=ParallelConfig(
+            ubatch_size=k,
+            all2all_backend="nixl_ep",
+            data_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        attention_config=AttentionConfig(flash_attn_version=3),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=256,
+            max_num_seqs=padded,
+            max_num_batched_tokens=256,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            cudagraph_capture_sizes=[padded],
+            max_cudagraph_capture_size=padded,
+        ),
+    )
+    device = torch.device("cuda", 0)
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
+    )
+    cache = KVCacheConfig(
+        num_blocks=1024,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["attn"], spec)],
+    )
+    with set_current_vllm_config(config):
+        group = AttentionGroup(FlashAttentionBackend, ["attn"], spec, 0)
+        group.create_metadata_builders(config, device, num_metadata_builders=k)
+        state = DefaultModelState(config, torch.nn.Identity(), None, device)
+        return UBatchRunner(config, device, state, [[group]], cache, padded)
+
+
+@pytest.mark.cuda_only
+@pytest.mark.parametrize(
+    "staging_runner", [(127, 2), (128, 3), (129, 4), (127, 8)], indirect=True
+)
+def test_prepare_stages_decode_with_each_captured_regions_attention(staging_runner):
+    runner = staging_runner
+    padded = runner.vllm_config.scheduler_config.max_num_seqs
+    n = 32
+    buffers = InputBuffers(padded, padded, runner.device)
+    seq_lens = [8 + i for i in range(n)]
+    batch = _make_input_batch([1] * n, seq_lens, buffers, padded, padded)
+    batch.input_ids.copy_(torch.arange(padded, device=runner.device))
+    tables = (torch.arange(padded * 8, device=runner.device).reshape(padded, 8),)
+    slots = torch.arange(padded, device=runner.device).unsqueeze(0)
+    original = [value[:n].clone() for value in (batch.input_ids, *tables)]
+    state = runner.prepare(batch, tables, slots, CUDAGraphMode.FULL)
+    assert state.staged_rows is not None
+    start = 0
+    for i, (region, ctx) in enumerate(zip(state.slices, state.forward_contexts)):
+        count = n // runner.num_ubatches + (i < n % runner.num_ubatches)
+        metadata = ctx.attn_metadata["attn"]
+        expected_query = torch.arange(region.num_tokens + 1, device=runner.device)
+        torch.testing.assert_close(
+            metadata.query_start_loc, expected_query.clamp_max(count).int()
+        )
+        torch.testing.assert_close(
+            metadata.seq_lens[:count],
+            torch.tensor(seq_lens[start : start + count], device=runner.device).int(),
+        )
+        assert not metadata.seq_lens[count:].any()
+        torch.testing.assert_close(
+            metadata.block_table[:count], original[1][start : start + count]
+        )
+        assert (
+            ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [region.num_tokens] * 2
+        )
+        start += count
+    restore_staged_inputs(batch, tables, slots, state.staged_rows)
+    for value, expected in zip((batch.input_ids, *tables), original):
+        torch.testing.assert_close(value[:n], expected)
+
+
+@pytest.mark.cuda_only
+@pytest.mark.parametrize(
+    ("loads", "staging_votes", "expected_mode"),
+    [
+        ([63, 97], [True, True], CUDAGraphMode.FULL),
+        ([63, 97], [True, False], CUDAGraphMode.NONE),
+        ([1, 97], [True, True], CUDAGraphMode.NONE),
+    ],
+)
+def test_dp_keeps_imbalanced_graph_only_when_every_rank_can_stage(
+    staging_runner, loads, staging_votes, expected_mode
+):
+    runner = staging_runner
+    from vllm.config import set_current_vllm_config
+
+    with set_current_vllm_config(runner.vllm_config):
+        manager = CudaGraphManager(
+            runner.vllm_config,
+            runner.device,
+            CUDAGraphMode.FULL,
+            1,
+            ubatch_runner=runner,
+        )
+        buf = torch.ones(128, device=runner.device)
+        manager.capture(lambda desc, warmup: lambda mode: buf.add_(1))
+    desc, sync = _sync_dp(
+        loads,
+        [1, 1],
+        cudagraph_manager=manager,
+        staging_per_rank=staging_votes,
+        decode_threshold=1,
+    )
+    assert desc.cg_mode == expected_mode
+    assert sync is not None and sync.eager == (expected_mode == CUDAGraphMode.NONE)

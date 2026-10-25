@@ -34,12 +34,20 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+DBO supports DeepEP with `--all2all-backend deepep_low_latency` for workloads dominated by decode, or `deepep_high_throughput` for workloads dominated by prefill. Install DeepEP before selecting either backend. MRV2's NIXL EP decode staging path is described below.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+
+### MRV2 decode staging
+
+With MRV2, single-token decode batches can retain a FULL microbatched CUDA graph when DP loads are imbalanced. For example, ranks with 63 and 97 requests can both use a 128-row graph: the smaller rank spreads its real rows across the captured regions, then restores logical output order after replay. All ranks agree on staging eligibility during DP synchronization.
+
+This path uses NIXL EP with unquantized BF16 weights and KV cache, TP1/PP1, and no context parallelism. Supported attention layouts are FlashAttention MLA and global causal FA3 attention with AOT scheduling. It requires the default model state and excludes multimodal or prompt-embedding inputs, special position layouts, LoRA, speculative decoding, EPLB, KV transfer and returned routed experts. These configurations keep the existing eager fallback when a captured region would be empty.
+
+Staging is selected automatically for eligible batches with DBO enabled; it adds temporary row copies and does not change graph buckets or backend microbatch limits. Row placement and attention metadata follow each captured region, including an uneven final region.
 
 ## DBO Components
 
