@@ -1081,7 +1081,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype, ...]
     state_alignment: int = 1
     """Byte alignment of each state within a page."""
-    # Enables group-shared trackers and the FlashInfer replay lifecycle.
+    # Selects the FlashInfer replay copy layout and lifecycle warmup.
     use_flashinfer_replayssm: bool = False
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
