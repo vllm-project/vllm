@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import inspect
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import Any, ClassVar
 
+import flashinfer.decode as flashinfer_decode
 import numpy as np
 import torch
 from flashinfer import (
@@ -19,7 +22,7 @@ from flashinfer import (
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import FP4Tensor, get_trtllm_gen_multi_ctas_kv_counter_bytes
 from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
@@ -105,6 +108,34 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+trtllm_gen_prefill_counter_buffer: torch.Tensor | None = None
+
+# Relative cost per (CTA wave x KV token) of the trtllm-gen generation kernel when the
+# KV of each CTA's query tile is split across `s` CTAs (index s), normalized to the
+# unsplit kernel (which costs the same as the context kernel). The split kernels use the
+# static scheduler and a separate reduction kernel. Measured on SM107 for FP8 Q/KV,
+# head_dim 256, 8 q heads per kv head, KV 40k-200k tokens.
+_TRTLLM_GEN_PREFILL_SPLIT_COST = (
+    0.0,
+    1.0,
+    1.123,
+    1.151,
+    1.184,
+    1.235,
+    1.273,
+    1.315,
+    1.355,
+)
+# Each split must keep at least this many KV tokens, or its fixed cost dominates.
+_TRTLLM_GEN_PREFILL_MIN_KV_PER_SPLIT = 8192
+# The generation kernel's CTA tile is 128 query rows (tokens x heads per kv head).
+_TRTLLM_GEN_PREFILL_ROWS_PER_CTA = 128
+# Largest number of prefill requests per launch the cost model was validated on.
+_TRTLLM_GEN_PREFILL_MAX_REQS = 64
+
+_TRTLLM_DECODE_TAKES_SM_COUNT = (
+    "sm_count" in inspect.signature(trtllm_batch_decode_with_kv_cache).parameters
+)
 
 
 def _nvfp4_kv_on_fa2() -> bool:
@@ -149,6 +180,105 @@ def _get_trtllm_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_workspace_buffer
+
+
+def _get_trtllm_gen_prefill_counter_buffer(num_bytes: int) -> torch.Tensor:
+    """Zeroed multi-CTA KV semaphores for generation-kernel prefills. The kernel
+    resets them after every launch, so zeroing once at allocation suffices.
+    """
+    global trtllm_gen_prefill_counter_buffer
+    if (
+        trtllm_gen_prefill_counter_buffer is None
+        or trtllm_gen_prefill_counter_buffer.numel() < num_bytes
+    ):
+        trtllm_gen_prefill_counter_buffer = torch.zeros(
+            num_bytes, dtype=torch.uint8, device="cuda"
+        )
+    return trtllm_gen_prefill_counter_buffer
+
+
+def trtllm_gen_prefill_sm_count(
+    query_lens: Sequence[int],
+    seq_lens: Sequence[int],
+    num_qo_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    num_sms: int,
+    workspace_bytes: int,
+) -> int | None:
+    """Choose the kernel for a causal chunked-prefill launch on trtllm-gen.
+
+    Returns the ``sm_count`` to launch the generation (spec-decode) kernel with, or
+    None to keep the context kernel. Both kernels stream a request's whole KV once
+    per CTA of 128 query rows, so their time is (CTA waves) x (KV per CTA). A context
+    CTA covers 128 tokens of one head; a generation CTA covers 128 // group tokens of
+    the `group` heads that share a KV head, so its waves are quantized ~8x finer for
+    GQA 8. The generation kernel also splits each CTA's KV into
+    ``sm_count // grid_ctas`` parts (gmem partials + reduction), which fills the
+    last wave at a per-split cost (_TRTLLM_GEN_PREFILL_SPLIT_COST).
+
+    Several requests share one varlen launch. Its generation grid is padded to the
+    longest chunk (``grid_ctas`` per split, the count FlashInfer divides the SM
+    count by); tiles past a request's own chunk exit at once, so waves are counted
+    over the real tiles at the mean KV of those tiles. A kernel also takes at least
+    as long as its longest CTA (the longest sequence's KV, divided by the split), so
+    each cost is the larger of the two. Splits need >= 8192 KV tokens of the
+    longest sequence each.
+
+    A single request must be prefix-dominated (cached prefix >= 8x the chunk): on
+    causal-heavy single chunks the generation kernel loses.
+    """
+    if len(query_lens) == 1 and seq_lens[0] - query_lens[0] < 8 * query_lens[0]:
+        return None
+    group = num_qo_heads // num_kv_heads
+    tokens_per_cta = _TRTLLM_GEN_PREFILL_ROWS_PER_CTA // group
+    gen_tiles = [cdiv(q, tokens_per_cta) for q in query_lens]
+    gen_ctas = sum(gen_tiles) * num_kv_heads
+    gen_kv = sum(t * seq for t, seq in zip(gen_tiles, seq_lens)) / sum(gen_tiles)
+    grid_ctas = max(gen_tiles) * num_kv_heads * len(query_lens)
+    ctx_tiles = [cdiv(q, _TRTLLM_GEN_PREFILL_ROWS_PER_CTA) for q in query_lens]
+    ctx_kv = sum(t * seq for t, seq in zip(ctx_tiles, seq_lens)) / sum(ctx_tiles)
+    max_kv = max(seq_lens)
+    # Partial O (bf16) + softmax stats (float2) per row, sm_count x 128 rows; leave
+    # half of the shared workspace for the rest.
+    bytes_per_cta = _TRTLLM_GEN_PREFILL_ROWS_PER_CTA * (2 * head_dim + 8)
+    max_ctas = workspace_bytes // 2 // bytes_per_cta
+    max_splits = min(
+        len(_TRTLLM_GEN_PREFILL_SPLIT_COST) - 1,
+        max(1, max_kv // _TRTLLM_GEN_PREFILL_MIN_KV_PER_SPLIT),
+        max_ctas // grid_ctas,
+    )
+    best_cost = max(
+        cdiv(sum(ctx_tiles) * num_qo_heads, num_sms) * ctx_kv, float(max_kv)
+    )
+    best_splits = 0
+    for splits in range(1, max_splits + 1):
+        cost = _TRTLLM_GEN_PREFILL_SPLIT_COST[splits] * max(
+            cdiv(splits * gen_ctas, num_sms) * gen_kv / splits, max_kv / splits
+        )
+        if cost < best_cost:
+            best_cost, best_splits = cost, splits
+    return best_splits * grid_ctas if best_splits else None
+
+
+def _trtllm_batch_decode_with_sm_count(sm_count: int, **kwargs: Any) -> None:
+    """``trtllm_batch_decode_with_kv_cache`` with its kernel selection planned for
+    ``sm_count`` SMs (this sets the multi-CTA KV split).
+
+    FlashInfer releases without the ``sm_count`` argument read the SM count from
+    ``flashinfer.decode.get_device_sm_count``; for those it is overridden for the
+    duration of the call. Drop that fallback once the minimum FlashInfer version
+    takes ``sm_count``.
+    """
+    if _TRTLLM_DECODE_TAKES_SM_COUNT:
+        trtllm_batch_decode_with_kv_cache(**kwargs, sm_count=sm_count)
+        return
+    get_device_sm_count = flashinfer_decode.get_device_sm_count
+    flashinfer_decode.get_device_sm_count = lambda _device: sm_count
+    try:
+        trtllm_batch_decode_with_kv_cache(**kwargs)
+    finally:
+        flashinfer_decode.get_device_sm_count = get_device_sm_count
 
 
 def _pack_draft_block_bool_mask(
@@ -765,6 +895,11 @@ class TRTLLMPrefill:
     max_seq_len: int
     """The maximum sequence length for KV Cache."""
 
+    gen_sm_count: int | None = None
+    """If set, run the prefill on the trtllm-gen generation kernel with this
+    ``sm_count`` (see ``trtllm_gen_prefill_sm_count``) instead of the context
+    kernel."""
+
 
 @dataclass
 class FlashInferTrtllmAPIDecode:
@@ -965,6 +1100,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # so both values must be tracked independently.
         self.q_data_type_prefill = self.get_q_data_type(is_prefill=True)
         self.q_data_type_decode = self.get_q_data_type(is_prefill=False)
+
+        # Chunked prefills over a long cached prefix may run on the trtllm-gen
+        # generation kernel (trtllm_gen_prefill_sm_count). Its cost model was
+        # measured on SM107 for FP8 Q/KV, head_dim 256 and 8 q heads per kv head.
+        self.trtllm_gen_prefill_num_sms = (
+            torch.cuda.get_device_properties(device).multi_processor_count
+            if self.attention_config.trtllm_gen_split_kv_prefill
+            and current_platform.is_device_capability(107)
+            and self.q_data_type_prefill == FP8_DTYPE
+            and self.kv_cache_dtype == FP8_DTYPE
+            and self.head_dim == 256
+            and self.num_qo_heads == 8 * self.num_kv_heads
+            and not self.use_dcp
+            else 0
+        )
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
@@ -1769,6 +1919,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             :, : cdiv(max_prefill_seq_len, page_size)
                         ].contiguous()
                     )
+                gen_sm_count = None
+                if (
+                    self.trtllm_gen_prefill_num_sms
+                    and num_prefills <= _TRTLLM_GEN_PREFILL_MAX_REQS
+                ):
+                    # Precise for prefill rows (CommonAttentionMetadata docs).
+                    seq_lens_ub = common_attn_metadata.seq_lens_cpu_upper_bound
+                    gen_sm_count = trtllm_gen_prefill_sm_count(
+                        query_lens=query_lens_prefill_cpu.tolist(),
+                        seq_lens=(
+                            seq_lens_ub[prefill_start:num_reqs].tolist()
+                            if seq_lens_ub is not None
+                            else [max_seq_len] * num_prefills
+                        ),
+                        num_qo_heads=self.num_qo_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim=self.head_dim,
+                        num_sms=self.trtllm_gen_prefill_num_sms,
+                        workspace_bytes=envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    )
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=prefill_block_tables,
                     seq_lens=prefill_seq_lens,
@@ -1776,6 +1946,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
                     max_seq_len=max_seq_len,
+                    gen_sm_count=gen_sm_count,
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
@@ -2502,25 +2673,62 @@ class FlashInferImpl(AttentionImpl):
                     mock_kv_cache = kv_cache_tuple
                     mock_block_table = block_tables_prefill
 
-                trtllm_batch_context_with_kv_cache(
-                    query=prefill_query,
-                    kv_cache=mock_kv_cache,
-                    workspace_buffer=workspace_buffer,
-                    block_tables=mock_block_table,
-                    seq_lens=seq_lens_prefill,
-                    max_q_len=attn_metadata.prefill.max_q_len,
-                    max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
-                    batch_size=attn_metadata.num_prefills,
-                    cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
-                    cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
-                    window_left=self.window_left,
-                    sinks=self.sinks,
-                    o_sf_scale=self.o_sf_scale,
-                    out=out,
-                    kv_cache_sf=prefill_kv_block_scales,
-                )
+                gen_sm_count = attn_metadata.prefill.gen_sm_count
+                if (
+                    gen_sm_count is not None
+                    and isinstance(out, torch.Tensor)
+                    and out.dtype == torch.bfloat16
+                ):
+                    # Generation kernel with a causal varlen query; gen_sm_count
+                    # sets its KV split.
+                    _trtllm_batch_decode_with_sm_count(
+                        gen_sm_count,
+                        query=prefill_query,
+                        kv_cache=mock_kv_cache,
+                        workspace_buffer=workspace_buffer,
+                        block_tables=mock_block_table,
+                        seq_lens=seq_lens_prefill,
+                        max_seq_len=attn_metadata.prefill.max_seq_len,
+                        bmm1_scale=self.bmm1_scale,
+                        bmm2_scale=self.bmm2_scale,
+                        window_left=self.window_left,
+                        sinks=self.sinks,
+                        out=out,
+                        kv_layout="HND",
+                        backend="trtllm-gen",
+                        q_len_per_req=None,
+                        max_q_len=attn_metadata.prefill.max_q_len,
+                        cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                        multi_ctas_kv_counter_buffer=(
+                            _get_trtllm_gen_prefill_counter_buffer(
+                                get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                                    attn_metadata.num_prefills,
+                                    self.num_heads,
+                                    gen_sm_count,
+                                )
+                            )
+                        ),
+                    )
+                else:
+                    trtllm_batch_context_with_kv_cache(
+                        query=prefill_query,
+                        kv_cache=mock_kv_cache,
+                        workspace_buffer=workspace_buffer,
+                        block_tables=mock_block_table,
+                        seq_lens=seq_lens_prefill,
+                        max_q_len=attn_metadata.prefill.max_q_len,
+                        max_kv_len=attn_metadata.prefill.max_seq_len,
+                        bmm1_scale=self.bmm1_scale,
+                        bmm2_scale=self.bmm2_scale,
+                        batch_size=attn_metadata.num_prefills,
+                        cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                        cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
+                        window_left=self.window_left,
+                        sinks=self.sinks,
+                        o_sf_scale=self.o_sf_scale,
+                        out=out,
+                        kv_cache_sf=prefill_kv_block_scales,
+                    )
 
                 if needs_fp8_out:
                     output[

@@ -78,6 +78,14 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
+    trtllm_gen_split_kv_prefill: bool = False
+    """Run chunked prefills over a long cached prefix on the FlashInfer trtllm-gen
+    generation kernel with a split KV instead of its context kernel, when a cost
+    model predicts a gain. Only on SM107 with FP8 queries and FP8 KV cache, head
+    size 256 and 8 query heads per KV head, without decode context parallelism.
+    Split launches change the floating-point reduction order, so outputs are not
+    bitwise identical to the context kernel."""
+
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
     Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
