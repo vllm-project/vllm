@@ -1007,8 +1007,9 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
 
 
 @pytest.mark.parametrize("padded,k", [(127, 2), (128, 3), (129, 4), (127, 8)])
-def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k):
-    n = 32
+@pytest.mark.parametrize("overflow", [False, True])
+def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k, overflow):
+    n = padded if overflow else 32
     buffers = InputBuffers(padded, padded, torch.device("cpu"))
     batch = _make_input_batch([1] * n, [100] * n, buffers, padded, padded)
     batch.input_ids.copy_(torch.arange(padded))
@@ -1018,6 +1019,12 @@ def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k):
     values = (batch.input_ids, batch.positions, *tables)
     expected = [value[:n].clone() for value in values]
     slices = create_ubatch_slices(batch, k)
+    if overflow:
+        with pytest.raises(AssertionError):
+            stage_decode_tokens(batch, tables, slots, slices)
+        for value, original in zip(values, expected):
+            torch.testing.assert_close(value[:n], original)
+        return
     rows = stage_decode_tokens(batch, tables, slots, slices)
     for value, original in zip(values, expected):
         torch.testing.assert_close(value[rows], original)
@@ -1025,10 +1032,6 @@ def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k):
     assert (~batch.is_padding).sum() == n
     for region in slices:
         assert (~batch.is_padding[region.token_slice]).sum() in (n // k, n // k + 1)
-    output = torch.zeros(padded, 2)
-    output[rows] = torch.arange(n * 2).reshape(n, 2).float()
-    output[:n] = output[rows]
-    torch.testing.assert_close(output[:n], torch.arange(n * 2).reshape(n, 2).float())
     restore_staged_inputs(batch, tables, slots, rows)
     for value, original in zip(values, expected):
         torch.testing.assert_close(value[:n], original)

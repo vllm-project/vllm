@@ -58,6 +58,7 @@ def stage_decode_tokens(
     num_padded = input_batch.num_tokens_after_padding
     k = len(ubatch_slices)
     counts = [n // k + (i < n % k) for i in range(k)]
+    assert all(c <= s.num_tokens for s, c in zip(ubatch_slices, counts))
     staged_rows = torch.cat(
         [
             torch.arange(
@@ -101,8 +102,8 @@ def restore_staged_inputs(
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
-    Splitting the DP-padded token range can leave trailing microbatches
-    entirely inside the padding. Clamping each such microbatch's
+    Splitting at the midpoint of the DP-padded token count leaves the trailing
+    microbatch anywhere from full to entirely inside the padding. Clamping its
     request slice onto the last request leaves it holding that request with
     zero query tokens -- the shape a straddling request already takes -- so it
     stays well-formed with no work to do, like a dummy run.
