@@ -848,7 +848,7 @@ def test_async_load_reserves_blocks_for_promotion_margin(
 @pytest.mark.parametrize("num_spec_tokens", [1, 3])
 @pytest.mark.parametrize(
     ("num_tokens", "num_blocks"),
-    [(40, 4), (2048, 129)],
+    [(40, 4), (2047, 129)],
     ids=["room-in-last-block", "capped-by-max-model-len"],
 )
 def test_async_load_admits_request_whose_spec_step_fits_its_blocks(
@@ -856,8 +856,8 @@ def test_async_load_admits_request_whose_spec_step_fits_its_blocks(
 ):
     """The spec decode margin must only reserve blocks the step really adds.
 
-    A prompt whose last block has room for the spec decode step, or that is
-    already at max_model_len, needs no extra block for it. Reserving a flat
+    A prompt whose last block has room for the spec decode step, or whose step
+    is capped at max_model_len, needs no extra block for it. Reserving a flat
     step's worth of blocks anyway means a request that fits in the whole pool
     (`num_blocks` counts the null block) can never be admitted: the head of
     the queue is retried every step and nothing runs to free blocks.
@@ -899,6 +899,61 @@ def test_async_load_admits_request_whose_spec_step_fits_its_blocks(
         scheduler_output, create_model_runner_output([request], use_eos=True)
     )
     assert request.is_finished()
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize("num_spec_tokens", [1, 3])
+def test_async_load_near_max_model_len_does_not_block_another_fitting_load(
+    num_spec_tokens,
+):
+    """An in-flight load must not reserve slots beyond max_model_len."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size, num_speculative_tokens=num_spec_tokens
+    )
+    max_model_len = vllm_config.model_config.max_model_len
+    assert max_model_len % block_size == 0
+    scheduler = create_scheduler(
+        vllm_config,
+        # One null block, the near-limit prompt, and one smaller prompt.
+        num_blocks=max_model_len // block_size + 2,
+    )
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=block_size,
+            num_tokens=num_tokens,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i, num_tokens in enumerate((max_model_len - 1, block_size // 2), 1)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(req.num_tokens, True) for req in reqs],
+    ):
+        scheduler.schedule()
+    assert all(req.status == RequestStatus.WAITING_FOR_REMOTE_KVS for req in reqs)
+
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output(
+            [], finished_recving={req.request_id for req in reqs}
+        ),
+    )
+    scheduler_output = scheduler.schedule()
+    for req in reqs:
+        assert req.status == RequestStatus.RUNNING
+        assert scheduler_output.num_scheduled_tokens[req.request_id] > 0
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output(reqs, use_eos=True)
+    )
+    assert all(req.is_finished() for req in reqs)
     scheduler.schedule()
     assert_scheduler_empty(scheduler)
 

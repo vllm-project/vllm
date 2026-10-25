@@ -12,6 +12,7 @@ spec step and retried the request forever (no running requests to free any).
 
 import os
 
+import pytest
 import requests
 
 PREFILL_HOST = os.getenv("PREFILL_HOST", "localhost")
@@ -36,10 +37,20 @@ def _completions_url(host: str, port: str) -> str:
     return f"http://{host}:{port}/v1/completions"
 
 
-def test_async_load_admits_request_filling_free_blocks():
-    model = requests.get(f"http://{DECODE_HOST}:{DECODE_PORT}/v1/models").json()
+@pytest.mark.parametrize(
+    ("prompt_len", "token_offset", "max_tokens"),
+    [(PROMPT_LEN, 1000, 1 + NUM_SPEC_TOKENS), (PROMPT_LEN + 1, 10000, 1)],
+    ids=["room-in-last-block", "capped-by-max-model-len"],
+)
+def test_async_load_admits_request_filling_free_blocks(
+    prompt_len, token_offset, max_tokens
+):
+    model = requests.get(
+        f"http://{DECODE_HOST}:{DECODE_PORT}/v1/models", timeout=DECODE_TIMEOUT_S
+    ).json()
     model = model["data"][0]["id"]
-    prompt = [(1000 + 7 * i) % 30000 for i in range(PROMPT_LEN)]
+    # Distinct prefixes keep the second case from using the decoder's local hit.
+    prompt = [(token_offset + 7 * i) % 30000 for i in range(prompt_len)]
 
     prefill = requests.post(
         _completions_url(PREFILL_HOST, PREFILL_PORT),
@@ -59,7 +70,7 @@ def test_async_load_admits_request_filling_free_blocks():
         },
         timeout=DECODE_TIMEOUT_S,
     ).json()
-    assert prefill["usage"]["prompt_tokens"] == PROMPT_LEN
+    assert prefill["usage"]["prompt_tokens"] == prompt_len
     kv_transfer_params = prefill["kv_transfer_params"]
     assert kv_transfer_params["remote_block_ids"]
 
@@ -69,16 +80,17 @@ def test_async_load_admits_request_filling_free_blocks():
             json={
                 "model": model,
                 "prompt": prompt,
-                "max_tokens": 1 + NUM_SPEC_TOKENS,
+                "max_tokens": max_tokens,
                 "temperature": 0,
+                "ignore_eos": True,
                 "kv_transfer_params": kv_transfer_params,
             },
             timeout=DECODE_TIMEOUT_S,
         ).json()
     except requests.Timeout:
         raise AssertionError(
-            f"decode did not admit the {PROMPT_LEN}-token remote-prefilled "
+            f"decode did not admit the {prompt_len}-token remote-prefilled "
             f"request within {DECODE_TIMEOUT_S}s"
         ) from None
-    assert decode["usage"]["prompt_tokens"] == PROMPT_LEN
-    assert decode["usage"]["completion_tokens"] == 1 + NUM_SPEC_TOKENS
+    assert decode["usage"]["prompt_tokens"] == prompt_len
+    assert decode["usage"]["completion_tokens"] == max_tokens
