@@ -450,6 +450,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     max_num_reqs=self.max_num_reqs,
                     max_num_logits_per_req=self.decode_query_len,
                     device=self.device,
+                    adaptive_verification_enabled=(
+                        self.speculative_config is not None
+                        and self.speculative_config.enable_adaptive_verification
+                    ),
                 )
                 logger.info("Batch-sharded sampling enabled.")
             else:
@@ -711,6 +715,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vllm_config=self.vllm_config,
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
+            copy_admitted_drafts_to_host=self.batch_sharder is not None,
             use_draft_lengths=getattr(self.speculator, "draft_token_lengths", None)
             is not None,
         )
@@ -1436,6 +1441,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # compact_batch's budget is only primed when drafts are scheduled.
         adaptive_verification = self.adaptive_verification if draft_tokens else None
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        num_admitted_draft_tokens = None
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
             # all verification requests, `reallocate_drafts` will unevenly assign the
@@ -1460,9 +1466,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.input_buffers.query_start_loc
         async_tensor_h2d(query_start_loc_np, out=query_start_loc)
         if adaptive_verification is not None:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
-            )
+            (
+                cu_num_logits,
+                query_start_loc,
+                total_num_draft_tokens,
+                num_admitted_draft_tokens,
+            ) = adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -1547,6 +1556,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            num_admitted_draft_tokens=num_admitted_draft_tokens,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,

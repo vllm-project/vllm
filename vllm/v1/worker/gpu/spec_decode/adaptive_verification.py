@@ -128,6 +128,19 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
+class AdmittedDraftCounts:
+    """Per-request admitted draft counts, in flight to the host."""
+
+    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+        self._cpu = cpu
+        self._event = event
+
+    def wait(self) -> np.ndarray:
+        with gpu_sync_allowed():
+            self._event.synchronize()
+        return self._cpu.numpy()
+
+
 class AdaptiveVerificationManager:
     use_draft_lengths = False
 
@@ -137,6 +150,7 @@ class AdaptiveVerificationManager:
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
         max_total_logits: int,
+        copy_admitted_drafts_to_host: bool = False,
         use_draft_lengths: bool = False,
     ):
         self.req_states = req_states
@@ -177,6 +191,15 @@ class AdaptiveVerificationManager:
         )
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
+
+        # Batch-sharded sampling sizes its all-to-all from host counts, so it
+        # needs the admitted split on the host.
+        self._copy_admitted_drafts_to_host = copy_admitted_drafts_to_host
+        if copy_admitted_drafts_to_host:
+            self._admitted_drafts_cpu = torch.empty(
+                max_num_reqs, dtype=torch.int32, pin_memory=True
+            )
+            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._stale_confidences = [
@@ -457,7 +480,10 @@ class AdaptiveVerificationManager:
 
     def reallocate_drafts(
         self, req_ids: list[str], idx_mapping: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int, AdmittedDraftCounts | None]:
+        """The admitted draft counts are None unless copy_admitted_drafts_to_host
+        is set and the budget binds; otherwise the host counts are already exact.
+        """
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
         num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
@@ -506,10 +532,27 @@ class AdaptiveVerificationManager:
             out=self.query_start_loc[1 : num_reqs + 1],
         )
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+
+        admitted_drafts = None
+        if (
+            self._copy_admitted_drafts_to_host
+            and draft_budget > 0
+            and (self.use_draft_lengths or draft_budget < int(scheduled_drafts.sum()))
+        ):
+            admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
+            current_stream = torch.cuda.current_stream(self.req_states.device)
+            self._copy_stream.wait_stream(current_stream)
+            with stream(self._copy_stream, current_stream):
+                admitted_cpu.copy_(capacities, non_blocking=True)
+                self._admitted_drafts_event.record()
+            admitted_drafts = AdmittedDraftCounts(
+                admitted_cpu, self._admitted_drafts_event
+            )
         return (
             self._cu_num_logits[: num_reqs + 1],
             self.query_start_loc,
             draft_budget,
+            admitted_drafts,
         )
 
 
@@ -524,6 +567,7 @@ def maybe_create_adaptive_verification_manager(
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+    copy_admitted_drafts_to_host: bool = False,
     use_draft_lengths: bool = False,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
@@ -573,5 +617,6 @@ def maybe_create_adaptive_verification_manager(
         query_start_loc,
         num_bonus_tokens,
         max_total_logits=max_total_logits,
+        copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
         use_draft_lengths=use_draft_lengths,
     )

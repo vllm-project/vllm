@@ -48,8 +48,9 @@ def make_manager(
         (2, [15, 15, 15], [0, 0, 0]),
     ],
 )
+@pytest.mark.parametrize("copy_to_host", [False, True])
 def test_direct_lengths_reuse_compaction_with_exact_reordered_offsets(
-    max_logits, scheduled, expected
+    max_logits, scheduled, expected, copy_to_host
 ):
     """Head lengths must respect scheduler capacity and sampler chunk bounds."""
     device = torch.device("cuda")
@@ -59,7 +60,12 @@ def test_direct_lengths_reuse_compaction_with_exact_reordered_offsets(
         states.add_request(req_id, 1, [1], 1, 32)
     query_start_loc = torch.zeros(4, dtype=torch.int32, device=device)
     manager = AdaptiveVerificationManager(
-        states, query_start_loc, 1, max_logits, use_draft_lengths=True
+        states,
+        query_start_loc,
+        1,
+        max_logits,
+        copy_admitted_drafts_to_host=copy_to_host,
+        use_draft_lengths=True,
     )
     slots = torch.tensor([states.req_id_to_index[r] for r in req_ids], device=device)
     manager.record_draft_lengths(
@@ -76,13 +82,18 @@ def test_direct_lengths_reuse_compaction_with_exact_reordered_offsets(
     )
     assert int(compacted.sum()) == num_tokens == 3 + sum(expected)
     order = [2, 0, 1]
-    logits, queries, budget = manager.reallocate_drafts(
+    logits, queries, budget, admitted = manager.reallocate_drafts(
         [req_ids[i] for i in order], slots[order]
     )
     offsets = np.cumsum([0] + [expected[i] + 1 for i in order])
     np.testing.assert_array_equal(logits.cpu().numpy(), offsets)
     np.testing.assert_array_equal(queries.cpu().numpy(), offsets)
     assert budget == sum(expected)
+    if copy_to_host and budget > 0:
+        assert admitted is not None
+        np.testing.assert_array_equal(admitted.wait(), [expected[i] for i in order])
+    else:
+        assert admitted is None
 
 
 def test_direct_lengths_reset_reused_request_slots_after_pending_copy():
@@ -109,7 +120,7 @@ def test_direct_lengths_reset_reused_request_slots_after_pending_copy():
         torch.tensor([2], dtype=torch.int32, device=device), mapping
     )
     assert manager.get_num_tokens({"new": 16}, {"new": list(range(15))}) == 3
-    logits, queries, budget = manager.reallocate_drafts(["new"], mapping)
+    logits, queries, budget, _ = manager.reallocate_drafts(["new"], mapping)
     assert logits.tolist() == queries.tolist() == [0, 3]
     assert budget == 2
 
