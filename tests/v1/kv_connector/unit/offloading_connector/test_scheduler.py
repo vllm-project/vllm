@@ -207,6 +207,8 @@ def test_swa_offload_window_covers_unaligned_hit(
 
 def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
+    eagle: bool = False,
+    cache_hit_alignment_tokens: int | None = 4,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -215,6 +217,10 @@ def _make_partial_tail_scheduler(
         enable_kv_cache_events=True, publisher="null"
     )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    # Core resolves fine-grained hits for this layout at prefix_match_unit.
+    kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
+    # The drafter shares the full-attention group, as in Qwen3-Next MTP.
+    kv_cache_config.kv_cache_groups[0].is_eagle_group = eagle
     if recurrent_only:
         kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
@@ -224,9 +230,10 @@ def _make_partial_tail_scheduler(
 def _make_partial_tail_request(
     scheduler: OffloadingConnectorScheduler,
     kv_transfer_params: dict[str, Any] | None = None,
+    request_id: str = "req",
 ) -> MagicMock:
     request = MagicMock()
-    request.request_id = "req"
+    request.request_id = request_id
     request.kv_transfer_params = kv_transfer_params
     request.kv_hints = None
     request.num_prompt_tokens = 30
@@ -327,6 +334,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     recurrent_event = events_by_group[1]
     assert recurrent_event.block_size == 0
     assert recurrent_event.token_ids == []
+    assert recurrent_event.kv_cache_spec_kind == "mamba"
     assert len(recurrent_event.block_hashes) == 1
     assert recurrent_event.parent_block_hash is None
 
@@ -889,6 +897,398 @@ def test_partial_lookup_requires_every_cache_group():
     assert req_status.partial_tail_boundary is None
 
 
+def _key_tokens(scheduler: OffloadingConnectorScheduler, keys) -> dict[int, int]:
+    req_context = scheduler._req_status["req"].req_context
+    return {
+        get_offload_group_idx(key): req_context.get_offload_key_position(key)
+        for key in keys
+    }
+
+
+@pytest.mark.parametrize(
+    ("cache_hit_alignment_tokens", "proof_tokens"), [(4, 28), (16, 40), (None, 40)]
+)
+def test_eagle_proof_margin_follows_core_hit_alignment(
+    cache_hit_alignment_tokens, proof_tokens
+):
+    """Core drops one hash unit past a fine-grained hit, else one block."""
+    scheduler = _make_partial_tail_scheduler(
+        eagle=True, cache_hit_alignment_tokens=cache_hit_alignment_tokens
+    )
+    attention, mamba = scheduler.config.kv_group_configs
+    assert scheduler._partial_tail_key_tokens(attention, 24) == proof_tokens
+    assert scheduler._partial_tail_key_tokens(mamba, 24) == 24
+
+
+def test_eagle_partial_tail_store_keys_attention_at_proof():
+    """The EAGLE group stores its tail block under the hash one unit later.
+
+    With EAGLE block drop, core puts the Mamba checkpoint of a 30-token prompt
+    at 24. Core matches the attention group up to 28 and then drops 4 tokens,
+    so the attention block is stored under the hash that ends at 28.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_computed_tokens = 30
+    req_status = scheduler._req_status["req"]
+    req_status.loaded_from_offload = True
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={},
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 24)]},
+        ),
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    [job_id] = jobs
+    offered_keys = scheduler.manager.prepare_store.call_args.args[0]
+    assert _key_tokens(scheduler, offered_keys) == {0: 28, 1: 24}
+    assert [get_offload_block_hash(key) for key in offered_keys] == [b"h6", b"h5"]
+    src_spec = jobs[job_id].src_spec
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [12, 99]
+    assert src_spec.block_indices == [1, 1]
+
+    events = list(
+        scheduler._events_tracker.take_events(
+            [
+                OffloadingEvent(
+                    keys=list(scheduler._jobs[job_id].keys),
+                    medium=Medium.CPU,
+                    removed=False,
+                )
+            ]
+        )
+    )
+    events_by_group = {event.group_idx: event for event in events}
+    assert events_by_group[0].token_ids == list(range(16, 28))
+
+
+@pytest.mark.parametrize(
+    ("num_prompt_tokens", "num_computed_tokens", "num_scheduled_tokens", "stored"),
+    [
+        (30, 24, 0, False),
+        (30, 27, 0, False),
+        (30, 24, 3, False),
+        # The step computes the proof token 28 exactly.
+        (30, 24, 4, True),
+        # Tokens past the prompt end at 26 do not compute the proof.
+        (26, 24, 6, False),
+    ],
+)
+def test_eagle_partial_tail_store_needs_proof_in_prompt(
+    num_prompt_tokens, num_computed_tokens, num_scheduled_tokens, stored
+):
+    """Store the tail only if this step computes the proof at 28 in the prompt."""
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = num_prompt_tokens
+    request.num_computed_tokens = num_computed_tokens
+    req_status = scheduler._req_status["req"]
+    req_status.loaded_from_offload = True
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={"req": num_scheduled_tokens},
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 24)]},
+        ),
+    )
+
+    assert bool(scheduler._build_partial_tail_store_jobs(output)) == stored
+    assert scheduler.manager.prepare_store.called == stored
+
+
+@pytest.mark.parametrize("missing", [None, b"h6", b"h3"])
+def test_eagle_partial_lookup_loads_attention_proof(missing):
+    """An EAGLE partial hit needs the proof key and the popped chunk.
+
+    The complete-chunk lookup pops the only EAGLE chunk (0-16), so the hit at
+    24 lies in the second block after the complete boundary. It needs the
+    attention chunk 0-16, the attention proof at 28 and the Mamba state at 24.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+
+    def lookup(key, req_context):
+        block_hash = get_offload_block_hash(key)
+        if get_offload_group_idx(key) == 1:
+            ready = block_hash == b"h5"
+        else:
+            ready = block_hash != missing
+        return LookupResult.HIT if ready else LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    if missing is not None:
+        assert scheduler._lookup(req_status) == 0
+        assert req_status.partial_tail_boundary is None
+        return
+    assert scheduler._lookup(req_status) == 24
+    assert req_status.partial_tail_boundary == 24
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=24,
+    )
+    [load_job_id] = scheduler._current_batch_load_jobs
+    load_job = scheduler._current_batch_load_jobs[load_job_id]
+    assert {
+        (get_offload_group_idx(key), get_offload_block_hash(key))
+        for key in scheduler._jobs[load_job_id].keys
+    } == {(0, b"h3"), (0, b"h6"), (1, b"h5")}
+    dst_spec = load_job.dst_spec
+    assert isinstance(dst_spec, GPULoadStoreSpec)
+    assert dst_spec.block_ids.tolist() == [31, 32, 41]
+    assert dst_spec.group_sizes == [2, 1]
+
+
+@pytest.mark.parametrize(
+    ("attention_missing", "expected_hit", "expected_lookups"),
+    [
+        # The complete-chunk lookup of h3 also serves the boundaries 24 and 20.
+        (None, 20, ["0h3", "0h6", "1h5", "0h5", "1h4"]),
+        # A missing chunk h3 is looked up once more and skips the boundaries
+        # 24, 20 and 16.
+        (b"h3", 0, ["0h3", "0h3", "0h3", "0h2", "1h1", "0h1", "1h0"]),
+    ],
+)
+def test_eagle_partial_lookup_probes_popped_chunk_once(
+    attention_missing, expected_hit, expected_lookups
+):
+    """Boundaries past the popped EAGLE chunk reuse its complete-chunk lookup.
+
+    The Mamba state is stored only at 20 (h4). Before this lookup was shared,
+    the same hits took 7 and 9 lookups.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    lookups = []
+
+    def lookup(key, req_context):
+        group_idx = get_offload_group_idx(key)
+        block_hash = get_offload_block_hash(key)
+        lookups.append(f"{group_idx}{block_hash.decode()}")
+        ready = (
+            block_hash == b"h4" if group_idx == 1 else block_hash != attention_missing
+        )
+        return LookupResult.HIT if ready else LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == expected_hit
+    assert lookups == expected_lookups
+
+
+def test_eagle_partial_lookup_after_recurrent_group_tightens_hit():
+    """A recurrent group can lower the hit after the EAGLE group pops a chunk.
+
+    The 62-token prompt has attention chunks h3, h7 and h11. The EAGLE group
+    hits all three and pops h11. The Mamba group has a complete state only at
+    16 (h3), so the complete hit drops to 16. The EAGLE lookup still confirmed
+    h7, so the partial hit at 36 loads h7 without another lookup of it.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = request.num_tokens = 62
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(15)]
+    request.all_token_ids = list(range(62))
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    lookups = []
+
+    def lookup(key, req_context):
+        group_idx = get_offload_group_idx(key)
+        block_hash = get_offload_block_hash(key)
+        lookups.append(f"{group_idx}{block_hash.decode()}")
+        ready = group_idx == 0 or block_hash in (b"h3", b"h8")
+        return LookupResult.HIT if ready else LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == 36
+    assert req_status.partial_tail_boundary == 36
+    assert lookups.count("0h7") == 1
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32), KVCacheBlock(33)],
+                [
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(41),
+                ],
+            )
+        ),
+        num_external_tokens=36,
+    )
+    [load_job_id] = scheduler._current_batch_load_jobs
+    assert {
+        (get_offload_group_idx(key), get_offload_block_hash(key))
+        for key in scheduler._jobs[load_job_id].keys
+    } == {(0, b"h3"), (0, b"h7"), (0, b"h9"), (1, b"h8")}
+
+
+@pytest.mark.parametrize("cow_on_proof_step", [False, True])
+def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step):
+    """Store, finish and resend a 30-token prompt with an EAGLE group.
+
+    The resend hits the Mamba checkpoint at 24 only through the EAGLE
+    group's proof key at 28. With ``cow_on_proof_step``, the steps follow core:
+    the prefill stops at 24, and the CoW hand-off arrives on the step that
+    computes tokens 24-30. The producer models a turn that loaded its prefix
+    from the offload tier, so that its tail is stored.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    stored: set = set()
+    scheduler.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT if key in stored else LookupResult.MISS
+    )
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    def run_step(num_scheduled_tokens, handoffs=None, finished=()):
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = num_scheduled_tokens
+        output.finished_req_ids = set(finished)
+        if handoffs is not None:
+            output.kv_connector_block_state = KVConnectorBlockState(
+                req_ids=set(),
+                resolve_block_ids={}.__getitem__,
+                boundary_state_offloads=handoffs,
+            )
+        meta = scheduler.build_connector_meta(output)
+        for job_id in meta.store_jobs:
+            stored.update(scheduler._jobs[job_id].keys)
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={job_id: 1 for job_id in meta.store_jobs}
+                )
+            )
+        )
+
+    producer = _make_partial_tail_request(scheduler)
+    producer.num_computed_tokens = 0
+    producer.status = RequestStatus.RUNNING
+    assert scheduler.get_num_new_matched_tokens(producer, 0) == (0, False)
+    producer_status = scheduler._req_status["req"]
+    producer_status.loaded_from_offload = True
+    producer_status.group_states[0].block_ids[:] = [11, 12]
+    producer_status.group_states[1].block_ids[:] = [0, 21]
+    if cow_on_proof_step:
+        run_step({"req": 24})
+        producer.num_computed_tokens = 24
+        run_step({"req": 6}, handoffs={"req": [(1, 99, 24)]})
+        producer.num_computed_tokens = 30
+    else:
+        run_step({"req": 30})
+        producer.num_computed_tokens = 30
+        run_step({"req": 1}, handoffs={"req": [(1, 99, 24)]})
+    producer.is_finished.return_value = True
+    scheduler.request_finished(producer)
+    run_step({}, finished={"req"})
+
+    stored_positions = {
+        (get_offload_group_idx(key), get_offload_block_hash(key)) for key in stored
+    }
+    assert stored_positions == {(0, b"h3"), (0, b"h6"), (1, b"h5")}
+
+    consumer = _make_partial_tail_request(scheduler, request_id="resend")
+    assert scheduler.get_num_new_matched_tokens(consumer, 0) == (24, True)
+    scheduler.update_state_after_alloc(
+        consumer,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=24,
+    )
+    [load_job_id] = scheduler._current_batch_load_jobs
+    assert scheduler._jobs[load_job_id].keys == stored
+
+
+@pytest.mark.parametrize("host_hit", [False, True])
+def test_eagle_partial_tail_store_needs_offload_load(host_hit):
+    """Store an EAGLE partial tail only after a load from the offload tier.
+
+    Without a host hit, the GPU prefix cache keeps the tail, and the hand-off
+    that computes the proof at 28 stores nothing. After the request loads 24
+    tokens from the offload tier, the same hand-off stores the tail.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    scheduler.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT
+        if host_hit
+        and (get_offload_group_idx(key) == 0 or get_offload_block_hash(key) == b"h5")
+        else LookupResult.MISS
+    )
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    request = _make_partial_tail_request(scheduler)
+    num_external_tokens = 24 if host_hit else 0
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (
+        num_external_tokens,
+        host_hit,
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(11), KVCacheBlock(12)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(21)],
+            )
+        ),
+        num_external_tokens=num_external_tokens,
+    )
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    request.num_computed_tokens = 24
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={"req": 6},
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 24)]},
+        ),
+    )
+
+    assert bool(scheduler._build_partial_tail_store_jobs(output)) == host_hit
+    assert scheduler.manager.prepare_store.called == host_hit
+
+
 def test_scheduler_reports_allocation_failure(request_runner):
     runner = request_runner(
         block_size=4,
@@ -1328,6 +1728,24 @@ def test_promotion_hit_precedes_stored_event_translation(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_streaming_session_stores_new_chunks(request_runner, async_scheduling: bool):
+    """A streaming session resumed for its next input chunk arrives with its
+    full block table, so its new chunks must be stored from their own blocks."""
+    runner = request_runner(
+        block_size=4, num_gpu_blocks=100, async_scheduling=async_scheduling
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=list(range(1, 9)), req_id="s", resumable=True)
+    runner.run(decoded_tokens=[100, EOS_TOKEN_ID], expected_stored=(0, 1))
+
+    runner.new_request(token_ids=list(range(200, 212)), req_id="s", resumable=True)
+    runner.run(decoded_tokens=[300, EOS_TOKEN_ID], expected_stored=(2, 3, 4))
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_offloading_connector(request_runner, async_scheduling: bool):
     block_size = 4
     blocks_per_chunk = 3
@@ -1428,7 +1846,9 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_request_preemption(request_runner, async_scheduling: bool):
+@pytest.mark.parametrize("cpu_hit", [True, False])
+def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: bool):
+    """Resume reloads the chunks, or re-stores them if the CPU tier lost them."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -1479,16 +1899,23 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     free_block_queue.num_free_blocks = num_free_blocks_empty
     runner.scheduler.reset_prefix_cache()
 
-    # request should now return from preemption
-    # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 3
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(
-        decoded_tokens=[0] * block_size,
-        expected_loaded=(0, 1, 2, 3, 4, 5, 6, 7, 8),
-    )
+    if cpu_hit:
+        # request should now return from preemption
+        # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
+        runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 3
+        runner.run(
+            decoded_tokens=[0] * block_size,
+            expected_loaded=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        )
+    else:
+        # lookup misses: recompute and re-store [0, ..., 8], then store [9, 10, 11]
+        runner.run(
+            decoded_tokens=[0] * block_size,
+            expected_stored=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        )
 
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
