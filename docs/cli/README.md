@@ -136,7 +136,7 @@ vllm bench {forward, latency, serve, throughput}
 
 ### forward
 
-Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; sampling and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
+Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; sampling and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP/PCP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
 
 ```bash
 vllm bench forward \
@@ -144,6 +144,27 @@ vllm bench forward \
     --case decode=32*1@4096 \
     --case mix=2048,32*1@4096
 ```
+
+PCP uses `--prefill-context-parallel-size` with the model runner's supported
+MLA models. Cases describe the global batch per DP rank, before PCP splits it;
+`num_local_tokens`, `num_tokens_after_padding`, and `batch_order` in each rank's
+JSON result describe the local partition (a request can appear twice).
+Latency is the maximum across all ranks. For example, with four GPUs:
+
+```bash
+torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
+    --model MODEL --tensor-parallel-size 2 --prefill-context-parallel-size 2 \
+    --case prefill=8192 --case mix=2048,8*1@4096
+```
+
+For GLM-5.2 with PCP+DCP, also pass `--decode-context-parallel-size 2
+--dcp-comm-backend ag_rs --attention-backend FLASHMLA_SPARSE
+--kv-cache-dtype fp8_ds_mla`. DCP shares the existing workers.
+
+The benchmark captures the entire prefill forward in one graph. Serving may
+use eager execution or piecewise graphs with eager attention between segments.
+Serving TTFT also includes scheduling, input preparation, and sampling, so it
+can be substantially higher than the forward timing.
 
 See [vllm bench forward](./bench/forward.md) for the full reference of all available arguments.
 
