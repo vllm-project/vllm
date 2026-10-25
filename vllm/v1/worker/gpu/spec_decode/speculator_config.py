@@ -14,7 +14,7 @@ Parts only needed by the V1 model runner are marked "V1 model runner only", and
 will be removed with it.
 """
 
-from typing import TYPE_CHECKING, Any, ClassVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -100,6 +100,7 @@ class SpeculatorConfig:
         self.spec_config = spec_config
 
     @property
+    @final
     def num_speculative_tokens(self) -> int:
         return self.spec_config.num_speculative_tokens
 
