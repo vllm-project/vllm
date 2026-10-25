@@ -1910,3 +1910,36 @@ Lecture :
 - **0 assert `not found in cache` depuis l'overlay (18:52Z)** → condition de la PR amont
   vllm-project tenue à ce stade ; ouverture prévue au cycle du matin (le 25/10 « au matin »,
   ~06:41Z), sauf contre-ordre.
+
+## 25/10 03:40Z — confirmation croisée par le hub : le changement de config ne dégrade pas, mais n'améliore pas le TTFT vu par les clients
+
+Table `[ttft]` du hub (po-2025:claudish, message du 24/10 23:36Z), même instrument, `swift-1.5-27b` :
+
+| Tranche | n | >30 s | >120 s | >300 s | moyenne | max |
+|---|---|---|---|---|---|---|
+| post-Q32 20:05→21:25Z | 231 | 33,8 % | 6,5 % | 0 | 36,6 s | 275,8 s |
+| restart + dette de prefill 22:00→22:37Z | 51 | 80,4 % | 29,4 % | 0 | 83,5 s | 220,5 s |
+| **stabilisée 22:45→00:30Z** | **137** | **40,9 %** | **6,6 %** | **0** | **39,2 s** | **262,2 s** |
+
+Les deux instruments concordent :
+1. **La dette de prefill du restart est bien un artefact d'une heure** (hub : 29,4 % → 6,6 % de
+   requêtes > 120 s ; moteur : prefill calculé 1 054 → 313 tok/s sur la même période).
+2. **À l'état stabilisé, le TTFT vu par les clients est identique à la base post-Q32** (>120 s :
+   6,5 → 6,6 % ; moyenne 36,6 → 39,2 s ; >30 s 33,8 → 40,9 %). Donc **ni gain ni perte mesurés**
+   pour gpu-util 0,73 + tier disque 250 GiB sur cet indicateur, ce que confirme le débit moteur
+   (−22 % avec −19 % de demande, nuit de maxing).
+3. `>300 s` reste **0 sur trois tranches cumulées (n=419)** : la coupure du hub n'a jamais été
+   approchée.
+4. **Ce qui reste structurel** : ~40 % des requêtes client dépassent 30 s avant le premier token à
+   l'état stabilisé. C'est la file native + la saturation KV sur des conversations longues +
+   le prefill lent du 27B dense, pas un effet de la config de ce soir. Le levier restant est du
+   niveau **politique d'admission / priorité** (décision user), pas du niveau réglage moteur.
+
+**État des leviers de capacité (ce qu'on garde)** : KV 831 723 (+10,8 %) ; tier disque à 250 GiB,
+**première rotation réelle à 03:20Z (887 fichiers supprimés, 0 erreur)**, plus vieux bloc 6,3 h
+(les blocs re-servis voient leur mtime rafraîchi, donc la borne basse n'est pas l'âge de rétention) ;
+9 préemptions depuis le boot, **stables depuis 00:47Z** (l'ancienne config en faisait 66/h) ;
+hit rate du cache de préfixe 41,9 % cumulé (139,3 M requêtes / 58,4 M hits).
+
+**Fenêtre de jour** : proposée à claudish le lundi 26/10 09:00→11:00Z (jour ouvré, volume
+comparable), à confirmer quand les volumes du week-end seront connus.
