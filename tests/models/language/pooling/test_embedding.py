@@ -83,10 +83,9 @@ def test_models(
             # the MEAN pooling that vLLM uses above.
             from sentence_transformers.models import Pooling
 
-            st_model = hf_model.model
-            getattr(st_model[0], "modality_config", {}).pop("message", None)
-            st_model[1] = Pooling(
-                st_model.get_sentence_embedding_dimension(), pooling_mode="mean"
+            getattr(hf_model.model[0], "modality_config", {}).pop("message", None)
+            hf_model.model[1] = Pooling(
+                hf_model.model.get_sentence_embedding_dimension(), pooling_mode="mean"
             )
         hf_outputs = hf_model.encode(example_prompts)
 
