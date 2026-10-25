@@ -266,6 +266,26 @@ def test_no_preemption_beyond_the_per_step_cap(max_preemptions, victims):
     assert ("hi" in output.num_scheduled_tokens) == bool(victims)
 
 
+@pytest.mark.parametrize("peer_priority, victims", [(0, set()), (1, {"low", "peer"})])
+def test_a_running_request_of_the_same_priority_is_no_victim(peer_priority, victims):
+    """With 2 blocks free, 14 for the waiting request take both running requests'
+    20 and 10 blocks: only when both have a lower priority than it. One of its
+    own priority is no victim, beside one of a lower priority too, and the
+    lower one alone cannot make room."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=2)
+    _run_until_decoding(
+        scheduler,
+        _request("peer", _num_tokens(20), priority=peer_priority, arrival_time=0),
+        _request("low", _num_tokens(10), priority=2, arrival_time=1),
+    )
+    assert _num_free_blocks(scheduler) == 2
+
+    scheduler.add_request(_request("hi", _num_tokens(14), priority=0, arrival_time=2))
+    output = _step(scheduler)
+    assert (output.preempted_req_ids or set()) == victims
+    assert ("hi" in output.num_scheduled_tokens) == bool(victims)
+
+
 def test_no_growth_is_counted_when_the_victims_allowed_cannot_make_room(
     monkeypatch,
 ):
