@@ -5,7 +5,7 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
+from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
@@ -107,7 +107,11 @@ async def init_render_app_state(
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
-    init_render_state(state, request_logger)
+    init_render_state(
+        state,
+        request_logger,
+        disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+    )
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

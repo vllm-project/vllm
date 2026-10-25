@@ -69,7 +69,11 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 // converts the float32 score to a 32-bit ordered unsigned integer — the full
 // precision key for radix sorting
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
-  uint32_t bits = __float_as_uint(x);
+  // Read the bits through an opaque move: otherwise nvcc lowers
+  // `bits | 0x80000000u` to the FP op -|x|, which canonicalizes NaN to
+  // 0x7FFFFFFF (the key of -0.0) while the FP16 coarse bin puts NaN on top.
+  uint32_t bits;
+  asm("mov.b32 %0, %1;" : "=r"(bits) : "f"(x));
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
@@ -201,11 +205,11 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
 // Extended tie_handle for TopK > kBlockSize (e.g. TopK=2048).
 // tie_handle assumes 1 tie per thread (max 1024).
 // This version handles 2 ties per thread via kPerThread=2
-template <uint32_t TopK>
+template <uint32_t TopK, uint32_t MaxTies = TopK>
 __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
                                  uint32_t num_above, int32_t* output,
                                  void* _smem) {
-  static_assert(TopK > kBlockSize);
+  static_assert(MaxTies > kBlockSize);
   struct TS {
     alignas(128) uint32_t counter;
     alignas(128) MatchBin match;
@@ -217,7 +221,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
   const auto li = tx % kWarpSize;
   const auto wi = tx / kWarpSize;
 
-  constexpr uint32_t kPerThread = (TopK + kBlockSize - 1) / kBlockSize;
+  constexpr uint32_t kPerThread = (MaxTies + kBlockSize - 1) / kBlockSize;
   Tie my_ties[kPerThread];
   uint32_t keys[kPerThread];
   bool active[kPerThread];
@@ -327,9 +331,19 @@ struct Histogram4096Smem {
   };
 };
 
+// Defined in topk_histogram_4096_overflow.cuh. Only kFp32Rescan instantiations
+// call it, and their callers include that header.
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
+__device__ __noinline__ void exact_topk_rescan_cold(
+    const float* __restrict__ scores, int32_t* __restrict__ output,
+    uint32_t length, void* smem);
+
+enum class OverflowRecovery { kDisabled, kFp32Rescan };
+
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          bool UsePredicatedLoads = false>
+          bool UsePredicatedLoads = false,
+          OverflowRecovery Recovery = OverflowRecovery::kDisabled>
 __device__ void histogram_4096_topk(const float* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
@@ -446,6 +460,15 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   const auto [thr_bin, num_above, num_equal] = smem->match;
   const bool need_tie = (num_equal + num_above > TopK);
 
+  // Coarse-bin overflow must be refined before emitting any candidates.
+  if constexpr (Recovery == OverflowRecovery::kFp32Rescan) {
+    if (need_tie && num_equal > TopK) {
+      exact_topk_rescan_cold<TopK, kBlockSize, UsePredicatedLoads ? 1 : 4>(
+          scores, output, length, _smem);
+      return;
+    }
+  }
+
   done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
@@ -468,7 +491,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
             }
           } else {
             if (pos < TopK) {
-              smem->tie_buffer[pos] = {idx, elems[e]};  // store for refirement
+              smem->tie_buffer[pos] = {idx, elems[e]};
             }
           }
         }
@@ -508,15 +531,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     if (lane_id == 0 && rank < topk_remain) {
       output[num_above + rank] = target.idx;  // place at correct position
     }
-  } else if (num_ties <=
-             kWarpSize *
-                 2) {  // TODO (roberto): try to refactor this with <=32 case
-    //  Same idea but each thread handles 2 tie elements
+  } else if (num_ties <= kWarpSize * 2) {
+    // Same idea, with each thread handling two tie elements.
     const auto lane_id = tx % kWarpSize;
     const auto warp_id = tx / kWarpSize;
     const auto lane1 = lane_id + kWarpSize;
     const auto warp1 = warp_id + kWarpSize;
-    const auto invalid = Tie{0xFFFFFFFF, -__FLT_MAX__};
+    // Padding must not outrank any real tie, including a -inf one.
+    const auto invalid = Tie{0xFFFFFFFF, -__builtin_huge_valf()};
     const auto tie0 = smem->tie_buffer[lane_id];
     const auto tie1 = lane1 < num_ties ? smem->tie_buffer[lane1] : invalid;
     if (warp_id < num_ties) {
