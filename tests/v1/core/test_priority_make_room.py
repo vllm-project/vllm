@@ -593,6 +593,30 @@ def test_no_blocks_are_released_without_victims_or_deferred_frees():
     assert scheduler._num_released_blocks([], ((Unread(),), BLOCK_SIZE)) == 0
 
 
+def test_no_prefix_cache_lookup_without_a_lower_priority_running(monkeypatch):
+    """When nothing runs at a lower priority than the waiting request, there is
+    nothing to preempt for it, and make-room spares its prefix cache lookup."""
+    scheduler = _create_scheduler(
+        max_priority_preemptions_per_step=2, enable_prefix_caching=True
+    )
+    _run_until_decoding(
+        scheduler,
+        _request("a", _num_tokens(15), priority=1, arrival_time=0, prompt_token=1),
+        _request("b", _num_tokens(15), priority=1, arrival_time=1, prompt_token=2),
+    )
+
+    def local_prefix_hit(request: Request):
+        raise AssertionError("looked the waiting request's prefix up")
+
+    monkeypatch.setattr(scheduler, "_local_prefix_hit", local_prefix_hit)
+    scheduler.add_request(
+        _request("c", _num_tokens(8), priority=1, arrival_time=2, prompt_token=3)
+    )
+    output = _step(scheduler)
+    assert not output.preempted_req_ids
+    assert "c" not in output.num_scheduled_tokens
+
+
 def _create_encoder_decoder_scheduler(num_blocks: int) -> Scheduler:
     """A scheduler with a self-attention and a cross-attention KV cache group,
     patched to schedule as for an encoder-decoder model, as in
