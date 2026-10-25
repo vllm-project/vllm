@@ -34,7 +34,7 @@ def executable(specs, heads, gate_mode, has_bias, device, tokens=1):
     batch = specs[0][0][0]
     table = SCHEDULE if tokens == 1 else SPEC_SCHEDULE
     schedule = batch_table(table.get(heads, ""))
-    schedule = schedule.get(batch // tokens, (0, 0, 0)) if gate_mode != 2 else (0,) * 3
+    schedule = schedule.get(batch // tokens, (0, 0, 0))
     if schedule[0] >= 2 and specs[9][1][-2:] != (128, 1):  # staging needs whole rows
         schedule = (1, *schedule[1:4])  # no evict hint without staging
     requests = batch // tokens

@@ -124,8 +124,8 @@ class KdaSplit:
         early, lanes, self.occupancy, cluster, evict = (*schedule, 0, 0)[:5]
         self.early, self.staged = bool(early), early >= 2
         self.gate_staged, self.tokens = early == 3, tokens
-        assert gate_mode != 2 or not (early or cluster)
-        assert tokens == 1 or not (self.staged or gate_mode == 2 or cluster == 16)
+        assert gate_mode in (0, 1)
+        assert tokens == 1 or not (self.staged or cluster == 16)
         # TP8 (12 heads) uses fast math. Release the o-proj at entry so its weight loads
         # overlap KDA: TP8 B1-8 (the producer waits before reading KDA's output), TP16 B1
         # only: TP16's fused o-proj reads the AttnRes prefix/blocks at launch, which only
@@ -480,8 +480,8 @@ class KdaSplit:
     @cute.jit
     def gate_warp(self, args, shared_decay, barrier, coords, staged_rows):
         """Project one value partition and multicast its decays to every CTA. Modes fix
-        the F_B reduction order: 0 = one chain of eight MMAs, 1 = four chains of two,
-        2 = sixteen 8-FMA partials summed in a butterfly. Projection math stays IEEE.
+        the F_B reduction order: 0 = one chain of eight MMAs, 1 = four chains of two.
+        Projection math stays IEEE.
         ``staged_rows``: shared [copy, lane, 4] words; each lane cp.asyncs its own
         16-byte F_B operands there before the PDL wait and reads them back after it."""
         f_a, a_log, dt_bias, lower_bound, weight = (args[i] for i in (4, 6, 7, 13, 16))
@@ -489,126 +489,100 @@ class KdaSplit:
         rows, mode = self.rows, self.gate_mode
         per: cutlass.Constexpr = max(1, rows // 32)  # decays per lane
         a = a_log[head]
-        if cutlass.const_expr(mode == 2):
-            feature = lane % rows
-            row = head * 128 + value_base + feature
-            # uint4 weights before the wait, two uint2 activation loads per 8-FMA
-            # partial after it; keep that granularity and the low-then-high FMA order.
-            wr = [load_weight_bf16x8(at(weight, row, 8 * i)) for i in range(16)]
-            dt = dt_bias[row]
-            cute.arch.griddepcontrol_wait()
-            partial = cute.make_rmem_tensor(16, Float32)
-            for i in cutlass.range_constexpr(16):
-                a0 = load_activation_bf16x4(at(f_a, token, 8 * i))
-                a1 = load_activation_bf16x4(at(f_a, token, 8 * i + 4))
-                av = (*a0, *a1)
-                acc = Float32(0)
-                for e in cutlass.range_constexpr(4):
-                    x0, x1 = unpack_bf16(av[e])
-                    w0, w1 = unpack_bf16(wr[i][e])
-                    acc = fma(x0, w0, acc)
-                    acc = fma(x1, w1, acc)
-                partial[i] = acc
-            for shift in cutlass.range_constexpr(3, -1, -1):
-                for i in cutlass.range_constexpr(1 << shift):
-                    partial[i] += partial[i | (1 << shift)]
-            raw_g = [Float32(BFloat16(partial[0]))]
-            dt = [dt]
+        tiles: cutlass.Constexpr = rows // 16
+        chains: cutlass.Constexpr = 4 if mode == 1 else 1
+        group, quarter = lane >> 2, lane & 3
+        feature = 16 * (quarter >> 1) + group + 8 * (quarter & 1)
+        dt = [Float32(0) for _ in range(per)]
+        if cutlass.const_expr(self.tokens > 1):  # token column, its features
+            token += group % self.tokens
+            features = [
+                16 * (i // 2) + group + 8 * (i % 2) for i in range(rows // 8)
+            ]
+            dt = [dt_bias[head * 128 + value_base + f] for f in features]
+        for r in cutlass.range_constexpr(per if self.tokens == 1 else 0):
+            if feature + 32 * r < rows:
+                dt[r] = dt_bias[head * 128 + value_base + 32 * r + feature]
+        # Two decays per lane load 16 bytes per row: chunk c then covers columns
+        # 32 (c // 2) + 8 quarter + 4 (c % 2) + [0, 4) instead of 16 c + 4 quarter.
+        wide: cutlass.Constexpr = per >= 2
+        wr = cute.make_rmem_tensor((tiles, 8, 4), Uint32)
+        if cutlass.const_expr(staged_rows is not None):
+            for tile in cutlass.range_constexpr(tiles):
+                row = head * 128 + value_base + 16 * tile + group
+                for chunk in cutlass.range_constexpr(4):
+                    col = 32 * chunk + 8 * quarter
+                    for half in cutlass.range_constexpr(2):
+                        slot = staged_rows[
+                            (tile * 4 + chunk) * 2 + half, lane, None
+                        ]
+                        source = at(weight, row + 8 * half, col)
+                        copy_g2s(slot.iterator, source)
+            cute.arch.cp_async_commit_group()
         else:
-            tiles: cutlass.Constexpr = rows // 16
-            chains: cutlass.Constexpr = 4 if mode == 1 else 1
-            group, quarter = lane >> 2, lane & 3
-            feature = 16 * (quarter >> 1) + group + 8 * (quarter & 1)
-            dt = [Float32(0) for _ in range(per)]
-            if cutlass.const_expr(self.tokens > 1):  # token column, its features
-                token += group % self.tokens
-                features = [
-                    16 * (i // 2) + group + 8 * (i % 2) for i in range(rows // 8)
-                ]
-                dt = [dt_bias[head * 128 + value_base + f] for f in features]
-            for r in cutlass.range_constexpr(per if self.tokens == 1 else 0):
-                if feature + 32 * r < rows:
-                    dt[r] = dt_bias[head * 128 + value_base + 32 * r + feature]
-            # Two decays per lane load 16 bytes per row: chunk c then covers columns
-            # 32 (c // 2) + 8 quarter + 4 (c % 2) + [0, 4) instead of 16 c + 4 quarter.
-            wide: cutlass.Constexpr = per >= 2
-            wr = cute.make_rmem_tensor((tiles, 8, 4), Uint32)
-            if cutlass.const_expr(staged_rows is not None):
-                for tile in cutlass.range_constexpr(tiles):
-                    row = head * 128 + value_base + 16 * tile + group
-                    for chunk in cutlass.range_constexpr(4):
+            for tile in cutlass.range_constexpr(tiles):
+                row = head * 128 + value_base + 16 * tile + group
+                for chunk in cutlass.range_constexpr(4 if wide else 8):
+                    if cutlass.const_expr(wide):
                         col = 32 * chunk + 8 * quarter
-                        for half in cutlass.range_constexpr(2):
-                            slot = staged_rows[
-                                (tile * 4 + chunk) * 2 + half, lane, None
-                            ]
-                            source = at(weight, row + 8 * half, col)
-                            copy_g2s(slot.iterator, source)
-                cute.arch.cp_async_commit_group()
-            else:
-                for tile in cutlass.range_constexpr(tiles):
-                    row = head * 128 + value_base + 16 * tile + group
-                    for chunk in cutlass.range_constexpr(4 if wide else 8):
-                        if cutlass.const_expr(wide):
-                            col = 32 * chunk + 8 * quarter
-                            low = load_weight_bf16x8(at(weight, row, col))
-                            high = load_weight_bf16x8(at(weight, row + 8, col))
-                            self.split_pairs(wr, tile, chunk, low, high)
-                        else:
-                            col = 16 * chunk + 4 * quarter
-                            low = load_bf16x4(at(weight, row, col))
-                            high = load_bf16x4(at(weight, row + 8, col))
-                            wr[tile, chunk, 0], wr[tile, chunk, 2] = low
-                            wr[tile, chunk, 1], wr[tile, chunk, 3] = high
-            cute.arch.griddepcontrol_wait()
-            if cutlass.const_expr(wide):
-                pairs = [
-                    load_activation_bf16x8(at(f_a, token, 32 * c + 8 * quarter))
-                    for c in range(4)
-                ]
-                ar = [pairs[c // 2][2 * (c % 2) : 2 * (c % 2) + 2] for c in range(8)]
-            else:
-                ar = [
-                    load_activation_bf16x4(at(f_a, token, 16 * c + 4 * quarter))
-                    for c in range(8)
-                ]
-            if cutlass.const_expr(staged_rows is not None):
-                cute.arch.cp_async_wait_group(0)
-                for tile in cutlass.range_constexpr(tiles):
-                    for chunk in cutlass.range_constexpr(4):
-                        copy = (tile * 4 + chunk) * 2
-                        low = smem_words(staged_rows[copy, lane, None].iterator)
-                        high = smem_words(staged_rows[copy + 1, lane, None].iterator)
+                        low = load_weight_bf16x8(at(weight, row, col))
+                        high = load_weight_bf16x8(at(weight, row + 8, col))
                         self.split_pairs(wr, tile, chunk, low, high)
-            acc = zeros((chains, tiles, 4), Float32)
-            for chunk in cutlass.range_constexpr(8):
-                chain: cutlass.Constexpr = chunk // 2 if mode == 1 else 0
-                for tile in cutlass.range_constexpr(tiles):
-                    wa = tuple(wr[tile, chunk, e] for e in range(4))
-                    mma_into(acc[chain, tile, None], wa, ar[chunk], bf16=True)
-            if cutlass.const_expr(self.tokens > 1):
-                gates = (a, lower_bound, dt, features)
-                targets = (shared_decay, barrier, value_base)
-                return self.multicast(acc, gates, targets, lane)
-            raw_g = []
-            for r in cutlass.range_constexpr(per):
-                partial = cute.make_rmem_tensor(chains, Float32)
-                for chain in cutlass.range_constexpr(chains):
-                    selected = acc[chain, 2 * r, 0]
-                    if quarter & 1:
-                        selected = acc[chain, 2 * r, 2]
-                    if cutlass.const_expr(tiles > 2 * r + 1):  # noqa: SIM102
-                        if quarter >> 1:
-                            selected = acc[chain, 2 * r + 1, 0]
-                            if quarter & 1:
-                                selected = acc[chain, 2 * r + 1, 2]
-                    partial[chain] = selected
-                value = partial[0]
-                if cutlass.const_expr(mode == 1):
-                    value = Float32(0) + (
-                        ((value + partial[1]) + partial[2]) + partial[3]
-                    )
-                raw_g.append(Float32(BFloat16(value)))
+                    else:
+                        col = 16 * chunk + 4 * quarter
+                        low = load_bf16x4(at(weight, row, col))
+                        high = load_bf16x4(at(weight, row + 8, col))
+                        wr[tile, chunk, 0], wr[tile, chunk, 2] = low
+                        wr[tile, chunk, 1], wr[tile, chunk, 3] = high
+        cute.arch.griddepcontrol_wait()
+        if cutlass.const_expr(wide):
+            pairs = [
+                load_activation_bf16x8(at(f_a, token, 32 * c + 8 * quarter))
+                for c in range(4)
+            ]
+            ar = [pairs[c // 2][2 * (c % 2) : 2 * (c % 2) + 2] for c in range(8)]
+        else:
+            ar = [
+                load_activation_bf16x4(at(f_a, token, 16 * c + 4 * quarter))
+                for c in range(8)
+            ]
+        if cutlass.const_expr(staged_rows is not None):
+            cute.arch.cp_async_wait_group(0)
+            for tile in cutlass.range_constexpr(tiles):
+                for chunk in cutlass.range_constexpr(4):
+                    copy = (tile * 4 + chunk) * 2
+                    low = smem_words(staged_rows[copy, lane, None].iterator)
+                    high = smem_words(staged_rows[copy + 1, lane, None].iterator)
+                    self.split_pairs(wr, tile, chunk, low, high)
+        acc = zeros((chains, tiles, 4), Float32)
+        for chunk in cutlass.range_constexpr(8):
+            chain: cutlass.Constexpr = chunk // 2 if mode == 1 else 0
+            for tile in cutlass.range_constexpr(tiles):
+                wa = tuple(wr[tile, chunk, e] for e in range(4))
+                mma_into(acc[chain, tile, None], wa, ar[chunk], bf16=True)
+        if cutlass.const_expr(self.tokens > 1):
+            gates = (a, lower_bound, dt, features)
+            targets = (shared_decay, barrier, value_base)
+            return self.multicast(acc, gates, targets, lane)
+        raw_g = []
+        for r in cutlass.range_constexpr(per):
+            partial = cute.make_rmem_tensor(chains, Float32)
+            for chain in cutlass.range_constexpr(chains):
+                selected = acc[chain, 2 * r, 0]
+                if quarter & 1:
+                    selected = acc[chain, 2 * r, 2]
+                if cutlass.const_expr(tiles > 2 * r + 1):  # noqa: SIM102
+                    if quarter >> 1:
+                        selected = acc[chain, 2 * r + 1, 0]
+                        if quarter & 1:
+                            selected = acc[chain, 2 * r + 1, 2]
+                partial[chain] = selected
+            value = partial[0]
+            if cutlass.const_expr(mode == 1):
+                value = Float32(0) + (
+                    ((value + partial[1]) + partial[2]) + partial[3]
+                )
+            raw_g.append(Float32(BFloat16(value)))
 
         decay = []
         for r in cutlass.range_constexpr(per):
@@ -637,8 +611,7 @@ class KdaSplit:
                     if packet >> 3 == r:
                         values[e] = shuffled[r]
             else:
-                if cutlass.const_expr(mode != 2):
-                    source = (source & 7) << 2 | (source >> 4) << 1 | source >> 3 & 1
+                source = (source & 7) << 2 | (source >> 4) << 1 | source >> 3 & 1
                 values[e] = cute.arch.shuffle_sync(decay[0], source)
         offset = shared_decay.iterator + value_base + 4 * packet
         pointer = cute.make_ptr(

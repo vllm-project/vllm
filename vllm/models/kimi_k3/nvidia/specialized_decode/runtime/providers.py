@@ -81,8 +81,8 @@ class Attention:
         self.projection = SkinnyProjection(weight, split_k)
         self.core: Any  # PreparedKda or PreparedMla
         if kind == "kda":
-            # TP8: gate mode 1 at B1, the scalar mode 2 at B2, the MMA mode 0 from B3.
-            mode = lambda b: (1 if b == 1 else 2 if b == 2 else 0) if tp == 8 else 0
+            # TP8 B1: gate mode 1; everything else the MMA mode 0.
+            mode = lambda b: int(tp == 8 and b == 1)
             policies = {b: (pitch, mode(b)) for b in runtime.batches}
             q = runtime.q  # verify steps: B requests x q tokens
             verify = [b // q for b in runtime.batches if q > 1 and b % q == 0]
@@ -124,7 +124,6 @@ class Attention:
         projected, local = self.storage[b]
         projected = self.projection.run(x, projected)
         if self.kind == "kda":
-            self.prefetch.fork("attention_moe", self.layer.layer_idx, b)
             if q > 1:  # uniform q-token verify rows
                 slots = metadata.spec_state_indices_tensor
                 accepted = metadata.num_accepted_tokens
@@ -147,7 +146,6 @@ class Attention:
             # DCP: lengths are the local shard's, totals the full sequences'.
             mla.update(totals=decode.dcp_tot_seq_lens)
             self.core.run(projected, local, slots=slots, q=q, **mla)
-            self.prefetch.fork("attention_moe", self.layer.layer_idx, b)
         self.output.run(local, prefix, blocks, out)
         self.prefetch.fork("oproj_down", self.layer.layer_idx, b)
         return out
