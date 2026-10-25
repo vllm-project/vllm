@@ -336,11 +336,12 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @staticmethod
     def _renderer_keeps_inline_system(renderer: BaseRenderer) -> bool:
-        """Probe a non-jinja renderer (e.g. DeepSeek V4's encoder).
+        """Probe a non-jinja renderer (e.g. DeepSeek V4.1's encoder).
 
-        Inline system messages must render in order, and a trailing one must
-        still be followed by the generation prompt (DeepSeek V3.2 puts it after
-        the prompt; Mistral moves system text into the last user turn).
+        Inline system messages must render in order as distinct system turns,
+        and a trailing one must still be followed by the generation prompt.
+        DeepSeek V4 appends their text to the user turn, V3.2 puts it after the
+        generation prompt, and Mistral moves it into the last user turn.
         """
         markers = ("SYSA", "USRA", "SYSB", "USRB")
         messages: list[Any] = [
@@ -358,14 +359,21 @@ class AnthropicServingMessages(OpenAIServingChat):
                 text = renderer.get_tokenizer().decode(token_ids or [])
             return text
 
+        def separator(text: str) -> str:
+            return text[text.find(markers[1]) + len(markers[1]) : text.find(markers[2])]
+
         try:
             full = render(messages)
             trailing = render(messages[:3])
+            as_user = render([*messages[:2], {**messages[2], "role": "user"}])
         except Exception:
             logger.debug("Inline system probe failed", exc_info=True)
             return False
         positions = [full.find(marker) for marker in markers]
         if -1 in positions or positions != sorted(positions):
+            return False
+        system_separator = separator(full)
+        if not system_separator.strip() or system_separator == separator(as_user):
             return False
         generation_prompt = full[positions[-1] + len(markers[-1]) :]
         return trailing.endswith(markers[2] + generation_prompt)

@@ -1489,9 +1489,11 @@ class TestDetectMergeInlineSystem:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
-            # Renders inline system messages in place; merging them would
-            # break prefix caching for Claude Code's per-turn reminders.
-            ("deepseek-ai/DeepSeek-V4-Flash", False),
+            # Renders inline system messages as system turns; merging them
+            # would break prefix caching for Claude Code's per-turn reminders.
+            ("deepseek-ai/DeepSeek-V4.1-Flash", False),
+            # Appends inline system text to the preceding user turn (#46710).
+            ("deepseek-ai/DeepSeek-V4-Flash", True),
             # Puts a trailing system message after the generation prompt.
             ("deepseek-ai/DeepSeek-V3.2-Exp", True),
         ],
