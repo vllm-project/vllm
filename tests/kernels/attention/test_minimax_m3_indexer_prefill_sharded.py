@@ -91,16 +91,18 @@ def _make_case(query_lens, prefixes, device_plan=False):
     return lengths, table, query, cache, plan, scores, positions
 
 
-def _reference(query, cache, table, rank, query_lens, prefixes, like):
+def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
     reference = torch.full_like(like, -float("inf"))
     start = 0
     for req, (qlen, prefix) in enumerate(zip(query_lens, prefixes)):
         positions = torch.arange(qlen, device="cuda") + prefix
         q = query[start : start + qlen].float()
         for block in range((prefix + qlen + 127) // 128):
-            keys = cache[table[req, block], rank::2].float()
+            keys = cache[table[req, block], rank::tp].float()
             dots = torch.einsum("qhd,kd->qhk", q, keys)
-            key_positions = block * 128 + rank + 2 * torch.arange(64, device="cuda")
+            key_positions = (
+                block * 128 + rank + tp * torch.arange(128 // tp, device="cuda")
+            )
             dots.masked_fill_(
                 key_positions[None, None, :] > positions[:, None, None],
                 -float("inf"),
@@ -113,8 +115,9 @@ def _reference(query, cache, table, rank, query_lens, prefixes, like):
 @requires_sm100
 @pytest.mark.parametrize("query_lens,prefixes", CASES)
 @pytest.mark.parametrize("device_plan", [False, True])
+@pytest.mark.parametrize("tp", [2, 4])
 @torch.inference_mode()
-def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan):
+def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
     from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
 
     lengths, table, query, cache, plan, scores, _ = _make_case(
@@ -130,19 +133,20 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan):
             tail = (length - 1) % 128
             cache[page, tail:] = 0
             cache[page, tail:, 0] = -256 if iteration == 0 else 256
-        for rank in range(2):
+        for rank in range(tp):
             scores.fill_(float("nan"))
             fmha_index_score_sharded(
                 query,
-                cache[:, rank::2].contiguous(),
+                cache[:, rank::tp].contiguous(),
                 table,
                 plan,
                 rank=rank,
+                tp=tp,
                 max_score=scores,
                 sm_scale=1.0,
             )
             reference = _reference(
-                query, cache, table, rank, query_lens, prefixes, scores
+                query, cache, table, rank, query_lens, prefixes, scores, tp
             )
             torch.testing.assert_close(scores, reference, rtol=0, atol=0)
 
