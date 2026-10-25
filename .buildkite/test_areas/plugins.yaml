@@ -11,6 +11,10 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/test_scheduler_plugins.py
+  - tests/v1/core/utils.py
+  - examples/features/adaptive_budget/
+  - vllm/v1/core/sched/
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
@@ -61,6 +65,10 @@ steps:
       source_file_dependencies:
       - vllm/plugins/
       - tests/plugins/
+      - tests/plugins_tests/test_scheduler_plugins.py
+      - tests/v1/core/utils.py
+      - examples/features/adaptive_budget/
+      - vllm/v1/core/sched/
       - vllm/platforms/rocm.py
 
 
