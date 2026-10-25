@@ -132,7 +132,8 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
 
 @pytest.mark.nixl_ep
 @pytest.mark.asyncio
-async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
+@pytest.mark.parametrize("return_routes", [False, True])
+async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch, return_routes):
     """Real decode rows survive graph staging with the eager model's logprobs."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     loads = (63, 97)
@@ -179,9 +180,10 @@ async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
                 max_num_seqs=128,
                 max_num_batched_tokens=2048,
                 kv_cache_memory_bytes=1 << 30,
-                enable_prefix_caching=False,
+                enable_prefix_caching=return_routes,
                 async_scheduling=False,
                 cudagraph_metrics=True,
+                enable_return_routed_experts=return_routes,
                 compilation_config={
                     "mode": 0,
                     "cudagraph_mode": "FULL",
@@ -217,6 +219,12 @@ async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
             for out in outputs:
                 assert isinstance(out, RequestOutput)
                 assert out.finished and len(out.outputs[0].token_ids) == 8
+                if return_routes:
+                    routes = out.outputs[0].routed_experts
+                    assert routes is not None
+                    assert out.prompt_token_ids is not None
+                    assert routes.shape == (len(out.prompt_token_ids) + 7, 27, 6)
+                    assert ((routes >= 0) & (routes < 64)).all()
                 completed.append(out.outputs[0])
             return [
                 (

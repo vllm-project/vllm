@@ -2129,6 +2129,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            routed_experts_token_indices=(
+                ubatch_state.staged_rows if ubatch_state is not None else None
+            ),
         )
 
         if not self.is_last_pp_rank:
@@ -2159,6 +2162,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        routed_experts_token_indices = (
+            self.execute_model_state.routed_experts_token_indices
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2235,7 +2241,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
-            pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
+            pending_aux_output = self.aux_output_connector.prepare_output(
+                input_batch, routed_experts_token_indices
+            )
 
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -2478,6 +2486,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    routed_experts_token_indices: torch.Tensor | None = None
 
 
 class BatchReqState(NamedTuple):

@@ -158,9 +158,16 @@ class RoutedExpertsCapturer:
             f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 
-    def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
+    def snapshot_routing_data(
+        self, num_tokens: int, token_indices: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Return a stable snapshot of the current routing data."""
-        return self.device_buffer[:num_tokens].to(self.output_dtype)
+        routing_data = (
+            self.device_buffer[:num_tokens]
+            if token_indices is None
+            else self.device_buffer[token_indices]
+        )
+        return routing_data.to(self.output_dtype)
 
 
 class RoutedExpertsSink:

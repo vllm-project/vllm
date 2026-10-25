@@ -45,7 +45,9 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 With MRV2, single-token decode batches can retain a FULL microbatched CUDA graph when DP loads are imbalanced. For example, ranks with 63 and 97 requests can both use a 128-row graph: the smaller rank spreads its real rows across the captured regions, then restores logical output order after replay. All ranks agree on staging eligibility during DP synchronization.
 
-This path uses NIXL EP with FlashAttention MLA, unquantized BF16 weights and KV cache, TP1, and the default model state. Prompt embeddings, EPLB, KV transfer and returned routed experts keep the existing eager fallback when a captured region would be empty. General MRV2 DBO restrictions, including LoRA, speculation, pipeline/context parallelism and multimodal models, still apply.
+This path uses NIXL EP with FlashAttention MLA, unquantized BF16 weights and KV cache, TP1, and the default model state. Prompt embeddings, EPLB and KV transfer keep the existing eager fallback when a captured region would be empty. General MRV2 DBO restrictions, including LoRA, speculation, pipeline/context parallelism and multimodal models, still apply.
+
+Returned routed experts are supported with prefix caching enabled: each step's routing snapshot uses the staging row map to restore logical token order before the asynchronous CPU copy. Captured routing buffers retain their addresses.
 
 Staging is selected automatically for eligible batches with DBO enabled; it adds temporary row copies and does not change graph buckets or backend microbatch limits. Row placement and attention metadata follow each captured region, including an uneven final region.
 

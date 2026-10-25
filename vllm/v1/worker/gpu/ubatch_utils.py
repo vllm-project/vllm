@@ -400,7 +400,6 @@ class UBatchRunner:
             or parallel.tensor_parallel_size != 1
             or parallel.enable_eplb
             or config.kv_transfer_config is not None
-            or config.aux_output_config.enable_return_routed_experts
         ):
             return False
         # General DBO feature exclusions are validated by VllmConfig.

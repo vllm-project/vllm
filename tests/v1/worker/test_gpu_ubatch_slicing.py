@@ -1040,3 +1040,35 @@ def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k, overflow
     torch.testing.assert_close(slots[:, :n], torch.arange(n).unsqueeze(0))
     assert (slots[:, n:] == -1).all()
     assert not batch.is_padding[:n].any() and batch.is_padding[n:].all()
+
+
+@pytest.mark.parametrize("n", [63, 65])
+def test_staged_routing_snapshot_keeps_logical_rows(tmp_path, dist_init, n):
+    from transformers import Qwen3MoeConfig
+
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        num_hidden_layers=1,
+        num_experts=8,
+        num_experts_per_tok=2,
+        max_position_embeddings=256,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(model_config=ModelConfig(model=str(tmp_path), dtype="bfloat16"))
+    capturer = RoutedExpertsCapturer(128, config)
+    device = capturer.device_buffer.device
+    batch = _make_input_batch(
+        [1] * n, [8] * n, InputBuffers(128, 128, device), 128, 128
+    )
+    tables = (torch.zeros(128, 8, dtype=torch.int32, device=device),)
+    slots = torch.arange(128, device=device).unsqueeze(0)
+    rows = (
+        stage_decode_tokens(batch, tables, slots, create_ubatch_slices(batch, 2))
+        if n == 63
+        else None
+    )
+    destinations = rows if rows is not None else torch.arange(n, device=device)
+    expected = torch.arange(n * 2, device=device).reshape(n, 1, 2) % 8
+    capturer.device_buffer[destinations] = expected.int()
+    snapshot = capturer.snapshot_routing_data(n, rows)
+    capturer.device_buffer.zero_()
+    torch.testing.assert_close(snapshot.int(), expected.int())
