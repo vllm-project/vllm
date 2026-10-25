@@ -3505,10 +3505,11 @@ class Scheduler(SchedulerInterface):
     def _first_tokens_hold_priority(self) -> int | None:
         """With the budget cap, the highest priority among the requests whose
         first tokens are due: the running ones with fewer than
-        `priority_prefill_budget_cap_tokens` output tokens and, while a running
-        slot is free, the ones whose KV load is done, which the waiting loop
-        promotes in this step but only on budget the running loop leaves, and
-        the ones whose load is in flight, for its first
+        `priority_prefill_budget_cap_tokens` output tokens, those of steps in
+        flight under async scheduling included, and, while a running slot is
+        free, the ones whose KV load is done, which the waiting loop promotes
+        in this step but only on budget the running loop leaves, and the ones
+        whose load is in flight, for its first
         `priority_prefill_budget_cap_tokens` steps: a stuck load holds nothing
         after those."""
         if not self.priority_prefill_budget_cap:
@@ -3524,7 +3525,8 @@ class Scheduler(SchedulerInterface):
         priorities = [
             req.priority
             for req in self.running
-            if req.num_output_tokens < self.priority_prefill_budget_cap_tokens
+            if req.num_output_tokens + req.num_output_placeholders
+            < self.priority_prefill_budget_cap_tokens
         ]
         if self._running_slot_free():
             priorities.extend(

@@ -1356,6 +1356,38 @@ def test_lower_priority_prefill_sits_out_a_requests_first_tokens(
         assert all(tokens["prefill"] == 256 for tokens in steps)
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_the_first_tokens_hold_as_many_steps_under_async_scheduling(async_scheduling):
+    """Under async scheduling a step is scheduled before the output of the step
+    before it is processed. The priority 0 request's first tokens count those in
+    flight, so the running priority 2 prefill sits out the steps of its first 4
+    tokens and goes on in the step of its fifth, as without async scheduling."""
+    scheduler = _create_scheduler(
+        async_scheduling=async_scheduling,
+        priority_prefill_budget_cap=True,
+        priority_prefill_budget_cap_tokens=4,
+        long_prefill_token_threshold=256,
+        max_model_len=2048,
+        num_blocks=400,
+    )
+    _run_until_decoding(scheduler, _request("decode", 40, priority=2, arrival_time=0))
+    scheduler.add_request(_request("prefill", 2000, priority=2, arrival_time=1))
+    assert _step(scheduler).num_scheduled_tokens == {"decode": 1, "prefill": 256}
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=2))
+    schedule, process = _in_flight_steps(scheduler)
+    steps = [schedule().num_scheduled_tokens]
+    for _ in range(4):
+        # As in the engine: with async scheduling, one step stays in flight.
+        if not async_scheduling:
+            process()
+        steps.append(schedule().num_scheduled_tokens)
+        if async_scheduling:
+            process()
+    assert steps[0] == {"decode": 1, "hi": 100}
+    assert steps[1:4] == [{"decode": 1, "hi": 1}] * 3
+    assert steps[4] == {"decode": 1, "hi": 1, "prefill": 256}
+
+
 def test_budget_cap_never_cuts_a_decode():
     """A priority 2 decode scheduled after the prefill that sits out the step
     keeps its token."""
