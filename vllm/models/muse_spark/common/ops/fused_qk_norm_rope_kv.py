@@ -31,7 +31,7 @@ def supports_fused_kv_insert(attn_layer: torch.nn.Module) -> bool:
         return False
     if attn_layer.attn_backend.forward_includes_kv_cache_update:
         return False
-    if not attn_layer.attn_backend.supports_kv_cache_update_bypass:
+    if not attn_layer.attn_backend.supports_kv_update_bypass():
         return False
     if attn_layer.kv_sharing_target_layer_name is not None:
         return False

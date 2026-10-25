@@ -191,6 +191,12 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_kv_update_bypass(cls) -> bool:
+        """Whether forward() can run with key/value omitted after a fused op
+        wrote the cache. Override when the answer depends on runtime config."""
+        return cls.supports_kv_cache_update_bypass
+
+    @classmethod
     def supports_rswa(cls) -> bool:
         return False
 

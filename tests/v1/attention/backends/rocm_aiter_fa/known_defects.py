@@ -110,11 +110,6 @@ KNOWN_DEFECTS["fp8-e5m2-declared"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["kv-update-bypass-frozen"] = Defect(
-    "supports_kv_cache_update_bypass is computed once at import and goes "
-    "stale when the shuffle toggle changes.",
-    (_CAP + "test_kv_update_bypass_follows_the_shuffle_toggle",),
-)
 
 _MARKED = pytest.StashKey[bool]()
 
