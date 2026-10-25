@@ -187,12 +187,15 @@ def test_public_binding_supports_direct_capture_source():
     calls = []
     capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
 
-    bind_routed_experts_capturer(source, capturer)
+    unbind = bind_routed_experts_capturer(source, capturer)
 
     assert source.capture_fn is not None
     topk_ids = torch.tensor([[1, 2]])
     source.capture_fn(topk_ids)
     assert calls == [(3, topk_ids)]
+    unbind()
+    assert source.capture_fn is None
+    unbind()
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -659,23 +662,16 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32)
     )
-    model = Mock()
-    kv_cache_config = Mock()
+    result = aux_output_worker.get_aux_output_connector(config)
 
-    result = aux_output_worker.get_aux_output_connector(model, config, kv_cache_config)
-
-    constructor.assert_called_once_with(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=config,
-    )
+    constructor.assert_called_once_with(config)
     assert result is connector
 
 
 def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    capturer = Mock()
+    capturer = Mock(shape_per_token=(2,), output_dtype_name="int32")
     constructor = Mock(return_value=capturer)
     bind = Mock()
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
@@ -687,16 +683,18 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     )
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=False
+        ),
         kv_transfer_config=None,
         max_concurrent_batches=2,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
     )
     model = Mock()
-    connector = aux_output_worker.AuxOutputWorkerConnector(
-        vllm_config=config,
-        model=model,
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
+    connector = aux_output_worker.AuxOutputWorkerConnector(config)
+    connector.initialize_capturers(model)
+    connector.initialize_storage(
+        SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()])
     )
 
     constructor.assert_called_once_with(
@@ -715,7 +713,11 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
     store_constructor = Mock()
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
-    capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
+    capturer = SimpleNamespace(
+        shape_per_token=(2,),
+        output_dtype_name="int32",
+        device_buffer=torch.empty((32, 2), dtype=torch.int32),
+    )
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
@@ -730,14 +732,19 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    monkeypatch.setattr(aux_output_worker, "AuxOutputBuffer", Mock())
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
+        aux_output_config=SimpleNamespace(
+            max_bytes=None,
+            enable_return_routed_experts=True,
+            enable_return_indexer_topk=False,
+        ),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
         max_concurrent_batches=2,
+        parallel_config=SimpleNamespace(data_parallel_size_local=1),
     )
     kwargs = dict(
         vllm_config=config,
@@ -748,7 +755,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         ),
     )
 
-    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
+    connector = aux_output_worker.AuxOutputWorkerConnector(kwargs["vllm_config"])
+    connector.initialize_capturers(kwargs["model"])
+    connector.initialize_storage(kwargs["kv_cache_config"])
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16

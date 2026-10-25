@@ -70,6 +70,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -95,6 +96,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1522,7 +1524,7 @@ async def test_request_output_collector():
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
 
-def test_routed_experts_are_accumulated_until_finish():
+def test_aux_outputs_are_accumulated_until_finish():
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1548,11 +1550,15 @@ def test_routed_experts_are_accumulated_until_finish():
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
     state.routed_experts_chunks.append(prompt_chunk)
+    selections = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
+    state.indexer_chunks = [selections[:4]]
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
     assert partial.outputs[0].routed_experts is None
+    assert partial.outputs[0].indexer_topk is None
 
+    state.indexer_chunks.append(selections[4:])
     state.routed_experts_chunks.append(decode_chunk)
     finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
     assert finished is not None
@@ -1560,6 +1566,8 @@ def test_routed_experts_are_accumulated_until_finish():
         finished.outputs[0].routed_experts,
         np.concatenate((prompt_chunk, decode_chunk)),
     )
+    result = finished.outputs[0]
+    np.testing.assert_array_equal(result.indexer_topk, selections)
 
 
 @pytest.mark.asyncio
@@ -1879,6 +1887,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 

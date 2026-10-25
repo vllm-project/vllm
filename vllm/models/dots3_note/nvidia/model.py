@@ -20,6 +20,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_embed_norm import has_full_vocab_on_rank
+from vllm.model_executor.layers.indexer_capture import capture_indexer_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -193,6 +194,10 @@ def _forward_note_mla(
 
     if attention.indexer and attention.is_sparse and not attention.skip_topk:
         attention.indexer(hidden_states, q_c, positions, attention.indexer_rope_emb)
+        capture_indexer_topk(
+            attention.indexer_capture, attention.topk_indices_buffer, len(hidden_states)
+        )
+
     if llama_4_scaling is not None:
         q *= llama_4_scaling
 

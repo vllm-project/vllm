@@ -45,6 +45,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -129,7 +133,7 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
-class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+class DeepseekV4Attention(nn.Module, AttentionLayerBase, IndexerCaptureSource, ABC):
     """DeepseekV4 MLA attention layer.
 
     The platform-specific sparse-MLA forward (``forward_mqa`` /
@@ -472,6 +476,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
                     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.register_warmup()
 
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if self.indexer is None:
+            return None
+        return extract_layer_index(self.prefix), self.indexer.topk_tokens
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -754,6 +763,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q_quant,
                 None,
                 index_weights,
+            )
+
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(hidden_states)
             )
 
         # MLA attention writes into the pre-allocated `out` buffer

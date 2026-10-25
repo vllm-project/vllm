@@ -461,7 +461,12 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
+            AuxOutputSchedulerConnector(
+                self.kv_cache_manager,
+                self.connector,
+                enable_routed_experts=vllm_config.aux_output_config.enable_return_routed_experts,
+                enable_indexer=vllm_config.aux_output_config.enable_return_indexer_topk,
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -2386,11 +2391,12 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            indexer_topk = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
             if self.aux_output_connector is not None and should_emit_output:
-                routed_experts = self.aux_output_connector.take_output(
+                routed_experts, indexer_topk = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
             if should_emit_output:
@@ -2473,6 +2479,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        indexer_topk=indexer_topk,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

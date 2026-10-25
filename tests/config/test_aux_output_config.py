@@ -157,3 +157,26 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
+
+
+@pytest.mark.parametrize(
+    "routed,indexer", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_aux_output_flags_are_independent(routed, indexer):
+    config = AuxOutputConfig(
+        enable_return_routed_experts=routed,
+        enable_return_indexer_topk=indexer,
+    )
+    assert config.enabled == (routed or indexer)
+    assert (
+        EngineArgs(
+            enable_return_indexer_topk=indexer
+        ).aux_output_config.enable_return_indexer_topk
+        == indexer
+    )
+
+
+def test_indexer_only_does_not_require_moe_routing():
+    config = _config(is_moe=False)
+    config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
+    VllmConfig._verify_aux_output_compatibility(config)

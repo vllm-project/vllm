@@ -8,6 +8,7 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
@@ -37,11 +38,12 @@ class MLAModules:
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
     index_group_builder: "SparseMLAIndexGroupBuilder | None" = None
+    enable_indexer_capture: bool = False
 
 
 # --8<-- [start:multi_head_latent_attention]
 @PluggableLayer.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(PluggableLayer):
+class MultiHeadLatentAttentionWrapper(PluggableLayer, IndexerCaptureSource):
     """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
     Note that currently oot platforms can still use CustomOp.register_oot to
@@ -80,6 +82,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         super().__init__()
+        self.enable_indexer_capture = mla_modules.enable_indexer_capture
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -144,6 +147,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         ):
             enable_short_prefill_scoring_skip = (
                 allow_short_prefill_indexer_scoring_skip
+                and not self.enable_indexer_capture
                 and not self.skip_topk
                 and not getattr(indexer_op, "use_pcp", False)
                 and current_platform.is_cuda()
@@ -159,6 +163,17 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.mla_attn.layer_name if enable_short_prefill_scoring_skip else ""
             )
         self.prefix = prefix
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if (
+            not self.enable_indexer_capture
+            or not self.is_sparse
+            or self.indexer is None
+        ):
+            return None
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(self.prefix), self.topk_tokens
 
     def forward(
         self,
@@ -231,6 +246,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            capture = self.indexer_capture
+            if capture is not None:
+                assert self.topk_indices_buffer is not None
+                capture.capture(
+                    self.topk_indices_buffer[
+                        : len(hidden_states), : capture.rows.shape[1]
+                    ]
+                )
+
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
