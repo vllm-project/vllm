@@ -310,10 +310,6 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
-    # Actual verified draft counts, after adaptive trimming; scheduler capacities
-    # still determine placeholder rollback. Indexed in req_ids order.
-    num_verified_draft_tokens: list[int] | None = None
-
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

@@ -45,6 +45,7 @@ def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
     """Load the released head and verify real, optionally shortened drafts."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
         "Qwen/Qwen3-8B",
         speculative_config={
@@ -84,9 +85,16 @@ def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
             metrics, "vllm:spec_decode_num_accepted_tokens"
         )
         assert drafts > 0 and accepted > 0
+
+        def get_draft_lengths(worker):
+            lengths = worker.model_runner.speculator.draft_token_lengths
+            return None if lengths is None else lengths[:1].tolist()
+
+        lengths = llm.collective_rpc(get_draft_lengths)[0]
         if adaptive:
-            assert 0 < proposed < 15 * drafts
+            assert lengths is not None and 0 <= lengths[0] < 15
         else:
+            assert lengths is None
             assert proposed == 15 * drafts
 
 

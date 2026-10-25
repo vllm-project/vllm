@@ -87,6 +87,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 "is the bonus token."
             )
         self.sample_from_anchor = False
+        self.draft_token_lengths: torch.Tensor | None = None
         if self.enable_adaptive_verification and dflash_config.get(
             "use_thresh_head_two_model", False
         ):

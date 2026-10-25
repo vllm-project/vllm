@@ -158,7 +158,6 @@ class AdaptiveVerificationManager:
         device = req_states.device
         self._copy_stream = torch.cuda.Stream(device)
         self.use_draft_lengths = use_draft_lengths
-        self.verified_draft_tokens: dict[str, int] | None = None
         self._draft_lengths: CpuGpuBuffer | None = None
         self._lengths_pending = False
         if use_draft_lengths:
@@ -384,11 +383,8 @@ class AdaptiveVerificationManager:
             available = np.maximum(budget - (np.cumsum(lengths) - lengths), 0)
             lengths = np.minimum(lengths, available)
             draft_budget = int(lengths.sum())
-            self.verified_draft_tokens = dict(
-                zip(req_ids, map(int, lengths), strict=True)
-            )
             self._batch_budget = (
-                self.verified_draft_tokens,
+                dict(zip(req_ids, map(int, lengths), strict=True)),
                 dict(zip(req_ids, map(int, num_non_draft_tokens), strict=True)),
                 draft_budget,
             )

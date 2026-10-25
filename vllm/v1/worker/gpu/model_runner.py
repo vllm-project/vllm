@@ -2226,15 +2226,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
-        if (
-            self.adaptive_verification is not None
-            and self.adaptive_verification.verified_draft_tokens is not None
-            and input_batch.num_draft_tokens_per_req is not None
-        ):
-            verified = self.adaptive_verification.verified_draft_tokens
-            model_runner_output.num_verified_draft_tokens = [
-                verified.get(req_id, 0) for req_id in input_batch.req_ids
-            ]
         pending_aux_output = None
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
@@ -2321,9 +2312,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_tokens[:, num_spec_tokens:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
-                if self.speculator.draft_token_lengths is not None:
+                draft_lengths = getattr(self.speculator, "draft_token_lengths", None)
+                if draft_lengths is not None:
                     self.adaptive_verification.record_draft_lengths(
-                        self.speculator.draft_token_lengths, input_batch.idx_mapping
+                        draft_lengths, input_batch.idx_mapping
                     )
                 else:
                     self.adaptive_verification.record_confidences(

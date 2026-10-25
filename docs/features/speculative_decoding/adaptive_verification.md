@@ -85,6 +85,9 @@ With `enable_adaptive_verification=false`, the head weights are still loaded, an
 the drafter uses fixed-length DFlash verification. Other DFlash and DSpark
 checkpoints retain their existing acceptance-based policy.
 
+Speculative decoding statistics retain their existing scheduled-draft counting
+semantics; the reported draft count is not the head's selected verification length.
+
 On Ampere GPUs, FlashAttention 2 does not support the variable-length decode
 CUDA graphs required by adaptive verification. Select a supported backend such
 as `TRITON_ATTN`, as shown above.

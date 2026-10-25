@@ -171,7 +171,6 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_token_confidence_probs = torch.empty_like(
             self.draft_tokens, dtype=torch.float32
         )
-        self.draft_token_lengths: torch.Tensor | None = None
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
         )
