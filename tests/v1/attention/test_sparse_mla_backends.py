@@ -192,7 +192,7 @@ DEVICE_TYPE = current_platform.device_type
 )
 def test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     monkeypatch,
     batch_name,
@@ -213,7 +213,7 @@ def test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter(
     monkeypatch.setattr(rocm_aiter_ops, "mla_decode_fwd", unsupported_aiter)
     test_sparse_backend_decode_correctness(
         default_vllm_config=default_vllm_config,
-        dist_init=dist_init,
+        single_rank_tp=single_rank_tp,
         backend_cls=ROCMAiterMLASparseBackend,
         batch_name=batch_name,
         kv_cache_dtype="auto",
