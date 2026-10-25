@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -102,6 +103,7 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_rmsnorm,
     swiglu_oai_split,
 )
+from vllm.models.minimax_m3.amd.ops.sp_norm_quant import gemma_rmsnorm_mx
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
     ASM_PAGE_SIZE,
     minimax_m3_alloc_sparse_block_table,
@@ -1519,6 +1521,26 @@ class MiniMaxM3DecoderLayer(nn.Module):
             self, quant_config, prefix
         )
 
+    def _quantizes_qkv_input_in_norm(self) -> bool:
+        """Whether the input norm can emit qkv_proj's MXFP8 input directly."""
+        fuse = getattr(self, "_fused_qkv_input_quant", None)
+        if fuse is None:
+            qkv_proj = self.self_attn.qkv_proj
+            kernel = sp_prefill._mxfp8_kernel(qkv_proj)
+            fuse = (
+                envs.VLLM_ROCM_MINIMAX_M3_NORM_QUANT_QKV
+                and isinstance(self.self_attn, MiniMaxM3SparseAttention)
+                and kernel is not None
+                and kernel.supports_quantized_input(qkv_proj)
+            )
+            self._fused_qkv_input_quant = fuse
+            self._qkv_mxfp8_kernel = kernel if fuse else None
+            if fuse:
+                logger.info_once(
+                    "MiniMax-M3: the input RMSNorm emits qkv_proj's MXFP8 input."
+                )
+        return fuse
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -1526,15 +1548,31 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        if self._quantizes_qkv_input_in_norm():
+            # One pass: residual add + Gemma RMSNorm + the per-token MXFP8 quant
+            # that qkv_proj would otherwise run as a separate kernel.
+            _, residual, x_q, x_s = gemma_rmsnorm_mx(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight,
+                self.input_layernorm.variance_epsilon,
+            )
+            qkv = self._qkv_mxfp8_kernel.apply_quantized(
+                self.self_attn.qkv_proj, x_q, x_s, torch.bfloat16
+            )
+            hidden_states, _ = self.self_attn.o_proj(
+                self.self_attn.attend(positions, qkv)
+            )
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+            )
 
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
             hidden_states, residual, self.post_attention_layernorm

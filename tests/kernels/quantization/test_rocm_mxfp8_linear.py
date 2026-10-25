@@ -42,6 +42,11 @@ M31_TP4_SHAPES = [
     ("shared_gate_up", 1536, 6144),
     ("shared_down", 6144, 768),
 ]
+# Wider local shapes at TP2 (fused qkv, dense-layer gate_up).
+M31_TP2_SHAPES = [
+    ("tp2_fused_qkv", 4992, 6144),
+    ("tp2_dense_gate_up", 12288, 6144),
+]
 
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
@@ -54,15 +59,16 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
 
 
 @pytest.mark.parametrize(
-    "n,k,selected,fallback",
+    "n,k,selected,mid_m",
     [
-        (2560, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (6144, 768, (16, 16, 256, 2, 3), (16, 32, 256, 4, 3)),
+        (2560, 6144, (16, 16, 1024, 2, 3), (32, 16, 1024, 2, 3)),
+        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 3)),
+        (6144, 768, (16, 16, 256, 2, 3), (32, 16, 256, 2, 3)),
     ],
 )
-def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
-    """The gfx950 small-M tuning is shape-scoped and ends after M=16."""
+def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, mid_m):
+    """The gfx950 small-M tuning is shape-scoped through M=16; from M=17 the
+    mid-M table takes over."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
     from vllm.platforms.rocm import on_gfx950
 
@@ -70,7 +76,21 @@ def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
         pytest.skip("MiniMax-M3.1 small-M tuning requires gfx950")
     for num_tokens in (1, 8, 16):
         assert rocm_native._select_cfg(num_tokens, n, k) == selected
-    assert rocm_native._select_cfg(17, n, k) == fallback
+    assert rocm_native._select_cfg(17, n, k) == mid_m
+
+
+@pytest.mark.parametrize("k", [768, 1280, 1536, 2048, 3072, 4096, 6144])
+@pytest.mark.parametrize("n", [1536, 2560, 3072, 6144, 12288])
+def test_gfx950_mid_m_tiles_divide_k(n, k):
+    """The mid-M table's BLOCK_K always divides K (the K-loop is unmasked)."""
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _gfx950_mid_m_cfg,
+    )
+
+    for m in range(17, 257):
+        block_m, block_n, block_k, _, _ = _gfx950_mid_m_cfg(m, n, k)
+        assert k % block_k == 0 and block_k >= 128, (m, n, k, block_k)
+        assert block_m in (16, 32, 64) and block_n in (16, 32, 64)
 
 
 @pytest.mark.parametrize(
@@ -90,9 +110,13 @@ def test_rocm_mxfp8_linear_preserves_non_gfx950_tiles(monkeypatch, n, k, fallbac
 
 
 @pytest.mark.parametrize(
-    "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
+    "name,n,k",
+    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
+    ids=lambda v: str(v),
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize(
+    "num_tokens", [1, 2, 7, 8, 16, 17, 31, 32, 48, 64, 96, 128, 192, 256, 1024]
+)
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.

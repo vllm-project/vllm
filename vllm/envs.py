@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ROCM_MINIMAX_M3_SP_PREFILL: bool = False
+    VLLM_ROCM_MINIMAX_M3_NORM_QUANT_QKV: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1398,6 +1399,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_MINIMAX_M3_SP_PREFILL": lambda: (
         os.getenv("VLLM_ROCM_MINIMAX_M3_SP_PREFILL", "False").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 on gfx950 with MXFP8 attention projections: let the input
+    # Gemma RMSNorm emit qkv_proj's MXFP8 input (one kernel instead of two).
+    "VLLM_ROCM_MINIMAX_M3_NORM_QUANT_QKV": lambda: (
+        os.getenv("VLLM_ROCM_MINIMAX_M3_NORM_QUANT_QKV", "True").lower()
+        in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

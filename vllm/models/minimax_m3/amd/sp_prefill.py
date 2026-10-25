@@ -263,14 +263,18 @@ def _mxfp8_kernel(layer):
         RocmDotScaledMxfp8LinearKernel,
     )
 
-    kernel = getattr(layer.quant_method, "kernel", None)
-    if isinstance(kernel, RocmDotScaledMxfp8LinearKernel):
-        return kernel
+    # ModelOpt keeps the kernel on the quant method, Quark on the layer's scheme.
+    for kernel in (
+        getattr(layer.quant_method, "kernel", None),
+        getattr(getattr(layer, "scheme", None), "ocp_mx_linear", None),
+    ):
+        if isinstance(kernel, RocmDotScaledMxfp8LinearKernel):
+            return kernel
     return None
 
 
 def _linear(layer, x_q: torch.Tensor, x_s: torch.Tensor) -> torch.Tensor:
-    return layer.quant_method.kernel.apply_quantized(layer, x_q, x_s, torch.bfloat16)
+    return _mxfp8_kernel(layer).apply_quantized(layer, x_q, x_s, torch.bfloat16)
 
 
 def make_o_proj_full(layer, quant_config, prefix: str):
