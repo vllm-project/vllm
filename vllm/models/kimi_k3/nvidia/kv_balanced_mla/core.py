@@ -158,7 +158,7 @@ def _compile(
     lse: bool,
     cp: tuple[int, int, int],
 ):
-    """The work-list FP8 MLA decode for one shape: packed query rows, causal among a
+    """The KV-balanced FP8 MLA decode for one shape: packed query rows, causal among a
     request's q rows unless ``causal`` is off, FP16 partials, BF16 latent output,
     and each row's log2 LSE with ``lse``. ``cp`` is (DCP world, rank, interleave):
     with a world above 1 the cache holds this rank's shard and the causal mask maps
@@ -258,8 +258,8 @@ def supports(heads: int, q: int, device: torch.device) -> bool:
     return tiler[0] == ROWS
 
 
-class WorkListMla:
-    """The work-list MLA decode of one (heads, q, causal) shape for up to
+class KvBalancedMla:
+    """The KV-balanced MLA decode of one (heads, q, causal) shape for up to
     ``max_requests`` requests: ``plan`` once per forward, then ``decode`` per layer.
 
     The caller owns the plan buffers (``counts`` [max_requests], ``work``

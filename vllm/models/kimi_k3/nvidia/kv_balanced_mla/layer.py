@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Kimi K3 MLA decode on the work-list kernel, in place of the TOKENSPEED_MLA
+"""The Kimi K3 MLA decode on the KV-balanced kernel, in place of the TOKENSPEED_MLA
 backend's ``forward_mqa``.
 
-Selected with ``additional_config={"mla_decode_backend": "worklist"}``; the default
+Selected with ``additional_config={"mla_decode_backend": "kv_balanced"}``; the default
 ``"auto"`` keeps the attention backend's decode. It covers the target verify and the
 DSpark draft, with or without DCP. Per forward, the first MLA layer of each decode
 shape plans the split-KV work list from this rank's KV lengths, and every later layer
@@ -34,21 +34,21 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
     from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 
-    from .core import WorkListMla
+    from .core import KvBalancedMla
 
 logger = init_logger(__name__)
 
-AUTO, WORKLIST = "auto", "worklist"
+AUTO, KV_BALANCED = "auto", "kv_balanced"
 LATENT, ROPE = 512, 64
 
 
 def mla_decode_backend(vllm_config: VllmConfig) -> str:
-    """The ``mla_decode_backend`` of ``additional_config``: "auto" or "worklist"."""
+    """The ``mla_decode_backend`` of ``additional_config``: "auto" or "kv_balanced"."""
     extra = vllm_config.additional_config
     backend = extra.get("mla_decode_backend", AUTO) if isinstance(extra, dict) else AUTO
-    if backend not in (AUTO, WORKLIST):
+    if backend not in (AUTO, KV_BALANCED):
         raise ValueError(
-            f"mla_decode_backend must be '{AUTO}' or '{WORKLIST}', got {backend!r}"
+            f"mla_decode_backend must be '{AUTO}' or '{KV_BALANCED}', got {backend!r}"
         )
     return backend
 
@@ -58,7 +58,7 @@ class _Shape:
     lengths) whose plan it holds. The context is held so that its identity can't
     be reused by a later forward."""
 
-    def __init__(self, core: "WorkListMla | None"):
+    def __init__(self, core: "KvBalancedMla | None"):
         self.core = core
         self.planned_for: dict[int, tuple[object, int]] = {}
 
@@ -67,8 +67,8 @@ class _Shape:
 _SHAPES: dict[tuple[int, int, bool], _Shape] = {}
 
 
-class WorkListMqa:
-    """``forward_mqa`` of one Kimi K3 MLA layer on the work-list kernel;
+class KvBalancedMqa:
+    """``forward_mqa`` of one Kimi K3 MLA layer on the KV-balanced kernel;
     ``__call__`` returns None to defer to the attention backend."""
 
     def __init__(self, layer: "MultiHeadLatentAttention"):
@@ -85,7 +85,7 @@ class WorkListMqa:
         device = torch.device(current_platform.device_type, torch.cuda.current_device())
         if not core.supports(self.heads, self.max_q, device):
             raise RuntimeError(
-                "mla_decode_backend=worklist needs at least 128 query rows per "
+                "mla_decode_backend=kv_balanced needs at least 128 query rows per "
                 f"request (heads x query length), got {self.heads} x {self.max_q}"
             )
         max_seqs = config.scheduler_config.max_num_seqs
@@ -94,12 +94,12 @@ class WorkListMqa:
         )
         if self.max_requests < max_seqs:
             logger.warning_once(
-                "Kimi K3 work-list MLA decode: steps above %d requests use the "
+                "Kimi K3 KV-balanced MLA decode: steps above %d requests use the "
                 "backend decode",
                 self.max_requests,
             )
         clusters = core.max_active_clusters(device)
-        self._key = ("kimi_k3_worklist_mla", self.heads, self.max_q)
+        self._key = ("kimi_k3_kv_balanced_mla", self.heads, self.max_q)
         self._counts_shape = (self.max_requests,)
         self._work_shape = (
             core.work_list_len(self.heads, self.max_q, self.max_requests, clusters),
@@ -128,26 +128,26 @@ class WorkListMqa:
         if shape is None:
             if torch.cuda.is_current_stream_capturing():
                 logger.warning_once(
-                    "Kimi K3 work-list MLA decode: first call for heads=%d q=%d "
+                    "Kimi K3 KV-balanced MLA decode: first call for heads=%d q=%d "
                     "causal=%s inside CUDA graph capture; using the backend decode",
                     heads,
                     qlen,
                     causal,
                 )
                 return None
-            from .core import WorkListMla, supports
+            from .core import KvBalancedMla, supports
 
             device = torch.device(
                 current_platform.device_type, torch.cuda.current_device()
             )
             core = (
-                WorkListMla(heads, qlen, self.max_requests, causal, device)
+                KvBalancedMla(heads, qlen, self.max_requests, causal, device)
                 if supports(heads, qlen, device)
                 else None
             )
             shape = _SHAPES[key] = _Shape(core)
             logger.info(
-                "Kimi K3 work-list MLA decode: heads=%d q=%d causal=%s %s",
+                "Kimi K3 KV-balanced MLA decode: heads=%d q=%d causal=%s %s",
                 heads,
                 qlen,
                 causal,
@@ -190,7 +190,7 @@ class WorkListMqa:
         except AssertionError:
             # A micro-batch lane whose buffers were not reserved before the lock.
             logger.warning_once(
-                "Kimi K3 work-list MLA decode: no buffers for this micro-batch lane; "
+                "Kimi K3 KV-balanced MLA decode: no buffers for this micro-batch lane; "
                 "using the backend decode"
             )
             return None
@@ -235,10 +235,10 @@ class WorkListMqa:
         return out, (lse.view(-1, self.heads) if lse is not None else None)
 
 
-def make_worklist_mqa(layer: "MultiHeadLatentAttention") -> WorkListMqa | None:
-    """The work-list decode of ``layer`` when ``mla_decode_backend`` is "worklist",
+def make_kv_balanced_mqa(layer: "MultiHeadLatentAttention") -> KvBalancedMqa | None:
+    """The KV-balanced decode of ``layer`` when ``mla_decode_backend`` is "kv_balanced",
     else None. Raises if the layer can't run it."""
-    if mla_decode_backend(get_current_vllm_config()) != WORKLIST:
+    if mla_decode_backend(get_current_vllm_config()) != KV_BALANCED:
         return None
     backend = layer.attn_backend.get_name()
     unsupported = [
@@ -265,6 +265,6 @@ def make_worklist_mqa(layer: "MultiHeadLatentAttention") -> WorkListMqa | None:
     ]
     if unsupported:
         raise RuntimeError(
-            "mla_decode_backend=worklist requires " + "; ".join(unsupported)
+            "mla_decode_backend=kv_balanced requires " + "; ".join(unsupported)
         )
-    return WorkListMqa(layer)
+    return KvBalancedMqa(layer)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Kimi K3 work-list MLA decode against an FP32 reference."""
+"""The Kimi K3 KV-balanced MLA decode against an FP32 reference."""
 
 import math
 from types import SimpleNamespace
@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.kimi_k3.nvidia.worklist_mla.layer import (
+from vllm.models.kimi_k3.nvidia.kv_balanced_mla.layer import (
     AUTO,
-    WORKLIST,
+    KV_BALANCED,
     mla_decode_backend,
 )
 from vllm.platforms import current_platform
@@ -21,13 +21,13 @@ SCALE = 1.0 / math.sqrt(192)
 requires_sm100 = pytest.mark.skipif(
     not current_platform.is_cuda()
     or not current_platform.is_device_capability_family(100),
-    reason="the work-list MLA decode runs on SM100-family GPUs",
+    reason="the KV-balanced MLA decode runs on SM100-family GPUs",
 )
 
 
 @pytest.mark.parametrize(
     ("extra", "expected"),
-    [(None, AUTO), ({}, AUTO), ({"mla_decode_backend": "worklist"}, WORKLIST)],
+    [(None, AUTO), ({}, AUTO), ({"mla_decode_backend": "kv_balanced"}, KV_BALANCED)],
 )
 def test_mla_decode_backend(extra, expected):
     assert mla_decode_backend(SimpleNamespace(additional_config=extra)) == expected
@@ -85,11 +85,11 @@ def _reference(query, cache, block_table, local, lengths, causal, dcp):
 
 
 def _run(query, cache, block_table, local, totals, causal, dcp):
-    from vllm.models.kimi_k3.nvidia.worklist_mla.core import WorkListMla
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KvBalancedMla
 
     requests, q, heads, _ = query.shape
     device = query.device
-    core = WorkListMla(heads, q, max_requests=8, causal=causal, device=device)
+    core = KvBalancedMla(heads, q, max_requests=8, causal=causal, device=device)
     counts = torch.zeros(core.max_requests, dtype=torch.int32, device=device)
     work = torch.zeros(core.list_len, dtype=torch.int32, device=device)
     workspace = torch.empty(core.workspace_bytes, dtype=torch.int8, device=device)
@@ -138,7 +138,7 @@ def _check(out, lse, ref_out, ref_lse, tolerance=0.03):
         ([2000, 64000, 12345], 96, 5, True, 8),  # DCP8 shard
     ],
 )
-def test_worklist_decode_matches_reference(lengths, heads, q, causal, dcp):
+def test_kv_balanced_decode_matches_reference(lengths, heads, q, causal, dcp):
     torch.manual_seed(0)
     device = torch.device("cuda")
     local = [-(-n // dcp) for n in lengths]
@@ -158,7 +158,7 @@ def test_worklist_decode_matches_reference(lengths, heads, q, causal, dcp):
 
 
 @requires_sm100
-def test_worklist_decode_keeps_small_probabilities():
+def test_kv_balanced_decode_keeps_small_probabilities():
     """A peaked softmax: one key per 128 scores 2^10 above a long tail, so each tail
     probability is 2^-10 of the row max (below E4M3's 2^-9 without the P prescale),
     and the tail's values point away from the peaks' so losing it moves the output
@@ -186,12 +186,12 @@ def test_worklist_decode_keeps_small_probabilities():
 
 
 @requires_sm100
-def test_worklist_mqa_plans_once_per_forward_and_falls_back(
+def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     monkeypatch, workspace_init
 ):
     """The per-layer dispatch: the first layer of a forward plans and later layers
     reuse it; steps the kernel can't run return None for the backend decode."""
-    from vllm.models.kimi_k3.nvidia.worklist_mla import core, layer
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, layer
 
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -207,9 +207,9 @@ def test_worklist_mqa_plans_once_per_forward_and_falls_back(
     context = [object()]
     monkeypatch.setattr(layer, "get_forward_context", lambda: context[0])
     plans = []
-    plan = core.WorkListMla.plan
+    plan = core.KvBalancedMla.plan
     monkeypatch.setattr(
-        core.WorkListMla,
+        core.KvBalancedMla,
         "plan",
         lambda self, *args: plans.append(1) or plan(self, *args),
     )
@@ -239,7 +239,7 @@ def test_worklist_mqa_plans_once_per_forward_and_falls_back(
     query = (torch.randn(len(lengths) * q, heads, LATENT + ROPE, device=device) / 2).to(
         torch.float8_e4m3fn
     )
-    mqa = layer.WorkListMqa(mla)
+    mqa = layer.KvBalancedMqa(mla)
 
     out, lse = mqa(mla, query, metadata)
     assert lse is None
