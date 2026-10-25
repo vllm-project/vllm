@@ -46,7 +46,7 @@ critère du mandat : vérification ≪ exécution.
 
 ## 3. Recette prête à l'emploi (à copier)
 
-```
+```text
 Prompt par shard (blocs de ≤50 lignes, inline — le canal fichier est HS) :
   « Bloc de log ci-dessous. Recopie EXACTEMENT (copier-coller, sans rien changer)
    chaque ligne qui contient le mot <MOTIF>. Une ligne par ligne, dans l'ordre
@@ -75,23 +75,43 @@ rend à l'appelant sa fenêtre de contexte pour le raisonnement — bénéfice d
 sans coordination. Les recettes ci-dessus doivent donc être présentées comme « garde ton
 contexte », pas « économise les tokens de la flotte ».
 
-## 5. Feuille de route (dans l'ordre)
+## 5. Familles d'usage (mandat user 25/10 21:55 locale — non exhaustives)
 
-1. **Sous-agent Claude Code `mini-fanout-extractor`** (définition `.claude/agents/`) : prend
-   un fichier + un motif, shingle, appelle le mini par shard via MCP sk-agent, vérifie
-   mécaniquement, réessaie les shards en écart, rend le résultat + le rapport d'écart.
-2. **Presets sk-agent dédiés** (`mini-log-triager`) avec `max_tokens` relevé (cf. miss du
-   shard B) et `enable_thinking=false` déjà par défaut côté moteur.
-3. **Driver script** (pattern `nb_audit_driver.py` d'ai-01 : le harnais exécute, le modèle
-   lit) pour les corpus > 1 000 lignes : fan-out N shards, barrière de vérification, sortie
-   assemblée.
-4. **Proposition Hermes/NanoClaw** (CoursIA) : pré-passe par notebook — extraction verbatim
-   de l'inventaire des cellules/résultats, livrée par DM (mécanisme `nb_audit_deliver.py`
-   existant). La vérification reste chez le bot auditeur (recompte).
-5. Mesure d'adoption : compteur `request_success_total` du moteur — l'objectif du mandat
+Le point commun : **l'utilité pour un agent Claude Code est réelle s'il peut lâcher une horde
+de mini (ou un seul, dans la durée) et faire autre chose pendant ce temps** — sinon, un cron
+dédié porte le même travail. Critère transverse : rien de critique sans vérification derrière.
+
+1. **Secrétaire / adjoint** : parcourir inlassablement les centaines d'issues et de PRs,
+   remonter des listes selon critères (chaque item prouvé par citation verbatim).
+2. **Dashboards** : chasser les infos non consolidées ou méritant une issue.
+3. **Lutte contre l'entropie** : tester les outils, vérifier les configs, trouver les docs en
+   retard dans les dépôts, identifier les fichiers à nettoyer, proposer des consolidations.
+4. **Veille** : prendre le temps d'aller chercher des infos fastidieuses, à navigation ou
+   recherche prolongée.
+
+**Outils** (note user 25/10) : chaque famille suppose des outils spécifiques — et FrogNano les
+a, des deux côtés : harnais Claude Code (sous-agents avec `gh`, `Grep`, lecture web) ou sk-agent
+(MCPs branchés). La condition est la **configuration** — c'est elle la barrière, pas la capacité
+du modèle ; c'est exactement ce que les sous-agents tout faits ci-dessous éliminent.
+
+## 6. Livrables et feuille de route
+
+1. ✅ **Sous-agent Claude Code `mini-fanout-extractor`** (`.claude/agents/`) — orchestrateur
+   générique : découpage ≤50 lignes, fan-out mini, vérification comm+grep, retry ciblé.
+2. ✅ **Sous-agent Claude Code `mini-sweeper`** (`.claude/agents/`) — balayeur de sources
+   (issues/PRs `gh`, dashboards RSM, dépôts) : collecte déterministe par l'agent, extraction
+   d'évidence verbatim par le mini, vérification par existence de sous-chaîne, liste en sortie
+   (évidence déléguée, jugement au parent).
+3. **Presets sk-agent dédiés** (`mini-log-triager`) avec `max_tokens` relevé (cf. miss du
+   shard B).
+4. **Driver script** (pattern `nb_audit_driver.py` d'ai-01) pour les corpus > 1 000 lignes et
+   pour les **crons dédiés** (fan-out sans agent attendant).
+5. **Proposition Hermes/NanoClaw** (CoursIA) : pré-passe par notebook, livraison DM
+   (`nb_audit_deliver.py`), vérification chez le bot auditeur.
+6. Mesure d'adoption : compteur `request_success_total` du moteur — l'objectif du mandat
    adoption reste « usage réel », pas « pings envoyés ».
 
-## 6. Hors périmètre (mesuré, ne pas réessayer sans nouvelle preuve)
+## 7. Hors périmètre (mesuré, ne pas réessayer sans nouvelle preuve)
 
 Comparaison numérique (échec dès 16 lignes), agrégation arithmétique, verdicts, comptage
 d'étiquettes chargées (`DONE`) sans renommage, blocs > 50 lignes par appel, tout passage de
