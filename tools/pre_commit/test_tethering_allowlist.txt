@@ -57,3 +57,47 @@ tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platform
 
 # tests/tools/
 tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
+
+# Temporary gaps from disabling jobs until their transitive dependencies are locked.
+tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
+tests/kernels/helion/test_autotune.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_benchmark_script.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_case_key.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_config_manager.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_dynamic_per_token_scaled_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_fused_qk_norm_rope.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_helion_available.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_pattern_matching.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_per_token_group_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_register.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_rms_norm_dynamic_per_token_quant.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_rms_norm_per_block_quant.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_silu_and_mul_per_block_quant.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_silu_mul_fp8.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/kernels/helion/test_utils.py  # CI jobs disabled pending locked helion transitive dependencies
+tests/quantization/test_auto_gptq.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_config_utils.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_configs.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_cpu_offload.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_experts_int8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_gptq_dynamic.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_humming_compile.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_humming_ignore.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_humming_mxfp4_block_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_int8_moe_oracle.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_keep_param_objects.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_lm_head.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_mixed_precision.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_modelopt.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_moe_wna16.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_online_mxfp4.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_online_shared_expert_fusion.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_quantization_config_args.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_quark.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_register_quantization_config.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_torchao.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_trtllm_nvfp4_hidden_dim_padding.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_turboquant.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/rocm/test_moe_padding.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/rocm/test_moe_weight_replay.py  # CI jobs disabled pending locked torchao transitive dependencies
