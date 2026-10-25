@@ -34,28 +34,41 @@ Before creating the Store, startup queries system available RAM and the remainin
 container cgroup memory, using the smaller value. The Store uses anonymous shared
 `mmap`, so `/dev/shm` mount free space is not its capacity limit; see the
 [Linux tmpfs documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html).
-Schedulers that enforce their memory request outside cgroups can export the budget
-in `VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES` from their job wrapper; startup then uses
-the smallest of that value, the cgroup headroom and available RAM.
+If the cgroup limit or usage is unavailable or invalid, startup uses system
+available RAM. Cgroup headroom is conservatively estimated as limit minus current
+usage, including reclaimable page cache. Low estimated headroom produces a warning
+and startup continues, since cache reclamation may allow the allocation to fit.
 The check reserves runtime headroom, accounts for staging and estimated metadata,
 and divides the remaining budget across local DP output workers. It then rounds
-down to complete SHM objects and infers the maximum GPU KV block count.
+down to complete SHM objects and estimates a GPU KV block count that fits the
+current headroom.
 
-If the arenas cannot fit or a configured `aux_output_config.max_bytes` cannot
-cover all KV blocks, startup fails with required/available SHM and a block limit.
-Use the reported `--num-gpu-blocks-override N` (Python:
-`num_gpu_blocks_override=N`) or a smaller positive count. Unset
-`aux_output_config.max_bytes` so the arena follows the chosen KV block count, or
-resize it within the reported host budget. A smaller `--max-model-len` may be
-needed to fit the resulting KV capacity.
+An explicit `aux_output_config.max_bytes` that cannot cover all KV blocks is a
+configuration error and prevents startup. Unset it to derive capacity from KV
+coverage, or increase it to the required size.
+
+If the estimated arena, staging, metadata and reserve exceed current headroom,
+startup logs a warning with memory estimates and optional adjustments. For an
+explicit `max_bytes`, the warning first suggests unsetting or resizing it;
+reducing KV blocks alone does not shrink an explicit arena. If fewer KV blocks
+are also needed to fit the estimate, both changes are suggested together. With
+automatic sizing, consider the reported `--num-gpu-blocks-override N` (Python:
+`num_gpu_blocks_override=N`). A smaller positive count must still fit
+`--max-model-len`. If the conservative estimate is below that context length,
+the warning suggests more memory, less staging, or a smaller `--max-model-len`
+instead of an infeasible block count. These estimates do not establish that a
+configuration is impossible to run.
 
 Alternatively, reduce `--kv-cache-memory-bytes` or `--gpu-memory-utilization`.
 An explicit KV memory byte budget takes precedence over utilization; no linear
 conversion from CPU RAM to a GPU utilization percentage is assumed. If staging
-alone exhausts the budget, the error asks for more RAM/container memory or smaller
-`--max-num-batched-tokens`/`--max-num-seqs` instead of suggesting zero blocks.
-This is a startup estimate, not an atomic host-memory reservation; concurrent
-allocations and later output accumulation can change the available memory.
+and runtime reserve exhaust the estimated headroom, the warning suggests more
+RAM/container memory or smaller `--max-num-batched-tokens`/`--max-num-seqs`
+instead of zero blocks.
+This is a startup estimate, not an atomic host-memory reservation or a runtime
+limit. Startup continues after memory warnings and can still fail during actual
+allocation or encounter OOM as concurrent allocations and output accumulation
+change memory usage.
 
 ## Output format
 
