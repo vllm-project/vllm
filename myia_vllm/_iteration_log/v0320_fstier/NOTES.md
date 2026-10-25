@@ -2187,3 +2187,48 @@ en amont des règles → re-forke tôt pour des lanes aux jeux de skills différ
 **⚠️ PAS DÉPLOYÉ** : `--deploy-global` réécrit le `custom_modes.yaml` de **chaque** lane → décision
 owner/coordinateur ; tant qu'il n'est pas passé, **#4334 n'a aucun effet en production**.
 `claudish#640` (mesure côté hub) : **0 commentaire, aucune activité depuis sa création il y a 32 h**.
+
+## 25/10 ~17:45Z — what the fs tier actually writes, and where prefixes fork
+
+Triggered by the user's challenge: "the only way to justify that many file writes is that the
+whole conversation's KV is saved at each assistant message".
+
+**Correction first.** One fs block file is 26,247,168 B = 1,424 tokens x **18,432 B/token for
+both TP ranks together** (16 attention layers x K+V x 4 KV heads x 256 x 0.5625 B in NVFP4).
+The 36,864 B/token used in the 16:50Z section double-counted the ranks. Consequences:
+- RAM tier 24 GiB = **981 blocks** vs GPU KV 7.41 GiB/rank x 2 = **606 blocks**: the RAM tier
+  is already **1.62x** the VRAM KV in bytes. "RAM tier smaller than VRAM" (said at 16:50Z) was false.
+- "store bytes ~= (computed + generated) tokens x 36,864" was two errors cancelling (see below).
+
+**Write path (code, v0.32.0 overlay).** Upstream tiering is write-through by design
+(`v1/kv_offload/tiering/manager.py` header, principle 1, and `complete_store`): every chunk stored
+GPU->RAM is cascaded to every secondary tier, evicted or not. `fs/io.py:98` skips a block whose file
+already exists. Default policy is `CHUNK_LEVEL` (prefix-hit chunks skipped).
+
+**Measured (two 150 s windows + a 4 min file scan, engine under Sunday-afternoon load):**
+- fs write counter +1.732 GB = exactly 66 files x 26.25 MB created in the window; 133 files written
+  in 4 min, all brand-new (birth time = mtime), **0 rewrites**. No re-storage of known blocks.
+- fs writes by KV group: 4 groups, `g3` = attention (dense, one file per 1,424-token chunk),
+  `g0`-`g2` = Gated DeltaNet state (mamba page padded 0.38% to the attention page size, boot log).
+  Last 10 min: **150 attention files vs 222 GDN files (74 snapshots x 3)**, i.e. two thirds of
+  current fs writes are GDN state snapshots. Whole tier: 5,067 attention vs 5,535 GDN files (52%).
+- ~1.6 GDN snapshots per request (reachable boundaries: end of prompt, end of request), ~79 MB each.
+  Store bytes per new token = 46.1-46.3 KB vs 18.4 KB attention-only: the 2.5x is the snapshots.
+- Rate 11.5-19.2 MB/s = 41-69 GB/h; RAM tier turnover ~22-38 min, so write-on-evict would write
+  almost the same volume. Only an admission filter (spill only what showed reuse) would cut it.
+- Disk `sdd` (WSL ext4 vhdx) real writes were 1.8-2.3x the counter: other writers on the same
+  disk, not identified. At this rate the fs tier alone writes ~1-1.7 TB/day to the SSD behind
+  the vhdx (to check against its TBW).
+
+**Prefix forks (body_head of 200s over 6 h, `error_source_capture`, 1,500 B depth):**
+- claudish hub (Bun), 997 requests: **Claude Code main agent 878 (88%)**, identical through
+  1,400 B (deepest we capture); Roo/Zoo modes 36 (3.6%); code-review bot 59 + 9; Agent SDK
+  subagents/session naming 12; others <5. The "fork at byte 143/18" figures came from the Zoo
+  modes and an older observation, not from today's Claude Code lanes.
+- OpenAI SDK, 84 requests: roo-state-manager condensation, 3 prompt variants forking at 127 B.
+- The Swift chat template renders **tools before the system text** (`chat_template.jinja:58-70`):
+  the shared prefix begins with the tools block; lanes with different tool sets fork before any
+  system text. The real Claude Code fork lies beyond 1,400 B of system text or inside the tools
+  block: visible to the hub (full bodies), not to us.
+- claudish artefact: the system text starts with its preamble followed by a literal JSON-encoded
+  empty block `{"type":"text","text":""}` (identical in every request, not a fork).
