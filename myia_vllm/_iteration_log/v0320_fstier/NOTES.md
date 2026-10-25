@@ -1957,3 +1957,54 @@ comparable), à confirmer quand les volumes du week-end seront connus.
   postée sur #62615 (c.6394054527). Fixes #60729 (case 2), related #54914.
 - Prod au même cycle : health 200, RC=0, VRAM GPU 0 22 329 MiB, préemptions 14 (+5 dans la nuit,
   à suivre), tier fs 268,4 GiB avec rotations normales (751 fichiers à 05:20Z, 0 err).
+
+## 25/10 07:41Z — litige routage clos (concession claudish) ; PAYG chiffré ; conditions (a)-(d) répondues ; deriveContextLimit corrigé
+
+**Litige (escalade user 05:55Z + 06:52Z).** ai-01:claudish a rétracté son « jamais servi de
+lanes haiku » (msg-20261025T073124, 08:31Z) après appariement req→resp de toutes les réponses
+swift du jour : 815/876 (93 %) répondent à des requêtes haiku (po-2028 479, po-2023 186,
+po-2024 124, ai-01 22) ; pilote né le 20/10 (0 resp/j les 17-19/10 → 1 234 le 20/10), jamais
+interrompu. Rectificatif publié sur global par claudish. Deux narratives internes rectifiées
+et consignées chez eux.
+
+**Ce qui brûle en PAYG = la taille, pas le filet.** Frontière nette mesurée par claudish :
+swift sert jusqu'à 937 Ko de corps, ds-flash commence à 970 Ko. À ~4 o/jeton : prompt +
+max_tokens > 262 144 → 400 moteur → saut #431 → terminator PAYG. Cause d'explosion des
+volumes : MiniMax M3.1 **et** le plan Qwen (ds-v4.1) morts tous deux le 23/10 (0 resp/j
+chacun) — ds-flash est le seul terminator restant pour TOUTES les cascades.
+**Chiffre PAYG nuit 25/10 00→08Z** (2 498 fichiers ds-flash) : 2,47 M tok out + 5,08 M in +
+433,5 M cache-read ≈ **~2,5 €** (ancre liste ~1 €/M out, ancre console à faire — claudish ne
+publie pas d'€ ferme sans elle). Remis au user ce cycle.
+
+**Ma nuit sur PAYG, cause racine rectifiée.** Mes cycles 00:47Z/05:41Z ne sont pas tombés sur
+ds par ordre de cascade : leurs corps (>970 Ko) dépassaient la fenêtre moteur → 400 → PAYG.
+L'option B (swift en 4ᵉ marche de la cascade sonnet, qui aurait couvert mes cycles) a été
+soumise puis **retirée** par ai-01 (arbitrage user) → registre Q36.
+
+**Correction technique déposée (contre « la fenêtre réelle 3× plus large »)** : le KV 831 723
+est la capacité **agrégée** du cache, pas la fenêtre par requête. Limite par requête =
+`max_model_len` = 262 144 (prompt + max_tokens), contexte natif du modèle — pas élargissable
+(YaRN 1M : qualité non testée + une requête 500K = 60 % du KV). `deriveContextLimit` (#660
+claudish) dérivé du moteur obtient exactement 262 144 : il aligne le hub sur la vraie
+déclaration mais **ne fait pas rentrer les gros corps**. Leviers réels : cap `max_tokens` hub
+sur le step swift (8-16K → prompt admissible ~246-254K, rattrape la frontière 937/970 Ko) ou
+fenêtre de condensation ai-01 330K→~220K. Choix = arbitrage user → **registre Q36** (a/b/c,
+reco (a)).
+
+**Conditions (a)-(d) du filet haiku continu — répondues à po-2025:claudish avec mesures**
+(msg-20261025T074625) : (a) admission = prompt ENTIER réservé (Q32), prompt moyen mesuré
+107 369 tok/req (13 % du KV), grosse session ~240K = 29 % ; (b) prefix cache ON, 91,8 % des
+tokens servis du cache depuis boot (49,6 % GPU + 39,4 % RAM + 2,8 % fs) ; (c) budget #654
+600K Σ + BIG_LIMIT 3 = **OK premier armement** (pire cas 3×240K = 720K > budget → bride avant
+le KV, ~230K de tête pour croissance + consommateurs directs ; garde-fou = préemptions,
+16/34,5 h actuellement, resserrer si retour vers la signature 66/h) ; (d) trafic continu
+confirmé (mandat user 25/10). Armement reste chez claudish (annonce global d'abord).
+
+**Sécurité cycle** : IP `92.184.141.244` = 2 req 200 /7 h (famille mobile Free, non réclamée —
+probable rotation mobile type po-2027 `92.184.141.186`/`92.184.103.95`) → signalée au user,
+surveillance. Le bucket `?` (649 req/7 h, 200) = appels du hub via la gateway Docker sans
+XFF : interne, nominal.
+
+**État moteur** : health 200, StartedAt 21:26:46Z inchangé, 0 assert (18 h), préemptions 16,
+VRAM GPU 0 **22 725 MiB** (ligne d'alerte 23 000, à surveiller — rollback GPU_UTIL 0.70 si
+franchie), GPU 1 21 398, /dev/shm 25 G sous le seuil 45 G, 2 223 req/34,5 h depuis boot.
