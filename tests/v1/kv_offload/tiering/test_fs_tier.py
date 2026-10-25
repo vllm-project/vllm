@@ -670,6 +670,7 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     store_results = drain(tier)
     assert len(store_results) == 1
     assert not store_results[0].success
+    assert store_results[0].transfer_bytes is None
 
     tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
     load_results = drain(tier)

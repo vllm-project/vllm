@@ -154,8 +154,6 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Block count per in-flight job, used to report transfer_bytes.
-        self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -226,7 +224,6 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
@@ -248,7 +245,6 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
@@ -287,9 +283,10 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
-            block_count = self._job_block_counts.pop(job_id, 0)
-            num_written = self._store_progress.pop(job_id, block_count)
-            transfer_bytes = num_written * self._block_size if block_count else None
+            num_written = self._store_progress.pop(job_id, None)
+            transfer_bytes = (
+                num_written * self._block_size if num_written is not None else None
+            )
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
