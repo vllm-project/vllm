@@ -73,7 +73,9 @@ cur_step_action: StepAction | None = None
 step_actions: list[StepAction] = []
 
 
-def get_fake_sample_fn() -> SamplerOutput:
+def get_fake_sample_fn() -> Callable[
+    [GPUModelRunner, torch.Tensor | None, SpecDecodeMetadata | None], SamplerOutput
+]:
     def fake_sample_fn(
         self: GPUModelRunner,
         logits: torch.Tensor | None,
@@ -373,6 +375,8 @@ def get_fake_process_mamba_fn(
         # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
         # to action[0] by plain equality. Source block-level exactness (incl.
         # the accept-bias) is covered by test_precopy_mamba_align.py.
+        assert align_ctx.precopy_src_col_buf is not None
+        assert align_ctx.mamba_state_idx_buf is not None
         src_col = int(align_ctx.precopy_src_col_buf.np[0])
         state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
         if action == (-1, -1):
@@ -454,10 +458,12 @@ def _run_ref_mamba_state_worker():
         )
         prompt_dataset = datasets.load_dataset("heheda/a_long_article")
         full_prompt = prompt_dataset["train"][0]["text"]
+        # Patched for the lifetime of this spawned worker process.
+        monkeypatch = pytest.MonkeyPatch()
         fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
-        GPUModelRunner.execute_model = fake_execute_model_fn
+        monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
         fake_sample_fn = get_fake_sample_fn()
-        GPUModelRunner._sample = fake_sample_fn
+        monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
         engine = LLM(
             model=MODEL,
             load_format="dummy",
@@ -986,6 +992,7 @@ def _run_mamba_prefix_cache_mrv1(
         async_scheduling=async_scheduling,
         seed=42,
     )
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
     global prompt_token_ids
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
     print(f"Token IDs length: {len(prompt_token_ids)}")
@@ -1266,6 +1273,7 @@ def _run_mamba_prefix_cache_mrv2(
         async_scheduling=async_scheduling,
         seed=42,
     )
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
 
     try:
         tests = (

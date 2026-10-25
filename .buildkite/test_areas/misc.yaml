@@ -144,20 +144,21 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
+  automatic_shard: true
   timeout_in_minutes: 45
-  parallelism: 4
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 KV Connectors Shard %N"
+      label: ":amd: (MI355 DPX) V1 KV Connectors"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -189,15 +190,36 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
 
-# Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
-# GPUs over xGMI, compared exactly against a direct serve.
+# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# the connector or its tests change.
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  key: amd-umbp-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
+
+# Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
+# decode on separate GPUs over xGMI, compared exactly against a direct serve.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
   key: amd-moriio-write-dummy-e2e-mi355
   dind: false
   device: mi355_2
   num_devices: 2
-  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 20 cases the
-  # largest of 6 shards holds 5 (~22 min on MI355). Every case picks free ports
+  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 28 cases the
+  # largest of 6 shards holds 7 (~32 min on MI355). Every case picks free ports
   # for its servers and proxy and its own compile-cache dir.
   parallelism: 6
   timeout_in_minutes: 45
@@ -215,7 +237,31 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+# The same P/D between different TP sizes (WRITE TP2 -> TP1, READ of MLA
+# TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
+- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
+  key: amd-moriio-write-dummy-hetero-tp-mi355
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 45
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+  - vllm/model_executor/model_loader/dummy_loader.py
+  - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+  - tests/v1/kv_connector/moriio_integration/
+  - requirements/kv_connectors_rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k heterogeneous_tp
 
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb
@@ -274,6 +320,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/worker/test_gpu_worker.py::test_cpu_worker_without_triton
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
@@ -478,7 +525,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python-only Installation"
   key: python-only-installation
   depends_on: ~
   optional: true
@@ -502,7 +549,7 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Python 3.14 Smoke Nightly"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke"
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
@@ -565,7 +612,7 @@ steps:
   - vllm/device_allocator/
   - vllm/connections.py
   - vllm/engine/arg_utils.py
-  - vllm/entrypoints/chat_utils.py
+  - vllm/renderers/chat_utils/
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
   - vllm/entrypoints/openai/completion/protocol.py
@@ -579,6 +626,7 @@ steps:
   - vllm/logprobs.py
   - vllm/model_executor/layers/quantization/quark/
   - vllm/model_executor/model_loader/tensorizer.py
+  - vllm/models/muse_spark/
   - vllm/multimodal/
   - vllm/outputs.py
   - vllm/parser/
@@ -597,6 +645,7 @@ steps:
   - vllm/v1/
   - vllm/version.py
   - cmake/utils.cmake
+  - cmake/hipify.py
   - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
@@ -631,6 +680,8 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/check_trust_remote_code.py
+  - tests/tools/test_check_trust_remote_code.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -682,6 +733,7 @@ steps:
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
+  - pytest -v -s tools/test_check_trust_remote_code.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -845,7 +897,7 @@ steps:
       - pytest -v -s v1/determinism/test_online_batch_invariance.py
       - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
 
-- label: ":nvidia: (H100) Batch Invariance (Distributed)"
+- label: ":nvidia: (H100) [Nightly] Batch Invariance (Distributed)"
   key: batch-invariance-distributed-4xh100
   automatic_shard: true
   timeout_in_minutes: 45
@@ -888,7 +940,7 @@ steps:
       - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
       - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
-- label: ":nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Acceptance Length (Large Models)"
   device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20

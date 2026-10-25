@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-node MoRIIO WRITE P/D checks on dummy weights.
+"""Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
 
 Each case serves a real model architecture with ``--load-format dummy``, widened
 by ``moriio_wide_dummy`` (see ``DUMMY_WEIGHT_RANGE``): the
@@ -13,7 +13,10 @@ Cases marked ``HMA_off`` run every server with
 ``--disable-hybrid-kv-cache-manager``, so all layers, sliding-window ones
 included, share a single cache group.
 
-Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI.
+Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI:
+prefill pushes it in WRITE mode, and decode pulls it in READ mode (cases
+marked ``READ``). The proxy runs a READ request's prefill to completion before
+it sends the request to decode.
 Either way decode computes the last prompt token itself. For hybrid models
 prefill computes only the first ``n - 1`` tokens and transfers the KV and the
 recurrent state after them. For attention-only models prefill computes and
@@ -26,9 +29,9 @@ token, the others are a whole number of hybrid cache blocks plus one token
 a whole number of chunks plus one token. With the split matched, a correct
 transfer reproduces the direct serve's first-token log-probabilities exactly,
 so the comparison needs no noise allowance. The
-servers compile with Inductor's deterministic mode, since otherwise each one
-benchmarks its own reduction launch configs and separately started servers
-can drift apart by a few bf16 logit steps. Guards:
+servers compile with Inductor's deterministic mode and without pointwise
+autotuning, since otherwise each one benchmarks its own launch configs and
+separately started servers can drift apart by a few bf16 logit steps. Guards:
 
 * decode must report an external prefix-cache hit for every transferred token
   of every prompt, so the match is not a local recompute;
@@ -42,13 +45,16 @@ can drift apart by a few bf16 logit steps. Guards:
 import atexit
 import contextlib
 import json
+import math
 import os
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -82,7 +88,11 @@ MIN_CONTEXT_EFFECT = 0.05
 # top-k set entirely.
 DUMMY_WEIGHT_RANGE = 0.1
 _WIDE_DUMMY_DIR = Path(__file__).resolve().parent
+# MoRI transport between the single-node prefill and decode GPUs.
+BACKEND = os.getenv("MORIIO_DUMMY_E2E_BACKEND", "xgmi")
 TOP_K = 20
+# Well under the 60 s deferred-send reaper, which frees unreleased blocks.
+PREFILL_FREE_TIMEOUT_S = 20
 MAX_TOKENS = 4
 MAX_MODEL_LEN = 4096
 
@@ -260,10 +270,21 @@ class Case:
     decode_graph: str
     # Run every server of the case without the hybrid KV cache manager.
     hma_off: bool = False
+    prefill_tp: int = 1
+    decode_tp: int = 1
+    # Extra arguments for every server of the case.
+    server_args: tuple[str, ...] = ()
+    # Decode pulls the KV (READ) instead of prefill pushing it (WRITE).
+    read_mode: bool = False
 
     @property
     def extra_args(self) -> tuple[str, ...]:
-        return ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        hma = ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        return hma + self.server_args
+
+    @property
+    def heterogeneous_tp(self) -> bool:
+        return self.prefill_tp != self.decode_tp
 
     @property
     def id(self) -> str:
@@ -271,6 +292,12 @@ class Case:
             f"{self.arch}-{self.attention_backend}-"
             f"P_{self.prefill_graph}-D_{self.decode_graph}"
             + ("-HMA_off" if self.hma_off else "")
+            + (
+                f"-TP{self.prefill_tp}to{self.decode_tp}"
+                if self.heterogeneous_tp
+                else ""
+            )
+            + ("-READ" if self.read_mode else "")
         )
 
 
@@ -300,15 +327,78 @@ CASES = [
 ]
 
 
+# Prefill TP2 writing into decode TP1: split GQA heads gathered into one
+# block, MLA latents and replicated heads written by one prefill rank, and
+# recurrent state gathered from both. Decode TP larger than prefill TP is not
+# here: on one node MoRI's xGMI backend cannot open a session to a peer's second
+# GPU from a prefill rank that sees fewer GPUs (see the MoRIIO usage guide).
+HETEROGENEOUS_TP_CASES = [
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, prefill_tp=2),
+    Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, prefill_tp=2),
+    Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    # Hybrid models size attention blocks to the per-rank recurrent state, and
+    # an MLA page does not shrink with TP like KDA state does: pin one block
+    # size on both sides (TP2 alone picks 1024 tokens, TP1 1920).
+    Case(
+        "kimi_linear",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        prefill_tp=2,
+        server_args=("--block-size", "2048"),
+    ),
+]
+# READ mode, equal TP: one case per cache-group kind (KDA + MLA, Gated DeltaNet
+# + full attention, full attention, and single-group MLA and sliding window).
+READ_CASES = [
+    Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, read_mode=True),
+    Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, read_mode=True),
+    Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, read_mode=True),
+]
+# READ mode between different TP sizes: MLA latents are replicated, so decode
+# TP2 reads its copy from prefill TP1 and decode TP1 reads one copy from
+# prefill TP2, releasing both.
+HETEROGENEOUS_TP_READ_CASES = [
+    Case(
+        "deepseek_v3",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        True,
+        decode_tp=2,
+        read_mode=True,
+    ),
+    Case(
+        "deepseek_v3",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        True,
+        prefill_tp=2,
+        read_mode=True,
+    ),
+]
+
+
 def _graph_args(mode: str) -> list[str]:
     if mode == "NONE":
         return ["--enforce-eager"]
-    # Inductor otherwise picks reduction launch configs by timing them, so each
-    # separately compiled server may sum in a different order and drift by a
-    # few bf16 logit steps; deterministic mode fixes the choice.
+    # Inductor otherwise picks launch configs by timing them, so separately
+    # compiled servers may drift by a few bf16 logit steps: reductions sum in a
+    # different order, and on ROCm the pointwise block size changes which
+    # multiply-adds are fused into FMAs. Deterministic mode fixes only the
+    # reduction configs, so pointwise autotuning is off as well.
     config = {
         "cudagraph_mode": mode,
-        "inductor_compile_config": {"deterministic": True},
+        "inductor_compile_config": {
+            "deterministic": True,
+            "triton.autotune_pointwise": False,
+        },
     }
     return ["--compilation-config", json.dumps(config)]
 
@@ -325,14 +415,15 @@ def _visible_devices() -> tuple[str, list[str]]:
     return selector, devices
 
 
-def _device_env(selector: str, device: str) -> dict[str, str]:
+def _device_env(selector: str, devices: list[str]) -> dict[str, str]:
     # vLLM mirrors HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES at import, so
     # the test process carries both; pin every selector or the server refuses
     # the mismatch. ROCR narrows the set first, so HIP/CUDA then index into it.
-    env = {selector: device}
+    env = {selector: ",".join(devices)}
+    indexed = ",".join(str(i) for i in range(len(devices)))
     for key in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         if key != selector:
-            env[key] = "0" if selector == "ROCR_VISIBLE_DEVICES" else device
+            env[key] = indexed if selector == "ROCR_VISIBLE_DEVICES" else env[selector]
     return env
 
 
@@ -350,14 +441,14 @@ def _server(
     overrides: dict[str, Any],
     backend: str,
     graph: str,
-    device: str,
+    devices: list[str],
     selector: str,
     *,
     port: int | None = None,
     extra_args: tuple[str, ...] = (),
     kv_transfer_config: dict[str, Any] | None = None,
 ) -> RemoteOpenAIServer:
-    port = port or get_open_port()
+    port = port or _open_port()
     args = [
         *arch.args,
         *extra_args,
@@ -384,6 +475,8 @@ def _server(
         "--gpu-memory-utilization",
         "0.5",
         "--enable-prefix-caching",
+        "--tensor-parallel-size",
+        str(len(devices)),
         *_graph_args(graph),
     ]
     role = "direct"
@@ -392,9 +485,10 @@ def _server(
         role = kv_transfer_config["kv_role"]
     env = {
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
-        **_device_env(selector, device),
+        **_device_env(selector, devices),
         "VLLM_HOST_IP": "127.0.0.1",
-        "VLLM_PORT": str(get_open_port()),
+        # vLLM scans upward from VLLM_PORT for the server internal sockets.
+        "VLLM_PORT": str(_open_port_block(32)),
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
         "VLLM_CACHE_ROOT": str(_CACHE_ROOT / role),
@@ -410,19 +504,61 @@ def _server(
     )
 
 
-def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
+# Ports handed to a server of this test session, so later picks avoid them.
+_HANDED_OUT: set[int] = set()
+# Prefill and decode start in parallel threads, so picking a port and recording
+# it must be one step.
+_HANDED_OUT_LOCK = threading.Lock()
+# MoRIIO binds ``port + tp_rank`` (times the DP rank) on every rank, so a
+# handshake or notify port needs a free block, not one free port.
+_PORT_BLOCK = 8
+
+
+def _bindable(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+def _open_port() -> int:
+    with _HANDED_OUT_LOCK:
+        while True:
+            port = get_open_port()
+            if port not in _HANDED_OUT:
+                _HANDED_OUT.add(port)
+                return port
+
+
+def _open_port_block(size: int = _PORT_BLOCK) -> int:
+    """First port of ``size`` consecutive free ports no other server got."""
+    with _HANDED_OUT_LOCK:
+        while True:
+            base = get_open_port()
+            block = range(base, base + size)
+            if _HANDED_OUT.isdisjoint(block) and all(_bindable(p) for p in block):
+                _HANDED_OUT.update(block)
+                return base
+
+
+def _moriio_config(
+    role: str, http_port: int, ping_port: int, read_mode: bool = False
+) -> dict[str, Any]:
     return {
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
         "kv_connector_extra_config": {
-            "backend": "xgmi",
-            "read_mode": False,
+            "backend": BACKEND,
+            "read_mode": read_mode,
             "host_ip": "127.0.0.1",
             "proxy_ip": "127.0.0.1",
             "proxy_ping_port": str(ping_port),
             "http_port": str(http_port),
-            "handshake_port": str(get_open_port()),
-            "notify_port": str(get_open_port()),
+            # Every TP rank binds its port plus its rank offset.
+            "handshake_port": str(_open_port_block()),
+            "notify_port": str(_open_port_block()),
         },
     }
 
@@ -431,7 +567,7 @@ def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
 def _proxy(ping_port: int) -> Iterator[str]:
     # Free ports for both sockets, so cases from parallel shards on one host
     # do not collide.
-    port = get_open_port()
+    port = _open_port()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -471,10 +607,14 @@ def _pd_pair(
     prefill_overrides: dict[str, Any],
     decode_overrides: dict[str, Any],
     case: Case,
-) -> Iterator[tuple[str, RemoteOpenAIServer]]:
+) -> Iterator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
-    assert len(devices) >= 2, "needs one GPU for prefill and one for decode"
-    prefill_port, decode_port, ping_port = (get_open_port() for _ in range(3))
+    prefill_devices = devices[: case.prefill_tp]
+    decode_devices = devices[case.prefill_tp : case.prefill_tp + case.decode_tp]
+    assert len(decode_devices) == case.decode_tp, (
+        f"needs {case.prefill_tp} GPUs for prefill and {case.decode_tp} for decode"
+    )
+    prefill_port, decode_port, ping_port = (_open_port() for _ in range(3))
     with _proxy(ping_port) as proxy_url, contextlib.ExitStack() as stack:
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
@@ -486,12 +626,12 @@ def _pd_pair(
                     prefill_overrides,
                     case.attention_backend,
                     case.prefill_graph,
-                    devices[0],
+                    prefill_devices,
                     selector,
                     port=prefill_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_producer", prefill_port, ping_port
+                        "kv_producer", prefill_port, ping_port, case.read_mode
                     ),
                 ),
                 pool.submit(
@@ -500,19 +640,19 @@ def _pd_pair(
                     decode_overrides,
                     case.attention_backend,
                     case.decode_graph,
-                    devices[1],
+                    decode_devices,
                     selector,
                     port=decode_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_consumer", decode_port, ping_port
+                        "kv_consumer", decode_port, ping_port, case.read_mode
                     ),
                 ),
             ]
             for future in futures:
                 servers.append(future.result())
         _wait_for_registration(proxy_url, arch.model)
-        yield proxy_url, servers[1]
+        yield proxy_url, servers[0], servers[1]
 
 
 def _wait_for_registration(proxy_url: str, model: str) -> None:
@@ -616,6 +756,22 @@ def _distance(ref: dict[str, float], got: dict[str, float]) -> float:
     return max(abs((ref[t] - ref_mean) - (got[t] - got_mean)) for t in common)
 
 
+def _wait_for_prefill_blocks_freed(prefill: RemoteOpenAIServer) -> None:
+    """Prefill frees a finished request's blocks once every decode rank that
+    holds a share of it has released it. A missed release leaves them in use
+    until the deferred-send reaper frees them after 60 s."""
+    deadline = time.monotonic() + PREFILL_FREE_TIMEOUT_S
+    while True:
+        usage = sum(s.value for s in _metric(prefill, "vllm:kv_cache_usage_perc"))
+        if usage == 0:
+            return
+        assert time.monotonic() < deadline, (
+            f"prefill still holds {usage:.2%} of its KV cache "
+            f"{PREFILL_FREE_TIMEOUT_S} s after the last request finished"
+        )
+        time.sleep(0.5)
+
+
 def _external_hits(server: RemoteOpenAIServer) -> float:
     samples = _metric(server, "vllm:external_prefix_cache_hits_total")
     return sum(sample.value for sample in samples)
@@ -626,17 +782,31 @@ class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
     hybrid: bool
+    read_mode: bool = False
 
     @property
     def expected_external_hits(self) -> int:
-        # Hybrid prefill stops one token short; attention-only prefill hands
-        # decode the whole prompt.
-        return sum(len(p) - int(self.hybrid) for p in self.prompts)
+        return _expected_external_hits(self.prompts, self.hybrid, self.read_mode)
 
 
-def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Reference:
-    """Direct serve; also checks that the comparison can see a wrong prefix."""
+def _expected_external_hits(
+    prompts: list[list[int]], hybrid: bool, read_mode: bool
+) -> int:
+    # Hybrid prefill stops one token short, and a READ decode always computes
+    # the last prompt token itself; an attention-only WRITE hands decode the
+    # whole prompt.
+    return sum(len(p) - int(hybrid or read_mode) for p in prompts)
+
+
+def _reference(
+    arch: ArchCase, overrides: dict[str, Any], case: Case, tp: int | None = None
+) -> Reference:
+    """Direct serve; also checks that the comparison can see a wrong prefix.
+
+    It runs at the decode TP size unless ``tp`` is given.
+    """
     selector, devices = _visible_devices()
+    devices = devices[: tp or case.decode_tp]
     # Prefill graphs run the chunks and the decode-only last step runs the same
     # captured graph in every decode mode used here, so the prefill mode
     # reproduces both halves of the P/D computation.
@@ -645,7 +815,7 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
         overrides,
         case.attention_backend,
         case.prefill_graph,
-        devices[0],
+        devices,
         selector,
         extra_args=case.extra_args,
     ) as server:
@@ -664,10 +834,13 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
                 f"{moved:.4g} for len {len(prompt)}); a wrong prefix would go "
                 "unnoticed"
             )
-        # Determinism of the reference itself (served from its prefix cache).
-        again = _first_step(url, arch.model, prompts[-1])
-        print(f"[noise] repeat distance={_distance(refs[-1], again)}")
-    return Reference(prompts, refs, arch.hybrid)
+        # Determinism of the reference itself (served from its prefix cache),
+        # for every prompt so a P/D mismatch at any length can be told apart
+        # from noise.
+        for prompt, ref in zip(prompts, refs):
+            again = _distance(ref, _first_step(url, arch.model, prompt))
+            print(f"[noise] len={len(prompt)} repeat distance={again}")
+    return Reference(prompts, refs, arch.hybrid, case.read_mode)
 
 
 def _pd_distances(
@@ -679,13 +852,18 @@ def _pd_distances(
 ) -> tuple[list[float], float]:
     with _pd_pair(arch, prefill_overrides, decode_overrides, case) as (
         proxy_url,
+        _,
         decode,
     ):
         hits_before = _external_hits(decode)
-        distances = [
-            _distance(expected, _first_step(proxy_url, arch.model, prompt))
-            for prompt, expected in zip(ref.prompts, ref.logprobs)
-        ]
+        distances = []
+        for prompt, expected in zip(ref.prompts, ref.logprobs):
+            got = _first_step(proxy_url, arch.model, prompt)
+            distances.append(_distance(expected, got))
+            if not distances[-1] <= TOLERANCE:
+                # Keep the evidence: a wrong prefix and numerical noise look
+                # the same in the distance alone.
+                print(f"[pd] {case.id} len={len(prompt)} ref={expected} got={got}")
         hits = _external_hits(decode) - hits_before
     lengths = [len(p) for p in ref.prompts]
     print(f"[pd] {case.id} lens={lengths} distances={distances} external_hits={hits}")
@@ -696,8 +874,7 @@ def _pd_distances(
 # Tests
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
-def test_write_matches_direct_serve(case: Case):
+def _check_matches_direct_serve(case: Case) -> None:
     arch = ARCHS[case.arch]
     overrides = _arch_overrides(arch)
     ref = _reference(arch, overrides, case)
@@ -713,13 +890,76 @@ def test_write_matches_direct_serve(case: Case):
     assert not bad, f"P/D first-token log-probs differ from direct serve: {bad}"
 
 
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
+def test_write_matches_direct_serve(case: Case):
+    _check_matches_direct_serve(case)
+
+
+@pytest.mark.parametrize("case", READ_CASES, ids=lambda c: c.id)
+def test_read_matches_direct_serve(case: Case):
+    _check_matches_direct_serve(case)
+
+
+@pytest.mark.parametrize(
+    "case", HETEROGENEOUS_TP_CASES + HETEROGENEOUS_TP_READ_CASES, ids=lambda c: c.id
+)
+def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
+    """Prefill and decode of different TP sizes complete WRITE and READ.
+
+    Unlike the equal-TP cases this cannot compare against a direct serve:
+    a different TP size sums in a different order, and on dummy weights that
+    changes the top tokens entirely, so log-probs only show the transfer did
+    not hang and decode consumed the transferred KV. That every head and state
+    slice lands at the right offset is pinned byte for byte by
+    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py and
+    tests/v1/kv_connector/unit/test_moriio_read_tp.py.
+    """
+    _, devices = _visible_devices()
+    if len(devices) < case.prefill_tp + case.decode_tp:
+        pytest.skip(f"needs {case.prefill_tp + case.decode_tp} GPUs")
+    arch = ARCHS[case.arch]
+    overrides = _arch_overrides(arch)
+    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, prefill, decode):
+        lengths = _prompt_lengths(arch, decode)
+        prompts = _prompts(lengths)
+        hits_before = _external_hits(decode)
+        tops = [_first_step(proxy_url, arch.model, prompt) for prompt in prompts]
+        hits = _external_hits(decode) - hits_before
+        _wait_for_prefill_blocks_freed(prefill)
+    print(f"[pd] {case.id} lens={lengths} external_hits={hits}")
+
+    expected = _expected_external_hits(prompts, arch.hybrid, case.read_mode)
+    assert hits == expected, (
+        f"decode reported {hits} external prefix-cache hits, expected {expected}"
+    )
+    assert all(
+        len(top) >= TOP_K and all(math.isfinite(v) for v in top.values())
+        for top in tops
+    ), f"decode returned non-finite log-probs: {tops}"
+
+
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))
 def test_corrupted_prefill_state_is_detected(arch_name: str):
     """Negative control: KV computed with different values must fail."""
+    _check_corrupted_prefill_state_is_detected(arch_name, read_mode=False)
+
+
+@pytest.mark.parametrize("arch_name", ["kimi_linear", "qwen3_dense"])
+def test_corrupted_prefill_state_is_detected_read(arch_name: str):
+    """The same negative control with decode pulling the KV."""
+    _check_corrupted_prefill_state_is_detected(arch_name, read_mode=True)
+
+
+def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) -> None:
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
     case = Case(
-        arch_name, default.attention_backend, _DEFAULT, _DEFAULT, default.hma_off
+        arch_name,
+        default.attention_backend,
+        _DEFAULT,
+        _DEFAULT,
+        default.hma_off,
+        read_mode=read_mode,
     )
     overrides = _arch_overrides(arch)
     ref = _reference(arch, overrides, case)
