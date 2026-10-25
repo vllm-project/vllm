@@ -9,7 +9,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
-    _HAS_CPU_SAMPLING_OPS,
     apply_top_k_top_p_cpu,
     apply_top_k_top_p_pytorch,
     random_sample,
@@ -1213,8 +1212,8 @@ class TestFlashInferDistributionMatch:
 
 
 @pytest.mark.skipif(
-    not _HAS_CPU_SAMPLING_OPS,
-    reason="CPU top-k/top-p C++ kernels not available on this build",
+    not current_platform.is_cpu(),
+    reason="CPU top-k/top-p kernels require a CPU build",
 )
 class TestCpuTopkTopp:
     """Tests for the CPU top-k/top-p kernel.
@@ -1628,9 +1627,6 @@ class TestCpuTopkTopp:
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
 
-    @pytest.mark.skipif(
-        not _HAS_CPU_SAMPLING_OPS, reason="CPU top-p/top-k kernel unavailable"
-    )
     @pytest.mark.parametrize("vocab_size", [17, 128, 1024, 32000])
     @pytest.mark.parametrize("batch_size", [1, 8, 32])
     def test_fused_equals_sequential(self, batch_size: int, vocab_size: int):

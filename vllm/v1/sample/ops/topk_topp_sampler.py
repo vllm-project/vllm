@@ -23,20 +23,11 @@ if HAS_TRITON:
         apply_top_k_top_p_triton,
     )
 
-try:
-    from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
-    from vllm._custom_ops import (
-        cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
-    )
-    from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
-    # Probe the dispatcher: raises AttributeError on non-CPU builds where
-    # the op is absent (the Python wrappers import cleanly regardless).
-    torch.ops._C.cpu_topk_sampling  # noqa: B018
-
-    _HAS_CPU_SAMPLING_OPS = True
-except (ImportError, AttributeError):
-    _HAS_CPU_SAMPLING_OPS = False
+from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+from vllm._custom_ops import (
+    cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+)
+from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
 
 logger = init_logger(__name__)
 
@@ -369,7 +360,13 @@ class TopKTopPSampler(nn.Module):
         (#59786). Falls back to native sampling when fp64 Gumbel noise
         is requested.
         """
-        logits = apply_top_k_top_p_cpu(logits, k, p)
+        if k is not None or p is not None:
+            if HAS_TRITON:
+                logits = apply_top_k_top_p_triton(logits, k, p)
+            elif current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+                logits = apply_top_k_top_p_cpu(logits, k, p)
+            else:
+                logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -603,8 +600,6 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    if not _HAS_CPU_SAMPLING_OPS:
-        return apply_top_k_only(logits, k)
     logits = logits.contiguous()
     _cpu_topk_sampling_op(logits, k.to(torch.int32))
     return logits
@@ -629,21 +624,14 @@ def apply_top_k_top_p_cpu(
         return _apply_top_k_only_cpu(logits, k)
 
     if k is None:
-        if _HAS_CPU_SAMPLING_OPS:
-            logits = logits.contiguous()
-            _cpu_topp_sampling_op(logits, p.float())
-            return logits
-        return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
-
-    # Joint k+p path.
-    if _HAS_CPU_SAMPLING_OPS:
         logits = logits.contiguous()
-        _cpu_topk_topp_sampling_op(logits, k.to(torch.int32), p.float())
+        _cpu_topp_sampling_op(logits, p.float())
         return logits
 
-    # Fallback: sequential top-k then top-p.
-    logits = _apply_top_k_only_cpu(logits, k)
-    return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
+    # Joint k+p path.
+    logits = logits.contiguous()
+    _cpu_topk_topp_sampling_op(logits, k.to(torch.int32), p.float())
+    return logits
 
 
 def empty_exponential_noise_like(

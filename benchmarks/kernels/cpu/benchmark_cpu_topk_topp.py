@@ -20,7 +20,6 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.ops.topk_topp_sampler import (
-    _HAS_CPU_SAMPLING_OPS,
     apply_top_k_top_p_cpu,
     apply_top_k_top_p_pytorch,
 )
@@ -380,13 +379,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    if not _HAS_CPU_SAMPLING_OPS:
-        print(
-            "ERROR: CPU sampling ops not available. "
-            "Build vLLM with VLLM_TARGET_DEVICE=cpu."
-        )
-        return
 
     # Print configuration
     print(f"Batch sizes: {args.batch_sizes}")
