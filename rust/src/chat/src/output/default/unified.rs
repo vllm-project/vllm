@@ -265,6 +265,7 @@ pub(crate) async fn unified_event_stream(
                     y.yield_ok(AssistantEvent::LogprobsDelta {
                         logprobs,
                         token_ids,
+                        finish_reason: finished.as_ref().map(|value| value.finish_reason.clone()),
                     })
                     .await;
                 }

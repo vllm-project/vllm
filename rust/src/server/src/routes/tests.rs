@@ -3561,7 +3561,7 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                                 outputs: vec![request_output_with_logprobs(
                                     &request.request_id,
                                     vec![104],
-                                    Some(EngineCoreFinishReason::Stop),
+                                    Some(EngineCoreFinishReason::Length),
                                     None,
                                     Some(Logprobs {
                                         positions: vec![PositionLogprobs {
@@ -3752,7 +3752,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"hi"),
-                            Some(EngineCoreFinishReason::Stop),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                             Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                             Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
@@ -4781,7 +4781,7 @@ async fn non_stream_completions_include_logprobs() {
                             request_output_with_logprobs(
                                 &request.request_id,
                                 vec![b'i' as u32],
-                                Some(EngineCoreFinishReason::Stop),
+                                Some(EngineCoreFinishReason::Length),
                                 None,
                                 Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
                                 None,
@@ -4850,6 +4850,164 @@ async fn non_stream_completions_include_logprobs() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_logprobs_exclude_hidden_stop_tokens_without_changing_usage_or_token_ids() {
+    for chat_route in [true, false] {
+        for stream in [true, false] {
+            for (stop_token, include_stop, skip_special, expected_text, expected_tokens) in [
+                (FAKE_BOS_TOKEN_ID, false, true, "h", vec!["h"]),
+                (b'!' as u32, false, false, "h", vec!["h"]),
+                (FAKE_BOS_TOKEN_ID, true, true, "h", vec!["h"]),
+                (b'!' as u32, true, true, "h!", vec!["h", "!"]),
+                (FAKE_BOS_TOKEN_ID, true, false, "h<bos>", vec!["h", "<bos>"]),
+            ] {
+                let ipc = IpcNamespace::new().unwrap();
+                let address = ipc.handshake_endpoint();
+                let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+                    address.clone(),
+                    b"hidden-stop-logprobs".to_vec(),
+                    move |dealer, push| {
+                        boxed_test_future(async move {
+                            let add = recv_engine_message(dealer).await;
+                            let request: EngineCoreRequest =
+                                rmp_serde::from_slice(&add[1]).unwrap();
+                            let stop_reason = (stop_token != FAKE_BOS_TOKEN_ID)
+                                .then_some(StopReason::TokenId(stop_token));
+                            send_outputs(
+                                push,
+                                RequestBatchOutputs {
+                                    outputs: vec![
+                                        request_output_with_logprobs(
+                                            &request.request_id,
+                                            vec![b'h' as u32],
+                                            None,
+                                            None,
+                                            Some(sample_logprobs_for_tokens(&[b'h' as u32])),
+                                            None,
+                                        ),
+                                        request_output_with_logprobs(
+                                            &request.request_id,
+                                            vec![stop_token],
+                                            Some(EngineCoreFinishReason::Stop),
+                                            stop_reason,
+                                            Some(sample_logprobs_for_token(
+                                                stop_token,
+                                                b'!' as u32,
+                                            )),
+                                            None,
+                                        ),
+                                    ],
+                                    ..Default::default()
+                                }
+                                .into(),
+                            )
+                            .await;
+                        })
+                    },
+                ));
+                let client = EngineCoreClient::connect(
+                    EngineCoreClientConfig::new_single(address).with_local_input_output_addresses(
+                        Some(ipc.input_endpoint()),
+                        Some(ipc.output_endpoint()),
+                    ),
+                )
+                .await
+                .unwrap();
+                let chat = ChatLlm::from_shared_backend(
+                    test_llm(client),
+                    Arc::new(FakeChatBackend::new()),
+                );
+                let mut app =
+                    build_router(Arc::new(AppState::new(vec!["test-model".into()], chat)));
+                let mut body = if chat_route {
+                    json!({"messages": [{"role": "user", "content": "hello"}], "logprobs": true})
+                } else {
+                    json!({"prompt": "hello", "logprobs": 0})
+                };
+                body["stream"] = json!(stream);
+                body["stream_options"] = if stream {
+                    json!({"include_usage": true})
+                } else {
+                    json!(null)
+                };
+                body["return_token_ids"] = json!(true);
+                body["include_stop_str_in_output"] = json!(include_stop);
+                body["skip_special_tokens"] = json!(skip_special);
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(if chat_route {
+                                "/v1/chat/completions"
+                            } else {
+                                "/v1/completions"
+                            })
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                engine_task.await.unwrap();
+                let payloads = if stream {
+                    sse_json_payloads(std::str::from_utf8(&bytes).unwrap())
+                } else {
+                    vec![serde_json::from_slice(&bytes).unwrap()]
+                };
+                let mut text = String::new();
+                let mut tokens = vec![];
+                let mut token_ids = vec![];
+                let mut completion_tokens = json!(null);
+                let mut finish_reason = json!(null);
+                for payload in payloads {
+                    assert!(payload.get("error").is_none(), "{payload}");
+                    let choice = &payload["choices"][0];
+                    let content = if chat_route {
+                        &choice[if stream { "delta" } else { "message" }]["content"]
+                    } else {
+                        &choice["text"]
+                    };
+                    text.push_str(content.as_str().unwrap_or_default());
+                    if let Some(ids) = choice["token_ids"].as_array() {
+                        token_ids.extend(ids.iter().cloned());
+                    }
+                    if let Some(logprobs) =
+                        choice["logprobs"][if chat_route { "content" } else { "tokens" }].as_array()
+                    {
+                        tokens.extend(logprobs.iter().map(|entry| {
+                            if chat_route {
+                                entry["token"].clone()
+                            } else {
+                                entry.clone()
+                            }
+                        }));
+                    }
+                    if !choice["finish_reason"].is_null() {
+                        finish_reason = choice["finish_reason"].clone();
+                    }
+                    if !payload["usage"].is_null() {
+                        completion_tokens = payload["usage"]["completion_tokens"].clone();
+                    }
+                }
+                assert_eq!(text, expected_text);
+                assert_eq!(json!(tokens), json!(expected_tokens));
+                assert_eq!(token_ids, vec![json!(104), json!(stop_token)]);
+                assert_eq!(completion_tokens, json!(2));
+                assert_eq!(finish_reason, json!("stop"));
+            }
+        }
+    }
+}
+
 /// Send one request with output logprobs to an app whose server-wide
 /// `--return-tokens-as-token-ids` is `server_flag`, and return every logprob
 /// token string it carries, sampled tokens and top candidates alike. Streaming
@@ -4877,7 +5035,7 @@ async fn logprob_tokens_with_server_flag(
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             vec![b'h' as u32],
-                            Some(EngineCoreFinishReason::Stop),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                             Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
                             None,
@@ -5113,15 +5271,15 @@ async fn non_stream_completions_include_prompt_logprobs() {
     assert_eq!(json["choices"][0]["text"], "hellohi");
     assert_eq!(
         json["choices"][0]["logprobs"]["tokens"],
-        json!(["h", "e", "l", "l", "o", "h", "i", "!"])
+        json!(["h", "e", "l", "l", "o", "h", "i"])
     );
     assert_eq!(
         json["choices"][0]["logprobs"]["text_offset"],
-        json!([0, 1, 2, 3, 4, 5, 6, 7])
+        json!([0, 1, 2, 3, 4, 5, 6])
     );
     assert_eq!(
         json["choices"][0]["logprobs"]["token_logprobs"],
-        json!([null, -0.3, -0.4, -0.45, -0.5, -0.1, -0.1, -0.1])
+        json!([null, -0.3, -0.4, -0.45, -0.5, -0.1, -0.1])
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][0],

@@ -57,6 +57,8 @@ pub(super) struct ResponseOptions {
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
     /// server's `--return-tokens-as-token-ids`.
     pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether a stop token is included in the decoded response text.
+    pub include_stop_str_in_output: bool,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
 }
@@ -219,6 +221,7 @@ pub(super) fn prepare_chat_request(
         request_id,
         response_model,
         options: ResponseOptions {
+            include_stop_str_in_output: request.include_stop_str_in_output,
             include_usage,
             include_continuous_usage,
             requested_logprobs,

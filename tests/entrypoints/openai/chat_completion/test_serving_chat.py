@@ -655,6 +655,7 @@ def _build_minimal_metrics_serving_chat(
     serving.request_logger = None
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
+    serving.default_sampling_params = {}
     return serving
 
 
@@ -1433,7 +1434,7 @@ async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
     async for line in serving.chat_completion_stream_generator(
         request,
         _stream_request_outputs(
-            make_output(10, "<tool_call>", None), make_output(11, "answer", "stop")
+            make_output(10, "<tool_call>", None), make_output(11, "answer", "length")
         ),
         "chatcmpl-test-id",
         "test-model",

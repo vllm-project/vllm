@@ -36,7 +36,7 @@ def _output(text: str, idxs: list[int], finished: bool) -> RequestOutput:
                 token_ids=[TOKENS[i][0] for i in idxs],
                 cumulative_logprob=None,
                 logprobs=[_logprobs(i) for i in idxs],
-                finish_reason="stop" if finished else None,
+                finish_reason="length" if finished else None,
             )
         ],
         finished=finished,
@@ -51,6 +51,7 @@ def _serving() -> OpenAIServingCompletion:
     serving.enable_per_request_metrics = False
     serving.system_fingerprint = None
     serving.return_tokens_as_token_ids = False
+    serving.default_sampling_params = {}
     return serving
 
 

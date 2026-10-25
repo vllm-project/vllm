@@ -49,6 +49,8 @@ pub(super) struct ResponseOptions {
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
     /// server's `--return-tokens-as-token-ids`.
     pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether a stop token is included in the decoded response text.
+    pub include_stop_str_in_output: bool,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -178,6 +180,7 @@ pub(super) fn prepare_completion_request(
         request_id,
         response_model,
         options: ResponseOptions {
+            include_stop_str_in_output: request.include_stop_str_in_output,
             include_usage,
             include_continuous_usage,
             prompt_only,

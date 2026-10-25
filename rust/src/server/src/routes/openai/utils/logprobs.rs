@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
-    DecodedTokenLogprob,
+    DecodedTokenLogprob, FinishReason,
 };
 
 use super::types::{
@@ -14,20 +16,42 @@ use super::types::{
 };
 use crate::error::{ApiError, server_error};
 
+/// Exclude a terminal stop token hidden from the OpenAI response text.
+pub fn visible_logprob_positions<'a>(
+    logprobs: &'a DecodedLogprobs,
+    finish_reason: Option<&FinishReason>,
+    include_stop_str_in_output: bool,
+    tokenizer: &dyn Tokenizer,
+) -> &'a [DecodedPositionLogprobs] {
+    let positions = &logprobs.positions;
+    if matches!(
+        finish_reason,
+        Some(FinishReason::Stop(None | Some(StopReason::TokenId(_))))
+    ) && let Some((last, rest)) = positions.split_last()
+        && (!include_stop_str_in_output
+            || last.entries.first().is_some_and(|token| {
+                tokenizer.is_special_id(token.token_id) && token.token.is_empty()
+            }))
+    {
+        return rest;
+    }
+    positions
+}
+
 /// Convert decoded token-position logprobs into the OpenAI completions
 /// `logprobs` shape.
 pub fn decoded_logprobs_to_openai(
-    logprobs: &DecodedLogprobs,
+    positions: &[DecodedPositionLogprobs],
     initial_text_offset: u32,
     return_tokens_as_token_ids: bool,
 ) -> Result<LogProbs, ApiError> {
-    let mut text_offset = Vec::with_capacity(logprobs.positions.len());
-    let mut token_logprobs = Vec::with_capacity(logprobs.positions.len());
-    let mut tokens = Vec::with_capacity(logprobs.positions.len());
-    let mut top_logprobs = Vec::with_capacity(logprobs.positions.len());
+    let mut text_offset = Vec::with_capacity(positions.len());
+    let mut token_logprobs = Vec::with_capacity(positions.len());
+    let mut tokens = Vec::with_capacity(positions.len());
+    let mut top_logprobs = Vec::with_capacity(positions.len());
     let mut current_offset = initial_text_offset;
 
-    for position in &logprobs.positions {
+    for position in positions {
         let chosen = position.entries.first().ok_or_else(|| {
             server_error!("decoded logprobs position unexpectedly had no token candidates")
         })?;
@@ -143,12 +167,11 @@ pub fn prompt_logprobs_to_maps(
 /// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
 /// shape.
 pub fn decoded_logprobs_to_openai_chat(
-    logprobs: &DecodedLogprobs,
+    positions: &[DecodedPositionLogprobs],
     top_logprobs: i32,
     return_tokens_as_token_ids: bool,
 ) -> Result<ChatLogProbs, ApiError> {
-    let content = logprobs
-        .positions
+    let content = positions
         .iter()
         .map(|pos| position_to_chat_logprobs_content(pos, top_logprobs, return_tokens_as_token_ids))
         .try_collect()?;
@@ -184,6 +207,8 @@ pub fn collected_logprobs_to_openai(
     echoed_prompt: bool,
     initial_completion_offset: u32,
     return_tokens_as_token_ids: bool,
+    include_stop_str_in_output: bool,
+    tokenizer: &dyn Tokenizer,
 ) -> Result<LogProbs, ApiError> {
     if echoed_prompt {
         let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
@@ -203,7 +228,12 @@ pub fn collected_logprobs_to_openai(
             Some(completion_logprobs) => Ok(append_openai_logprobs(
                 prompt_logprobs,
                 decoded_logprobs_to_openai(
-                    completion_logprobs,
+                    visible_logprob_positions(
+                        completion_logprobs,
+                        Some(&collected.finish_reason),
+                        include_stop_str_in_output,
+                        tokenizer,
+                    ),
                     completion_start,
                     return_tokens_as_token_ids,
                 )?,
@@ -216,7 +246,12 @@ pub fn collected_logprobs_to_openai(
         server_error!("completion response requested logprobs but generation returned none")
     })?;
     decoded_logprobs_to_openai(
-        completion_logprobs,
+        visible_logprob_positions(
+            completion_logprobs,
+            Some(&collected.finish_reason),
+            include_stop_str_in_output,
+            tokenizer,
+        ),
         initial_completion_offset,
         return_tokens_as_token_ids,
     )
@@ -360,7 +395,7 @@ mod tests {
 
     fn chat_top_logprobs_len(top_logprobs: i32) -> usize {
         let chat_logprobs =
-            decoded_logprobs_to_openai_chat(&sample_logprobs(), top_logprobs, false)
+            decoded_logprobs_to_openai_chat(&sample_logprobs().positions, top_logprobs, false)
                 .expect("chat logprobs");
         chat_logprobs.content.expect("content")[0].top_logprobs.len()
     }
@@ -381,7 +416,7 @@ mod tests {
 
         let top_tokens = |top_logprobs| {
             let chat_logprobs =
-                decoded_logprobs_to_openai_chat(&logprobs, top_logprobs, false).unwrap();
+                decoded_logprobs_to_openai_chat(&logprobs.positions, top_logprobs, false).unwrap();
             chat_logprobs.content.unwrap()[0]
                 .top_logprobs
                 .iter()
@@ -399,7 +434,7 @@ mod tests {
         logprobs.positions[0].entries[0].rank = 0;
         logprobs.positions[0].entries[1].logprob = f32::NEG_INFINITY;
 
-        let response = decoded_logprobs_to_openai_chat(&logprobs, -1, false).unwrap();
+        let response = decoded_logprobs_to_openai_chat(&logprobs.positions, -1, false).unwrap();
         let json = serde_json::to_string_pretty(&response).unwrap();
         expect_test::expect![[r#"
             {

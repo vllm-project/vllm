@@ -45,6 +45,7 @@ pub(crate) enum AssistantEvent {
     LogprobsDelta {
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
+        finish_reason: Option<FinishReason>,
     },
     /// The start of a new tool call, with its declared name and generated ID.
     ToolCallStart { id: String, name: String },

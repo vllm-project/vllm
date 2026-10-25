@@ -25,6 +25,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
+    get_logprob_token_ids,
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
@@ -687,7 +688,13 @@ class OpenAIServingChat(GenerateBaseServing):
                     if request.logprobs:
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
-                            token_ids=output.token_ids,
+                            token_ids=get_logprob_token_ids(
+                                output.token_ids,
+                                output,
+                                request,
+                                tokenizer,
+                                self.default_sampling_params,
+                            ),
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
@@ -1000,7 +1007,13 @@ class OpenAIServingChat(GenerateBaseServing):
             if request.logprobs:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
-                    token_ids=token_ids,
+                    token_ids=get_logprob_token_ids(
+                        token_ids,
+                        output,
+                        request,
+                        tokenizer,
+                        self.default_sampling_params,
+                    ),
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                     logprob_token_ids=request.logprob_token_ids,

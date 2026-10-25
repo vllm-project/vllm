@@ -74,6 +74,7 @@ impl ChatEventStream {
                 ChatEvent::LogprobsDelta {
                     logprobs,
                     token_ids: delta_ids,
+                    ..
                 } => {
                     if let Some(logprobs) = logprobs {
                         logprob_positions.extend(logprobs.positions);
@@ -185,6 +186,7 @@ mod tests {
                     }),
                 }),
                 Ok(ChatEvent::LogprobsDelta {
+                    finish_reason: None,
                     logprobs: Some(DecodedLogprobs {
                         positions: vec![DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {

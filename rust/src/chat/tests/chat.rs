@@ -1403,6 +1403,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::LogprobsDelta {
+            finish_reason: None,
             logprobs: Some(DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![

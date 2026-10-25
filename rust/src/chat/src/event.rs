@@ -210,6 +210,8 @@ pub enum ChatEvent {
     LogprobsDelta {
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
+        /// Terminal reason for this update, before wire-level metadata filtering.
+        finish_reason: Option<FinishReason>,
     },
     /// One assistant output block has ended.
     BlockEnd {
