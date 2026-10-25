@@ -2281,3 +2281,30 @@ Workstreams (disjoint paths, so parallel agents cannot collide):
    blocks are in GPU memory. Marconi (arXiv 2411.19379) does exactly this.
 
 Nothing deployed. Each phase lands as its own PR; the fs tier only changes image after a GO.
+
+## 25/10 19:41Z — routine cycle: healthy; M1 first read-back numbers landed
+
+Same engine generation since 09:04:20Z (RC=0, OOM 0, 3 containers up, health 200 in 3.6 ms).
+
+- **Load**: prompt tokens 286.35 M total (+40.5 M over the cycle, ~5,100 tok/s average);
+  census 503 requests/126 min, hub (Bun) carries 293 of them with 100K-1M bodies; 478×200,
+  25×401 (the usual dead-key actors), **0 new external IP with 200, 0 window+1 400** (#431
+  stays clean since 16:31Z).
+- **WEDGE `fail 1/2` ×5** (18:09→19:30Z) under those long prefills — documented starvation
+  of the probe, never 2/2, no restart; 2,001 probes OK.
+- **Preemptions 17** (+5 over the cycle), prefix hit 61.2 % cumulative, VRAM GPU 0 22,805
+  (creeping, 195 MiB under the 23,000 alert; rule unchanged: 0.70 at next restart if crossed).
+- **fs tier since 17:59Z**: +85 GB written (≈47 GB/h sustained), +29.1 GB read back,
+  fs chunk hits 2,617 (+1,107 in ~1.7 h) — the evening replays are real; M1 distinct-file
+  read-back measured at 19:20Z: attention 6.2 %, GDN 0.9 % (PR #199).
+- **Phase 2 re-scoped by the design note** (PR #200): upstream already stops the prefill chunk
+  at the block-floored junction and caches the state there; what is missing is *persistence*
+  (LRU evicts it in 22-38 min), so the fork change is a protected-block class, ~1 week, not a
+  new checkpoint engine. Correction posted on #198.
+- **Condensation**: breaker OPEN again 18:24Z, cloud fallback succeeded (RSM-side, diagnostic
+  with roo-extensions still pending; engine counters exonerate the motor).
+- **Commit 89.2 %** (0.8 pt under CRIT) — WSL remains the consumer; no heavy job launched.
+- `/dev/shm` 24G/63G (floor), G: OK, nbaudit `ok:true` 0 failures — note: the runner now
+  serves `19451:Image/` (wave 2 armed).
+- **DST**: Europe/Paris switched to winter time last night — the host is UTC+1 now, not UTC+2.
+  Spec line corrected (this PR).
