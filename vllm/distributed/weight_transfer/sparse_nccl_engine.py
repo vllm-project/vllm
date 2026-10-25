@@ -368,8 +368,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
         cross-rank barrier."""
-        if torch.cuda.is_available():
-            torch.cuda.current_stream().synchronize()
+        if torch.accelerator.is_available():
+            torch.accelerator.current_stream().synchronize()
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:

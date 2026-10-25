@@ -469,8 +469,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         only add a dependency on the default process group that this backend
         otherwise does not have.
         """
-        if torch.cuda.is_available():
-            torch.cuda.current_stream().synchronize()
+        if torch.accelerator.is_available():
+            torch.accelerator.current_stream().synchronize()
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
