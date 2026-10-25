@@ -86,6 +86,8 @@ class FileMapper:
         kv_cache_groups = [
             {
                 "tokens_per_block": group.tokens_per_block,
+                # json cannot serialize `Fraction`
+                "tokens_per_state": [str(ts) for ts in group.tokens_per_state],
                 "layer_names": list(group.layer_names),
             }
             for group in config.groups

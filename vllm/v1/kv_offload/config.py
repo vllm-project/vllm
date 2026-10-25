@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 
@@ -16,6 +17,10 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
+    # Tokens covered by one stored state. Ints > 1 compress multiple tokens
+    # into one state (DSv4 sparse MLA); fractions < 1 store multiple states
+    # per token (Whisper block pooling).
+    tokens_per_state: tuple[int | Fraction, ...] = (1,)
 
 
 @dataclass(frozen=True)

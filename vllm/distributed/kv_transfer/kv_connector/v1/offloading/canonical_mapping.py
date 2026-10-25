@@ -274,25 +274,28 @@ def _layer_mapping(
     """Certified mapping for one layer at one rank, or None (fail closed)."""
     if not isinstance(spec, AttentionSpec):
         return None
-    bs = spec.block_size
+    # num_states = block_size/tokens_per_state for compressed MLA,
+    # num_states = block_size otherwise.
+    num_states = spec.num_states
     page = spec.real_page_size_bytes
-    if ctx.cp_size > 1 and (ctx.interleave > bs or bs % ctx.interleave):
+    if ctx.cp_size > 1 and (ctx.interleave > num_states or num_states % ctx.interleave):
         return None
 
     if isinstance(spec, MLAAttentionSpec):
         # TP-replicated latent; CP shards its tokens across the DCP groups
         if (
-            spec.tokens_per_state != 1
-            or page % bs
+            type(spec.tokens_per_state) is int
+            or spec.block_size % spec.tokens_per_state
+            or page % num_states
             or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head
         ):
             return None
-        row = page // bs
+        row = page // num_states
         return CanonicalPageMapping(
             canonical_page_size_bytes=ctx.cp_size * page,
             local_page_size_bytes=page,
-            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], bs, ctx),
+            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], num_states, ctx),
             num_writers=ctx.tp_size // ctx.dcp_size,
             writer_index=ctx.tp_rank // ctx.dcp_size,
             parallelism_agnostic=ctx.cp_size == 1,
@@ -324,7 +327,7 @@ def _layer_mapping(
     return CanonicalPageMapping(
         canonical_page_size_bytes=ctx.cp_size * num_head_shards * page,
         local_page_size_bytes=page,
-        runs=_interleave_cp_tokens(regions, bs, ctx),
+        runs=_interleave_cp_tokens(regions, num_states, ctx),
         num_writers=replication // ctx.dcp_size,
         writer_index=(ctx.tp_rank % replication) // ctx.dcp_size,
         parallelism_agnostic=ctx.cp_size == 1,
