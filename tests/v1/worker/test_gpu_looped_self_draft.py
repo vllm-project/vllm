@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """GPU tests for request identity, rejection/reordering and graph padding."""
 
 from types import SimpleNamespace

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """V2 attention metadata for the shared looped draft/verify prefix.
 
 Shared prefix layers and private draft layers process just the last token of

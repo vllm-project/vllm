@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """Short-lived draft activations, indexed by vLLM request-state slot.
 
 Only the immediately preceding proposal is reusable. Keeping request IDs on the
