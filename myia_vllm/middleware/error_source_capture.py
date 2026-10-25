@@ -156,6 +156,10 @@ class ErrorSourceCapture:
                 "referer": headers.get("referer", ""),
                 "auth_prefix": (headers.get("authorization", "")[:24] + "...")
                 if headers.get("authorization") else "",
+                # Caller identity pushed by the claudish hub (format <machine>:<workspace>).
+                # Announced by po-2025:claudish 2026-10-25; empty until the hub ships it.
+                "x_claudish_client": headers.get("x-claudish-client", ""),
+                "x_claudish_machine": headers.get("x-claudish-machine", ""),
                 "body_bytes": body_len,
                 "body_truncated_bytes": body_truncated,
                 "body_head": body_head,
@@ -224,6 +228,9 @@ class ErrorSourceCapture:
             "referer": headers.get("referer", ""),
             "auth_prefix": (headers.get("authorization", "")[:24] + "...")
             if headers.get("authorization") else "",
+            # Same caller-identity fields as the captured-request schema.
+            "x_claudish_client": headers.get("x-claudish-client", ""),
+            "x_claudish_machine": headers.get("x-claudish-machine", ""),
             "body_bytes": body_len,
             "body_truncated_bytes": 0,
             "body_head": "",
