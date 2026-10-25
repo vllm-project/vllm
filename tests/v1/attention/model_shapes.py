@@ -9,7 +9,7 @@ Kimi K3, MiniMax M3's sparse layers) belong to the MLA/sparse backend suites.
 Re-read the configs rather than hand-editing a number.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,74 @@ def shapes_supported_by(head_sizes: list[int]) -> list[AttnShape]:
 
 def shapes_rejected_by(head_sizes: list[int]) -> list[AttnShape]:
     return [s for s in ALL_SHAPES if s.head_size not in head_sizes]
+
+
+@dataclass(frozen=True)
+class MLAShape:
+    """One MLA (or DSA sparse-MLA) layer kind of one model, at a TP degree.
+
+    MLA caches one latent head of ``kv_lora_rank + qk_rope_head_dim`` per
+    token regardless of TP; only the query heads are sharded. ``index_*`` are
+    the DSA indexer's top-k width, heads and head dim (None for dense MLA).
+    """
+
+    model: str
+    num_heads: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    q_lora_rank: int | None = None
+    tp: int = 1
+    index_topk: int | None = None
+    index_n_heads: int | None = None
+    index_head_dim: int | None = None
+
+    @property
+    def is_sparse(self) -> bool:
+        return self.index_topk is not None
+
+    @property
+    def head_size(self) -> int:
+        """Cached latent row width (the MQA head size)."""
+        return self.kv_lora_rank + self.qk_rope_head_dim
+
+    @property
+    def id(self) -> str:
+        name = self.model.split("/")[-1]
+        sparse = f"-topk{self.index_topk}" if self.is_sparse else ""
+        return (
+            f"{name}-tp{self.tp}-h{self.num_heads}l{self.kv_lora_rank}"
+            f"n{self.qk_nope_head_dim}r{self.qk_rope_head_dim}"
+            f"v{self.v_head_dim}{sparse}"
+        )
+
+    def shard(self, tp: int) -> "MLAShape":
+        """Per-rank shape: query heads split, the latent cache is shared."""
+        assert self.num_heads % tp == 0
+        return replace(self, num_heads=self.num_heads // tp, tp=tp)
+
+
+DEEPSEEK_V3 = MLAShape("deepseek-ai/DeepSeek-V3", 128, 512, 128, 64, 128, 1536)
+KIMI_K3_MLA = MLAShape("moonshotai/Kimi-K3", 96, 512, 128, 64, 128, 1536)
+DEEPSEEK_V3_2 = MLAShape(
+    "deepseek-ai/DeepSeek-V3.2", 128, 512, 128, 64, 128, 1536,
+    index_topk=2048, index_n_heads=64, index_head_dim=128,
+)  # fmt: skip
+# GLM-5.3 is GLM-5.2 with FP8 weights; both share the top-k of every 4th
+# ("full") indexer layer with the next three ("shared") layers.
+GLM_5_2 = MLAShape(
+    "zai-org/GLM-5.2", 64, 512, 192, 64, 256, 2048,
+    index_topk=2048, index_n_heads=32, index_head_dim=128,
+)  # fmt: skip
+# NoPE (no rope dims), kpool indexer (index_kpool=4) on hybrid KDA + DSA.
+GLM_5_3_FLASH = MLAShape(
+    "zai-org/GLM-5.3-Flash", 64, 512, 256, 0, 256, 1536,
+    index_topk=2048, index_n_heads=32, index_head_dim=128,
+)  # fmt: skip
+
+MLA_SHAPES = [DEEPSEEK_V3, KIMI_K3_MLA]
+SPARSE_MLA_SHAPES = [DEEPSEEK_V3_2, GLM_5_2, GLM_5_3_FLASH]
 
 
 @dataclass(frozen=True)
