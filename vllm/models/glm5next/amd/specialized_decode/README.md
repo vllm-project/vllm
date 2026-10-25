@@ -24,6 +24,9 @@ post contracts the streams) run vLLM's code.
   replayed from a FULL CUDA graph. Prefill, mixed and larger steps and
   PIECEWISE replays run vLLM's layers.
 - KV cache bf16 or e4m3 (`--kv-cache-dtype fp8`); KDA recurrent state fp32.
+- MTP (`--speculative-config '{"method": "mtp", "num_speculative_tokens": k}'`):
+  uniform verify steps of whole requests, 1 + k rows each, at most 8 rows (4 at
+  TP2); wider verify steps run vLLM's layers.
 
 ## Layout
 
@@ -45,11 +48,12 @@ the decode after load and binds it to every KV cache vLLM allocates.
 
 Unsupported deployments are refused with every reason at once: the config
 before load (platform, MRv2, PP, DP, EP, EPLB, DCP, PCP, LoRA, KV connectors,
-routed-expert capture, speculative decoding, sleep mode, CPU weight offload,
-weight updates, prompt embeds, graph modes and capture sizes, geometry, TP
-size, sequence-parallel MoE, cache dtypes), the model after load (MoE backend,
-layer kinds, FlyDSL, compute units) and the caches at every bind (dtype, shape,
-strides).
+routed-expert capture, speculative decoding other than MTP (and MTP with
+adaptive verification, dynamic speculation or KDA RecoverSSM), sleep mode, CPU
+weight offload, weight updates, prompt embeds, graph modes and capture sizes,
+geometry, TP size, sequence-parallel MoE, cache dtypes), the model after load
+(MoE backend, layer kinds, FlyDSL, compute units) and the caches at every bind
+(dtype, shape, strides).
 
 ## Fail-stop
 
