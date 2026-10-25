@@ -90,6 +90,7 @@ TokenizerMode = Literal[
     "auto",
     "hf",
     "glm5_next",
+    "alpamayo2_super",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -176,6 +177,9 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
+    - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
+      trajectory and special tokens added; selected automatically for
+      `nvidia/Alpamayo2-Super`.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -185,6 +189,8 @@ class ModelConfig:
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for checkpoints that ship those templates.
+      Tool definitions follow `--exclude-tools-when-tool-choice-none` on the
+      Rust frontend, matching the "hf" renderer.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -747,6 +753,8 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
+            elif arch == "Alpamayo2Super":
+                self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "KimiK3ForConditionalGeneration":

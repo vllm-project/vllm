@@ -79,11 +79,7 @@ impl ChatRenderer for Glm5NextChatRenderer {
             kwargs.insert("reasoning_effort".into(), serde_json::json!(effort));
         }
         let messages = encoding::messages(&request.messages);
-        let tools = if request.tool_parsing_enabled() {
-            encoding::tools(request.tools())
-        } else {
-            Vec::new()
-        };
+        let tools = encoding::tools(request.tools());
         let mut out = writer::Glm5PromptWriter::new(self.tokenizer.as_deref());
         let media_order = encoding::render_into(
             &mut out,
