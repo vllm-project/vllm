@@ -649,6 +649,7 @@ def _cadenced_dp_engine_core(
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
+    core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
     core.step_counter = 0
     core.pending_pause = False
@@ -832,6 +833,23 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 
     core._reset_caches.assert_not_called()
     core.model_executor.discard.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tags", "republished"), [(None, True), (["kv_cache"], True), (["weights"], False)]
+)
+def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
+    """Peers can load the KV cache registration only after the workers redid it."""
+    core = _pausable_engine_core_proc()
+    calls: list[str] = []
+    core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
+    core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
+    kv_connector = core.scheduler.get_kv_connector.return_value
+    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = (
+        lambda metadata: calls.append("publish")
+    )
+    EngineCore.wake_up(core, tags)
+    assert calls == (["wake_up", "publish"] if republished else ["wake_up"])
 
 
 @pytest.mark.parametrize("deferred", [False, True])
