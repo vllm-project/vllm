@@ -2119,3 +2119,32 @@ po-2025:claudish) — **inerte jusqu'au prochain restart**, aucun geste moteur p
 « cap max_tokens » **réfutée par la mesure** (claudish : prompt > fenêtre → 400, sinon la
 génération est rabotée) ; les deux règles Q36 sont prises par claudish (implémentation après
 #679/#675, recreate unique demain après la fenêtre 09:00-11:00Z).
+
+## 25/10 15:41Z — routine saine ; amortissement porté par les tiers (7,8 % calculés) ; 0 récidive #431 ; breaker condensation re-trippé
+
+**Prod** : health 200 en 6,4 ms, `RC=0`, `StartedAt` inchangé (09:04:20Z), 0 OOM, `/dev/shm` 39 %
+stable, 3 conteneurs Up. VRAM GPU 0 **22 613** / GPU 1 **21 408** MiB (sous l'alerte 23 000) ;
+GPU 2 24 057 MiB = training CoursIA à plein (nominal, hors périmètre). Watchdog : que des
+`fail 1/2` (4 nouveaux depuis 13:52Z), compteurs avancants, **0 restart**, 1 675 sondes OK.
+
+**Delta 2 h** (même génération, 13:41→15:41Z) : prompt **+45,84 M tok** dont
+`local_compute` **+3,56 M = 7,8 % seulement** — le reste servi par les caches :
+device 36,5 %, **host tier 54,0 %** (24,8 M rejoués), external KV transfer 56,1 % (25,7 M),
+disk 2,1 %. **L'amortissement tient l'après-midi** : les 246 corps >100 Ko des sessions
+Claude-Code (539-663 Ko, tailles toutes différentes = sessions distinctes, pas un re-prefill
+en boucle) sont absorbés par les tiers. Génération **+634,6 K tok (≈88 tok/s)**, +490 requêtes
+(4,1/min), **préemptions +8 (2→10)** — pression KV de pointe modérée, aucun wedge 2/2.
+
+**#431** : **0 récidive** de la signature `400 + corps > 100 Ko` depuis 08:15:08Z.
+
+**Condensation** : le circuit breaker s'est **re-ouvert à 14:56:51Z** (primaire essayé →
+timeout 90 s → repli cloud ×3) — 5ᵉ occurrence du jour. Diagnostic + addendum déjà chez
+roo-extensions (timeout statut 4,1 K tok + breaker sans half-open), pas de réponse à 15:41Z.
+
+**Sécurité** : 200 uniquement depuis des IP connues (hairpin 321, interne 181, poste Paris
+`82.66.89.184` 2, web2 `51.75.200.22` 2). `koara.live` persiste : **20 × 401 sur 2 h** (~10/h,
+clé morte, toujours aucun accès).
+
+**Hôte** : commit **89,3 %** (353,2/395,3 Go, marge 42,1 Go) — **à 0,7 point de la barre CRIT
+90 %**, montée diurne vmmemWSL documentée ; aucun travail lourd lancé ce cycle (règle §3).
+G: écriture OK ; nbaudit `ok:true` (vague 2 Image/, 0 échec).
