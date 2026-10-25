@@ -26,6 +26,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.transformers_utils.configs.ming_v3_asr import MingAudioConfig
 
+from .test_common import _assert_inputs_equal
+
 MODEL = os.environ.get("VLLM_TEST_MING_ASR_MODEL", "inclusionAI/Ming-3.0-asr-tiny")
 
 
@@ -129,16 +131,15 @@ def test_chunk_policy_has_separate_cache_entries(asr_processors, scoped):
         options: dict[str, object] = {"audio_chunk_frames": frames}
         if scoped:
             options = {"audio_kwargs": options}
-        results.append(
-            processor(
-                "<audio><audioPatch></audio>",
-                mm_items=processor.info.parse_mm_data({"audio": audio}),
-                hf_processor_mm_kwargs=options,
-                cache=cache,
-            )
+        kwargs = dict(
+            mm_items=processor.info.parse_mm_data({"audio": audio}),
+            hf_processor_mm_kwargs=options,
         )
+        result = processor("<audio><audioPatch></audio>", **kwargs, cache=cache)
+        _assert_inputs_equal(result, processor("<audio><audioPatch></audio>", **kwargs))
+        results.append(result)
     assert results[0]["mm_hashes"] != results[1]["mm_hashes"]
-    assert results[0]["prompt_token_ids"] == results[2]["prompt_token_ids"]
+    _assert_inputs_equal(results[0], results[2])
     assert config.hf_config.audio_config.chunk_frames == 3000
     for result, frames in zip(results, (3000, 6000, 3000)):
         data = result["mm_kwargs"].get_data()

@@ -122,7 +122,7 @@ async def test_streaming(server, audio):
 
 @pytest.mark.asyncio
 async def test_long_audio_prefix_cache(server, audio):
-    """Long requests must increase prefix hits across audio chunk policies."""
+    """Restoring a long request's chunk policy must reuse its cached prefix."""
     waveform, rate = sf.read(
         BytesIO(audio["chinese_common_voice.wav"]), dtype="float32"
     )
@@ -141,8 +141,8 @@ async def test_long_audio_prefix_cache(server, audio):
                 if line.startswith("vllm:prefix_cache_hits_total{")
             )
 
-        before = await prefix_hits()
-        for frames in (3000, 3000, 6000, 3000):
+        for frames in (3000, 6000, 3000):
+            before = await prefix_hits()
             text = await _transcribe(
                 client,
                 clip.getvalue(),
@@ -151,4 +151,6 @@ async def test_long_audio_prefix_cache(server, audio):
             )
             assert "漓江和湘江有秦代开凿的灵渠沟通" in text
         after = await prefix_hits()
-        assert after > before, f"Long requests added no prefix hits: {before=} {after=}"
+        assert after > before, (
+            f"Restoring the chunk policy added no prefix hits: {before=} {after=}"
+        )

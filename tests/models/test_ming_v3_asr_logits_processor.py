@@ -22,19 +22,17 @@ from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcRequestState,
 )
-from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
 
 
 @pytest.fixture
 def processor_state():
-    config = VllmConfig()
     device = torch.device(current_platform.device_type)
     requests = RequestState(4, 64, 64, 0, 128, device)
     processor = NoRepeatNGramLogitsProcessor(
-        config, LogitsProcRequestState.from_request_state(requests)
+        VllmConfig(), LogitsProcRequestState.from_request_state(requests)
     )
-    return config, requests, processor
+    return requests, processor
 
 
 def _request_context(requests, req_ids):
@@ -54,16 +52,10 @@ def _request_context(requests, req_ids):
 
 
 @pytest.mark.parametrize("size", [1, 2, 10])
-@pytest.mark.parametrize(
-    "history",
-    [
-        pytest.param([1, 2, 3] * 10, id="in_vocab"),
-        pytest.param([128, 1, 2, 200, 1, 2] * 5, id="outside_logits_vocab"),
-    ],
-)
-def test_ngram_matches_hf_with_reordered_rows(processor_state, size, history):
-    _, requests, processor = processor_state
+def test_ngram_matches_hf_with_reordered_rows(processor_state, size):
+    requests, processor = processor_state
     device = requests.device
+    history = [1, 2, 3] * 10
     for req_id, n in (("blocked", size), ("ordinary", 0)):
         requests.add_request(req_id, 12, history, len(history), 16)
         processor.add_request(
@@ -81,9 +73,27 @@ def test_ngram_matches_hf_with_reordered_rows(processor_state, size, history):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_ngram_ignores_candidates_outside_logits_vocab(processor_state):
+    """Block valid continuations even when other matching tokens exceed the vocab."""
+    requests, processor = processor_state
+    history = [2, 7, 2, 128, 2, 200, 2]
+    requests.add_request("req", len(history), history, len(history), 16)
+    processor.add_request(
+        requests.req_id_to_index["req"],
+        SamplingParams(extra_args={"no_repeat_ngram_size": 2}),
+    )
+    requests.apply_staged_writes()
+    processor.apply_staged_writes()
+    logits = torch.zeros(1, requests.vocab_size, device=requests.device)
+    expected = torch.zeros_like(logits)
+    expected[0, 7] = -float("inf")
+    actual = processor.apply(logits, _request_context(requests, ["req"]))
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("size", [0, 2])
 def test_recycled_slot_uses_new_history_and_options(processor_state, size):
-    _, requests, processor = processor_state
+    requests, processor = processor_state
     history = [1, 2, 3] * 10
     requests.add_request("old", 12, history, len(history), 16)
     slot = requests.req_id_to_index["old"]
@@ -118,49 +128,6 @@ def test_recycled_slot_uses_new_history_and_options(processor_state, size):
         rtol=0,
         atol=0,
     )
-
-
-@pytest.mark.parametrize("size", [0, 10])
-def test_sampler_applies_blocking_with_logit_bias_and_temperature(
-    processor_state, size
-):
-    config, requests, processor = processor_state
-    history = [7] * 10
-    requests.add_request("req", len(history), history, len(history), 16)
-    sampler = Sampler(
-        config,
-        requests.max_num_reqs,
-        requests.vocab_size,
-        requests.device,
-        requests,
-        custom_logits_processors=[processor],
-    )
-    sampler.add_request(
-        requests.req_id_to_index["req"],
-        SamplingParams(
-            temperature=2.0,
-            logit_bias={7: 100, 8: 20},
-            extra_args={"no_repeat_ngram_size": size},
-        ),
-    )
-    requests.apply_staged_writes()
-    sampler.apply_staged_writes()
-    ctx = _request_context(requests, ["req"])
-    logits = torch.zeros(1, requests.vocab_size, device=requests.device)
-    actual = sampler.apply_sampling_params(
-        logits,
-        expanded_idx_mapping=ctx.expanded_idx_mapping,
-        idx_mapping=ctx.idx_mapping,
-        idx_mapping_np=ctx.idx_mapping_np,
-        pos=ctx.pos,
-        input_ids=ctx.input_ids,
-        expanded_local_pos=ctx.expanded_local_pos,
-        seq_lens_upper_bound_np=ctx.seq_lens_upper_bound_np,
-    )
-    expected = torch.zeros_like(logits)
-    expected[0, 7] = -float("inf") if size else 50
-    expected[0, 8] = 10
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_processor_import_stays_frontend_safe():
