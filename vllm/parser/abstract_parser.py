@@ -577,9 +577,15 @@ class DelegatingParser(Parser):
 
         if tools_structural_tag is None:
             if is_auto and structured_outputs is not None:
+                reason = (
+                    "no tool is strict"
+                    if tool_parser.structural_tag_model is not None
+                    and resolved_tools is None
+                    else "structural tags are unavailable"
+                )
                 logger.warning_once(
                     "Tool calls are not constrained for tool_choice=auto with "
-                    "structured outputs because structural tags are unavailable; "
+                    f"structured outputs because {reason}; "
                     "the structured output constraint applies.",
                     scope="local",
                 )

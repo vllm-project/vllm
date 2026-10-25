@@ -184,6 +184,7 @@ class TestToolChoice_Plus_ResponseFormat:
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
+        assert "because no tool is strict" in mock_warn.call_args[0][0]
 
     def test_auto_without_strict_tools_with_parser_default_function_strict_level(self):
         """Regression test for #62483: a parser whose default_tool_strict_level
@@ -210,6 +211,7 @@ class TestToolChoice_Plus_ResponseFormat:
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
+        assert "because no tool is strict" in mock_warn.call_args[0][0]
 
         # When the operator explicitly configures tool_strict_level=FUNCTION,
         # or when a tool has strict=True, the combined OrFormat grammar is built.
@@ -303,6 +305,7 @@ class TestToolChoice_Plus_ResponseFormat:
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
+        assert "because structural tags are unavailable" in mock_warn.call_args[0][0]
 
     def test_auto_with_xgrammar_unsupported_schema(self):
         """Conrer case based on Vadim's feedback in PR #56086
