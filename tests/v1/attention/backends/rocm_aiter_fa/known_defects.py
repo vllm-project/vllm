@@ -101,14 +101,6 @@ KNOWN_DEFECTS["shuffle-lbhnc-layout"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["fp8-e5m2-declared"] = Defect(
-    "fp8_e5m2 is declared, but ROCm reshape_and_cache_flash rejects it at "
-    "the first KV write.",
-    (
-        _CAP + "test_declarations_match_flagship_model_needs",
-        _CAP + "test_selector_rejects_undeclared[overrides4-kv_cache_dtype]",
-    ),
-)
 
 KNOWN_DEFECTS["kv-update-bypass-frozen"] = Defect(
     "supports_kv_cache_update_bypass is computed once at import and goes "
