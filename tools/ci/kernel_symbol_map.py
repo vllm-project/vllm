@@ -236,8 +236,32 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 2))
     ap.add_argument("--cuobjdump", default=None)
+    ap.add_argument("--backend", choices=("cuda", "rocm"), default="cuda")
+    ap.add_argument("--rocm-path", type=Path, default=Path("/opt/rocm"))
+    ap.add_argument("--hipify-map", type=Path)
     ap.add_argument("--commit", default="", help="commit the build is of")
     a = ap.parse_args()
+    if a.backend == "rocm":
+        from rocm_kernel_symbol_map import build_map
+
+        tools = {}
+        for name in ("llvm-readelf", "llvm-objcopy", "clang-offload-bundler", "ninja"):
+            candidate = a.rocm_path / "llvm" / "bin" / name
+            tools[name] = (
+                str(candidate) if candidate.is_file() else shutil.which(name) or name
+            )
+        result = build_map(
+            a.build_root,
+            a.source_root,
+            tools,
+            commit=a.commit or os.environ.get("BUILDKITE_COMMIT", ""),
+            hipify_map=a.hipify_map,
+        )
+        a.out.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(a.out, "wt", encoding="utf-8") as stream:
+            json.dump(result, stream, separators=(",", ":"))
+        log(f"wrote {a.out}: {result['stats']}; {result.get('reason', '')}")
+        return 0
     t0 = time.time()
     source_root = a.source_root.resolve()
 

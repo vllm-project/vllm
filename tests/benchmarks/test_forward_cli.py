@@ -8,14 +8,43 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.benchmarks.forward.batch import build_batch
+from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_pcp_query_tokens(rank):
+    """PCP rows receive their query slice, including a continued prefix."""
+    batch = build_batch(
+        parse_case("mix=16@32c,1@64"), [], 1, 1000, np.random.default_rng(0)
+    )
+    buffers = InputBuffers(3, 12, torch.device("cpu"))
+    local = InputBatch.make_dummy(3, 9, buffers)
+    offsets = [4 * rank, 4 * (3 - rank)]
+    local = replace(
+        local,
+        req_ids=["bench-1", "bench-0", "bench-0"],
+        num_scheduled_tokens=np.array([1, 4, 4]),
+        num_computed_tokens_np=np.array([63, 16 + offsets[0], 16 + offsets[1]]),
+    )
+    buffers.input_ids.fill_(-1)
+    write_input_ids(batch, local, buffers.input_ids)
+    prefill = batch.query_token_ids["bench-0"]
+    expected = np.concatenate(
+        [batch.query_token_ids["bench-1"]]
+        + [prefill[start : start + 4] for start in offsets]
+    )
+    assert buffers.input_ids[:9].tolist() == expected.tolist()
+    assert buffers.input_ids[9:].tolist() == [-1, -1, -1]
 
 
 def _group(block_size: int, replay: int = 0, dcp_sharded: bool = False):
@@ -132,6 +161,10 @@ def test_profile_summary():
 # TODO(woosuk): Support ROCm and re-enable this test there.
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Hangs on ROCm; the bench is CUDA-only."
+)
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="torch.profiler records no kernels when replaying XPU graphs.",
 )
 def test_bench_forward(tmp_path):
     output = tmp_path / "forward.json"

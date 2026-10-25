@@ -60,6 +60,13 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(tools) = request.tools.as_ref() {
+        // Like OpenAI, an empty list is an error rather than "no tools".
+        if tools.is_empty() {
+            bail_invalid_request!(
+                param = "tools",
+                "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely."
+            );
+        }
         validate_function_tools(tools, "tools")?;
     }
 
