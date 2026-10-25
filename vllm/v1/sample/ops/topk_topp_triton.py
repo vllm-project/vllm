@@ -1134,12 +1134,14 @@ def _topk_topp_kernel(
                 # Top-k boundary tie trim (logit space, bit-exact group).
                 if topk_mask_num_keep < topk_mask_num_dup:
                     topk_dup_mask = keep_mask & (logits_blk == topk_mask_dup_logit)
-                    topk_dup_count = tl.cumsum(topk_dup_mask) + num_kept_k
-                    topk_dup_keep_mask = (
-                        topk_dup_count <= topk_mask_num_keep
-                    ) & topk_dup_mask
-                    num_kept_k += tl.sum(topk_dup_mask)
-                    keep_mask = keep_mask & (~topk_dup_mask | topk_dup_keep_mask)
+                    # Most tiles hold no member of the tie group; skip the scan.
+                    if tl.sum(topk_dup_mask) > 0:
+                        topk_dup_count = tl.cumsum(topk_dup_mask) + num_kept_k
+                        topk_dup_keep_mask = (
+                            topk_dup_count <= topk_mask_num_keep
+                        ) & topk_dup_mask
+                        num_kept_k += tl.sum(topk_dup_mask)
+                        keep_mask = keep_mask & (~topk_dup_mask | topk_dup_keep_mask)
 
                 probs_blk = tl.exp(logits_blk - prob_ref) / prob_sum_exp
                 probs_blk = tl.where(mask_n, probs_blk, 0.0)
@@ -1148,16 +1150,17 @@ def _topk_topp_kernel(
                 # Duplicate handling within the min-prob tie group
                 if num_keep < num_duplicate_logit:
                     duplicate_mask = keep_mask & (probs_blk == prob_min_larger)
-                    duplicate_count = tl.cumsum(duplicate_mask) + num_seen
-                    # Remove only members past num_keep up to the counted
-                    # group size, so an undercounted group is never
-                    # over-trimmed below p.
-                    duplicate_keep_mask = (
-                        (duplicate_count <= num_keep)
-                        | (duplicate_count > num_duplicate_logit)
-                    ) & duplicate_mask
-                    num_seen += tl.sum(duplicate_mask)
-                    keep_mask = keep_mask & (~duplicate_mask | duplicate_keep_mask)
+                    if tl.sum(duplicate_mask) > 0:
+                        duplicate_count = tl.cumsum(duplicate_mask) + num_seen
+                        # Remove only members past num_keep up to the counted
+                        # group size, so an undercounted group is never
+                        # over-trimmed below p.
+                        duplicate_keep_mask = (
+                            (duplicate_count <= num_keep)
+                            | (duplicate_count > num_duplicate_logit)
+                        ) & duplicate_mask
+                        num_seen += tl.sum(duplicate_mask)
+                        keep_mask = keep_mask & (~duplicate_mask | duplicate_keep_mask)
 
                 logits_blk = tl.where(keep_mask, logits_blk, MASK_VALUE)
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
