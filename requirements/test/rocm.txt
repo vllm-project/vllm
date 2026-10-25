@@ -248,7 +248,7 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.4.0
+fastsafetensors==0.5.0
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
