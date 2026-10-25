@@ -18,7 +18,6 @@ from cutlass.cute.runtime import make_fake_stream
 from ..common.host import fake, layout, prepare_shared_carveout, stream, to_cute
 from .dcp import (
     compile_value,
-    fill_splits,
     local_max,
     stock_decode,
 )
@@ -205,9 +204,9 @@ class PreparedMla:
     def stock_core(self, cache, block_table, lengths, batch, q=1, totals=None):
         """tokenspeed_mla_decode or trtllm-gen into the BF16 latent (DCP: tokenspeed
         for every rank's heads over the local shard into the DcpBox rows + LSE; q > 1
-        masks causally in global positions, ``totals``). tokenspeed: a fixed split
-        count per batch (one CTA pair per split filling the SMs); both PDL chained
-        between our kernels."""
+        masks causally in global positions, ``totals``). tokenspeed: its own split
+        count per batch (one wave, at most 32 splits); both PDL chained between our
+        kernels."""
         box, reqs = self.dcp, batch // q
         query = self.query_scratch[:batch].view(torch.float8_e4m3fn)
         out, lse, cp = self.latent[:batch], None, {}
@@ -222,10 +221,7 @@ class PreparedMla:
         if self.cores[batch, q] == "trtllm":
             trtllm_decode(query, *args, self.stock_scales, out)
             return
-        # No more splits than 1024-token chunks of the longest local KV shard: with a
-        # short max context, SM-filling splits would cover empty KV ranges.
-        split = min(fill_splits(batch, self.device), max(1, -(-self.max_seq // 1024)))
-        stock_decode(query, *args, self.stock_scales, out, lse, split, **cp)
+        stock_decode(query, *args, self.stock_scales, out, lse, **cp)
 
     def run(
         self, projected, out, *, cache, slots, block_table, lengths, totals=None, q=1

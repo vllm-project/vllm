@@ -366,13 +366,6 @@ def stock_decode(
         kernel(*args)
 
 
-def fill_splits(batch, device):
-    """Splits filling the SMs (one CTA pair each); tokenspeed caps itself at 32."""
-    from tokenspeed_mla import get_num_sm
-
-    return min(256, max(1, get_num_sm(device) // (2 * batch)))
-
-
 def local_max(max_context, size):
     """Longest local shard of a ``max_context`` sequence (block-interleaved)."""
     return math.ceil(max_context / (size * 64)) * 64
