@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-21
+  date_updated: 2026-10-23
   tasks:
     - text
     - multimodal
@@ -42,9 +42,10 @@ model:
   default_frontend: rust
   docker_image:
     # ROCm 10.0 nightly channel. MI355X's --monokernel (vllm-project/vllm#60397,
-    # #61082), paged MXFP4 indexer (#58671) and Gluon sparse MLA (#53492) are on
-    # main but not in 0.31.0, so AMD stays on the nightly image the AMD rows were
-    # verified on; the MI355X pip tab is hidden in the variants below.
+    # #61082), paged MXFP4 indexer (#58671) and Gluon sparse MLA (#53492), and
+    # MI325X's gfx942 monokernel (#60731), are on main but not in 0.31.0, so AMD
+    # stays on the nightly image the AMD rows were verified on; the MI325X and
+    # MI355X pip tabs are hidden in the variants below.
     amd: "vllm/vllm-openai-rocm:nightly-rocm100"
   architecture: moe
   parameter_count: "552B"
@@ -147,8 +148,12 @@ variants:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
           PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      # --monokernel and the ROCm MXFP4 indexer path are on main, not in the
-      # 0.31.0 wheel, which rejects the flag. Drop this once a release ships them.
+      # --monokernel is on main, not in the 0.31.0 wheel, which rejects the
+      # flag. MI355X also needs the ROCm MXFP4 indexer. Drop these once a
+      # release ships them.
+      mi325x:
+        install:
+          pip: false
       mi355x:
         install:
           pip: false
@@ -278,6 +283,8 @@ strategy_overrides:
           - '{"cpu_offload":true}'
           - "--compilation-config"
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          # gfx942 mono decode (vllm-project/vllm#60731): TP4, up to 42 rows.
+          - "--monokernel"
         extra_env:
           VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
       mi355x:
@@ -695,10 +702,10 @@ guide: |
     and the ROCm Engram host-memory gate ([vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491)).
     The launch-day `deepseekv41-flash-0909` image is no longer needed.
   - On AMD the Docker tab uses `vllm/vllm-openai-rocm:nightly-rocm100`, the ROCm 10.0
-    nightly the AMD rows were verified on. **MI355X needs it**: the TP2 command uses
-    `--monokernel` and the ROCm MXFP4 indexer, which are on `main` but not in 0.31.0,
-    so the Install block offers only Docker on MI355X. MI300X, MI325X and MI350X also
-    run from the ROCm pip wheel.
+    nightly the AMD rows were verified on. **MI355X and MI325X need it**: their
+    commands pass `--monokernel`, and MI355X also passes the ROCm MXFP4 indexer.
+    Both are on `main` but not in 0.31.0, so the Install block offers only Docker
+    on those two SKUs. MI300X and MI350X also run from the ROCm pip wheel.
   - The Rust OpenAI frontend is selected by default in the command builder. Switch
     to Python if you encounter unsupported features or compatibility issues.
   - Expect a long first load: `VLLM_ENGINE_READY_TIMEOUT_S=3600` is set for that reason.
@@ -824,6 +831,34 @@ guide: |
   `--no-swa-bounded-replay`. Use a nightly from 2026-10-13 or later; earlier
   ROCm builds lack the replay window clamp and fault at the first prefix hit.
 
+  ### AgentX TP2 scheduling
+
+  For MI355X **TP2** with AgentX-like traffic, we recommend the scheduler settings
+  from [InferenceX #4409](https://github.com/SemiAnalysisAI/InferenceX/pull/4409), using
+  **FP8 (0909)** (`deepseek-ai/DeepSeek-V4.1-Flash`):
+
+  | Client concurrency | `--max-num-batched-tokens` | `--max-num-seqs` |
+  |---:|---:|---:|
+  | 16 | 8192 | 4 |
+  | 32 | 8192 | 8 |
+
+  Select **MI355X**, **FP8 (0909)**, **Tensor Parallel**, **Rust**, **Speculative decoding**
+  and **Text only** above. Keep TP2, Engram CPU offload and five-token DSpark with real
+  block rejection (`enable_adaptive_verification:false`). Append the table's flags plus
+  `--max-model-len 1048576 --max-cudagraph-capture-size 1024 --disable-uvicorn-access-log`
+  to the generated serve arguments. Replace the Docker image with the following,
+  adding `-e OMP_NUM_THREADS=1 -e PYTHONUNBUFFERED=1` before it:
+
+  ```text
+  vllm/vllm-openai-rocm:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:520e098f54ec96837228aaddea0a833cbf6374dbdffd480c1d65f26ffab7701b
+  ```
+
+  [Audited config](https://github.com/SemiAnalysisAI/InferenceX/blob/9ab3d80f7698a4a46521a71b36e023419e05f30f/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi355x-fp4-mtp/agentic.yaml)
+  · [Sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/39844994441).
+  The sweep used synthetic acceptance length 3.51 for throughput; production uses real
+  block rejection. Excess clients queue behind the sequence cap. These workload-specific
+  limits are not generic defaults; this sweep did not qualify TP4 c16/c32.
+
   ## MI300X Tensor Parallel
 
   On MI300X, **Tensor Parallel** takes the recipe default of **TP4** with the
@@ -849,6 +884,11 @@ guide: |
   (`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`), with prefill
   eager.
 
+  This recipe does not pass `--monokernel`. With the kernels' weight copies
+  included, #60731 measured 170.11 GiB of weights a rank. At
+  `--gpu-memory-utilization 0.9` a 192 GiB MI300X leaves about 2.7 GiB beside
+  those weights.
+
   The offload resolves on gfx942 only on builds carrying
   [vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491),
   the same gate MI325X and MI355X need. Those builds also default `cpu_offload`
@@ -872,6 +912,17 @@ guide: |
   `VLLM_USE_BREAKABLE_CUDAGRAPH=0` and captures only full decode graphs
   (`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`); prefill runs
   eagerly.
+
+  `--monokernel` selects the gfx942 mono decode kernels from
+  [vllm-project/vllm#60731](https://github.com/vllm-project/vllm/pull/60731).
+  They run at TP4 only, on decode steps of up to 42 rows (7 requests with
+  five DSpark drafts). Larger steps, prefill, and mixed batches take the
+  regular path, and TP2 stays on vLLM's path. With their weight copies
+  included, #60731 measured 170.11 GiB of weights a rank, up from 98.88 GiB.
+  At `--gpu-memory-utilization 0.9` the KV pool still held 11.18 million
+  tokens. Use a ROCm nightly from 2026-10-20 or later;
+  `nightly-rocm100-df3bd094aeea829f27baa0a5282830464f601d9f` is the first.
+  Earlier builds have the flag for gfx950 only and refuse to start on MI325X.
 
   The offload resolves on gfx942 only on builds carrying
   [vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491),

@@ -45,6 +45,7 @@ class BatchShardMetadata:
     # tensor. Derived from the global cu_num_logits, so each rank agrees
     # ont he gather shapes, including empty shards.
     max_num_logits_per_req: int
+    adaptive_verification_enabled: bool
 
 
 @triton.jit(
@@ -150,11 +151,13 @@ class BatchSharder:
         max_num_reqs: int,
         max_num_logits_per_req: int,
         device: torch.device,
+        adaptive_verification_enabled: bool,
     ):
         tp_group = get_tp_group()
         self.tp_rank = tp_group.rank_in_group
         self.tp_size = tp_group.world_size
         self.device = device
+        self.adaptive_verification_enabled = adaptive_verification_enabled
         self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
@@ -175,7 +178,6 @@ class BatchSharder:
         tp_rank = self.tp_rank
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
-        num_logits = int(input_batch.cu_num_logits_np[-1])
 
         # Deterministically assign requests to ranks, round-robin over slot
         # indices so ownership stays balanced when the slot allocator fills
@@ -187,9 +189,23 @@ class BatchSharder:
         num_local_reqs = local_req_indices_np.shape[0]
         num_reqs_per_rank_np = np.bincount(req_owner_np, minlength=tp_size)
         max_num_reqs_per_rank = int(num_reqs_per_rank_np.max()) if num_reqs else 1
+        # Get the number of logits per request on the host.
+        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
+        num_admitted_draft_tokens_np = None
+        if input_batch.num_admitted_draft_tokens is not None:
+            # Under adaptive verification, cu_num_logits_np holds the scheduled counts.
+            # When the budget binds, the admitted counts are copied to the host so the
+            # plan matches the device layout.
+            assert input_batch.num_draft_tokens_per_req is not None
+            num_admitted_draft_tokens_np = input_batch.num_admitted_draft_tokens.wait()
+            num_logits_per_req_np = (
+                num_logits_per_req_np
+                - input_batch.num_draft_tokens_per_req
+                + num_admitted_draft_tokens_np
+            )
+        num_logits = int(num_logits_per_req_np.sum())
         # Derive the number of logits owned by each rank, as well as the
         # local rank.
-        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
         num_logits_per_rank_np = np.bincount(
             req_owner_np, weights=num_logits_per_req_np, minlength=tp_size
         ).astype(np.int64)
@@ -254,7 +270,15 @@ class BatchSharder:
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req[
                 local_req_indices_np
             ]
-            num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            if num_admitted_draft_tokens_np is not None:
+                # Under adaptive verification num_draft_tokens_per_req holds the
+                # scheduled counts. Follow the admitted counts so every rank picks
+                # the same sampler as the replicated path, including a budget of 0.
+                num_draft_tokens = int(
+                    num_admitted_draft_tokens_np[local_req_indices_np].sum()
+                )
+            elif input_batch.num_draft_tokens > 0:
+                num_draft_tokens = int(num_draft_tokens_per_req.sum())
 
         local_req_ids = [input_batch.req_ids[i] for i in local_req_indices_np.tolist()]
         local_batch = replace(
@@ -284,6 +308,7 @@ class BatchSharder:
             max_num_reqs_per_rank=max_num_reqs_per_rank,
             gathered_src_indices=gathered_src_indices,
             max_num_logits_per_req=max_num_logits_per_req,
+            adaptive_verification_enabled=self.adaptive_verification_enabled,
         )
         return local_batch, sorted_logits_indices, local_grammar_output, metadata
 
@@ -580,7 +605,14 @@ def _gather_logprobs_tensors(
         logprobs=logprobs,
         selected_token_ranks=selected_token_ranks,
         cu_num_generated_tokens=(
-            global_batch.cu_num_logits_np.tolist() if num_logits != num_reqs else None
+            None
+            if metadata.adaptive_verification_enabled or num_logits == num_reqs
+            else global_batch.cu_num_logits_np.tolist()
+        ),
+        cu_num_generated_tokens_tensor=(
+            global_batch.cu_num_logits.clone()
+            if metadata.adaptive_verification_enabled
+            else None
         ),
     )
 
