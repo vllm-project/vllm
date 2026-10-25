@@ -63,6 +63,7 @@ run_tests_for_model() {
   echo "Testing model: $model_name"
   echo "================================"
 
+  # Host-buffer transfers need matching block sizes in both test phases.
   # Start prefill instance
   PREFILL_PORT=8001
 
@@ -71,6 +72,7 @@ run_tests_for_model() {
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
   --max-model-len 8192 \
+  --block-size 32 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
@@ -86,6 +88,7 @@ run_tests_for_model() {
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
   --max-model-len 8192 \
+  --block-size 32 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
