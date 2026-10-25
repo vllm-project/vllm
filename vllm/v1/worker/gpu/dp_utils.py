@@ -56,6 +56,7 @@ def sync_cudagraph_and_dp_padding(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
+    max_seq_len: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Coordinates the batch descriptor and DP padding across all ranks.
 
@@ -187,13 +188,15 @@ def sync_cudagraph_and_dp_padding(
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
-    # num_active_loras is per-rank and doesn't need cross-rank agreement.
+    # num_active_loras is per-rank and doesn't need cross-rank agreement, nor does
+    # max_seq_len: a graph bounded on it has the token count of the default one.
     synced_desc = cudagraph_manager.dispatch(
         num_reqs,
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
         max_query_len=synced_max_query_len,
+        max_seq_len=max_seq_len,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -223,6 +226,7 @@ def dispatch_cg_and_sync_dp(
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
     dp_sync_state: DPSyncState | None = None,
+    max_seq_len: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -261,6 +265,9 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
+        max_seq_len: Upper bound on every request's context length in this
+            rank's batch, for selecting graphs bounded on it. None keeps the
+            batch out of them. Not agreed across ranks.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
@@ -287,6 +294,7 @@ def dispatch_cg_and_sync_dp(
             dp_sync_state.uniform_token_count if dp_sync_state else uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
         )
 
     if dp_size == 1:
@@ -325,4 +333,5 @@ def dispatch_cg_and_sync_dp(
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
         allow_skip_drafts=allow_skip_drafts,
+        max_seq_len=max_seq_len,
     )

@@ -256,7 +256,7 @@ class MambaHybridModelState(DefaultModelState):
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
-            max_seq_len = self.max_model_len
+            max_seq_len = input_batch.max_seq_len or self.max_model_len
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
