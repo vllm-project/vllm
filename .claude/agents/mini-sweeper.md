@@ -34,6 +34,10 @@ ToolSearch(query: "select:mcp__sk-agent__call_agent")
    ce numéro. Ne commente pas, n'invente rien, recopie uniquement. »
    Variante énum : « pour chaque numéro, rends uniquement une étiquette parmi {A,B,C} et la
    phrase exacte qui la justifie ».
+   **Marqueurs** : énumère les variantes de casse exactes (« fp8 ou FP8 ») — le matching du
+   mini est littéral ; un marqueur à la mauvaise casse rend « AUCUNE » à tort SANS déclencher
+   de retry (mesuré 25/10 : rappel fichier 50 % avant correction). Vérifie les orthographes
+   réelles (24 GiB/24GB/24 Go) par un grep avant de fixer la liste.
 3. **VÉRIFICATION mécanique (jamais d'auto-déclaration)** :
    - Citation → existence par sous-chaîne dans l'item source (`grep -F` ou équivalent) :
      une citation introuvable = **fabriquée**, l'item est retiré et compté comme écart.
@@ -45,6 +49,11 @@ ToolSearch(query: "select:mcp__sk-agent__call_agent")
 
 - La LISTE : un item par ligne — `ID | date | citation verbatim (≤1 phrase) | pointeur source`.
 - Couverture : items balayés, items retenus, écarts (citations fabriquées / lots en fallback).
+- **Termine par la commande de rappel** que l'appelant doit exécuter (ex.
+  `grep -rliE '<marqueurs>' <source>` + comparaison au compte de ta liste) — ta vérification
+  garantit la **précision** des citations, PAS le **rappel** du balayage (mesuré 25/10 :
+  50 % de rappel fichier avant correction de casse ; le grep du parent borne les faux négatifs
+  en 1 commande).
 - Nombre d'appels mini. **Aucun jugement de valeur** — pas de « mérite une issue », pas de
   priorisation : l'appelant décide. Si l'appelant a demandé un tri, trie sur des critères
   mécaniques (dates, labels, comptes), jamais sur le fond.

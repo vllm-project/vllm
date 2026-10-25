@@ -114,6 +114,7 @@
   versionné** : toute preuve qu'on veut garder se recopie dans
   `_iteration_log/<essai>/`).
 - Modèle : cache HF Windows `C:\Users\jsboi\.cache\huggingface` (pattern twin
-  po-2026) ; image `vllm/vllm-openai:v0.31.0`.
+  po-2026) ; image `vllm/vllm-openai:v0.32.0` (bump 19/10, PR #125 ; était
+  v0.31.0 — trouvé par le sweep entropie fan-out du 25/10, issue #205).
 - Registre questions user : mémoire siège `user-question-registry.md`
   (licence Apache/mit, UAC gouverneur, alias servi).

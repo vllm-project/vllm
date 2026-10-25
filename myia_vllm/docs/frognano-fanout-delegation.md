@@ -59,6 +59,26 @@ brut compte comme écart — traiter le sentinel explicitement dans le vérifica
 d'honnêteté : ce corpus est 100 % « RAM basse/CRITIQUE » au format très régulier, favorable au
 modèle — le 98,6 % du pilote reste la référence pour un corpus moins régulier.
 
+### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
+
+Sweep de `myia_vllm/docs/` (74 fichiers, 152 appels mini) pour marqueurs d'état périmé
+(v0.29-31.0, fp8, 24 GiB). **Ce que le sweep a rendu** : 13 items à citations, 15/18 byte-exact,
+1 fabriquée attrapée et retirée, 3 fallback grep — la couche **précision** a fait son travail.
+**Ce que la vérification du parent a révélé** : grep indépendant = 24 fichiers fp8 vs 12 listés
+→ **rappel fichier 50 %**, miss concentrés sur la **casse** (le prompt citait « fp8 » minuscule ;
+plusieurs fichiers ne portent que « FP8 » — le retry gagnait quand il était tiré, mais un lot
+qui rend « AUCUNE » à tort ne déclenche pas de retry). Les « 24 GiB » restants sont mi-fichier,
+hors fenêtre 25+25.
+
+**Leçons encodées dans le protocole** : (1) **énumérer les variantes de casse exactes** dans la
+liste de marqueurs (« fp8 ou FP8 ») ; (2) le parent **clôt tout sweep par un grep de rappel**
+(1 commande, `grep -rliE`) — c'est LE geste « valider la liste de l'horde en fin de tâche », et
+son coût reste ≪ lire 74 fichiers ; (3) les marqueurs se spécifient après un coup d'œil aux
+orthographes réelles (24 GiB/24GB/24 Go). Bilan jugement parent : 13 items → **1 doc réellement
+en retard** (doc de siège, image v0.31.0 → corrigée), le reste = registres historiques où les
+vieilles versions sont documentaires — l'architecture « évidence déléguée, jugement au parent »
+a tenu ses deux rôles.
+
 ## 3. Recette prête à l'emploi (à copier)
 
 ```text
