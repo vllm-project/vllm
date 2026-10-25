@@ -35,11 +35,12 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -738,6 +739,109 @@ def test_room_includes_the_cross_attention_blocks_of_an_encoder_decoder_model():
     assert output.preempted_req_ids == {"bg2"}
     assert "hi" in output.num_scheduled_tokens
     assert _num_free_blocks(scheduler) == 3
+
+
+@pytest.mark.parametrize("drafts", [False, True])
+def test_room_includes_the_decodes_draft_tokens(drafts):
+    """With speculative decoding, a running request's step takes slots for its
+    draft tokens too: three decodes one token short of filling their last block
+    take a block each for two drafts. The waiting request's 60 tokens, with its
+    own draft slots, need 4 blocks, as many as are free: it fits beside the
+    decodes without drafts, and with them takes a preemption."""
+    scheduler = _create_scheduler(
+        max_priority_preemptions_per_step=2, num_speculative_tokens=2
+    )
+    running = [
+        _request("p1", 10 * BLOCK_SIZE - 2, priority=1, arrival_time=0),
+        _request("bg1", 9 * BLOCK_SIZE - 2, priority=2, arrival_time=1),
+        _request("bg2", 9 * BLOCK_SIZE - 2, priority=2, arrival_time=2),
+    ]
+    _run_until_decoding(scheduler, *running)
+    assert _num_free_blocks(scheduler) == 4
+    if drafts:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([req.request_id for req in running], [[1, 2]] * 3)
+        )
+
+    scheduler.add_request(
+        _request("hi", 4 * BLOCK_SIZE - 4, priority=0, arrival_time=3)
+    )
+    output = _step(scheduler)
+    assert (output.preempted_req_ids or set()) == ({"bg2"} if drafts else set())
+    assert "hi" in output.num_scheduled_tokens
+
+
+def _create_sliding_window_scheduler() -> Scheduler:
+    """A scheduler with a full-attention and a sliding-window KV cache group, as
+    for a model that interleaves the two, a window of 4 blocks, 64-token steps
+    and 64 blocks of 16 tokens."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m", trust_remote_code=True, dtype="float16", seed=42
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=16,
+        max_num_batched_tokens=64,
+        max_model_len=32 * BLOCK_SIZE,
+        is_encoder_decoder=False,
+        policy="priority",
+        max_priority_preemptions_per_step=2,
+    )
+    cache_config = CacheConfig(
+        block_size=BLOCK_SIZE, cache_dtype="auto", enable_prefix_caching=False
+    )
+    cache_config.num_gpu_blocks = 65
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+    )
+    spec = dict(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=65,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_attn_layer"], FullAttentionSpec(**spec)),
+            KVCacheGroupSpec(
+                ["sliding_attn_layer"],
+                SlidingWindowSpec(**spec, sliding_window=4 * BLOCK_SIZE),
+            ),
+        ],
+    )
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+
+@pytest.mark.parametrize("num_blocks, victims", [(24, {"bg2"}), (26, {"bg", "bg2"})])
+def test_room_counts_a_sliding_window_groups_blocks_in_its_window(num_blocks, victims):
+    """A running request's sliding-window group holds only its window's blocks,
+    and a waiting request's needs only as many as its window and a step span:
+    bg2, the latest arrival, gives back its 10 full-attention blocks and 5
+    sliding-window ones. With 18 free, a request of 24 blocks needs 24 + 9, which
+    bg2 makes room for; one of 26 blocks needs bg too."""
+    scheduler = _create_sliding_window_scheduler()
+    _run_until_decoding(
+        scheduler,
+        _request("rt", _num_tokens(6), priority=0, arrival_time=0),
+        _request("bg", _num_tokens(14), priority=2, arrival_time=1),
+        _request("bg2", _num_tokens(10), priority=2, arrival_time=2),
+    )
+    for _ in range(3):
+        _step(scheduler)
+    bg2_blocks = scheduler.kv_cache_manager.get_blocks("bg2").blocks
+    assert [sum(not b.is_null for b in group) for group in bg2_blocks] == [10, 5]
+    assert _num_free_blocks(scheduler) == 18
+
+    scheduler.add_request(
+        _request("hi", _num_tokens(num_blocks), priority=0, arrival_time=3)
+    )
+    output = _step(scheduler)
+    assert output.preempted_req_ids == victims
+    assert "hi" in output.num_scheduled_tokens
 
 
 def test_pending_connector_block_frees_are_awaited(monkeypatch):
