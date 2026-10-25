@@ -1486,6 +1486,35 @@ class TestDetectMergeInlineSystem:
         )
         assert mock_logger.warning_once.called is expected
 
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # Renders inline system messages in place; merging them would
+            # break prefix caching for Claude Code's per-turn reminders.
+            ("deepseek-ai/DeepSeek-V4-Flash", False),
+            # Puts a trailing system message after the generation prompt.
+            ("deepseek-ai/DeepSeek-V3.2-Exp", True),
+        ],
+    )
+    def test_probes_non_jinja_renderer(self, model, expected):
+        """Encoder-based renderers are probed by rendering, not registered."""
+        from vllm.config import ModelConfig, VllmConfig
+        from vllm.renderers import renderer_from_config
+        from vllm.renderers.online_renderer import OnlineRenderer
+
+        model_config = ModelConfig(model=model)
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=renderer_from_config(VllmConfig(model_config=model_config)),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+
 
 # ======================================================================
 # Full (non-streaming) response conversion: messages_full_converter
