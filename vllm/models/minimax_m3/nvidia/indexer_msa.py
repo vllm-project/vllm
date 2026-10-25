@@ -174,12 +174,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.page_size = kv_cache_spec.block_size
-        self.logical_block_table: torch.Tensor | None = None
-        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         content = kv_cache_spec.state_content_bytes
         full = kv_cache_spec.head_size * kv_cache_spec.dtype.itemsize
+        self.page_size = kv_cache_spec.block_size
         self.index_k_tp = 1 if content is None else full // content
+        self.logical_block_table: torch.Tensor | None = None
+        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.prefill_local_score = (
             self.index_k_tp > 1
             and vllm_config.attention_config.indexer_prefill_cp
