@@ -2255,3 +2255,29 @@ already exists. Default policy is `CHUNK_LEVEL` (prefix-hit chunks skipped).
   `x-claudish-client: <machine>:<workspace>` (fallback `<machine>:unknown`). RSM condensation
   calls :5002 directly, so roo-extensions was asked to set the same header via `defaultHeaders`.
   Our middleware logs it from the next engine boot.
+
+## 25/10 19:00Z — mandate: implement the fs admission policy (#198), three workstreams
+
+The user gave a GO for the whole programme ("OK pour tout… à votre rythme de cron en cron"):
+implement issue #198 and the adjacent open issues incrementally, one surveillance cycle at a
+time. Production is untouched by the work itself: everything below is code, tests and
+measurement until a deployment window is explicitly agreed.
+
+Workstreams (disjoint paths, so parallel agents cannot collide):
+
+1. **Phase 0, measurement** — `myia_vllm/scripts/fs_tier/fs_snapshot_diff.py` (per-group fs
+   read-back from the mtime instrument, restart-free) and `myia_vllm/docs/fs-tier/
+   m2-instrumentation.md` (where to measure attention-only hit vs effective hit).
+   Installed this evening: 427.5 GB written / 39.6 GB read back in ~9 h, 2/3 of the writes are
+   GDN state snapshots (composition measured at 17:30Z).
+2. **Phase 1, fs admission filter** — new overlay `myia_vllm/configs/docker/overlay_v0320_
+   fsadmit/` built on the upstream `TieringAdmissionPolicy` interface (RFC #51240 / PR #60000,
+   both open): frequency ≥ N before an fs cascade (the Dynamo default filter), plus a GDN
+   latest-state rule behind its own flag. Rollback = one env var.
+3. **Phase 2, GDN checkpoint at radix branch points** — design note
+   `myia_vllm/docs/fs-tier/gdn-branch-checkpoint-design.md`. This is the lever that matters for
+   the 30-minute Haiku lanes: after a compaction the socle cannot be hit today because no GDN
+   state exists at the fork position, so it is recomputed every time even when its attention
+   blocks are in GPU memory. Marconi (arXiv 2411.19379) does exactly this.
+
+Nothing deployed. Each phase lands as its own PR; the fs tier only changes image after a GO.
