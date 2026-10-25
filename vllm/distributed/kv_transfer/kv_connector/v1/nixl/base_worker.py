@@ -461,6 +461,24 @@ class NixlBaseConnectorWorker:
         """Whether PP push must match HMA/packed layers by name, not region index."""
         return self.pp_size > 1 and self._tracks_region_layers()
 
+    def _compat_backend_name(self) -> str:
+        """Attention backend name folded into the compatibility hash."""
+        if not self._supports_pp_hma:
+            return self.backend_name
+        from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+
+        # A PP stage may own no indexer layers (e.g. GLM-5.2 skips them on
+        # most layers), so indexers must not change the hash.
+        backends = [
+            b
+            for b in self.attn_backends
+            if not (isinstance(b, type) and issubclass(b, DeepseekV32IndexerBackend))
+        ] or self.attn_backends
+        if self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            return ",".join(sorted({b.get_name() for b in backends}))
+        return backends[0].get_name() if backends else self.backend_name
+
     def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
     ) -> None:
@@ -867,7 +885,6 @@ class NixlBaseConnectorWorker:
         # PP>1 (push mode): this worker holds a contiguous layer slice and
         # transfers into the matching sub-range of a PP=1 remote's regions.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self._remote_region_offset = 0
         if self.pp_size > 1:
             if self._is_hma_required and not self._supports_pp_hma:
                 raise NotImplementedError(
@@ -1499,15 +1516,9 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
-        backend_name = self.backend_name
-        if self._supports_pp_hma and self._has_packed_cache:
-            # PP can reorder the same backends across stages of a packed model.
-            backend_name = ",".join(
-                sorted({backend.get_name() for backend in self.attn_backends})
-            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            backend_name,
+            self._compat_backend_name(),
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -1830,15 +1841,6 @@ class NixlBaseConnectorWorker:
 
         self._set_region_layers(region_layers)
         self._packed_member_layouts = packed_member_layouts
-
-        if self.pp_size > 1 and not use_layer_name_routing:
-            start_layer, end_layer = self.model_config.get_layers_start_end_indices(
-                self.vllm_config.parallel_config
-            )
-            num_local_layers = end_layer - start_layer
-            assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
-            regions_per_layer = self.num_regions // num_local_layers
-            self._remote_region_offset = regions_per_layer * start_layer
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         xfer_region_num_blocks = (
@@ -2471,30 +2473,27 @@ class NixlBaseConnectorWorker:
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
         ):
             # This worker holds a PP layer-slice; the PP=1 remote registered
-            # the full model. Slice its regions to our layer window so the
-            # logic below sees congruent local/remote lists.
-            start = self._remote_region_offset
-            end = start + num_local_regions
-            assert len(nixl_agent_meta.kv_caches_base_addr) >= end
-            nixl_agent_meta.kv_caches_base_addr = nixl_agent_meta.kv_caches_base_addr[
-                start:end
-            ]
-            nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
-            nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
-            if nixl_agent_meta.region_num_blocks is not None:
-                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
-                    start:end
-                ]
-            if nixl_agent_meta.region_group_ids is not None:
-                nixl_agent_meta.region_group_ids = nixl_agent_meta.region_group_ids[
-                    start:end
-                ]
-            if nixl_agent_meta.region_names is not None:
-                nixl_agent_meta.region_names = nixl_agent_meta.region_names[start:end]
-            if nixl_agent_meta.region_mem_types is not None:
-                nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
-                    start:end
-                ]
+            # the full model. Select its regions by name so the logic below
+            # sees congruent local/remote lists. Layers can own different
+            # numbers of regions (e.g. GLM-5.2 indexers), so no fixed offset.
+            remote_names = nixl_agent_meta.region_names
+            assert remote_names is not None, "Remote advertised no region_names"
+            remote_index = {name: i for i, name in enumerate(remote_names)}
+            missing = [n for n in self.region_names if n not in remote_index]
+            assert not missing, f"Remote is missing locally owned regions: {missing}"
+            regions = [remote_index[name] for name in self.region_names]
+            for attr in (
+                "kv_caches_base_addr",
+                "block_lens",
+                "block_strides",
+                "region_num_blocks",
+                "region_group_ids",
+                "region_mem_types",
+            ):
+                values = getattr(nixl_agent_meta, attr)
+                if values is not None:
+                    setattr(nixl_agent_meta, attr, [values[i] for i in regions])
+            nixl_agent_meta.region_names = list(self.region_names)
         # The push WRITE path is not validated with split remote blocks.
         if self._has_mamba and self.use_mla and self._TRANSFER_MODE == "pull":
             self._split_remote_blocks(nixl_agent_meta)

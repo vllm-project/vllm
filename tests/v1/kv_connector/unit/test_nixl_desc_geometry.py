@@ -262,6 +262,35 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("packed", [False, True])
+def test_push_compatibility_backend_ignores_indexers(packed):
+    # GLM-5.2 builds an indexer only on some layers, so a PP stage may own
+    # none while the PP=1 peer has one; both must hash the same backend.
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+
+    class _SparseMLA:
+        @staticmethod
+        def get_name():
+            return "FLASH_ATTN_MLA_SPARSE"
+
+    def backend_name(worker_cls, attn_backends):
+        worker = SimpleNamespace(
+            attn_backends=attn_backends,
+            backend_name=attn_backends[0].get_name(),
+            _supports_pp_hma=worker_cls._supports_pp_hma,
+            _has_packed_cache=packed,
+        )
+        return bw.NixlBaseConnectorWorker._compat_backend_name(worker)
+
+    full = [DeepseekV32IndexerBackend, _SparseMLA]
+    stage = [_SparseMLA]
+    push = NixlPushConnectorWorker
+    assert backend_name(push, full) == backend_name(push, stage)
+    # Pull never runs PP, so it keeps hashing the first backend.
+    assert backend_name(NixlPullConnectorWorker, full) == "DEEPSEEK_V32_INDEXER"
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("p_num_blocks, d_num_blocks", [(4, 4), (4, 6), (6, 4)])
 def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
     p_num_blocks, d_num_blocks

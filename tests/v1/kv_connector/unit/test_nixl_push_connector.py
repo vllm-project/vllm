@@ -1451,15 +1451,17 @@ class TestPushPipelineParallel:
         assert metadata.reqs_to_recv["req-default"].pp_size == 1
 
     def test_add_remote_agent_slices_remote_regions_to_local_pp_window(self):
-        """With PP>1 the producer registered regions for the full model, but
-        this worker holds only a contiguous layer slice; add_remote_agent
-        trims the remote region list to [offset : offset + num_local_regions]
-        before building descriptors. We stop right after the slice via a
-        sentinel on the next collaborator call."""
+        """With PP>1 the decoder registered regions for the full model, but
+        this worker holds only a layer slice; add_remote_agent keeps the
+        remote regions named like the local ones before building descriptors.
+        Layers may own different numbers of regions (here only layer 0 has an
+        indexer cache, as in GLM-5.2), so a fixed per-layer offset would pick
+        the wrong regions. We stop right after the slice via a sentinel on the
+        next collaborator call."""
         block_len = 4096 * 16
         w = _StubWriterWorker.fresh()  # seeds writer-thread state for teardown
         w.pp_size = 2
-        w._remote_region_offset = 2  # this worker owns layers [2, 4)
+        w.region_names = ["layers.2.attn", "layers.3.attn"]
         w.block_len_per_layer = [block_len, block_len]  # 2 local layers
         w.nixl_wrapper = MagicMock()
 
@@ -1472,25 +1474,33 @@ class TestPushPipelineParallel:
         meta = NixlAgentMetadata(
             engine_id="p-engine",
             agent_metadata=b"agent",
-            kv_caches_base_addr=[10, 11, 12, 13],  # full 4-layer model
+            kv_caches_base_addr=[10, 11, 12, 13, 14],  # full 4-layer model
             device_id=0,
             num_blocks=4,
-            block_lens=[block_len] * 4,
+            block_lens=[block_len] * 5,
             # Non-interleaved: consecutive blocks abut, so stride == block length.
-            block_strides=[block_len] * 4,
+            block_strides=[block_len] * 5,
             kv_cache_layout="HND",
             block_size=16,
             ssm_sizes=(0, 0),
             attn_backend_name="FLASH_ATTN",
             physical_blocks_per_logical_kv_block=1,
+            region_names=[
+                "layers.0.attn",
+                "layers.0.indexer",
+                "layers.1.attn",
+                "layers.2.attn",
+                "layers.3.attn",
+            ],
         )
 
         with pytest.raises(_StopAfterSlice):
             w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
 
-        # Sliced down to this worker's layer window (regions [2:4]).
-        assert meta.kv_caches_base_addr == [12, 13]
+        # Sliced down to this worker's layers (remote regions 3 and 4).
+        assert meta.kv_caches_base_addr == [13, 14]
         assert meta.block_lens == [block_len, block_len]
+        assert meta.region_names == ["layers.2.attn", "layers.3.attn"]
 
 
 class TestPushWriterMlaReplication:
