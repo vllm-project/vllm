@@ -360,6 +360,21 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            aligned_num_cpu_blocks = (
+                self.model_executor.get_simple_cpu_offload_num_blocks()
+            )
+            assert aligned_num_cpu_blocks is not None, (
+                "SimpleCPUOffloadConnector workers must report their block count"
+            )
+            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
+                aligned_num_cpu_blocks
+            )
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
 
@@ -830,12 +845,14 @@ class EngineCore:
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         self.model_executor.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self):
@@ -2530,7 +2547,8 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
-        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
+        parallel_config = self.vllm_config.parallel_config
+        has_unfinished, pause_consensus = parallel_config.sync_dp_state(
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,

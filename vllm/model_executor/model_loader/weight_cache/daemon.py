@@ -79,6 +79,7 @@ cached and keep loading from disk in the engine.
 import contextlib
 import fcntl
 import gc
+import itertools
 import multiprocessing
 import os
 import socket
@@ -93,10 +94,16 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
     ensure_model_parallel_initialized,
+    get_world_group,
     init_distributed_environment,
 )
-from vllm.logger import init_logger
+from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+    destroy_fi_ar_workspace,
+)
+from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
@@ -112,15 +119,19 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    SeedConfig,
+    SeedTransport,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
-    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
+from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -173,6 +184,25 @@ def export_entries(
     return entries, aliases
 
 
+def exported_weight_bytes(model: torch.nn.Module | None) -> int:
+    """Bytes of the distinct CUDA storages an engine maps from this model.
+
+    This is the memory the engine would otherwise allocate for the weights
+    itself. ``memory_allocated()`` also counts daemon-only state the engine
+    never maps (communication buffers, warmup workspaces, tensors outside
+    parameters/buffers that the engine rebuilds itself), so reporting it
+    would shrink the engine's KV cache below that of a disk load.
+    """
+    if model is None:
+        return 0
+    storages: dict[int, int] = {}
+    for tensor in itertools.chain(model.parameters(), model.buffers()):
+        if tensor.is_cuda:
+            storage = tensor.untyped_storage()
+            storages[storage.data_ptr()] = storage.nbytes()
+    return sum(storages.values())
+
+
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
 
@@ -186,10 +216,13 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
+        seed_config: SeedConfig | None = None,
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
+        self.warmup_caches = [FlashInferWarmupCache()]
+        self.d2d = SeedTransport(self.warmup_caches, seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -219,6 +252,10 @@ class WeightCacheDaemon:
             self.model_config = vllm_config.model_config
         self.global_rank = global_rank
         rank_in_dp = global_rank - dp_rank * self.pp_size * self.tp_size
+        # Set like the engine's workers do: per-rank state such as the
+        # torch.compile cache is keyed by it, and a compiled artifact shared
+        # across ranks would run every rank's kernels on rank 0's device.
+        vllm_config.parallel_config.rank = rank_in_dp
         self.tp_rank = rank_in_dp % self.tp_size
         self.pp_rank = rank_in_dp // self.tp_size
         self.dp_rank = dp_rank
@@ -247,39 +284,9 @@ class WeightCacheDaemon:
         )
 
     def warmup(self) -> None:
-        """Run the FlashInfer autotune pass against the cached model."""
-        vllm_config = self.vllm_config
-        # Mirrors the gate in the engine's kernel warmup.
-        if (
-            vllm_config.kernel_config.enable_flashinfer_autotune is False
-            or not has_flashinfer()
-            or not current_platform.has_device_capability(90)
-            or is_draft_model_cacheable(vllm_config.speculative_config)
-        ):
-            return
-        try:
-            current_platform.update_block_size_for_backend(vllm_config)
-            runner = build_warmup_runner(
-                vllm_config,
-                self.local_rank,
-                is_draft=self.is_draft,
-                model_config=self.model_config,
-            )
-            assert self.model is not None, "warmup ran before load_model"
-            runner.load_model(model=self.model)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
-            logger.info(
-                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
-                "configs are in the on-disk autotune cache",
-                self.role,
-                self.global_rank,
-            )
-        finally:
-            # Free the runner and the dummy-run activations; the daemon's
-            # weights are untouched.
-            gc.collect()
-            torch.accelerator.empty_cache()
+        """Run each warmup cache's pass (adopting remote caches via D2D)."""
+        for cache in self.warmup_caches:
+            cache.warmup(self, self.d2d)
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -309,6 +316,31 @@ class WeightCacheDaemon:
             self.global_rank,
             format_gib(torch.accelerator.memory_allocated()),
             format_gib(torch.accelerator.memory_reserved()),
+        )
+
+    def release_distributed(self) -> None:
+        """Tear down the daemon's process groups after loading and warmup.
+
+        Serving only exports CUDA IPC handles, so the communicators (NCCL,
+        custom all-reduce and FlashInfer workspaces) would otherwise pin GPU
+        memory outside the engine's budget for the daemon's lifetime.
+        """
+        free_before, _ = torch.accelerator.get_memory_info()
+        # No rank may tear down a communicator while a peer is still in a
+        # warmup collective on it.
+        get_world_group().barrier()
+        # Created lazily by warmup's all-reduce fusion and owned by no group.
+        destroy_fi_ar_workspace()
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        gc.collect()
+        torch.accelerator.empty_cache()
+        free_after, _ = torch.accelerator.get_memory_info()
+        logger.info(
+            "Weight cache %s daemon rank %d released its process groups (%s GiB freed)",
+            self.role,
+            self.global_rank,
+            format_gib(free_after - free_before),
         )
 
     def get_model(self) -> torch.nn.Module:
@@ -363,6 +395,7 @@ class WeightCacheDaemon:
         server.bind(socket_path)
         os.chmod(socket_path, 0o600)
         server.listen()
+        self.d2d.start_listener()
         logger.info(
             "Weight cache %s daemon rank %d serving on %s",
             self.role,
@@ -390,6 +423,7 @@ class WeightCacheDaemon:
                             send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
+            self.d2d.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -430,7 +464,7 @@ class WeightCacheDaemon:
                 conn,
                 {
                     "status": "ok",
-                    "memory_bytes": torch.accelerator.memory_allocated(),
+                    "memory_bytes": exported_weight_bytes(self.model),
                 },
             )
         elif cmd == "release":
@@ -498,7 +532,11 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
+    seed_config: SeedConfig | None = None,
 ) -> None:
+    # Spawned daemons start with logging unconfigured, like engine workers.
+    if logging_config := getattr(vllm_config, "logging_config", None):
+        configure_logging(logging_config)
     daemon = WeightCacheDaemon(
         vllm_config,
         global_rank,
@@ -508,9 +546,11 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
+        seed_config=seed_config,
     )
     daemon.load_model()
     daemon.warmup()
+    daemon.release_distributed()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )
