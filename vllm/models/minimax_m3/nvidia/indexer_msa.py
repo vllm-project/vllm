@@ -47,7 +47,6 @@ from vllm.models.minimax_m3.common.indexer import (
 )
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
-    minimax_m3_index_score,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -219,11 +218,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         if self.prefill_local_score:
             heads = self.num_index_heads * self.index_k_tp
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-            score_elements = (
-                PREFILL_FMHA_SCRATCH_BYTES // 5
-                if self.index_k_tp in (2, 4)
-                else PREFILL_SCORE_BYTES // 4
-            )
+            score_elements = PREFILL_FMHA_SCRATCH_BYTES // 5
             max_seq_len = vllm_config.model_config.max_model_len
             max_score_cols = (
                 ((max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE + 15) // 16 * 16
@@ -242,28 +237,27 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 device=device,
             )
             max_reqs = vllm_config.scheduler_config.max_num_seqs
-            min_chunk = 128 if self.index_k_tp in (2, 4) else 64
+            min_chunk = 128
             windows = (max_tokens + min_chunk - 1) // min_chunk
             self.prefill_window_metadata = torch.empty(
                 windows, 5, max_reqs + 1, dtype=torch.int32, device=device
             )
-            if self.index_k_tp in (2, 4):
-                self.prefill_work_ranges = torch.empty(
-                    windows,
-                    num_compute_units(device.index or 0),
-                    dtype=torch.int64,
-                    device=device,
-                )
-                max_chunk = min(PREFILL_FMHA_CHUNK_SIZE, max_tokens)
-                self.prefill_work_info = torch.empty(
-                    windows,
-                    heads * ((max_chunk + 127) // 128 + max_reqs - 1),
-                    dtype=torch.int64,
-                    device=device,
-                )
-                self.prefill_workspace = torch.empty(
-                    32 << 20, dtype=torch.uint8, device=device
-                )
+            self.prefill_work_ranges = torch.empty(
+                windows,
+                num_compute_units(device.index or 0),
+                dtype=torch.int64,
+                device=device,
+            )
+            max_chunk = min(PREFILL_FMHA_CHUNK_SIZE, max_tokens)
+            self.prefill_work_info = torch.empty(
+                windows,
+                heads * ((max_chunk + 127) // 128 + max_reqs - 1),
+                dtype=torch.int64,
+                device=device,
+            )
+            self.prefill_workspace = torch.empty(
+                32 << 20, dtype=torch.uint8, device=device
+            )
         if not self.prefill_local_score:
             self.unified_scores_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -406,25 +400,20 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 max_seq_len = common_attn_metadata.max_seq_len
                 blocks = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
                 score_cols = (blocks + 15) // 16 * 16
-                chunk_size = min(
-                    PREFILL_CHUNK_SIZE,
-                    max(64, PREFILL_SCORE_BYTES // (heads * score_cols * 4) // 64 * 64),
+                from vllm.third_party.fmha_sm100.api import (
+                    fmha_index_score_sharded_plan_device,
                 )
-                if self.index_k_tp in (2, 4):
-                    from vllm.third_party.fmha_sm100.api import (
-                        fmha_index_score_sharded_plan_device,
-                    )
 
-                    chunk_size = min(
-                        PREFILL_FMHA_CHUNK_SIZE,
-                        max(
-                            128,
-                            PREFILL_FMHA_SCRATCH_BYTES
-                            // (heads * score_cols * 5)
-                            // 128
-                            * 128,
-                        ),
-                    )
+                chunk_size = min(
+                    PREFILL_FMHA_CHUNK_SIZE,
+                    max(
+                        128,
+                        PREFILL_FMHA_SCRATCH_BYTES
+                        // (heads * score_cols * 5)
+                        // 128
+                        * 128,
+                    ),
+                )
                 assert self.prefill_window_metadata is not None
                 for window, start in enumerate(range(0, side_tokens, chunk_size)):
                     end = min(start + chunk_size, side_tokens)
@@ -440,25 +429,23 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     q_lens = window_metadata[1, : hi - lo]
                     k_lens = window_metadata[2, : hi - lo]
                     prefixes = window_metadata[3, : hi - lo]
-                    chunk_plan = None
-                    if self.index_k_tp in (2, 4):
-                        assert self.prefill_work_ranges is not None
-                        assert self.prefill_work_info is not None
-                        assert self.prefill_workspace is not None
-                        chunk_plan = fmha_index_score_sharded_plan_device(
-                            q_lens,
-                            k_lens,
-                            cu_q,
-                            window_metadata[4, : hi - lo + 1],
-                            prefixes,
-                            heads,
-                            total_q=end - start,
-                            max_query_len=end - start,
-                            max_seq_len=max_seq_len,
-                            packed_work_range=self.prefill_work_ranges[window],
-                            packed_work_info=self.prefill_work_info[window],
-                            workspace=self.prefill_workspace,
-                        )
+                    assert self.prefill_work_ranges is not None
+                    assert self.prefill_work_info is not None
+                    assert self.prefill_workspace is not None
+                    chunk_plan = fmha_index_score_sharded_plan_device(
+                        q_lens,
+                        k_lens,
+                        cu_q,
+                        window_metadata[4, : hi - lo + 1],
+                        prefixes,
+                        heads,
+                        total_q=end - start,
+                        max_query_len=end - start,
+                        max_seq_len=max_seq_len,
+                        packed_work_range=self.prefill_work_ranges[window],
+                        packed_work_info=self.prefill_work_info[window],
+                        workspace=self.prefill_workspace,
+                    )
                     local_chunks.append(
                         MiniMaxM3IndexerMSAPrefillChunk(
                             start=start,
@@ -747,35 +734,20 @@ def prefill_local_score(
         query = index_q[chunk.start : chunk.end]
         tokens = query.shape[0]
         scores = metadata.local_scores[:tokens]
-        if chunk.plan is not None:
-            from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
+        assert chunk.plan is not None
+        from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
 
-            fmha_index_score_sharded(
-                query,
-                kv,
-                chunk.block_table,
-                chunk.plan,
-                rank=comm.rank,
-                tp=comm.world,
-                max_score=scores,
-                sm_scale=1.0,
-                initialize=False,
-            )
-        else:
-            minimax_m3_index_score(
-                query,
-                kv,
-                chunk.block_table,
-                chunk.cu_seqlens_q,
-                chunk.seq_lens,
-                chunk.prefix_lens,
-                tokens,
-                chunk.max_seq_len,
-                heads,
-                rank=comm.rank,
-                tp=comm.world,
-                score_out=scores.transpose(0, 1),
-            )
+        fmha_index_score_sharded(
+            query,
+            kv,
+            chunk.block_table,
+            chunk.plan,
+            rank=comm.rank,
+            tp=comm.world,
+            max_score=scores,
+            sm_scale=1.0,
+            initialize=False,
+        )
         chunk_send = send[:, chunk.start : chunk.end]
         valid_pages = num_valid_pages[chunk.start : chunk.end]
         sparse_topk_select_prefill(
