@@ -172,6 +172,24 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
     assert isinstance(chat_template, str)
 
 
+def test_processor_multiple_chat_templates_uses_default():
+    """Render with the "default" template of a processor that has several."""
+    # Ships chat_template.jinja and additional_chat_templates/reranker.jinja
+    model = "Qwen/Qwen3-VL-Reranker-2B"
+    model_config = ModelConfig(model)
+    tokenizer = get_tokenizer(model)
+
+    prompt = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert prompt == "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+
+
 @pytest.mark.parametrize(
     "model, expected_kwargs",
     [
