@@ -3,10 +3,16 @@
 
 # imports for structured outputs tests
 import json
+from io import BytesIO
 
+import numpy as np
 import pytest
+from fastapi import UploadFile
+from transformers import WhisperConfig
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -16,6 +22,30 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
+
+
+@pytest.mark.parametrize("encoding", ["absent", "dict", "json"])
+def test_request_extensions_reach_prompt_and_sampling_params(tmp_path, encoding):
+    """Both request consumers must receive extensions, including form JSON."""
+    WhisperConfig().save_pretrained(tmp_path)
+    config = ModelConfig(model=str(tmp_path))
+    extensions = {"frontend_window": 128, "custom_tags": ["speech", 1]}
+    options = {}
+    if encoding != "absent":
+        options["vllm_xargs"] = (
+            json.dumps(extensions) if encoding == "json" else extensions
+        )
+    request = TranscriptionRequest(file=UploadFile(BytesIO()), **options)
+    params = request.build_stt_params(
+        audio=np.zeros(160, dtype=np.float32),
+        stt_config=SpeechToTextConfig(),
+        model_config=config,
+        task_type="transcribe",
+    )
+
+    expected = None if encoding == "absent" else extensions
+    assert params.extra_args == expected
+    assert (request.to_sampling_params(16).extra_args or {}) == (expected or {})
 
 
 async def transcribe_and_check(
