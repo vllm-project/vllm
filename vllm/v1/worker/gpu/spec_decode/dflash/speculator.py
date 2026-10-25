@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_pcp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -631,18 +630,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
-
-        if self.pcp_manager is not None and not dummy_run:
-            # Replicated drafts must publish the same proposal and distribution.
-            pcp_group = get_pcp_group()
-            pcp_group.broadcast(self.draft_tokens[:num_reqs], src=0)
-            if self.draft_logits is not None:
-                # Logits are indexed by persistent request slots.
-                draft_logits = self.draft_logits.index_select(
-                    0, input_batch.idx_mapping
-                )
-                pcp_group.broadcast(draft_logits, src=0)
-                self.draft_logits.index_copy_(0, input_batch.idx_mapping, draft_logits)
 
         return self.draft_tokens[:num_reqs]
 
