@@ -1,8 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <cstring>
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "quick_reduce_impl.cuh"
+#include "quick_reduce_tp4.cuh"
 
 #define HIP_CHECK(err)                                                     \
   do {                                                                     \
@@ -102,6 +105,7 @@ struct DeviceComms {
   static int constexpr kMaxWorldSize = 8;
 
   bool initialized = false;
+  bool is_gfx950 = false;
   uint32_t* d_flag_counters = nullptr;
   int world_size;
   int rank;
@@ -121,6 +125,11 @@ struct DeviceComms {
     destroy();
     this->world_size = world_size;
     this->rank = rank;
+    int device;
+    hipDeviceProp_t properties;
+    HIP_CHECK(hipGetDevice(&device));
+    HIP_CHECK(hipGetDeviceProperties(&properties, device));
+    is_gfx950 = std::strncmp(properties.gcnArchName, "gfx950", 6) == 0;
     if (max_problem_size.has_value() && max_problem_size.value() > 0) {
       this->kMaxProblemSize = max_problem_size.value();
     }
@@ -204,6 +213,16 @@ struct DeviceComms {
                         world_size * sizeof(uint8_t*), hipMemcpyHostToDevice));
   }
 
+  hipError_t allreduce_q4_bf16_tp4(const half* input, half* output,
+                                   uint32_t count, hipStream_t stream) {
+    uint32_t blocks = divceil(count * sizeof(half), kTileSize);
+    uint32_t grid = std::min<uint32_t>(tp4_q4::kMaxBlocks, blocks);
+    hipLaunchKernelGGL(tp4_q4::allreduce, dim3(grid), dim3(kBlockTwoShot), 0,
+                       stream, input, output, count, blocks, rank, dbuffer_list,
+                       data_offset, d_flag_counters, kMaxProblemSize);
+    return hipGetLastError();
+  }
+
   template <typename T, bool cast_bf2half>
   void allreduce(T const* A, T* B, uint32_t N, int quant_level,
                  hipStream_t stream) {
@@ -217,6 +236,13 @@ struct DeviceComms {
     uint32_t num_blocks = divceil(msg_size, kTileSize);
     uint32_t grid = min(kMaxNumBlocks, num_blocks);
     auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
+    if constexpr (std::is_same<T, half>::value && cast_bf2half) {
+      if (is_gfx950 && world_size == 4 &&
+          quant_level_ == QuickReduceQuantLevel::INT4) {
+        HIP_CHECK(allreduce_q4_bf16_tp4(A, B, N, stream));
+        return;
+      }
+    }
     switch (quant_level_) {
       case QuickReduceQuantLevel::INT8:
         TWOSHOT_DISPATCH(CodecQ8)

@@ -471,12 +471,14 @@ steps:
       - tests/distributed/
       - tests/basic_correctness/
       - tests/lora/test_mixtral.py
+      - csrc/rocm/quickreduce/
       commands:
       - pytest -v -s distributed/test_custom_all_reduce.py
       - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
       - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
       - pytest -v -s -x lora/test_mixtral.py
       - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
+      - pytest -v -s distributed/test_rocm_quick_reduce.py::test_quick_allreduce_bf16_cast_graph_shapes_and_late_peers
 
 - label: ":nvidia: (H100) Distributed Features"
   key: distributed-tests-2xh100-2xmi300

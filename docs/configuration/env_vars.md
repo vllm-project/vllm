@@ -2,6 +2,11 @@
 
 vLLM uses the following environment variables to configure the system:
 
+On AMD Instinct MI355X (`gfx950`), `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`
+selects a specialized native transport for eligible BF16 tensors at TP4 when
+`VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16` is enabled (the default).
+QuickReduce is disabled by default (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE`).
+
 !!! warning
     Please note that `VLLM_PORT` and `VLLM_HOST_IP` set the port and ip for vLLM's **internal usage**. It is not the port and ip for the API server. If you use `--host $VLLM_HOST_IP` and `--port $VLLM_PORT` to start the API server, it will not work.
 

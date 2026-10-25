@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import queue
 import traceback
-from functools import lru_cache
+from functools import lru_cache, partial
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import patch
@@ -243,7 +243,87 @@ def _quick_allreduce_cudagraph_worker(
             dist.destroy_process_group()
 
 
-def _run_cudagraph_replay_test(*, world_size: int, quant_level: str):
+def _quick_allreduce_bf16_shape_worker(
+    rank, world_size, port, quant_level, *, quantization_min_kb=None
+):
+    os.environ["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] = quant_level
+    os.environ["VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16"] = "1"
+    os.environ["VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB"] = "64"
+    os.environ.pop("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", None)
+    key = "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB"
+    if quantization_min_kb is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = str(quantization_min_kb)
+    envs.disable_envs_cache()
+
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    qar = None
+    try:
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce,
+        )
+
+        qar = QuickAllReduce(group=dist.GroupMember.WORLD, device=rank)
+        assert not qar.disabled and qar.use_fp16_kernels
+        for count in (192 * 6144, 256 * 6144 + 8, 2048 * 6144 + 8, 256 * 6144):
+            positions = torch.arange(count, device=device)
+            block = (positions // 64 % 13 - 6).to(torch.bfloat16)
+            dominant = positions % 64 < 2
+            # The small values survive FP but round to zero through INT4.
+            base = torch.where(dominant, block, block / 32)
+            inp = base * (rank + 1)
+            storage = torch.full((count + 8,), 37, dtype=torch.bfloat16, device=device)
+            out = storage[:count]
+            assert qar.should_quick_allreduce(inp)
+            qar.quick_all_reduce(inp, out=out)
+            torch.accelerator.synchronize()
+            dist.barrier()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                qar.quick_all_reduce(inp, out=out)
+            for iteration, scale in enumerate((0, 1, -1, 2, -2, 3, -3, 4)):
+                inp.copy_(base * ((rank + 1) * scale))
+                out.fill_(float("nan"))
+                lagging = iteration % world_size
+                if rank != lagging:
+                    graph.replay()
+                dist.barrier()
+                if rank == lagging:
+                    graph.replay()
+                torch.accelerator.synchronize()
+                expected = base * (world_size * (world_size + 1) // 2 * scale)
+                if (
+                    quantization_min_kb is None
+                    or count * 2 >= quantization_min_kb * 1024
+                ):
+                    expected = torch.where(dominant, expected, 0)
+                torch.testing.assert_close(out, expected, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    storage[count:],
+                    torch.full_like(storage[count:], 37),
+                    rtol=0,
+                    atol=0,
+                )
+                dist.barrier()
+            graph.reset()
+    finally:
+        if qar is not None:
+            qar.close()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _run_cudagraph_replay_test(
+    *, world_size: int, quant_level: str, worker=_quick_allreduce_cudagraph_worker
+):
     _log(f"launch {world_size}-GPU cudagraph replay case: quant={quant_level}")
     ctx = mp.get_context("spawn")
     port = get_open_port()
@@ -251,15 +331,25 @@ def _run_cudagraph_replay_test(*, world_size: int, quant_level: str):
 
     for rank in range(world_size):
         proc = ctx.Process(
-            target=_quick_allreduce_cudagraph_worker,
+            target=worker,
             args=(rank, world_size, port, quant_level),
         )
         proc.start()
         procs.append(proc)
 
-    for proc in procs:
-        proc.join(timeout=120)
-        assert proc.exitcode == 0, f"worker exited with code {proc.exitcode}"
+    try:
+        for proc in procs:
+            proc.join(timeout=120)
+            assert proc.exitcode == 0, f"worker exited with code {proc.exitcode}"
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+        for proc in procs:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+                proc.join()
     _log(f"finished {world_size}-GPU cudagraph replay case: quant={quant_level}")
 
 
@@ -851,6 +941,18 @@ def test_quick_allreduce_cudagraph_replay():
         world_size=CUDAGRAPH_WORLD_SIZE,
         quant_level="FP",
     )
+
+
+@pytest.mark.parametrize(
+    "quantization_min_kb", [None, 4096], ids=["int4", "fp_then_int4"]
+)
+@multi_gpu_test(num_gpus=4)
+def test_quick_allreduce_bf16_cast_graph_shapes_and_late_peers(quantization_min_kb):
+    """Shape/codec changes and late peers must not reuse earlier graph outputs."""
+    worker = partial(
+        _quick_allreduce_bf16_shape_worker, quantization_min_kb=quantization_min_kb
+    )
+    _run_cudagraph_replay_test(world_size=4, quant_level="INT4", worker=worker)
 
 
 @pytest.mark.skipif(
