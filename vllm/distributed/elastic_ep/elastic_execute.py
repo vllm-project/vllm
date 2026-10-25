@@ -50,7 +50,6 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     sync_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.platforms import current_platform
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
@@ -297,9 +296,8 @@ class ElasticEPScalingExecutor:
         self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
             self.transfer_weights(old_dp_size, new_dp_size)
-        # On ROCm this deadlocks while serving; warm_and_capture warms these at commit.
-        if not current_platform.is_rocm():
-            self._warm_target_groups(get_standby_dp_group(), standby_ep_group)
+        # Not warmed here: the warm-up deadlocks while serving (see
+        # defer_comm_warmup); the commit warms these groups.
         if new_dp_size > old_dp_size and self._can_reuse_fused_moe_kernel():
             target_world_group = get_standby_world_group()
             assert target_world_group is not None
@@ -604,7 +602,7 @@ class ElasticEPScalingExecutor:
         if not self._can_reuse_fused_moe_kernel():
             # warm_and_capture's dummy run warms the deferred dp/ep groups.
             self.warm_and_capture()
-        elif current_platform.is_rocm():
+        else:
             # Reuse path skips warm_and_capture; warm the deferred groups here.
             self._warm_target_groups(get_dp_group(), get_ep_group())
         self._perform_eplb_reshuffle(async_op=True)
@@ -619,7 +617,7 @@ class ElasticEPScalingExecutor:
             retired_groups = self.switch_and_prepare()
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
-            elif current_platform.is_rocm():
+            else:
                 # Reuse path skips warm_and_capture; warm the deferred groups here.
                 self._warm_target_groups(get_dp_group(), get_ep_group())
             self._start_group_cleanup(retired_groups)
@@ -678,8 +676,6 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
-        if not current_platform.is_rocm():
-            self._warm_target_groups(get_dp_group(), get_ep_group())
         if self._can_reuse_fused_moe_kernel():
             sync_flashinfer_autotune_cache(self.worker.model_runner, get_world_group())
 

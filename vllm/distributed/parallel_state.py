@@ -1975,16 +1975,16 @@ def init_distributed_environment(
 
 
 def _elastic_join_warmup_ctx() -> AbstractContextManager[Any]:
-    """Defer communicator warm-up when joining a live elastic-EP cluster on ROCm.
+    """Defer communicator warm-up when joining a live elastic-EP cluster.
 
     The existing ranks defer their matching warm-up in create_standby_groups(),
     so a joining worker must too or the warm-up collective has no peers. Both
     sides warm up at commit.
     """
-    from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_rocm
+    from vllm.distributed.device_communicators.pynccl import defer_comm_warmup
 
     if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-        return defer_comm_warmup_on_rocm()
+        return defer_comm_warmup()
     return nullcontext()
 
 
