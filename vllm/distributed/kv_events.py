@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict
-from itertools import count
 from queue import Queue
 from typing import Any
 
@@ -316,7 +315,10 @@ class ZmqEventPublisher(EventPublisher):
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
         request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
+        8-byte big-endian integer. Subscribers can additionally send a request
+        carrying the ``DUMP_SEQ`` sentinel to ask for a state dump — a snapshot
+        of the currently cached blocks plus the batches the consumer may have
+        missed (see `_service_dump`).
     buffer_steps:
         Number of past batches to keep for replay.
     hwm:
@@ -330,6 +332,16 @@ class ZmqEventPublisher(EventPublisher):
 
     SHUTDOWN_TIMEOUT: float = 1.0
     END_SEQ = (-1).to_bytes(8, "big", signed=True)
+    # Replay-request sentinel asking for a state dump instead of a plain
+    # history replay (see `_service_dump`).
+    DUMP_SEQ = (-2).to_bytes(8, "big", signed=True)
+    # Response marker terminating the snapshot part of a dump. Its payload
+    # carries the snapshot position n0 followed by the first sequence of the
+    # replayed tail, each 8-byte big-endian.
+    DUMP_END_SEQ = (-3).to_bytes(8, "big", signed=True)
+    # Snapshot frames are tagged with descending negative sequence numbers
+    # starting here so they cannot be confused with stream positions.
+    DUMP_FRAME_BASE_SEQ = -4
 
     def __init__(
         self,
@@ -345,6 +357,15 @@ class ZmqEventPublisher(EventPublisher):
         super().__init__(data_parallel_rank)
         self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
+        # Mirror of the currently cached blocks, keyed by
+        # (block_hash, medium, group_idx) and valued by the encoded payload of
+        # the batch that last stored each block. Updated in stream order on the
+        # publisher thread, it lets `_service_dump` serve a consistent snapshot
+        # without walking engine internals. Its size is bounded by the number
+        # of currently cached blocks.
+        self._resident: dict[
+            tuple[ExternalBlockHash, str | None, int | None], bytes
+        ] = {}
 
         # ZMQ sockets
         self._ctx = zmq.Context.instance()
@@ -371,7 +392,10 @@ class ZmqEventPublisher(EventPublisher):
         )
 
         # Payload
-        self._seq_gen = count()
+        # Sequence numbers are allocated on the publisher thread only, so
+        # `_service_dump` can treat `self._seq` as the stream position of the
+        # next batch to publish.
+        self._seq = 0
         self._topic_bytes = topic.encode("utf-8")
 
         # Thread
@@ -492,13 +516,15 @@ class ZmqEventPublisher(EventPublisher):
                 continue
 
             try:
-                seq = next(self._seq_gen)
+                seq = self._seq
+                self._seq += 1
 
                 payload = self._pack.encode(event)
                 seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
                 self._buffer.append((seq, payload))
+                self._update_resident_mirror(payload, event)
                 self._event_queue.task_done()
 
             except Exception as e:
@@ -511,6 +537,9 @@ class ZmqEventPublisher(EventPublisher):
         assert self._replay is not None  # narrows type for mypy
 
         frame = self._replay.recv_multipart()
+        if len(frame) == 4 and frame[2] == self.DUMP_SEQ:
+            self._service_dump(frame[0], int.from_bytes(frame[3], "big"))
+            return
         if len(frame) != 3:
             logger.warning("Invalid replay request: %s", frame)
             return
@@ -525,6 +554,84 @@ class ZmqEventPublisher(EventPublisher):
                 )
         # Send end of sequence marker
         self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
+
+    def _service_dump(self, client_id: bytes, last_seq: int) -> None:
+        """Serve a state-dump request (``DUMP_SEQ``).
+
+        The response, in order:
+
+        1. One frame per distinct retained ``BlockStored`` payload — the
+           blocks the engine currently caches — each tagged with a
+           descending negative sequence number starting at
+           ``DUMP_FRAME_BASE_SEQ``.
+        2. A ``DUMP_END_SEQ`` marker whose payload is the snapshot position
+           ``n0`` (the sequence number of the next batch to publish when the
+           snapshot was taken) followed by ``tail_from``, the first sequence
+           of the replayed tail.
+        3. Every buffered batch with ``seq >= tail_from``, in order.
+        4. The regular ``END_SEQ`` terminator.
+
+        Every event with ``seq < n0`` is already reflected in the snapshot,
+        and every event with ``seq >= n0`` is published live afterwards, so a
+        consumer that applies the snapshot, then the tail, then continues the
+        live stream converges to the publisher's state without gaps.
+
+        ``last_seq`` is the consumer's last applied sequence. ``last_seq == 0``
+        marks a cold start: the snapshot alone is a complete state, so the tail
+        is skipped (``tail_from = n0``) and no duplicate stores are replayed.
+        For ``last_seq > 0`` the tail replays ``[last_seq, n0)``; if the ring
+        no longer retains that far back, the tail starts at the oldest
+        retained batch and the consumer can detect the discontinuity from
+        ``tail_from``.
+        """
+        assert self._replay is not None  # narrows type for mypy
+
+        # dict(d) copies atomically under the GIL and this thread is the only
+        # writer, so the mirror and n0 below are mutually consistent.
+        snapshot = dict.fromkeys(self._resident.values())
+        n0 = self._seq
+        tail_from = n0 if last_seq == 0 else last_seq
+
+        for i, payload in enumerate(snapshot):
+            snap_seq = (self.DUMP_FRAME_BASE_SEQ - i).to_bytes(8, "big", signed=True)
+            self._replay.send_multipart(
+                (client_id, b"", self._topic_bytes, snap_seq, payload)
+            )
+        self._replay.send_multipart(
+            (
+                client_id,
+                b"",
+                b"",
+                self.DUMP_END_SEQ,
+                n0.to_bytes(8, "big") + tail_from.to_bytes(8, "big"),
+            )
+        )
+        for seq, buf in self._buffer:
+            if seq >= tail_from:
+                self._replay.send_multipart(
+                    (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
+                )
+        # Send end of sequence marker
+        self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
+
+    def _update_resident_mirror(self, payload: bytes, event: EventBatch) -> None:
+        """Maintain the resident-block mirror used to serve dump requests.
+
+        ``BlockStored`` records (or refreshes) the retained payload for every
+        block it stores; ``BlockRemoved`` drops the matching entries;
+        ``AllBlocksCleared`` wipes the mirror. Non-KV batches are ignored, and
+        removals that do not match a stored (medium, group_idx) triple are
+        dropped, mirroring how consumers evict unknown keys.
+        """
+        for ev in event.events:
+            if isinstance(ev, BlockStored):
+                for block_hash in ev.block_hashes:
+                    self._resident[(block_hash, ev.medium, ev.group_idx)] = payload
+            elif isinstance(ev, BlockRemoved):
+                for block_hash in ev.block_hashes:
+                    self._resident.pop((block_hash, ev.medium, ev.group_idx), None)
+            elif isinstance(ev, AllBlocksCleared):
+                self._resident.clear()
 
     @staticmethod
     def offset_endpoint_port(

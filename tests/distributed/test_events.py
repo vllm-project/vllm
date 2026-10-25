@@ -7,8 +7,12 @@ import msgspec
 import pytest
 
 from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
 )
 
@@ -135,6 +139,169 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
     assert seqs == list(range(10, buffer_size + 10)), (
         "Should replay seq 11 through buffer_size+10"
     )
+
+
+def _kv_store_batch(
+    block_hashes: list[bytes | int],
+    parent_block_hash: bytes | int | None = None,
+) -> KVEventBatch:
+    """Build a KVEventBatch carrying one BlockStored event."""
+    return KVEventBatch(
+        ts=time.time(),
+        events=[
+            BlockStored(
+                block_hashes=block_hashes,
+                parent_block_hash=parent_block_hash,
+                token_ids=list(range(len(block_hashes) * 16)),
+                block_size=16,
+                lora_id=None,
+                medium="GPU",
+                lora_name=None,
+            )
+        ],
+    )
+
+
+def _kv_remove_batch(block_hashes: list[bytes | int]) -> KVEventBatch:
+    """Build a KVEventBatch carrying one BlockRemoved event."""
+    return KVEventBatch(
+        ts=time.time(),
+        events=[BlockRemoved(block_hashes=block_hashes, medium="GPU")],
+    )
+
+
+def _kv_cleared_batch() -> KVEventBatch:
+    """Build a KVEventBatch carrying one AllBlocksCleared event."""
+    return KVEventBatch(ts=time.time(), events=[AllBlocksCleared()])
+
+
+def _make_kv_subscriber(publisher_config):
+    """A MockSubscriber that decodes KVEventBatch payloads."""
+    from .conftest import MockSubscriber
+
+    endpoint = publisher_config.endpoint
+    replay_endpoint = publisher_config.replay_endpoint
+    if endpoint.startswith("tcp://*"):
+        endpoint = endpoint.replace("*", "127.0.0.1")
+    if replay_endpoint and replay_endpoint.startswith("tcp://*"):
+        replay_endpoint = replay_endpoint.replace("*", "127.0.0.1")
+    return MockSubscriber(
+        [endpoint],
+        [replay_endpoint] if replay_endpoint else None,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+
+def _drain_live(subscriber, count: int, timeout_ms: int = 5000) -> None:
+    """Wait until ``count`` live batches have been received."""
+    received = 0
+    deadline = time.time() + timeout_ms / 1000
+    while received < count and time.time() < deadline:
+        if subscriber.receive_one(timeout=200) is not None:
+            received += 1
+    assert received == count, f"Expected {count} live batches, got {received}"
+
+
+def test_dump_cold_start_returns_snapshot_only(publisher, publisher_config):
+    """A cold-start dump returns the resident snapshot and no history tail."""
+    sub = _make_kv_subscriber(publisher_config)
+    try:
+        publisher.publish(_kv_store_batch([100, 101]))
+        publisher.publish(_kv_remove_batch([101]))
+        _drain_live(sub, 2)
+
+        sub.request_dump(last_seq=0)
+        snapshot, (n0, tail_from), tail = sub.receive_dump()
+
+        # Hash 101 was removed, so a single distinct payload (the span that
+        # stored 100 and 101) remains in the mirror.
+        assert len(snapshot) == 1
+        event = snapshot[0][1].events[0]
+        assert isinstance(event, BlockStored)
+        assert list(event.block_hashes) == [100, 101]
+        # Cold start: the snapshot is already the complete state, so the tail
+        # is skipped and tail_from equals the snapshot position.
+        assert n0 == 2
+        assert tail_from == 2
+        assert tail == []
+    finally:
+        sub.close()
+
+
+def test_dump_warm_consumer_replays_missed_window(publisher, publisher_config):
+    """A warm consumer's dump replays exactly the batches it missed."""
+    sub = _make_kv_subscriber(publisher_config)
+    try:
+        publisher.publish(_kv_store_batch([1]))
+        publisher.publish(_kv_store_batch([2]))
+        publisher.publish(_kv_store_batch([3]))
+        _drain_live(sub, 3)
+
+        # The consumer applied seq 0 and missed seq 1-2.
+        sub.request_dump(last_seq=1)
+        snapshot, (n0, tail_from), tail = sub.receive_dump()
+
+        assert n0 == 3
+        assert tail_from == 1
+        assert [seq for seq, _ in tail] == [1, 2]
+        # The snapshot contains every resident block, including the ones
+        # whose stores are replayed in the tail (idempotent adds).
+        assert len(snapshot) == 3
+    finally:
+        sub.close()
+
+
+def test_dump_after_all_blocks_cleared(publisher, publisher_config):
+    """AllBlocksCleared empties the resident mirror."""
+    sub = _make_kv_subscriber(publisher_config)
+    try:
+        publisher.publish(_kv_store_batch([10]))
+        publisher.publish(_kv_cleared_batch())
+        _drain_live(sub, 2)
+
+        sub.request_dump(last_seq=0)
+        snapshot, (n0, tail_from), tail = sub.receive_dump()
+
+        assert snapshot == []
+        assert n0 == 2
+        assert tail_from == 2
+        assert tail == []
+    finally:
+        sub.close()
+
+
+def test_dump_ignores_non_kv_event_batches(publisher, subscriber):
+    """Batches without KV cache events leave the resident mirror empty."""
+    for _ in range(3):
+        publisher.publish(create_test_events(1))
+    _drain_live(subscriber, 3)
+
+    subscriber.request_dump(last_seq=0)
+    snapshot, (n0, tail_from), tail = subscriber.receive_dump()
+
+    assert snapshot == []
+    assert n0 == 3
+    assert tail_from == 3
+    assert tail == []
+
+
+def test_plain_replay_still_works_after_dump(publisher, publisher_config):
+    """Dump support does not change plain replay semantics."""
+    sub = _make_kv_subscriber(publisher_config)
+    try:
+        publisher.publish(_kv_store_batch([1]))
+        publisher.publish(_kv_store_batch([2]))
+        _drain_live(sub, 2)
+
+        sub.request_dump(last_seq=0)
+        sub.receive_dump()
+
+        sub.request_replay(0)
+        replayed = sub.receive_replay()
+        assert [seq for seq, _ in replayed] == [0, 1]
+    finally:
+        sub.close()
 
 
 def test_topic_filtering(publisher_config):

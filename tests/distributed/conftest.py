@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import random
+from typing import Any
 
 import msgspec
 import msgspec.msgpack
@@ -9,7 +10,7 @@ import pytest
 import zmq
 
 from vllm.config.kv_events import KVEventsConfig
-from vllm.distributed.kv_events import EventPublisherFactory
+from vllm.distributed.kv_events import EventPublisherFactory, ZmqEventPublisher
 
 from .test_events import SampleBatch
 
@@ -141,6 +142,17 @@ class MockSubscriber:
             [b"", start_seq.to_bytes(8, "big")]
         )
 
+    def request_dump(self, last_seq: int = 0, socket_idx: int = 0) -> None:
+        """Request a state dump (snapshot + replay tail) from the publisher."""
+        if not self.replay_sockets:
+            raise ValueError("Replay sockets not initialized")
+        if socket_idx >= len(self.replay_sockets):
+            raise ValueError(f"Invalid socket index {socket_idx}")
+
+        self.replay_sockets[socket_idx].send_multipart(
+            [b"", ZmqEventPublisher.DUMP_SEQ, last_seq.to_bytes(8, "big")]
+        )
+
     def receive_replay(self, socket_idx: int = 0) -> list[tuple[int, SampleBatch]]:
         """Receive replayed messages from a specific replay socket."""
         if not self.replay_sockets:
@@ -172,6 +184,56 @@ class MockSubscriber:
                 break
 
         return replayed
+
+    def receive_dump(
+        self, socket_idx: int = 0
+    ) -> tuple[list[tuple[int, Any]], tuple[int, int], list[tuple[int, Any]]]:
+        """Receive a dump response.
+
+        Returns ``(snapshot, (n0, tail_from), tail)`` where ``snapshot`` and
+        ``tail`` are lists of ``(seq, decoded_batch)`` tuples. Snapshot frames
+        carry negative sequence numbers (huge when read as unsigned).
+        """
+        if not self.replay_sockets:
+            raise ValueError("Replay sockets not initialized")
+        if socket_idx >= len(self.replay_sockets):
+            raise ValueError(f"Invalid socket index {socket_idx}")
+
+        replay_socket = self.replay_sockets[socket_idx]
+        snapshot: list[tuple[int, Any]] = []
+        marker: tuple[int, int] | None = None
+        tail: list[tuple[int, Any]] = []
+        while True:
+            try:
+                if not replay_socket.poll(1000):
+                    break
+
+                frames = replay_socket.recv_multipart()
+                if frames and frames[0] == b"":
+                    frames = frames[1:]
+                if len(frames) == 3 and frames[1] == ZmqEventPublisher.DUMP_END_SEQ:
+                    payload = frames[2]
+                    marker = (
+                        int.from_bytes(payload[:8], "big"),
+                        int.from_bytes(payload[8:16], "big"),
+                    )
+                    continue
+                if len(frames) != 3 or not frames[-1]:
+                    break  # End of dump marker
+
+                topic, seq_bytes, payload = frames
+                assert topic == self.topic_bytes
+                seq = int.from_bytes(seq_bytes, "big")
+                data = self.decoder.decode(payload)
+                if seq >= 2**63:
+                    snapshot.append((seq, data))
+                else:
+                    tail.append((seq, data))
+            except zmq.ZMQError:
+                break
+
+        assert marker is not None, "dump response ended without a DUMP_END marker"
+        return snapshot, marker, tail
 
     def close(self):
         """Clean up resources."""
