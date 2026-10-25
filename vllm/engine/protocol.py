@@ -36,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -59,6 +59,10 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def errored(self) -> bool: ...
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
 
     @property
     @abstractmethod
@@ -168,6 +172,7 @@ class EngineClient(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides."""
         ...
@@ -261,6 +266,12 @@ class EngineClient(ABC):
     ) -> None:
         """Scale the engine."""
         raise NotImplementedError
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        """Return shared external Elastic EP operation status, if enabled."""
+        return None
 
     async def collective_rpc(
         self,

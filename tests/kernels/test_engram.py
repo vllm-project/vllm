@@ -184,6 +184,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
     assert state.ensure_cache()
     profiling_cache = state._cache
+    assert profiling_cache is not None
     profiling_cache.fill_(7)
     assert state.ensure_cache()
     assert state._cache is profiling_cache
@@ -192,6 +193,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(num_blocks, 64, 1)
     assert state.ensure_cache()
     assert state._cache is not profiling_cache
+    assert state._cache is not None
     assert state._cache.shape == (num_blocks * 64,)
     assert torch.count_nonzero(state._cache) == 0
 
@@ -502,11 +504,12 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_v2_model_state_gathers_lookback_window():
+@pytest.mark.parametrize("pcp", [False, True])
+def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
     from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 
-    depth, max_num_reqs, max_model_len = 3, 4, 16
+    depth, max_num_reqs, max_model_len = 3, 6, 16
     state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
     state.rope_state = None
     state.supports_mm_inputs = False
@@ -527,15 +530,24 @@ def test_v2_model_state_gathers_lookback_window():
     # Batch rows -> request state rows: a request two decode steps in, a fresh
     # request, and one at the end of a 5-token prompt.
     input_batch = SimpleNamespace(
-        idx_mapping=torch.tensor([2, 0, 3], dtype=torch.int64, device="cuda")
+        idx_mapping=torch.tensor(
+            [2, 0, 3, 2] if pcp else [2, 0, 3], dtype=torch.int64, device="cuda"
+        ),
+        query_start_loc=torch.arange(5 if pcp else 4, dtype=torch.int32, device="cuda"),
+        positions=torch.tensor([8, 0, 6, 5] if pcp else [8, 0, 6], device="cuda"),
     )
     window = state.prepare_inputs(input_batch, req_states)["lookback_token_ids"]
-    assert window.cpu().tolist() == [
+    assert window is not None
+    expected = [
         [22, 21, 16],
         [-1, -1, -1],
         [0, 0, 0],
-        [-1, -1, -1],
     ]
+    if pcp:
+        # The second PCP chunk of request 2 starts at 5, not at its global 8.
+        expected.append([15, 14, 13])
+    expected.extend([[-1] * depth] * (max_num_reqs - len(expected)))
+    assert window.cpu().tolist() == expected
     # Graph capture runs on the dummy inputs and replays read the same buffer.
     dummy = state.prepare_dummy_inputs(num_reqs=3, num_tokens=3)["lookback_token_ids"]
     assert dummy is window and torch.all(dummy == -1)
@@ -743,9 +755,12 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
     assert torch.equal(out, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize("use_thp", [False, True])
 @pytest.mark.parametrize("register_fails", [False, True])
-def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
+def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp):
     """Huge-page tables and their pinned fallback both give exact lookup rows."""
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
@@ -756,13 +771,14 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     rows, dim = 32769, 64
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(
-            rows, dim, (rows,), cpu_offload=True, use_thp=True
+            rows, dim, (rows,), cpu_offload=True, use_thp=use_thp
         )
     assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
     same_storage = layer.weight.untyped_storage().data_ptr() == (
         layer.weight_scale_inv.untyped_storage().data_ptr()
     )
-    assert same_storage != register_fails
+    registered = (use_thp or current_platform.is_rocm()) and not register_fails
+    assert same_storage == registered
     layer.weight.data.fill_(2)
     layer.weight_scale_inv.data.fill_(127)
     ids = torch.tensor(
@@ -797,6 +813,7 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     modules[1].prepare_embeddings(hashes[:, 1])
     rows = modules[0].embed(hashes[:, 0])
     torch.cuda.current_stream().synchronize()
+    assert modules[1]._prefetch_done is not None
     assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
@@ -856,7 +873,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         streams.append(torch.cuda.current_stream())
         lookup(ids, out, background=background)
 
-    layer.lookup = track_lookup
+    monkeypatch.setattr(layer, "lookup", track_lookup)
     main = torch.cuda.current_stream()
     ids = torch.randint(
         layer.vocab_start_idx,

@@ -238,6 +238,13 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        # All PP ranks must run the same forwards to match sends and receives.
+        if model_runner.speculative_config is not None:
+            # Greedy batches skip logits processing, so rejection kernels
+            # also see model-dtype logits instead of FP32.
+            _warmup_kernels(
+                model_runner, worker_execute_model, worker_sample_tokens, greedy=True
+            )
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
@@ -249,6 +256,7 @@ def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    greedy: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -321,7 +329,11 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = (
+            SamplingParams(temperature=0)
+            if greedy
+            else SamplingParams.for_sampler_warmup()
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -372,7 +384,9 @@ def _warmup_kernels(
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
+                (len(req_ids) * model_runner.decode_query_len, bitmask_width),
+                fill_value=-1,
+                dtype=np.int32,
             )
             grammar_output = GrammarOutput(
                 structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
