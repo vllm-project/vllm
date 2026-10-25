@@ -352,6 +352,32 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     assert output.routed_experts.shape == (0, 1, 1)
 
 
+def test_encoder_outputs_returned_with_final_output():
+    """Encoder outputs of every step reach only the request's final output."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1, max_tokens=2)
+    scheduler.add_request(request)
+    items = {0: {"x": torch.zeros(2)}, 1: {"x": torch.ones(3)}}
+
+    step_outputs = []
+    for item in items:
+        outputs = scheduler.update_from_output(
+            scheduler.schedule(),
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                sampled_token_ids=[[0]],
+                encoder_outputs={request.request_id: {item: items[item]}},
+            ),
+        )
+        step_outputs.append(outputs[request.client_index].outputs[0])
+
+    first, final = step_outputs
+    assert first.finish_reason is None and first.encoder_outputs is None
+    assert final.finish_reason is not None and final.encoder_outputs is not None
+    assert final.encoder_outputs.keys() == items.keys()
+    assert all(final.encoder_outputs[i]["x"] is items[i]["x"] for i in items)
+
+
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(

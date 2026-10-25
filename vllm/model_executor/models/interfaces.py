@@ -1334,6 +1334,42 @@ def supports_realtime(
 
 
 @runtime_checkable
+class SupportsEncoderOutputs(Protocol):
+    """The interface for multi-modal models that return per-item outputs of
+    their encoder pass with the request's final output.
+
+    The outputs reach `RequestOutput.encoder_outputs` with Model Runner V2.
+    Under tensor parallelism, the first rank's outputs are returned, so other
+    ranks may return none. They are not returned with pipeline parallelism,
+    encoder disaggregation or encoder-decoder models, and the encoder of such a
+    model runs without CUDA graphs.
+    """
+
+    supports_encoder_outputs: ClassVar[Literal[True]] = True
+
+    def take_encoder_outputs(self) -> list[dict[str, Tensor] | None]:
+        """Return and clear the outputs of the last `embed_multimodal` call,
+        one entry per item, `None` for items without outputs."""
+        ...
+
+
+@overload
+def supports_encoder_outputs(
+    model: type[object],
+) -> TypeIs[type[SupportsEncoderOutputs]]: ...
+
+
+@overload
+def supports_encoder_outputs(model: object) -> TypeIs[SupportsEncoderOutputs]: ...
+
+
+def supports_encoder_outputs(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEncoderOutputs]] | TypeIs[SupportsEncoderOutputs]:
+    return getattr(model, "supports_encoder_outputs", False)
+
+
+@runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 

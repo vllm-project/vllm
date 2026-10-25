@@ -13,6 +13,8 @@ class EncoderCache:
         self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         # MM hash -> encoder outputs
         self.encoder_outputs: dict[str, torch.Tensor] = {}
+        # MM hash -> host copies of the outputs returned with the request
+        self.item_outputs: dict[str, dict[str, torch.Tensor]] = {}
 
     def __len__(self) -> int:
         return len(self.encoder_outputs)
@@ -48,6 +50,8 @@ class EncoderCache:
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_outputs.clear()
+        self.item_outputs.clear()
 
     def free_encoder_cache(self, mm_hash: str) -> None:
         self.encoder_outputs.pop(mm_hash, None)
+        self.item_outputs.pop(mm_hash, None)

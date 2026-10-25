@@ -10,7 +10,11 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    supports_encoder_outputs,
+    supports_realtime,
+)
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import (
@@ -50,6 +54,9 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.item_output_model = model if supports_encoder_outputs(model) else None
+        # req_id -> MM item index -> outputs, gathered this step
+        self.request_outputs: dict[str, dict[int, dict[str, torch.Tensor]]] = {}
         self.cudagraph_manager = cudagraph_manager
         self.enable_timing = enable_timing
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
@@ -148,12 +155,15 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        mm_hashes: list[str] | None = None,
     ) -> list[torch.Tensor]:
         # Stable-sort items by modality so each modality is encoded in as few
         # batches as possible. The returned outputs are restored to input order.
         order = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
         encoder_outputs: list[torch.Tensor] = []
+        item_outputs: list[dict[str, torch.Tensor] | None] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
@@ -172,7 +182,22 @@ class EncoderRunner:
             )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
-        return [encoder_outputs[i] for i in np.argsort(order)]
+            if self.item_output_model is not None:
+                taken = self.item_output_model.take_encoder_outputs()
+                assert not taken or len(taken) == num_items
+                item_outputs.extend(taken or [None] * num_items)
+
+        restore = np.argsort(order)
+        if mm_hashes is not None and item_outputs:
+            for mm_hash, i in zip(mm_hashes, restore):
+                if outputs := item_outputs[i]:
+                    self.encoder_cache.item_outputs[mm_hash] = {
+                        name: torch.empty(
+                            t.shape, dtype=t.dtype, device="cpu", pin_memory=PIN_MEMORY
+                        ).copy_(t, non_blocking=True)
+                        for name, t in outputs.items()
+                    }
+        return [encoder_outputs[i] for i in restore]
 
     @contextmanager
     def timed_encoder_operation(self, request_ids: Collection[str]):
@@ -275,6 +300,12 @@ class EncoderRunner:
                     if start_pos + draft_lookahead >= cur_query_end:
                         continue
                     raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
+                # Placeholders can start with text tokens, so the step that
+                # gathers the first embedding returns the item's outputs.
+                if curr_embeds_start == 0 and (
+                    outputs := self.encoder_cache.item_outputs.get(mm_hash)
+                ):
+                    self.request_outputs.setdefault(req_id, {})[idx] = outputs
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -292,6 +323,12 @@ class EncoderRunner:
                 mm_embeds.append(mm_embeds_item)
 
         return mm_embeds, is_mm_embed
+
+    def take_request_outputs(
+        self,
+    ) -> dict[str, dict[int, dict[str, torch.Tensor]]] | None:
+        outputs, self.request_outputs = self.request_outputs, {}
+        return outputs or None
 
     @torch.inference_mode()
     def get_inputs_embeds(

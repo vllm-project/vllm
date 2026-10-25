@@ -308,6 +308,9 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # req_id -> MM item index -> outputs of the item's encoder pass
+    encoder_outputs: dict[str, dict[int, dict[str, torch.Tensor]]] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

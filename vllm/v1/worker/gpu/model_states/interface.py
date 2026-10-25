@@ -8,9 +8,11 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
+    supports_encoder_outputs,
 )
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -23,6 +25,8 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 class ModelSpecificAttnMetadata:
@@ -68,6 +72,37 @@ class ModelState(ABC):
                 and vllm_config.compilation_config.cudagraph_mm_encoder
                 and supports_encoder_cudagraph(model)
             )
+            if supports_encoder_outputs(model):
+                # A graph replay skips embed_multimodal, which makes the outputs.
+                if enable_encoder_cuda_graph:
+                    logger.info_once(
+                        "Encoder CUDA graphs are off: the model returns encoder "
+                        "outputs, which only an eager encoder pass makes."
+                    )
+                    enable_encoder_cuda_graph = False
+                lost_with = [
+                    setup
+                    for setup, active in (
+                        (
+                            "pipeline parallelism",
+                            vllm_config.parallel_config.pipeline_parallel_size > 1,
+                        ),
+                        (
+                            "encoder disaggregation",
+                            vllm_config.ec_transfer_config is not None,
+                        ),
+                        (
+                            "encoder-decoder models",
+                            vllm_config.model_config.is_encoder_decoder,
+                        ),
+                    )
+                    if active
+                ]
+                if lost_with:
+                    logger.warning_once(
+                        "Encoder outputs are not returned with %s.",
+                        " or ".join(lost_with),
+                    )
             cudagraph_manager = (
                 EncoderCudaGraphManager(
                     vllm_config=vllm_config,
@@ -203,7 +238,9 @@ class ModelState(ABC):
             with self.encoder_runner.timed_encoder_operation(
                 scheduled_encoder_inputs.keys()
             ):
-                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                    mm_kwargs, mm_hashes
+                )
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(

@@ -61,6 +61,32 @@ def test_encoder_graph_configuration(enabled, enforce_eager, supported, expected
     assert state.encoder_runner.has_cudagraph() is expected
 
 
+@pytest.mark.parametrize("encoder_decoder", [False, True])
+def test_encoder_graph_is_off_for_models_with_encoder_outputs(
+    caplog_vllm, encoder_decoder
+):
+    """A graph replay skips embed_multimodal, which makes the encoder outputs, and
+    encoder-decoder models return none."""
+    config = MagicMock()
+    config.model_config.enforce_eager = False
+    config.model_config.dtype = torch.float32
+    config.model_config.get_inputs_embeds_size.return_value = HIDDEN
+    config.model_config.is_encoder_decoder = encoder_decoder
+    config.scheduler_config.max_num_batched_tokens = 8
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config.compilation_config.cudagraph_mm_encoder = True
+    config.parallel_config.pipeline_parallel_size = 1
+    config.ec_transfer_config = None
+    model = MagicMock(spec=SupportsEncoderCudaGraph)
+    model.supports_encoder_outputs = True
+    state = _model_state(EncoderCache())
+    with patch("vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager"):
+        ModelState.__init__(state, config, model, state.encoder_cache, state.device)
+    assert not state.encoder_runner.has_cudagraph()
+    warning = "Encoder outputs are not returned with encoder-decoder models"
+    assert (warning in caplog_vllm.text) is encoder_decoder
+
+
 def test_encoder_graph_unsupported_modality_uses_eager_output():
     """An image graph must not intercept another modality's encoder output."""
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -152,6 +178,49 @@ def _gather(
         num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
+
+
+@pytest.mark.parametrize(
+    ("chunks", "returned"),
+    [
+        ([(0, 4)], True),
+        # The first chunk ends before the first embedding.
+        ([(0, 1), (1, 3)], True),
+        # The first embedding came from the prefix cache.
+        ([(2, 2)], False),
+    ],
+)
+def test_encoder_outputs_attach_at_the_first_embedding(chunks, returned):
+    """Items return their outputs in the step that gathers their first
+    embedding, also when the placeholder starts with a text token."""
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="h0",
+        mm_position=PlaceholderRange(
+            offset=0, length=4, is_embed=torch.tensor([False, True, True, False])
+        ),
+    )
+    runner = _make_runner([feature], cached=[feature])
+    outputs = {"x": torch.ones(2)}
+    runner.encoder_cache.item_outputs["h0"] = outputs
+
+    taken = []
+    for num_computed, num_scheduled in chunks:
+        _gather(
+            runner,
+            num_scheduled=num_scheduled,
+            draft_lookahead=0,
+            num_computed=num_computed,
+        )
+        taken.append(runner.take_request_outputs())
+
+    assert all(step is None for step in taken[:-1])
+    if returned:
+        assert taken[-1] is not None
+        assert taken[-1]["req0"][0] is outputs
+    else:
+        assert taken[-1] is None
 
 
 def test_draft_lookahead_uses_boundary_feature_when_cached():

@@ -2259,6 +2259,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        encoder_outputs = model_runner_output.encoder_outputs
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2329,6 +2330,11 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = req_indices[req_id]
+            if encoder_outputs and req_id in encoder_outputs:
+                request.encoder_outputs = {
+                    **(request.encoder_outputs or {}),
+                    **encoder_outputs[req_id],
+                }
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
@@ -2541,6 +2547,11 @@ class Scheduler(SchedulerInterface):
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
+                        encoder_outputs=(
+                            request.encoder_outputs
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                 )
             else:

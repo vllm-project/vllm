@@ -2319,6 +2319,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            encoder_outputs=(
+                self.model_state.encoder_runner.take_request_outputs()
+                if self.supports_mm_inputs
+                else None
+            ),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:

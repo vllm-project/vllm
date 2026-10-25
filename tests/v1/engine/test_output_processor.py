@@ -298,6 +298,102 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
 
 
+def test_encoder_outputs_only_on_finished_request_output():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+    encoder_outputs = {0: {"x": torch.ones(2)}}
+
+    first = output_processor.process_outputs(
+        [EngineCoreOutput(request_id="request-0-int", new_token_ids=[42])]
+    ).request_outputs[0]
+    final = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[43],
+                finish_reason=FinishReason.LENGTH,
+                encoder_outputs=encoder_outputs,
+            )
+        ]
+    ).request_outputs[0]
+
+    assert not first.finished and first.encoder_outputs is None
+    assert final.finished and final.encoder_outputs is encoder_outputs
+
+
+@pytest.mark.parametrize(
+    "output_kind",
+    [
+        RequestOutputKind.FINAL_ONLY,
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+    ],
+)
+def test_encoder_outputs_reach_the_parent_of_parallel_samples(output_kind):
+    """The child that returned the encoder outputs may finish first; a sibling
+    that reused the prompt's KV prefix returns none."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+
+    def request(request_id: str, params: SamplingParams) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id="request-0",
+            prompt_token_ids=[1, 2, 3],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=params,
+            pooling_params=None,
+        )
+
+    params = SamplingParams(n=2, detokenize=False, output_kind=output_kind)
+    parent = ParentRequest(request("request-0-int", params))
+    child_ids = []
+    for index in range(2):
+        child_id, child_params = parent.get_child_info(index)
+        output_processor.add_request(
+            request(child_id, child_params),
+            prompt=None,
+            parent_req=parent,
+            request_index=index,
+        )
+        child_ids.append(child_id)
+    encoder_outputs = {0: {"x": torch.ones(2)}}
+
+    request_outputs = []
+    for child_id, outputs in zip(child_ids, (encoder_outputs, None)):
+        request_outputs += output_processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=child_id,
+                    new_token_ids=[42],
+                    finish_reason=FinishReason.LENGTH,
+                    encoder_outputs=outputs,
+                )
+            ]
+        ).request_outputs
+
+    *earlier, final = request_outputs
+    assert all(not output.finished for output in earlier)
+    assert all(output.encoder_outputs is None for output in earlier)
+    assert final.finished and final.encoder_outputs is not None
+    assert final.encoder_outputs[0] is encoder_outputs[0]
+
+
 def test_request_stream_interval_raises_but_not_below_engine_default(
     dummy_test_vectors,
 ):
