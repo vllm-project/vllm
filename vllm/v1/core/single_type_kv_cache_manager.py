@@ -1461,6 +1461,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # The block holding each running request's reusable prompt-boundary
+            # state, referenced on the request's behalf until it is freed (see
+            # ``_retain_boundary_block``).
+            self._boundary_blocks: dict[str, KVCacheBlock] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1887,6 +1891,12 @@ class MambaManager(SingleTypeKVCacheManager):
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
+                        if self._boundary_blocks.get(request_id) is source_block:
+                            # The boundary state moves to cow_block with its
+                            # hash; move the request's hold on it as well.
+                            source_block.ref_cnt -= 1
+                            cow_block.ref_cnt += 1
+                            self._boundary_blocks[request_id] = cow_block
                         producer_tail = self._producer_partial_tail_reqs.pop(
                             request_id, None
                         )
@@ -1961,6 +1971,19 @@ class MambaManager(SingleTypeKVCacheManager):
                 for entry in self._pending_boundary_state_offloads
                 if entry[0] != request_id
             ]
+            boundary_block = self._boundary_blocks.pop(request_id, None)
+            if boundary_block is not None:
+                blocks = super().pop_blocks_for_free(request_id)
+                if any(block is boundary_block for block in blocks):
+                    # Still in the table (its own entry frees it): just drop
+                    # the hold, it cannot be the last reference.
+                    boundary_block.ref_cnt -= 1
+                    return blocks
+                # Retired from the table, so the hold is the request's only
+                # reference. Callers free in reverse order: list it first so
+                # the single reusable state is the last of the request's
+                # blocks to reach the free queue.
+                return [boundary_block, *blocks]
         return super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1994,6 +2017,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
+            prompt_boundary = (
+                self._prompt_boundary(request)
+                if self.mamba_cache_mode == "align"
+                else None
+            )
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
                 block = blocks[idx]
                 # Skip null blocks (align-mode skipped states) and blocks that
@@ -2016,9 +2044,74 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+                    if block.block_hash_num_tokens == prompt_boundary:
+                        self._retain_boundary_block(request.request_id, block)
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if self.mamba_cache_mode != "align" or not new_computed_blocks:
+            return
+        # A resumed or sibling request takes over a cached state it never
+        # registers itself (a sub-block hit is even CoW-copied out of the
+        # table). Hold the hit state like an own registration; registering
+        # the request's own boundary later replaces the hold. External
+        # computed tokens can skip the whole local hit, in which case the
+        # hit block was neither adopted nor touched.
+        hit_block = new_computed_blocks[-1]
+        req_blocks = self.req_to_blocks[request_id]
+        if (
+            req_blocks
+            and req_blocks[-1] is hit_block
+            and not hit_block.is_null
+            and hit_block.block_hash is not None
+        ):
+            self._retain_boundary_block(request_id, hit_block)
+
+    def _prompt_boundary(self, request: Request) -> int:
+        """The prompt position a later turn can resume this request from: the
+        boundary ``reachable_block_mask`` retains and a prefill checkpoint is
+        keyed at."""
+        return get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            self.cache_hit_alignment_tokens,
+            self.drop_eagle_checkpoint_block,
+        )
+
+    def _retain_boundary_block(self, request_id: str, block: KVCacheBlock) -> None:
+        """Hold the request's prompt-boundary state until the request is freed.
+
+        Align mode frees every state below the running one as decode advances
+        and releases a CoW copy once the copy has run, so the one block a later
+        turn can resume from reaches the free queue a step into decode, while
+        the request's attention blocks stay referenced until it finishes. Under
+        allocation pressure the state is recycled first and the next turn's
+        hybrid hit, the minimum over groups, collapses to zero although every
+        attention block of the prompt is still cached. Take a reference on the
+        request's behalf; ``pop_blocks_for_free`` releases it after the
+        request's other blocks.
+        """
+        assert not block.is_null and block.ref_cnt > 0
+        held = self._boundary_blocks.get(request_id)
+        if held is block:
+            return
+        if held is not None:
+            self.block_pool.free_blocks([held])
+        block.ref_cnt += 1
+        self._boundary_blocks[request_id] = block
 
     def _cache_partial_tail_block(
         self,
@@ -2037,14 +2130,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # The prompt's final chunk caches only up to its last full block,
             # so ``num_tokens < num_prompt_tokens`` holds there too; its
             # checkpoint is the prompt's reusable boundary, not a transient one.
-            is_prompt_checkpoint = (
-                checkpoint_position
-                == get_mamba_prefill_checkpoint_position(
-                    request.num_prompt_tokens,
-                    self.cache_hit_alignment_tokens,
-                    self.drop_eagle_checkpoint_block,
-                )
-            )
+            is_prompt_checkpoint = checkpoint_position == self._prompt_boundary(request)
             is_retained_checkpoint = False
             if checkpoint_position % self.block_size == 0:
                 block_idx = checkpoint_position // self.block_size - 1
@@ -2068,7 +2154,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
-            return self.block_pool.cache_partial_block(
+            checkpoint_hash = self.block_pool.cache_partial_block(
                 request=request,
                 block=checkpoint_block,
                 num_tokens=checkpoint_position,
@@ -2076,6 +2162,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_size=self.block_size,
                 replace_existing_hashes=True,
             )
+            if checkpoint_hash is not None and is_prompt_checkpoint:
+                self._retain_boundary_block(request.request_id, checkpoint_block)
+            return checkpoint_hash
         if num_tokens <= 0 or num_tokens % hash_block_size != 0:
             return None
         latest_prompt_hash_boundary = get_mamba_prefill_checkpoint_position(
@@ -2114,6 +2203,8 @@ class MambaManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        if partial_hash is not None and num_tokens == self._prompt_boundary(request):
+            self._retain_boundary_block(request.request_id, source_block)
         if partial_hash is not None and num_tokens % self.block_size:
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
