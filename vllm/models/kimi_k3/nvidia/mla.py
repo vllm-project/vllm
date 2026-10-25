@@ -86,6 +86,7 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_kv_concat_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
+from vllm.models.kimi_k3.nvidia.worklist_mla.layer import make_worklist_mqa
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -364,6 +365,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.impl.dcp_world_size = 1
             self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        # additional_config mla_decode_backend=worklist: the decode's work-list kernel.
+        self.worklist_mqa = make_worklist_mqa(self)
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
@@ -716,9 +719,16 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 assert self.dcp_manager is not None
                 assert self.dcp_manager.query_gather is not None
                 mqa_q = self.dcp_manager.query_gather(mqa_q)
-            latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
-                mqa_q, self._attn_read_kv_cache(), attn_metadata, self
+            mqa_out = (
+                self.worklist_mqa(self, mqa_q, attn_metadata)
+                if self.worklist_mqa is not None
+                else None
             )
+            if mqa_out is None:
+                mqa_out = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    mqa_q, self._attn_read_kv_cache(), attn_metadata, self
+                )
+            latent_out, lse = mqa_out
             if self.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
