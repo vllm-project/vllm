@@ -2042,3 +2042,23 @@ seule occurrence ne justifie pas un restart-config).
 **Watch.** Post-restart : VRAM 22 183/21 136 à froid (0.73), préemptions remises à 0,
 nbaudit ok (vague 2 Image/ active), commit hôte 78,1 % (marge 86,5 GB), G: OK, condensation
 nominale (re-credentials 05:44 = post-wedge hub).
+
+## 25/10 10:41Z — post-restart sain sous charge diurne forte ; census +212.133.41.33 ; D: nettoyé (Maintenance)
+
+Routine. Moteur (boot 09:04:20Z) sain sous **charge diurne très forte** : 78,4 M tokens de
+prompt en 2,2 h (~9 900 tok/s), hit préfixe **86,3 %** (l'amortissement post-restart refait
+son socle — mieux que le 72,9 % cumulé d'avant-crash), préemptions 1, running 3, 0 assert,
+un seul `WEDGE fail 1/2` (11:16Z, récupéré). VRAM sous charge à 0.73 : GPU 0 **22 417** /
+GPU 1 21 408 — marge 583 MiB avant la ligne 23 000, à suivre. GPU 2 = training CoursIA
+(15 Go, nominal). Commit hôte 83,8 % (marge 63,9 GB) — en montée matinale documentée, seuil 85 %.
+`/dev/shm` stable 24G. nbaudit ok (vague 2 Image/, 11:06Z).
+
+**Census** : `212.133.41.33` (3 req, 2×200) = même profil exact que `212.133.41.47` Q31
+(UA `OpenAI/JS 4.104.0`, corps 15-54 Ko = condensation RSM) → IP d'égress corporate du même
+acteur, ajoutée à la carte famille 212.133.41.x. Un 400 isolé au milieu (corps 15 848,
+model=None) sans suite.
+
+**Hors cycle** : règle user D: « transitoire seulement » appliquée par Maintenance —
+`D:\vllm_image_backups` (25,45 Go, 3 tars) supprimé, copies sha256-vérifiées consolidées
+sous `F:\Backups-Cloud\vllm_image_backups\` (empreintes mesurées des deux côtés avant geste ;
+journal campagne Maintenance #165). Aucun tar n'était porteur prod.
