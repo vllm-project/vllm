@@ -170,6 +170,18 @@ class BackpressureDetector(ABC):
         self._policy.on_store_admitted()
         return True
 
+    def should_store_without_side_effects(self) -> bool:
+        """Evaluate admission without recording policy or cooldown state."""
+        return self._policy.should_store(self)
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        """Record a rejected store and advance any detector state."""
+        self._policy.on_store_skipped(num_blocks)
+
+    def on_store_admitted(self) -> None:
+        """Record an admitted store and advance any detector state."""
+        self._policy.on_store_admitted()
+
     @classmethod
     def default_config(
         cls, tier_type: str, *, locality: str | None = None
@@ -378,6 +390,39 @@ class EMABackpressureDetector(BackpressureDetector):
                 self._policy.on_store_skipped(num_blocks)
                 return False
         return super().should_store(num_blocks)
+
+    def should_store_without_side_effects(self) -> bool:
+        under_pressure = self.is_under_pressure()
+        if self.is_healthy():
+            return True
+        in_cooldown = (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        )
+        if in_cooldown and (self._cooldown_count + 1) % 2 == 0:
+            return False
+        return self._policy.should_store(self)
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        under_pressure = self.is_under_pressure()
+        if (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        ):
+            self._cooldown_count += 1
+        super().on_store_skipped(num_blocks)
+
+    def on_store_admitted(self) -> None:
+        under_pressure = self.is_under_pressure()
+        if (
+            not under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        ):
+            self._cooldown_count += 1
+        super().on_store_admitted()
 
     def reset(self) -> None:
         self._ema = 0.0

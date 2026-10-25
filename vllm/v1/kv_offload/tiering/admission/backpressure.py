@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
     TieringOffloadingMetrics,
 )
+from vllm.v1.kv_offload.tiering.metrics import make_tier_label
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.manager import JobMetadata
@@ -52,22 +53,24 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
 
     def __init__(self, secondary_tiers: list[SecondaryTierManager]):
         self._tiers = secondary_tiers
+        self._admitted_jobs: set[int] = set()
+        self._cascades_dropped = [0] * len(secondary_tiers)
+        self._promotions_dropped = [0] * len(secondary_tiers)
 
     def should_admit(
         self,
         keys: Collection[OffloadKey],
         tier_idx: int,
+        *,
         is_promotion: bool,
     ) -> bool:
-        # Promotions stay admitted under backpressure: dropping a promotion
-        # only delays a hit the requester already paid a lookup for, while
-        # the promotion itself relieves future load on the tier.
+        # Promotions remain admitted to preserve current tiering behavior.
         if is_promotion:
             return True
         detector = self._tiers[tier_idx].bp_detector
         if detector is None:
             return True
-        return detector.policy.should_store(detector)
+        return detector.should_store_without_side_effects()
 
     def on_rejected(
         self,
@@ -77,20 +80,26 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
         is_promotion: bool,
     ) -> None:
         if is_promotion:
+            self._promotions_dropped[tier_idx] += 1
             return
+        self._cascades_dropped[tier_idx] += 1
         detector = self._tiers[tier_idx].bp_detector
         if detector is not None:
-            detector.policy.on_store_skipped(len(keys))
+            detector.on_store_skipped(len(keys))
 
     def on_admitted(self, metadata: "JobMetadata") -> None:
         transfer_job = metadata.transfer_job
+        self._admitted_jobs.add(transfer_job.job_id)
         if not transfer_job.is_promotion:
             detector = self._tiers[metadata.tier_idx].bp_detector
             if detector is not None:
-                detector.policy.on_store_admitted()
+                detector.on_store_admitted()
 
     def on_completed(self, metadata: "JobMetadata", result: JobResult) -> None:
         transfer_job = metadata.transfer_job
+        if transfer_job.job_id not in self._admitted_jobs:
+            return
+        self._admitted_jobs.remove(transfer_job.job_id)
         if transfer_job.is_promotion or not result.success:
             return
         tier = self._tiers[metadata.tier_idx]
@@ -114,6 +123,9 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
             )
 
     def reset(self) -> None:
+        self._admitted_jobs.clear()
+        self._cascades_dropped = [0] * len(self._tiers)
+        self._promotions_dropped = [0] * len(self._tiers)
         for tier in self._tiers:
             if tier.bp_detector is not None:
                 tier.bp_detector.reset()
@@ -148,6 +160,14 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
                     labelnames=("tier",),
                 )
             ),
+            TieringOffloadingMetrics.CASCADES_DROPPED: OffloadingCounterMetadata(
+                documentation="Number of cascade stores rejected by admission.",
+                labelnames=("tier",),
+            ),
+            TieringOffloadingMetrics.PROMOTIONS_DROPPED: OffloadingCounterMetadata(
+                documentation="Number of promotions rejected by admission.",
+                labelnames=("tier",),
+            ),
         }
 
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -156,7 +176,7 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
             detector = tier.bp_detector
             if detector is None:
                 continue
-            label = (f"{i + 1}:{tier.tier_type}",)
+            label = make_tier_label(i, tier.tier_type)
             ema = detector.stats.get("store_latency_ema")
             if ema is not None:
                 stats.set_gauge(
@@ -177,4 +197,18 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
                     blocks_dropped,
                     labelvalues=label,
                 )
+            if self._cascades_dropped[i] > 0:
+                stats.increase_counter(
+                    TieringOffloadingMetrics.CASCADES_DROPPED,
+                    self._cascades_dropped[i],
+                    labelvalues=label,
+                )
+            if self._promotions_dropped[i] > 0:
+                stats.increase_counter(
+                    TieringOffloadingMetrics.PROMOTIONS_DROPPED,
+                    self._promotions_dropped[i],
+                    labelvalues=label,
+                )
+            self._cascades_dropped[i] = 0
+            self._promotions_dropped[i] = 0
         return stats if not stats.is_empty() else None

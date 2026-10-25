@@ -42,6 +42,7 @@ class TieringAdmissionPolicy(ABC):
         self,
         keys: Collection[OffloadKey],
         tier_idx: int,
+        *,
         is_promotion: bool,
     ) -> bool:
         """Whether the transfer may be submitted.

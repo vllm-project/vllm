@@ -624,7 +624,7 @@ class ServerRole:
             round_seq=lookup.round_seq,
             from_lookup=True,
         )
-        return list(meta.keys)
+        return list(transfer_job.keys)
 
     def _resolve_pending_lookups(
         self, kv_request_id: str, parent: ParentManager

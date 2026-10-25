@@ -673,12 +673,8 @@ class TieringOffloadingManager(OffloadingManager):
         """
         # Admission runs before primary allocation so a rejected promotion
         # consumes no primary slot and no job ID.
-        if not self._admission_policy.should_admit(
-            [key], tier_idx, is_promotion=True
-        ):
-            self._admission_policy.on_rejected(
-                [key], tier_idx, is_promotion=True
-            )
+        if not self._admission_policy.should_admit([key], tier_idx, is_promotion=True):
+            self._admission_policy.on_rejected([key], tier_idx, is_promotion=True)
             return False
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
@@ -985,15 +981,16 @@ class TieringOffloadingManager(OffloadingManager):
             The TransferJob, or None if the admission policy rejected it.
 
         """
-        if not self._admission_policy.should_admit(
-            keys, tier_idx, is_promotion=False
-        ):
-            self._admission_policy.on_rejected(
-                keys, tier_idx, is_promotion=False
-            )
+        if not self._admission_policy.should_admit(keys, tier_idx, is_promotion=False):
+            self._admission_policy.on_rejected(keys, tier_idx, is_promotion=False)
             return None
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
+        self._admission_policy.on_reserved(
+            keys,
+            tier_idx,
+            is_promotion=False,
+        )
         job_id = self._next_job_id()
         transfer_job = TransferJob(
             job_id=job_id,

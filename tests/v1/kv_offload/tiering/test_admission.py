@@ -25,7 +25,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.tiering.admission import (
     AlwaysAdmitPolicy,
     BackpressureAdmissionPolicy,
-    TieringAdmissionPolicy,
 )
 from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
@@ -36,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
+    JobMetadata,
     TieringOffloadingManager,
 )
 
@@ -97,24 +97,23 @@ def _make_job(
 
 
 class TestAlwaysAdmitPolicy:
-    def test_admits_cascade(self):
-        policy = AlwaysAdmitPolicy()
-        assert policy.should_admit(to_keys([1]), 0, False) is True
-
-    def test_admits_promotion(self):
-        policy = AlwaysAdmitPolicy()
-        assert policy.should_admit(to_keys([1]), 0, True) is True
-
-    def test_admits_any_tier_index(self):
+    def test_admits_all_inputs(self):
         policy = AlwaysAdmitPolicy()
         for tier_idx in (0, 1, 5):
-            assert policy.should_admit(to_keys([1]), tier_idx, False) is True
+            for is_promotion in (False, True):
+                assert (
+                    policy.should_admit(
+                        to_keys([1]), tier_idx, is_promotion=is_promotion
+                    )
+                    is True
+                )
 
     def test_lifecycle_hooks_are_noops(self):
         policy = AlwaysAdmitPolicy()
         job = _make_job()
-        policy.on_admitted(job)
-        policy.on_completed(job, JobResult(job_id=job.job_id, success=True))
+        metadata = JobMetadata(job, 0)
+        policy.on_admitted(metadata)
+        policy.on_completed(metadata, JobResult(job_id=job.job_id, success=True))
         policy.reset()
 
     def test_get_stats_returns_none(self):
@@ -124,36 +123,36 @@ class TestAlwaysAdmitPolicy:
 class TestBackpressureAdmissionPolicy:
     def test_admits_when_no_detector(self):
         policy = BackpressureAdmissionPolicy([_FakeTier(detector=None)])
-        assert policy.should_admit(to_keys([1]), 0, False) is True
+        assert policy.should_admit(to_keys([1]), 0, is_promotion=False) is True
 
     def test_admits_healthy_tier(self):
         bp = _make_detector()
         bp._completions = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
         policy = BackpressureAdmissionPolicy([_FakeTier(detector=bp)])
-        assert policy.should_admit(to_keys([1]), 0, False) is True
+        assert policy.should_admit(to_keys([1]), 0, is_promotion=False) is True
 
     def test_rejects_pressured_tier(self):
         policy = BackpressureAdmissionPolicy(
             [_FakeTier(detector=_pressured_detector())]
         )
-        assert policy.should_admit(to_keys([1]), 0, False) is False
+        assert policy.should_admit(to_keys([1]), 0, is_promotion=False) is False
 
     def test_rejection_records_drop_in_detector_policy(self):
         bp = _pressured_detector()
         policy = BackpressureAdmissionPolicy([_FakeTier(detector=bp)])
         assert bp.policy.pop_stores_dropped() == (0, 0)
-        policy.should_admit(to_keys([1, 2, 3]), 0, False)
+        keys = to_keys([1, 2, 3])
+        policy.should_admit(keys, 0, is_promotion=False)
+        policy.on_rejected(keys, 0, is_promotion=False)
         assert bp.policy.pop_stores_dropped() == (1, 3)
 
     def test_promotion_admitted_under_pressure(self):
         policy = BackpressureAdmissionPolicy(
             [_FakeTier(detector=_pressured_detector())]
         )
-        assert policy.should_admit(to_keys([1]), 0, True) is True
+        assert policy.should_admit(to_keys([1]), 0, is_promotion=True) is True
 
     def _admitted_meta(self, policy, tier_idx=0):
-        from vllm.v1.kv_offload.tiering.manager import JobMetadata
-
         job = _make_job()
         meta = JobMetadata(job, tier_idx)
         policy.on_admitted(meta)
@@ -203,8 +202,6 @@ class TestBackpressureAdmissionPolicy:
         bp._completions = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
         policy = BackpressureAdmissionPolicy([_FakeTier(detector=bp)])
         job = _make_job(is_promotion=True)
-        from vllm.v1.kv_offload.tiering.manager import JobMetadata
-
         meta = JobMetadata(job, 0)
         policy.on_admitted(meta)
         policy.on_completed(meta, JobResult(job_id=job.job_id, success=True))
@@ -212,9 +209,8 @@ class TestBackpressureAdmissionPolicy:
 
     def test_on_completed_ignores_unknown_job(self):
         bp = _make_detector()
+        bp._completions = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
         policy = BackpressureAdmissionPolicy([_FakeTier(detector=bp)])
-        from vllm.v1.kv_offload.tiering.manager import JobMetadata
-
         meta = JobMetadata(_make_job(job_id=999), 0)
         # Never admitted: must not raise and must not touch the detector.
         policy.on_completed(meta, JobResult(job_id=999, success=True))
@@ -429,8 +425,8 @@ class TestAdmissionPolicyWiring:
 
     def test_admitted_job_ids_stay_sequential_after_rejection(self, setup):
         self._pressure_on()
-        self._store_blocks(to_keys([7]))
         counter_before = self.manager._job_id_counter
+        self._store_blocks(to_keys([7]))
         assert self.manager._transfer_jobs == {}
         self.detector._under_pressure = False
         keys = to_keys([8])

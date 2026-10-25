@@ -20,6 +20,10 @@ TierLabel = tuple[str]
 PRIMARY_TIER_LABEL: TierLabel = ("0:primary",)
 
 
+def make_tier_label(tier_idx: int, tier_type: str) -> TierLabel:
+    return (f"{tier_idx + 1}:{tier_type}",)
+
+
 class _JobMetadataLike(Protocol):
     @property
     def transfer_job(self) -> TransferJob: ...
@@ -59,7 +63,7 @@ class TieringMetricsTracker:
 
     @functools.cache  # noqa: B019
     def tier_label(self, tier_idx: int) -> TierLabel:
-        return (f"{tier_idx + 1}:{self._tier_types[tier_idx]}",)
+        return make_tier_label(tier_idx, self._tier_types[tier_idx])
 
     @property
     def primary_tier_label(self) -> TierLabel:
