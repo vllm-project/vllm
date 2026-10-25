@@ -1535,10 +1535,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
             self._fused_qkv_input_quant = fuse
             self._qkv_mxfp8_kernel = kernel if fuse else None
-            if fuse:
-                logger.info_once(
-                    "MiniMax-M3: the input RMSNorm emits qkv_proj's MXFP8 input."
-                )
         return fuse
 
     def forward(
