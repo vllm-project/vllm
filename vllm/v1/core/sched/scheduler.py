@@ -423,6 +423,8 @@ class Scheduler(SchedulerInterface):
         # Requests room was made for whose allocation the waiting loop has not
         # tried since: no room is made for them again until it has.
         self._make_room_untried: set[Request] = set()
+        # Requests preempted to make room since the last scheduler stats.
+        self._num_priority_preemptions = 0
         # The most new blocks a running request takes in a step, if bounded: one
         # per KV cache group from the managers that allocate by the token count,
         # without speculative or lookahead tokens.
@@ -3192,11 +3194,14 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_priority_preemptions = self._num_priority_preemptions
+        self._num_priority_preemptions = 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
+            num_priority_preemptions=num_priority_preemptions,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3503,6 +3508,7 @@ class Scheduler(SchedulerInterface):
                 victim, timestamp, drop_stale_output=self.requires_kv_delivery
             )
         self._make_room_untried.add(request)
+        self._num_priority_preemptions += len(victims)
         return set(victims)
 
     def _num_blocks_short(

@@ -10,6 +10,7 @@ with the null block) and prefix caching is off, so requests share no block.
 
 from collections import deque
 
+import prometheus_client
 import pytest
 import torch
 
@@ -35,6 +36,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1136,6 +1140,51 @@ def test_a_request_holding_kv_blocks_is_not_held_back():
     scheduler.add_request(_session_request(100, max_tokens=16, priority=2))
     output = _step(scheduler)
     assert "session" in output.num_scheduled_tokens
+
+
+# Metrics
+
+
+def test_the_scheduler_stats_count_the_requests_preempted_to_make_room():
+    """Per step, apart from the running loop's preemptions."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=4)
+    _run_three_low_priority_requests(scheduler)
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=4))
+
+    scheduler_output = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        scheduler_output, _model_runner_output(scheduler, scheduler_output)
+    )
+    assert scheduler_output.preempted_req_ids == {"other"}
+    assert outputs[0].scheduler_stats.num_priority_preemptions == 1
+
+    scheduler_output = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        scheduler_output, _model_runner_output(scheduler, scheduler_output)
+    )
+    assert outputs[0].scheduler_stats.num_priority_preemptions == 0
+
+
+@pytest.mark.parametrize("max_preemptions", [0, 2])
+def test_prometheus_counts_the_requests_preempted_to_make_room(max_preemptions):
+    """As vllm:num_priority_preemptions, only with the option on."""
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m"),
+        scheduler_config=SchedulerConfig.default_factory(
+            policy="priority", max_priority_preemptions_per_step=max_preemptions
+        ),
+    )
+    try:
+        logger = PrometheusStatLogger(vllm_config)
+        logger.record(SchedulerStats(num_priority_preemptions=3), None)
+        logger.record(SchedulerStats(num_priority_preemptions=2), None)
+        value = prometheus_client.REGISTRY.get_sample_value(
+            "vllm:num_priority_preemptions_total",
+            {"model_name": "facebook/opt-125m", "engine": "0"},
+        )
+        assert value == (5 if max_preemptions else None)
+    finally:
+        unregister_vllm_metrics()
 
 
 # Off is stock
