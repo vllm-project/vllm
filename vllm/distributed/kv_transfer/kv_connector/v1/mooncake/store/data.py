@@ -299,12 +299,16 @@ class RankLocalStoreLayout(StoreLayout):
             storage_len = storage.nbytes()
             block_bytes = cache[0].numel() * cache.element_size()
             if not is_non_overlapping_and_dense(cache[0]):
-                # Each head region keeps the whole block stride.
+                # One region per head, copying only that head's block (in a
+                # block-outermost buffer the block stride spans every head).
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
                     assert is_non_overlapping_and_dense(head_cache[0])
-                    head_stride = head_cache.stride(0) * head_cache.element_size()
-                    add_region(head_cache.data_ptr(), head_stride, head_stride)
+                    add_region(
+                        head_cache.data_ptr(),
+                        head_cache.stride(0) * head_cache.element_size(),
+                        head_cache[0].numel() * head_cache.element_size(),
+                    )
             elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
                 # Block-outermost buffer: each block holds every layer, so the
                 # whole storage is one region. In block 0 this layer's data

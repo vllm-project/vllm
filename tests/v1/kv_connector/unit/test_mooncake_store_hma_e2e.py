@@ -7,8 +7,10 @@ import ctypes
 import sys
 import threading
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
@@ -32,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -40,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -380,6 +384,160 @@ def test_hybrid_mamba_values_hold_only_group_states():
     for addr, data in zip(addrs, saved):
         ctypes.memmove(addr, data, len(data))
     assert torch.equal(raw, expected)
+
+
+_ATTN = FullAttentionSpec(
+    block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
+)
+_MAMBA = MambaSpec(
+    block_size=16,
+    shapes=((4, 8), (2, 8)),
+    dtypes=(torch.float32, torch.float16),
+    page_size_padded=_ATTN.page_size_bytes,
+    mamba_cache_mode="align",
+)
+# Model shapes as KV cache groups: each group is (layer names, spec).
+_MODELS = {
+    "dense": [(["A0", "A1", "A2"], _ATTN)],
+    "mla": [
+        (
+            ["A0", "A1", "A2"],
+            MLAAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=40, dtype=torch.float16
+            ),
+        )
+    ],
+    "full_swa": [
+        (["A0", "A1"], _ATTN),
+        (
+            ["S0", "S1"],
+            SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=16,
+                dtype=torch.float16,
+                sliding_window=32,
+            ),
+        ),
+    ],
+    # Like Kimi K3: Mamba groups with fewer layers, states padded to the page.
+    "attn_mamba": [
+        (["A0", "A1", "A2"], _ATTN),
+        (["M0", "M1"], _MAMBA),
+        (["M2", "M3"], _MAMBA),
+    ],
+    # Pages of different sizes are packed side by side within a block.
+    "mixed_pages": [
+        (["A0", "A1"], _ATTN),
+        (
+            ["B0", "B1", "B2"],
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+            ),
+        ),
+    ],
+}
+
+
+def _byte_mask(t: torch.Tensor, nbytes: int) -> torch.Tensor:
+    """The bytes of the backing storage that ``t`` covers."""
+    offsets = torch.tensor([t.storage_offset()])
+    for size, stride in zip(t.shape, t.stride()):
+        offsets = (offsets[:, None] + torch.arange(size) * stride).flatten()
+    elem = t.element_size()
+    mask = torch.zeros(nbytes, dtype=torch.bool)
+    mask[(offsets[:, None] * elem + torch.arange(elem)).flatten()] = True
+    return mask
+
+
+def _span_mask(spans, nbytes: int) -> torch.Tensor:
+    mask = torch.zeros(nbytes, dtype=torch.bool)
+    for start, length in spans:
+        mask[start : start + length] = True
+    return mask
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout), ids=lambda x: x.name)
+@pytest.mark.parametrize("model", list(_MODELS))
+def test_store_values_round_trip_every_layout(model, layout):
+    """Through the planner's real layout, each group's value for a block holds
+    every byte of its layers' views of that block, reads and writes only that
+    block, and restores it exactly. Without padding the value is the group's
+    whole block, as before; with Mamba padding it is exactly the states."""
+    num_blocks, block = 4, 2
+    groups = [KVCacheGroupSpec(names, spec) for names, spec in _MODELS[model]]
+    planner_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: layout,
+            num_gpu_blocks_override=num_blocks,
+            prefix_cache_retention_interval=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    try:
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+        kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
+    except (ValueError, AssertionError):
+        pytest.skip(f"{layout.name} cannot express {model}")
+    worker = _build_worker_with_dict_store(
+        _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
+    )
+    _register_with_fake_threads(worker, kv_caches)
+
+    first = next(iter(kv_caches.values()))
+    raw = torch.empty(0, dtype=torch.int8).set_(first.untyped_storage())
+    nbytes = raw.numel()
+    raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
+    before = raw.clone()
+    base = raw.data_ptr()
+
+    # The block of every byte that some layer's view uses (-1: none, e.g.
+    # padding). A value must not reach another block's bytes.
+    byte_block = torch.full((nbytes,), -1)
+    for views in kv_caches.values():
+        for view in views if isinstance(views, list) else [views]:
+            for b in range(num_blocks):
+                mask = _byte_mask(view[b], nbytes)
+                if ((byte_block[mask] != -1) & (byte_block[mask] != b)).any():
+                    pytest.skip(f"{layout.name} overlaps blocks of {model}")
+                byte_block[mask] = b
+    other_blocks = (byte_block != block) & (byte_block != -1)
+
+    for group, db in zip(groups, worker.token_dbs, strict=True):
+        store_layout = db.store_layout
+        addrs, sizes = store_layout.prepare_value_for_block(block)
+        chunk_addrs, chunk_sizes, _ = store_layout.prepare_values(
+            [(0, 16), (16, 32)], [block, block], [0, 0]
+        )
+        # Chunked saves and loads copy the same pieces as a single block.
+        assert chunk_addrs == [addrs, addrs] and chunk_sizes == [sizes, sizes]
+
+        value = _span_mask([(a - base, n) for a, n in zip(addrs, sizes)], nbytes)
+        owned = torch.zeros(nbytes, dtype=torch.bool)
+        for name in group.layer_names:
+            views = kv_caches[name]
+            for view in views if isinstance(views, list) else [views]:
+                owned |= _byte_mask(view[block], nbytes)
+        assert not (value & other_blocks).any(), "value reaches other blocks"
+        assert not (owned & ~value).any(), "value misses bytes of the group"
+        # Each piece ends at the last byte the group uses in it.
+        assert all(owned[a - base + n - 1] for a, n in zip(addrs, sizes))
+        if len(groups) == 1 and layout != KVCacheLayout.BHLNC:
+            # A single group stores whole blocks, as before. (A BHLNC head's
+            # block stride spans every head, so only the head's block is.)
+            assert store_layout.block_used_len == store_layout.block_len
+        if not layout.is_block_outermost:
+            # Exactly the group's bytes: no padding, no other group's slots.
+            assert torch.equal(value, owned) and sum(sizes) == owned.sum()
+
+        # Clobber everything but the other blocks, then load the saved value.
+        saved = [ctypes.string_at(a, n) for a, n in zip(addrs, sizes)]
+        raw[~other_blocks] = 7
+        for addr, data in zip(addrs, saved):
+            ctypes.memmove(addr, data, len(data))
+        assert torch.equal(raw[owned], before[owned])
+        assert torch.equal(raw[other_blocks], before[other_blocks])
+        raw.copy_(before)
 
 
 def test_recv_skips_swa_blocks_before_window():
