@@ -262,6 +262,7 @@ def test_deep_sleep_model_state(monkeypatch):
     assert after.keys() == before.keys()
     for name, (_, value) in before.items():
         assert after[name][1] == value, name
+    llm.wake_up(tags=["kv_cache"])
 
 
 def _cudagraph_bytes(worker) -> int:
