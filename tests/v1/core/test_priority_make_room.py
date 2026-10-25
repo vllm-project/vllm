@@ -280,6 +280,38 @@ def test_no_growth_is_counted_when_the_victims_allowed_cannot_make_room(
     assert "hi" not in output.num_scheduled_tokens
 
 
+def test_no_growth_is_counted_when_the_request_fits_with_a_block_each_to_spare(
+    monkeypatch,
+):
+    """A running request takes at most a block per KV cache group in a step, so
+    with that many blocks to spare the waiting request fits without counting
+    the decodes' growth: here 4 blocks of 16 free, beside 2 running requests."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=2)
+    _run_until_decoding(
+        scheduler,
+        _request("a", _num_tokens(8), priority=2, arrival_time=0),
+        _request("b", _num_tokens(8), priority=2, arrival_time=1),
+    )
+    assert _num_free_blocks(scheduler) == 16
+
+    def num_growth_blocks(request: Request, num_steps: int) -> int:
+        raise AssertionError("counted the decodes' growth")
+
+    monkeypatch.setattr(scheduler, "_num_growth_blocks", num_growth_blocks)
+    scheduler.add_request(_request("hi", _num_tokens(12), priority=0, arrival_time=2))
+    output = _step(scheduler)
+    assert not output.preempted_req_ids
+    assert "hi" in output.num_scheduled_tokens
+
+
+def test_the_growth_bound_holds_only_where_a_request_takes_a_block_a_group():
+    """One block per KV cache group a step, without speculative tokens, from the
+    managers that allocate by the token count."""
+    assert _create_scheduler()._max_growth_blocks == 1
+    assert _create_encoder_decoder_scheduler(num_blocks=65)._max_growth_blocks == 2
+    assert _create_scheduler(num_speculative_tokens=2)._max_growth_blocks is None
+
+
 def test_without_deferred_frees_the_growth_is_counted_once(monkeypatch):
     """Without deferred frees, one step of growth is counted until the victims'
     blocks are free: the sum the fit is checked against, once for each running

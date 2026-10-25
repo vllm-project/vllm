@@ -54,6 +54,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    CrossAttentionManager,
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -417,6 +423,26 @@ class Scheduler(SchedulerInterface):
         # Requests room was made for whose allocation the waiting loop has not
         # tried since: no room is made for them again until it has.
         self._make_room_untried: set[Request] = set()
+        # The most new blocks a running request takes in a step, if bounded: one
+        # per KV cache group from the managers that allocate by the token count,
+        # without speculative or lookahead tokens.
+        self._max_growth_blocks: int | None = None
+        managers = self.kv_cache_manager.coordinator.single_type_managers
+        if (
+            not self.num_spec_tokens
+            and not self.num_lookahead_tokens
+            and all(
+                type(manager)
+                in (
+                    FullAttentionManager,
+                    SlidingWindowManager,
+                    ChunkedLocalAttentionManager,
+                    CrossAttentionManager,
+                )
+                for manager in managers
+            )
+        ):
+            self._max_growth_blocks = len(managers)
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -3441,6 +3467,12 @@ class Scheduler(SchedulerInterface):
             # Not even all the candidates would make room: the decodes' growth
             # only adds to the shortfall. (Mamba's align mode can count growth
             # below zero, for a request holding blocks ahead of its tokens.)
+            return set()
+        if (
+            self._max_growth_blocks is not None
+            and num_blocks_short + len(self.running) * self._max_growth_blocks <= 0
+        ):
+            # It fits in this step, however the running requests grow.
             return set()
         num_growth_blocks = sum(self._num_growth_blocks(req, 1) for req in self.running)
         if num_blocks_short + num_growth_blocks <= 0:
