@@ -19,6 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
+import time
 from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
@@ -27,7 +28,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -46,6 +47,9 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+# Bound for one JSON message on the remote warmup-cache control plane.
+# Warmup cache tables are small JSON documents.
+MAX_JSON_MSG_SIZE = 1 << 26
 
 
 def _current_uid() -> int:
@@ -242,6 +246,28 @@ def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> s
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
+def hash_rope_parameters(model_config: ModelConfig) -> str:
+    """Fingerprint the text RoPE parameters used to construct cached buffers."""
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
 def _safetensors_header(path: str) -> bytes:
     """Return the raw safetensors header (length prefix + JSON) of a file.
 
@@ -293,6 +319,9 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    rope_parameters_hash: str
+    kv_cache_dtype: str
+    kv_cache_dtype_skip_layers: tuple[str, ...]
     revision: str | None
     vllm_version: str
     pp_size: int = 1
@@ -301,6 +330,8 @@ class WeightCacheKey:
     """Daemon group the weights come from; False is the target model."""
     dp_size: int = 1
     dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -309,11 +340,14 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        cache_config: CacheConfig,
         pp_size: int = 1,
         pp_rank: int = 0,
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -343,11 +377,18 @@ class WeightCacheKey:
                 quant_config=quant_config,
                 runtime_quant_config=model_config.quantization_config,
             ),
+            rope_parameters_hash=hash_rope_parameters(model_config),
+            kv_cache_dtype=cache_config.cache_dtype,
+            kv_cache_dtype_skip_layers=tuple(
+                sorted(set(cache_config.kv_cache_dtype_skip_layers))
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -415,9 +456,45 @@ def recv_msg(sock: socket.socket) -> Any:
     return pickle.loads(_recv_exact(sock, length))
 
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    """Receive one JSON message.
+
+    Args:
+        sock: Connected socket.
+        max_size: Largest payload accepted.
+        deadline: ``time.monotonic()`` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
+
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))
+
+
+def _recv_exact(
+    sock: socket.socket, num_bytes: int, deadline: float | None = None
+) -> bytes:
     buf = bytearray()
     while len(buf) < num_bytes:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Peer did not send its message in time")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
             raise ConnectionError("Socket closed while receiving message")

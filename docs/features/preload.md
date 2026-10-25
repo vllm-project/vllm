@@ -70,6 +70,50 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
+### Seeding warmup caches between daemons (D2D)
+
+A fresh daemon replica — a new node joining a fleet, a restarted preload
+set — would normally pay the autotune pass itself. With a seed source
+configured, each daemon rank fetches its rank-matched warmup caches from the
+source replica over an authenticated TCP control plane before tuning,
+validates them, and installs them into its own on-disk cache, so its warmup
+skips the profiling sweep. Any failure (unreachable, missing, incompatible)
+falls back to local tuning.
+
+Source replica:
+
+```bash
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
+    --seed-token "$TOKEN"
+```
+
+Mirror replica (possibly on another node):
+
+```bash
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --seed-source-host <source-host> --seed-source-port 29600 \
+    --seed-token "$TOKEN"
+```
+
+Each rank binds and dials `base_port + group offset + its global rank`, so one
+`host:base_port` pair covers a whole replica, including the draft daemon group
+when speculative decoding is configured.
+
+The exchange is keyed by the on-disk cache layout: a request names the cache
+by kind, configuration hash, DP rank and world rank, and the source resolves
+it to files under its cache root. Before installing, the target rejects a
+payload whose FlashInfer environment metadata (GPU, CUDA/cuDNN stack) differs
+from its own — such a table would never load anyway, and a hard conflict is
+never overwritten, which would poison the cache file into re-tuning on every
+start. Tables are shareable across vLLM versions as long as the configuration
+hash matches.
+
+The channel is a generic seeding point: warmup caches are the first kind, and
+further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
+as additional kinds — small JSON payloads travel inline, while large binary
+state rides the data plane.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
@@ -81,9 +125,10 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, model
-   revision, and vLLM version. On any mismatch the engine falls back to disk
-   loading (unless `fallback` is disabled).
+   architecture, TP/DP size/rank, dtype, quantization method and config, text
+   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
+   and vLLM version. On any mismatch the engine falls back to disk loading
+   (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 
@@ -192,6 +237,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   passes, and a table tuned on the draft model would key on the draft's
   config, which no engine looks up), so those deployments' first engine
   tunes and fills the cache instead.
+- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
+  seeded; single-rank daemons use FlashInfer's managed v2 store and always
+  tune in place. Seeding requires a trusted network — the TCP channel is
+  authenticated by a shared token but unencrypted.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
@@ -212,6 +261,13 @@ processes owned by the same user:
 - Both sides reject symlinked or non-owned socket paths; the auto-derived
   directory is additionally rejected if it is group/world accessible.
 - On Linux the daemon verifies the connecting peer's UID via `SO_PEERCRED`.
+
+The optional daemon-to-daemon listener (`--seed-listen-*`) is a
+separate TCP channel: requests are JSON-only and size-capped, authenticate
+with the shared `--seed-token` (constant-time comparison), and
+an unauthenticated peer that stops sending is cut off by a whole-message
+deadline instead of blocking the accept loop. The channel is unencrypted —
+bind it to a trusted network.
 
 See the [security documentation](../usage/security.md) for vLLM's general
 threat model.
