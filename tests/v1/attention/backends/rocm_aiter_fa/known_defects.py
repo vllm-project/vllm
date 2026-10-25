@@ -30,21 +30,6 @@ _ENGINE = "tests/v1/e2e/attention/test_rocm_aiter_fa_runtime.py::"
 
 KNOWN_DEFECTS: dict[str, Defect] = {}
 
-KNOWN_DEFECTS["mrv2-batch-order"] = Defect(
-    "Model runner v2 orders non-decodes by token count, so a prefill can "
-    "precede an extend; split_decodes_prefills_and_extends then runs that "
-    "extend without its context.",
-    (
-        _DISPATCH + "test_batch_order_from_each_model_runner[runner-v2-order]",
-        # Every engine run with model runner v2 (the flag before the model).
-        _ENGINE + "test_engine_modes[*-True-qwen3]",
-        _ENGINE + "test_engine_modes[*-True-qwen3_8]",
-        _ENGINE + "test_engine_modes[*-True-muse_spark]",
-        _ENGINE + "test_engine_modes[*-True-gpt_oss]",
-        _ENGINE + "test_engine_modes_full[*-True]",
-        _ENGINE + "test_ngram_spec_decode[*-True]",
-    ),
-)
 
 KNOWN_DEFECTS["prefill-features"] = Defect(
     "AITER varlen prefill/extend drops the logits soft cap, the head-128 "
