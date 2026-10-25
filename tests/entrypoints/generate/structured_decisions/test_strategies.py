@@ -115,8 +115,12 @@ def test_strategy_selection():
         "Gemma4UnifiedForConditionalGeneration",
     ):
         assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
-    with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
-        select_read_strategy(model("LlamaForCausalLM"), generate)
+    llama = "LlamaForCausalLM"
+    assert select_read_strategy(model(llama), generate) is NextTokenStrategy
+    assert (
+        select_read_strategy(model(llama, "processed_logprobs"), generate)
+        is NextTokenStrategy
+    )
     with pytest.raises(ValueError, match="not raw_logits"):
         select_read_strategy(model(qwen, "raw_logits"), generate)
     # A generative architecture served as a pooling model has no read strategy.
@@ -276,6 +280,40 @@ def test_gemma4_labels_start_the_reply(model_name, reply_start):
     # Construction fails unless every label is one token at the reply's start.
     strategy = NextTokenStrategy(context)
     assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
+
+
+def test_llama_labels_start_the_reply():
+    from vllm.tokenizers import get_tokenizer
+
+    model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    tokenizer = get_tokenizer(model_name)
+    model_config = ModelConfig(model=model_name, dtype="float32")
+    vllm_config = VllmConfig(model_config=model_config)
+    renderer = HfRenderer(vllm_config, tokenizer)
+    try:
+        online_renderer = OnlineRenderer(
+            model_config,
+            renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        engine = MagicMock(spec=EngineClient)
+        engine.model_config = model_config
+        strategy = NextTokenStrategy(
+            ReadContext(engine, online_renderer, None, "auto", {})
+        )
+
+        assert tokenizer.decode(strategy._generation_prompt()).endswith(
+            "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+        assert set(strategy.label_ids) == set(LABELS) | {
+            "yes",
+            "no",
+            *"0123456789",
+        }
+    finally:
+        renderer.shutdown()
 
 
 @pytest.fixture

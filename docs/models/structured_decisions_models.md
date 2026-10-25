@@ -12,6 +12,7 @@ used for classification and routing.
 |---------------------------|---------------------|------------------|-------------------|-------------------------|
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
 | `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
+| `LlamaForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `meta-llama/Llama-3.2-1B-Instruct` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 
 ### Multimodal Models

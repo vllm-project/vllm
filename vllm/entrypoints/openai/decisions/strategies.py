@@ -1451,6 +1451,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Gemma4ForCausalLM": NextTokenStrategy,
     "Gemma4ForConditionalGeneration": NextTokenStrategy,
     "Gemma4UnifiedForConditionalGeneration": NextTokenStrategy,
+    "LlamaForCausalLM": NextTokenStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
