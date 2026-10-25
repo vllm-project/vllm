@@ -76,6 +76,18 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+            # This checkpoint has no sentence-transformers config. Since
+            # sentence-transformers 5.6, a causal LM then gets its chat
+            # template applied and last-token pooling. Keep the plain text and
+            # the MEAN pooling that vLLM uses above.
+            from sentence_transformers.models import Pooling
+
+            st_model = hf_model.model
+            getattr(st_model[0], "modality_config", {}).pop("message", None)
+            st_model[1] = Pooling(
+                st_model.get_sentence_embedding_dimension(), pooling_mode="mean"
+            )
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(
