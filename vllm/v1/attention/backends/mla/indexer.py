@@ -208,6 +208,71 @@ class PrepareUniformDecodeKernel(
         )
 
 
+class PrepareNativeDecodeLensKernel(
+    VllmTritonJitKernel["PrepareNativeDecodeLensKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        max_decode_len: int
+
+    BLOCK_SIZE = 256
+
+    @staticmethod
+    @triton.jit
+    def kernel(
+        seq_lens_ptr,
+        decode_seq_lens_ptr,
+        num_decodes,
+        max_decode_len,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        idx = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = idx < num_decodes * max_decode_len
+        req_id = idx // max_decode_len
+        local_idx = idx % max_decode_len
+        # Clamp at 0: padding requests have seq_len == 0, which would
+        # otherwise make token 0 negative (next_n=2 gives 0-2+1+0 = -1).
+        # Downstream kernels read these as uint32, turning -1 into ~4e9.
+        seq_len = tl.load(seq_lens_ptr + req_id, mask=mask, other=0)
+        per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
+        tl.store(decode_seq_lens_ptr + idx, per_token_seq_len, mask=mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        max_decode_len: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            max_decode_len=triton_scalar_specialization_rep(max_decode_len),
+        )
+
+    def get_warmup_keys(self) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            max_decode_len=(1, 2, 16),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        return dict(
+            seq_lens=int32_ptr,
+            decode_seq_lens=int32_ptr,
+            num_decodes=1,
+            max_decode_len=compile_key.max_decode_len,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        seq_lens: torch.Tensor,
+        decode_seq_lens: torch.Tensor,
+        num_decodes: int,
+        max_decode_len: int,
+    ) -> LaunchSpec:
+        return (triton.cdiv(num_decodes * max_decode_len, self.BLOCK_SIZE),), dict(
+            BLOCK_SIZE=self.BLOCK_SIZE
+        )
+
+
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
@@ -1044,9 +1109,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
 
-        self.offsets_buffer = torch.arange(
-            next_n, device=self.device, dtype=torch.int32
-        )
         self.decode_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -1265,19 +1327,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 assert self.decode_seq_lens_buffer.dim() == 1
                 # (B, max_decode_len): token j attends to
                 # L - max_decode_len + j + 1 KV tokens.
-                seq_lens_buffer = self.decode_seq_lens_buffer[
+                _PREPARE_NATIVE_DECODE_LENS_KERNEL(
+                    seq_lens,
+                    self.decode_seq_lens_buffer,
+                    num_decodes,
+                    max_decode_len,
+                )
+                seq_lens = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
                 ].view(num_decodes, max_decode_len)
-                # Clamp at 0: padding requests have seq_len == 0, which would
-                # otherwise make token 0 negative (next_n=2 gives 0-2+1+0 = -1).
-                # Downstream kernels read these as uint32, turning -1 into ~4e9.
-                seq_lens_buffer[:] = (
-                    seq_lens.unsqueeze(1)
-                    - max_decode_len
-                    + 1
-                    + self.offsets_buffer[:max_decode_len]
-                ).clamp_(min=0)
-                seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
     def _prepare_global_decode_seq_lens(
@@ -1972,4 +2030,5 @@ def build_prefill_chunk_metadata(
 
 
 _PREPARE_UNIFORM_DECODE_KERNEL = PrepareUniformDecodeKernel()
+_PREPARE_NATIVE_DECODE_LENS_KERNEL = PrepareNativeDecodeLensKernel()
 _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()

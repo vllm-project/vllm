@@ -644,10 +644,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             if self.indexer is not None:
                 from vllm.v1.attention.backends.mla.indexer import (
                     _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_NATIVE_DECODE_LENS_KERNEL,
                     _PREPARE_UNIFORM_DECODE_KERNEL,
                 )
 
                 _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _PREPARE_NATIVE_DECODE_LENS_KERNEL.register_warmup()
                 _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
             spec_config = vllm_config.speculative_config
