@@ -1476,23 +1476,23 @@ class OffloadingConnectorScheduler:
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
 
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+        for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
             req_status.update_offload_keys()
 
-            if preempted:
+            if is_full_table:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
 
-            if new_block_id_groups:
+            if block_id_groups:
                 if self._sliding_window_groups:
                     new_block_ids_end[req_id] = tuple(
                         len(req_status.group_states[grp_idx].block_ids)
                         for grp_idx in self._sliding_window_groups
                     )
-                req_status.update_block_id_groups(new_block_id_groups)
+                req_status.update_block_id_groups(block_id_groups)
                 for group_config in self.config.kv_group_configs:
-                    new_blocks = new_block_id_groups[group_config.group_idx]
+                    new_blocks = block_id_groups[group_config.group_idx]
                     for bid in new_blocks:
                         if bid != 0:
                             self._current_batch_allocated_block_ids.add(bid)
