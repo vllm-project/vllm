@@ -211,6 +211,7 @@ vllm bench sweep startup \
 Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
 Wrap an entire filter value in single or double quotes if it contains commas. Only commas outside quoted values separate filters. Unterminated quoted values are rejected.
+Only a quote at the start of the value, after the first comparison operator and optional whitespace, opens a quoted value. Quotes later in an unquoted value, such as `build=='one`, remain literal.
 
 ```bash
 vllm bench sweep plot benchmarks/results/demo \

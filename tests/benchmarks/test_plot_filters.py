@@ -238,6 +238,7 @@ class TestPlotFilters:
             ('label=="fp8,tp2",request_rate<2', "fp8,tp2"),
             ("label=='fp8,tp2',request_rate<2", "fp8,tp2"),
             ('label=="O\'Brien,tp2",request_rate<2', "O'Brien,tp2"),
+            ("request_rate<2,label=='fp8,tp2'", "fp8,tp2"),
         ],
     )
     def test_quoted_commas_do_not_split_filter_values(self, expression, target):
@@ -247,8 +248,18 @@ class TestPlotFilters:
 
         assert result["label"].tolist() == [target]
 
-    @pytest.mark.parametrize("target", ["O'Brien", r"C:\models\example"])
-    def test_unquoted_values_keep_apostrophes_and_backslashes(self, target):
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "O'Brien",
+            r"C:\models\example",
+            "build=='one",
+            'build!="one',
+            "version>='one",
+            "build== 'one",
+        ],
+    )
+    def test_unquoted_values_keep_literal_quotes_and_backslashes(self, target):
         df = pd.DataFrame({"label": [target, "other"]})
 
         result = PlotFilters.parse_str(f"label=={target}").apply(df)
@@ -260,8 +271,22 @@ class TestPlotFilters:
         with pytest.raises(ValueError, match="Unterminated quoted value"):
             PlotFilters.parse_str(expression)
 
-    def test_cli_applies_quoted_comma_filter(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        "target,other,expression",
+        [
+            ("fp8,tp2", "fp8", '_benchmark_name=="fp8,tp2",request_rate>1'),
+            ("build=='one", "other", "_benchmark_name==build=='one,request_rate>1"),
+            ('build!="one', "other", '_benchmark_name==build!="one,request_rate>1'),
+            ("version>='one", "other", "_benchmark_name==version>='one,request_rate>1"),
+        ],
+    )
+    def test_cli_applies_quoted_and_unquoted_value_filters(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        target,
+        other,
+        expression,
     ):
         records = [
             {
@@ -270,7 +295,7 @@ class TestPlotFilters:
                 "total_token_throughput": 100,
                 "median_ttft_ms": 10,
             }
-            for name, rate in [("fp8,tp2", 1), ("fp8", 2)]
+            for name, rate in [(target, 1), (other, 2)]
         ]
         (tmp_path / "summary.json").write_text(json.dumps(records), encoding="utf-8")
         parser = SweepPlotArgs.add_cli_args(FlexibleArgumentParser())
@@ -278,7 +303,7 @@ class TestPlotFilters:
             [
                 str(tmp_path),
                 "--filter-by",
-                '_benchmark_name=="fp8,tp2",request_rate>1',
+                expression,
             ]
         )
 

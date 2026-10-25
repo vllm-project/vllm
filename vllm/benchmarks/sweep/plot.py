@@ -129,18 +129,23 @@ class PlotFilters(list[PlotFilterBase]):
 
         expressions = []
         quote: str | None = None
+        value_start: int | None = None
         start = 0
         for index, char in enumerate(s):
             if quote is not None:
                 if char == quote:
                     quote = None
-            elif char in ("'", '"') and s[start:index].rstrip().endswith(
-                tuple(PLOT_FILTERS)
-            ):
-                quote = char
             elif char == ",":
                 expressions.append(s[start:index])
                 start = index + 1
+                value_start = None
+            elif value_start is None:
+                for op_key in PLOT_FILTERS:
+                    if s.startswith(op_key, index):
+                        value_start = index + len(op_key)
+                        break
+            elif char in ("'", '"') and not s[value_start:index].strip():
+                quote = char
 
         if quote is not None:
             raise ValueError(f"Unterminated quoted value in plot filter {s!r}")
