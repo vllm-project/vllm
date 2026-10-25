@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
+    from vllm.outputs import RequestOutput
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
@@ -120,6 +121,49 @@ class StreamingTranscriptionPostProcessor:
 
     def process_delta(self, text_delta: str, finished: bool) -> str:
         return text_delta
+
+
+@dataclass(frozen=True, slots=True)
+class WordTimestamp:
+    """A word with its start and end, in seconds from the start of its chunk."""
+
+    word: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionChunk:
+    """One finished chunk of a transcription request, to align."""
+
+    output: "RequestOutput"
+    """The chunk's final output: its token IDs and, from models that support
+    `SupportsEncoderOutputs`, the outputs of its encoder pass."""
+
+    text: str
+    """The chunk's transcript, as the response shows it."""
+
+    language: str | None
+    """The request's language, or `None` when it is unknown."""
+
+
+class WordTimestampAligner:
+    """Aligns the words of one finished transcription chunk.
+
+    The server creates one instance and calls `align` in a worker
+    thread, so the instance can hold assets loaded once in `__init__`.
+    """
+
+    def __init__(self, model_config: "ModelConfig") -> None:
+        self.model_config = model_config
+
+    def align(self, chunk: TranscriptionChunk) -> list[WordTimestamp]:
+        """Return the words of the chunk's transcript with their times.
+
+        Raise an exception when the words cannot be aligned: the server then
+        fails the request. An empty list means that the chunk has no words.
+        """
+        raise NotImplementedError
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
@@ -1391,6 +1435,11 @@ class SupportsTranscription(Protocol):
     supports_diarized_transcription: ClassVar[bool] = False
     """Enables the `diarized_json` response format for the model."""
 
+    supports_word_timestamps: ClassVar[bool] = False
+    """Enables `timestamp_granularities[]=word` with `verbose_json`.
+    Models that set this must implement `get_word_timestamp_aligner_cls`.
+    """
+
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
@@ -1505,6 +1554,15 @@ class SupportsTranscription(Protocol):
         `post_process_output` applied, and returns timestamps relative to that
         chunk. Only models that set `supports_diarized_transcription` must
         override this method.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_word_timestamp_aligner_cls(cls) -> type[WordTimestampAligner]:
+        """Return the aligner that produces word timestamps for each chunk.
+
+        Only models that set `supports_word_timestamps` must override this
+        method.
         """
         raise NotImplementedError
 
