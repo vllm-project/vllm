@@ -875,6 +875,12 @@ class KVCacheManager:
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
+    def reserve_external_boundary_blocks(self, request_id: str) -> None:
+        """See ``MambaManager.reserve_external_boundary_block``."""
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager):
+                mgr.reserve_external_boundary_block(request_id)
+
     def take_boundary_state_offloads(
         self,
     ) -> dict[str, list[tuple[int, int, int]]]:

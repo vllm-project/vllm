@@ -132,6 +132,12 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+- `ssm_boundary_state_xfer` (via `kv_connector_extra_config`): Also send the Mamba state at the last full block of the prompt, so the decoder can reuse the transferred prefix from its own prefix cache. (Optional)
+    - Default: false
+    - Only for hybrid Mamba models with prefix caching on (Mamba `align` cache mode). Enable it when a router may send a later turn to the decoder without a prefill instance (conditional disaggregation). Without it, the decoder recomputes the full prompt on such a turn.
+    - Set it on both P and D instances. Pull mode only; ignored with decode context parallel (DCP > 1).
+    - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"ssm_boundary_state_xfer": true}}'`
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.

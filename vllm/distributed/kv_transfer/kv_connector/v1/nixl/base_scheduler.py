@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -41,7 +42,8 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -56,6 +58,9 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+    # Only the pull scheduler implements SSM boundary-state transfer.
+    _SUPPORTS_SSM_BOUNDARY_TRANSFER: bool = False
+    _ssm_boundary_transfer: bool = False
 
     def __init__(
         self,
@@ -101,6 +106,12 @@ class NixlBaseConnectorScheduler:
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
+        self._align_ssm_groups: tuple[int, ...] = tuple(
+            i
+            for i, g in enumerate(kv_cache_config.transfer_groups)
+            if isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+        )
         self._bounded_replay = any(
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
@@ -184,6 +195,22 @@ class NixlBaseConnectorScheduler:
             )
         )
 
+        self._ssm_boundary_transfer = (
+            self._SUPPORTS_SSM_BOUNDARY_TRANSFER
+            and bool(
+                vllm_config.kv_transfer_config.get_from_extra_config(
+                    "ssm_boundary_state_xfer", False
+                )
+            )
+            and bool(self._align_ssm_groups)
+            and vllm_config.cache_config.enable_prefix_caching
+            # DCP matches block lists from the head, misaligning the extra slot.
+            and parallel_config.decode_context_parallel_size == 1
+        )
+        self._kv_cache_manager: KVCacheManager | None = None
+        # P side: req -> (boundary tokens, pinned state block per align group).
+        self._boundary_pins: dict[ReqId, tuple[int, dict[int, KVCacheBlock]]] = {}
+
         if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
             logger.info(
                 "Bidirectional KV transfer is enabled and the kv "
@@ -199,11 +226,19 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        self._kv_cache_manager = kv_cache_manager
+
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_request_for_prefill(request)
+            if self._ssm_boundary_transfer:
+                n = request.num_prompt_tokens
+                boundary = n // self.block_size * self.block_size
+                if 0 < boundary < n:
+                    self._boundary_pins[request.request_id] = (boundary, {})
 
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
         # effectively disabled for Bidirectional KV transfer.
@@ -251,7 +286,10 @@ class NixlBaseConnectorScheduler:
                     del self._heartbeat_by_engine[engine_id]
 
     def get_exchange_clipped_blocks(
-        self, block_ids: BlockIds, clip_ssm: bool = True
+        self,
+        block_ids: BlockIds,
+        clip_ssm: bool = True,
+        keep_ssm_boundary: bool = False,
     ) -> BlockIds:
         """Clip a request's block lists down to the transferable blocks.
 
@@ -266,7 +304,8 @@ class NixlBaseConnectorScheduler:
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
         for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply.
+        does not apply. ``keep_ssm_boundary`` also keeps a reserved boundary
+        state just before the running state in align-mode SSM groups.
         """
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.
@@ -289,7 +328,12 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
+                state = clip_ssm_state_blocks(blocks, n_spec_blocks)
+                if keep_ssm_boundary and i in self._align_ssm_groups:
+                    running_idx = len(blocks) - 1 - min(n_spec_blocks, len(blocks) - 1)
+                    if running_idx > 0 and blocks[running_idx - 1] != NULL_BLOCK_ID:
+                        state = [blocks[running_idx - 1], *state]
+                blocks = state
             clipped.append(blocks)
         return tuple(clipped)
 
@@ -483,6 +527,9 @@ class NixlBaseConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = NixlConnectorMetadata()
 
+        if self._ssm_boundary_transfer:
+            self._pin_boundary_states(scheduler_output)
+
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (
             req,
@@ -529,6 +576,73 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
+        if self._ssm_boundary_transfer:
+            for req_id in connector_output.finished_sending or ():
+                self._release_boundary_pins(req_id)
+
+    ############################################################
+    # SSM boundary-state transfer (Mamba "align" mode)
+    ############################################################
+    def _pin_boundary_states(self, scheduler_output: SchedulerOutput) -> None:
+        """P side: pin each producer request's boundary state when offered."""
+        block_state = scheduler_output.kv_connector_block_state
+        if block_state is None or self._kv_cache_manager is None:
+            return
+        pool = self._kv_cache_manager.block_pool
+        transfer_index = {
+            group_id: i
+            for i, group_id in enumerate(self.kv_cache_config.transfer_group_ids)
+        }
+        for req_id, entries in block_state.boundary_state_offloads.items():
+            if req_id not in self._boundary_pins:
+                continue
+            boundary, pins = self._boundary_pins[req_id]
+            for group_id, block_id, boundary_tokens in entries:
+                group = transfer_index.get(group_id)
+                if (
+                    boundary_tokens != boundary
+                    or group not in self._align_ssm_groups
+                    or group in pins
+                    or block_id == NULL_BLOCK_ID
+                ):
+                    continue
+                block = pool.blocks[block_id]
+                pool.touch([block])
+                pins[group] = block
+
+    def _release_boundary_pins(self, req_id: ReqId) -> None:
+        _, pins = self._boundary_pins.pop(req_id, (0, {}))
+        if pins and self._kv_cache_manager is not None:
+            self._kv_cache_manager.block_pool.free_blocks(list(pins.values()))
+
+    def _attach_boundary_states(
+        self, request: "Request", block_ids: BlockIds
+    ) -> tuple[BlockIds, int | None]:
+        """P side: prepend each align group's pinned boundary state to the
+        sent block ids. Returns the boundary token count, or None if not sent."""
+        boundary, pins = self._boundary_pins.get(request.request_id, (0, {}))
+        if all(g in pins and block_ids[g] for g in self._align_ssm_groups):
+            block_ids = tuple(
+                [pins[i].block_id, *blocks] if i in pins else blocks
+                for i, blocks in enumerate(block_ids)
+            )
+            return block_ids, boundary
+        self._release_boundary_pins(request.request_id)
+        return block_ids, None
+
+    def _maybe_reserve_boundary_state(
+        self, request: "Request", num_loaded_tokens: int, num_computed_tokens: int
+    ) -> None:
+        """D side: reserve a block for the boundary state the prefiller sends,
+        unless the local prefix hit already covers it."""
+        params = request.kv_transfer_params
+        if not self._ssm_boundary_transfer or self._kv_cache_manager is None:
+            return
+        boundary = params.get("remote_ssm_boundary_tokens") if params else None
+        expected = num_loaded_tokens // self.block_size * self.block_size
+        if boundary != expected or num_computed_tokens >= boundary:
+            return
+        self._kv_cache_manager.reserve_external_boundary_blocks(request.request_id)
 
     def has_pending_push_work(self) -> bool:
         return False

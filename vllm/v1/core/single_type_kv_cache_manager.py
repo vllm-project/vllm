@@ -1461,6 +1461,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # See ``reserve_external_boundary_block``.
+            self._external_boundary_reqs: set[str] = set()
 
     @classmethod
     def find_longest_cache_hit(
@@ -1767,7 +1769,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 prefill_end,
             ):
                 checkpoint_position = 0
-            checkpoint_block = int(checkpoint_position > 0)
+            checkpoint_block = int(checkpoint_position > 0) + int(
+                request_id in self._external_boundary_reqs
+            )
             if not apply_admission_cap:
                 if checkpoint_position > 0:
                     checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
@@ -1917,6 +1921,48 @@ class MambaManager(SingleTypeKVCacheManager):
                 returned_blocks.extend(new_blocks)
                 return returned_blocks
 
+    def reserve_external_boundary_block(self, request_id: str) -> None:
+        """Keep a real block at the last block boundary of an external load,
+        for a KV connector that also loads the state there, so it gets cached
+        with the loaded prefix. Call before the request's first allocation."""
+        if self.mamba_cache_mode == "align" and not self.req_to_blocks.get(request_id):
+            self._external_boundary_reqs.add(request_id)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
+    ) -> None:
+        reserve = request_id in self._external_boundary_reqs
+        self._external_boundary_reqs.discard(request_id)
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+            record_for_zeroing,
+        )
+        num_computed = num_local_computed_tokens + num_external_computed_tokens
+        req_blocks = self.req_to_blocks[request_id]
+        boundary_idx = num_computed // self.block_size - 1
+        # At a block multiple the running state is the boundary state.
+        if (
+            not reserve
+            or num_computed % self.block_size == 0
+            or not 0 <= boundary_idx < len(req_blocks) - 1
+            or not req_blocks[boundary_idx].is_null
+        ):
+            return
+        (boundary_block,) = self.block_pool.get_new_blocks(1)
+        req_blocks[boundary_idx] = boundary_block
+        if self._record_new_block_ids and record_for_zeroing:
+            self.new_block_ids.append(boundary_block.block_id)
+        # Let cache_blocks() hash the loaded state.
+        self.num_cached_block[request_id] = min(
+            self.num_cached_block.get(request_id, 0), boundary_idx
+        )
+
     def _relocate_speculative_block(
         self, req_blocks: list[KVCacheBlock], block_idx: int
     ) -> None:
@@ -1951,6 +1997,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._external_boundary_reqs.discard(request_id)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
