@@ -136,6 +136,12 @@ class RocmOctaveAttentionBackend(AttentionBackend):
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # The kernels take block/head/token strides; the slot is contiguous.
+        # The MFMA decode loads 16 consecutive tokens of a head as one tile.
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import get_cdna_version
+
+            if get_cdna_version() == 3:
+                return (KVCacheLayout.LBHNC,)
         return (KVCacheLayout.LBHNC, KVCacheLayout.LBNHC)
 
     @classmethod
