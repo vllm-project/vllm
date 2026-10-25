@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
@@ -423,8 +424,6 @@ def _setup_shared_sync_load_failure(
     scheduler.use_v2_model_runner = True
 
     num_prompt_blocks = 10
-    if aux_output:
-        scheduler.aux_output_connector = AuxOutputSchedulerConnector()
     num_prompt_tokens = num_prompt_blocks * scheduler.block_size
     num_external_computed_tokens = num_external_computed_blocks * scheduler.block_size
     common_prefix_len = num_common_prefix_blocks * scheduler.block_size
@@ -462,6 +461,22 @@ def _setup_shared_sync_load_failure(
     scheduler.connector.take_events.return_value = ()
 
     failed_output = scheduler.schedule()
+    if aux_output:
+        # schedule() already advanced the token counts; register that frontier.
+        scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+            scheduler.kv_cache_manager, scheduler.connector
+        )
+        failed_output.aux_output_connector_metadata = (
+            scheduler.aux_output_connector.build_connector_meta(
+                replace(
+                    failed_output,
+                    num_scheduled_tokens=dict.fromkeys(
+                        failed_output.num_scheduled_tokens, 0
+                    ),
+                ),
+                scheduler.requests,
+            )
+        )
     owner_block_ids = failed_output.scheduled_new_reqs[0].block_ids[0]
     for scheduled_sharer in failed_output.scheduled_new_reqs[1:]:
         assert (
@@ -752,8 +767,8 @@ def test_shared_block_recovery_quarantines_divergent_fallback_hit():
 
     get_local_hit = scheduler._get_local_prefix_cache_hit
 
-    def divergent_local_hit(request):
-        blocks, tokens, boundary, _ = get_local_hit(request)
+    def divergent_local_hit(request, max_cache_hit_length=None):
+        blocks, tokens, boundary, _ = get_local_hit(request, max_cache_hit_length)
         return blocks, tokens, boundary, True
 
     scheduler._get_local_prefix_cache_hit = divergent_local_hit
