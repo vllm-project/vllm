@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Capture eager MRV2 module inputs, outputs, and batch metadata for debugging."""
+
 import os
 import tempfile
 from collections.abc import Iterator
@@ -61,7 +66,7 @@ def _parallel_groups() -> dict:
 
 
 class TensorDumper:
-    def __init__(self, config: TensorDumpConfig):
+    def __init__(self, config: TensorDumpConfig, model: torch.nn.Module):
         self.config = config
         self.rank = (
             torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -78,8 +83,6 @@ class TensorDumper:
         self._index = 0
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
 
-    def register(self, model: torch.nn.Module) -> None:
-        self.close()
         for name, module in model.named_modules():
             name = name or "<root>"
             self._handles.extend(

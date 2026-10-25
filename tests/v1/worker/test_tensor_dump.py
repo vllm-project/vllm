@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -73,8 +76,7 @@ def test_cli_config_round_trip(tmp_path, style, monkeypatch):
 
 def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
     model = torch.nn.Sequential(torch.nn.ReLU(inplace=True))
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
-    dumper.register(model)
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)), model)
     inputs = torch.tensor([-2.0, 3.0])
     expected = model(inputs.clone())
     with dumper.capture(batch):
@@ -94,7 +96,9 @@ def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
 
 
 def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     value = torch.tensor([3.0], requires_grad=True)
     dump("outside", value)
     with dumper.capture(batch):
@@ -112,7 +116,9 @@ def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
 
 @pytest.mark.parametrize("config", [{"enabled": False}, {"ranks": [999]}])
 def test_disabled_capture_writes_nothing(tmp_path, batch, config):
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path), **config))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path), **config), torch.nn.Identity()
+    )
     with dumper.capture(batch):
         dump("value", torch.ones(1))
     assert records(dumper) == []
@@ -120,7 +126,8 @@ def test_disabled_capture_writes_nothing(tmp_path, batch, config):
 
 def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), patterns=["selected*"])
+        TensorDumpConfig(output_dir=str(tmp_path), patterns=["selected*"]),
+        torch.nn.Identity(),
     )
     for _ in range(2):
         with dumper.capture(batch):
@@ -148,7 +155,9 @@ def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
 
 
 def test_failed_forward_clears_capture_context(tmp_path, batch):
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     with pytest.raises(RuntimeError, match="forward failed"), dumper.capture(batch):
         raise RuntimeError("forward failed")
     dump("outside", torch.ones(1))
@@ -156,11 +165,9 @@ def test_failed_forward_clears_capture_context(tmp_path, batch):
     assert dumper.step == 1
 
 
-def test_reregister_and_close_do_not_leave_hooks(tmp_path, batch):
+def test_constructor_registers_hooks_and_close_removes_them(tmp_path, batch):
     model = torch.nn.Identity()
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
-    dumper.register(model)
-    dumper.register(model)
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)), model)
     with dumper.capture(batch):
         model(torch.ones(1))
     assert len(records(dumper)) == 3
@@ -170,8 +177,12 @@ def test_reregister_and_close_do_not_leave_hooks(tmp_path, batch):
 
 
 def test_workers_do_not_overwrite_each_other(tmp_path, batch):
-    first = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
-    second = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    first = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
+    second = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     assert first.directory != second.directory
     for dumper in (first, second):
         with dumper.capture(batch):
@@ -180,7 +191,9 @@ def test_workers_do_not_overwrite_each_other(tmp_path, batch):
 
 
 def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     value = torch.ones(100_000)
     with dumper.capture(batch):
         dump("slice", value[10:13])
@@ -190,7 +203,8 @@ def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
 
 def test_filter_can_select_a_nested_tensor(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), patterns=["capture.items.1"])
+        TensorDumpConfig(output_dir=str(tmp_path), patterns=["capture.items.1"]),
+        torch.nn.Identity(),
     )
     with dumper.capture(batch):
         dump("capture", {"items": [torch.zeros(1), torch.ones(1)]})
@@ -240,7 +254,9 @@ def test_batch_records_parallel_groups(tmp_path, batch, monkeypatch, expert_para
 
         monkeypatch.setattr(parallel_state, "get_ep_group", missing_ep)
         del expected["ep"]
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     with dumper.capture(batch):
         pass
     assert records(dumper)[0]["value"]["parallel_groups"] == expected
@@ -255,7 +271,9 @@ def test_runtime_control_uses_existing_rpc(tmp_path):
 
     app = FastAPI()
     app.add_middleware(AuthenticationMiddleware, tokens=["test-key"])
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)))
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+    )
     app.state.engine_client = SimpleNamespace(
         collective_rpc=AsyncMock(
             side_effect=lambda **kwargs: [dumper.control(*kwargs["args"])]

@@ -2083,11 +2083,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     # Eager (NONE): call the raw model directly.
-                    with (
-                        self.tensor_dumper.capture(input_batch)
-                        if not dummy_run and self.tensor_dumper is not None
-                        else nullcontext()
-                    ):
+                    with self.tensor_dumper_capture(input_batch, dummy_run):
                         model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
@@ -2393,6 +2389,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             input_batch.query_start_loc,
         )
+
+    def init_tensor_dumper(self) -> None:
+        config = self.vllm_config.tensor_dump_config
+        if config.output_dir is not None:
+            self.tensor_dumper = TensorDumper(config, self.get_model())
+
+    def tensor_dumper_capture(
+        self, input_batch: InputBatch, dummy_run: bool
+    ) -> AbstractContextManager:
+        if not dummy_run and self.tensor_dumper is not None:
+            return self.tensor_dumper.capture(input_batch)
+        return nullcontext()
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that

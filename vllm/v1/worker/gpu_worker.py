@@ -1103,14 +1103,8 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        if self.vllm_config.tensor_dump_config.output_dir is not None:
-            from vllm.v1.worker.gpu.tensor_dump import TensorDumper
-
-            model_runner = cast("GPUModelRunnerV2", self.model_runner)
-            model_runner.tensor_dumper = TensorDumper(
-                self.vllm_config.tensor_dump_config
-            )
-            model_runner.tensor_dumper.register(model_runner.get_model())
+        if self.use_v2_model_runner:
+            cast("GPUModelRunnerV2", self.model_runner).init_tensor_dumper()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
