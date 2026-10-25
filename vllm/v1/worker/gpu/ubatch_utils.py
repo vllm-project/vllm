@@ -521,7 +521,7 @@ class UBatchRunner:
                 stack.close()
 
             if errors:
-                failed = min(errors)
+                failed = next(iter(errors))
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
                 ) from errors[failed]
