@@ -159,6 +159,9 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         scratch_table[0, 0] = 1
         scratch_table[0, 1] = num_slots
         grouped.append((mixers, spec, scratch_table))
+        # Homogeneous layer/group counts are runtime values, not JIT keys.
+        # One group warms the kernels without overlapping shared scratch pages.
+        break
     if not grouped:
         return
 

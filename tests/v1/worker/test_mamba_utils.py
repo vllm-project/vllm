@@ -1033,7 +1033,6 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
     from vllm.v1.worker.replayssm_utils import (
         ReplaySSMModelContext,
         _postprocess_replayssm_kernel,
-        _ReplaySSMGroupContext,
     )
 
     device = torch.device("cuda")
@@ -1057,14 +1056,17 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         replayssm_buffer_len=16,
         mamba_config=MambaConfig(),
     )
-    group = _ReplaySSMGroupContext.create(
-        [mixer],
-        torch.tensor([[1]], dtype=torch.int32, device=device),
-        cache_mode,
-        128,
-        1,
+    spec = MambaSpec(
+        block_size=128,
+        shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
+        dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
+        mamba_cache_mode=cache_mode,
+        use_flashinfer_replayssm=True,
     )
-    replay = ReplaySSMModelContext(groups=[group])
+    replay = ReplaySSMModelContext.create(
+        [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
+        max_num_reqs=1,
+    )
     metadata = _build_staging_metadata([64], [8], [64], [0], num_spec)
     ctx = _make_staging_ctx(1, device)
     stage_postprocess_inputs_to_gpu(
@@ -1089,8 +1091,8 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         replay.num_committed_ptrs,
         replay.src_slots_ptrs,
         replay.dst_slots_ptrs,
-        replay.plan_ring_start_ptrs,
-        replay.plan_flush_count_ptrs,
+        replay.plan_ring_start,
+        replay.plan_flush_count,
         replay.block_table_strides,
         replay.num_layers,
         MAX_NUM_REQS=1,

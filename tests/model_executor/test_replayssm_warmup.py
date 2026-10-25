@@ -135,8 +135,11 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
     config.cache_config.kv_cache_layout = layout.name
     kv_config = get_kv_cache_config_from_groups(
         config,
-        [KVCacheGroupSpec(["layers.0.mixer", "layers.1.mixer"], spec)],
-        5 * (2 * spec.page_size_bytes + 8),
+        [
+            KVCacheGroupSpec(["layers.0.mixer", "layers.1.mixer"], spec),
+            KVCacheGroupSpec(["layers.2.mixer"], spec),
+        ],
+        5 * (2 * spec.page_size_bytes + 16),
     )
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     mixers = []
@@ -161,6 +164,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
             (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
         )
         mixers.append(mixer)
+    assert mixers[0].kv_cache[0].data_ptr() == mixers[2].kv_cache[0].data_ptr()
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
     original_block_ids = block_ids.copy()
     block_table = SimpleNamespace(block_table=SimpleNamespace(np=block_ids))
