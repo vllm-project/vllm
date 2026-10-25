@@ -32,9 +32,10 @@ def projection_policies(tp, rows, batches):
         n = next(b for b in (8, 16, 32, 64) if batch <= b)
         if rows == 6288 and (tp == 8 or n > 8):
             tactic = (64, 64, 1, 6) if n == 64 else (128, n, 2, 5 if n == 32 else 6)
-        elif tp == 8 and n == 8:
-            # TP8 MLA (3648 rows): 128-row tiles give 116 one-per-SM CTAs in one wave;
-            # 64-row tiles (228 CTAs) ran two waves on 152 SMs (10.5 vs 8.9 us cold).
+        elif n == 8:
+            # B3-8 one wave: 128-row tiles give 116 (TP8 MLA 3648 rows), 104 (TP16 KDA
+            # 3216) and 92 (TP16 MLA 2880) one-per-SM CTAs; 64-row tiles ran two waves on
+            # 152 SMs (cold: TP8 MLA 10.5 vs 8.9 us, TP16 KDA 9.8 vs 8.2, MLA 9.3 vs 7.5).
             tactic = (128, 8, 4, 6)
         else:  # TP16 KDA B64: a sixth stage, -0.7 us per layer in the KDA chain
             stages = {8: 8, 16: 10, 32: 8, 64: 6 if rows == 3216 else 5}[n]
