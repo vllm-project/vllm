@@ -1943,3 +1943,17 @@ hit rate du cache de préfixe 41,9 % cumulé (139,3 M requêtes / 58,4 M hits).
 
 **Fenêtre de jour** : proposée à claudish le lundi 26/10 09:00→11:00Z (jour ouvré, volume
 comparable), à confirmer quand les volumes du week-end seront connus.
+
+## 25/10 05:41Z — engagement tenu : PR amont ouverte (vllm-project#63551), 0 assert après 11 h
+
+- Condition remplie : **aucun assert `not found in cache` depuis le déploiement de l'overlay**
+  (18:52Z 24/10 → 05:41Z 25/10 = 11 h), contre 5 crashs/jour sur le stock.
+- Branche `kv-offload-protect-step-hits` = upstream/main (e4a5b55373) + le correctif (applique
+  propre, il date d'hier et upstream n'a pas touché ces fichiers depuis) + le test de régression
+  déplacé sous `tests/v1/kv_offload/tiering/` (layout amont) + `ruff format` (1 fichier
+  reformaté). Commit `b55d41fbf3`, DCO signé.
+- **PR ouverte : [vllm-project/vllm#63551](https://github.com/vllm-project/vllm/pull/63551)** —
+  titre `[Bugfix][KV Offload] Protect the step's reported HITs from promotion eviction`. Cross-ref
+  postée sur #62615 (c.6394054527). Fixes #60729 (case 2), related #54914.
+- Prod au même cycle : health 200, RC=0, VRAM GPU 0 22 329 MiB, préemptions 14 (+5 dans la nuit,
+  à suivre), tier fs 268,4 GiB avec rotations normales (751 fichiers à 05:20Z, 0 err).
