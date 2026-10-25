@@ -678,6 +678,8 @@ class DeepseekSparseSWAIndexBatch:
         ]
         if (
             self._params_host is None
+            or self._params_host_rows is None
+            or self._params_device is None
             or self._params_host.shape[0] < num_groups
             or (self._params_copied is not None and not self._params_copied.query())
         ):

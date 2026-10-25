@@ -101,6 +101,7 @@ def _run_prepare(
         pcp_manager=None,
         draft_kv_cache_group_id=0,
         draft_kv_cache_group_ids=[0],
+        _draft_group_ids=torch.tensor([0], dtype=torch.int32, device=device),
         _layer_group_idx=None,
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
