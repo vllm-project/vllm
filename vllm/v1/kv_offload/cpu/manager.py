@@ -46,6 +46,23 @@ class _RequestCacheAccess:
     finished: bool = False
 
 
+class _UnionKeys:
+    """Read-only membership view over two key collections, without copying.
+
+    Eviction policies only test ``key in protected``; building a merged set
+    for every promotion would copy the whole protected set each time.
+    """
+
+    __slots__ = ("_a", "_b")
+
+    def __init__(self, a: Collection[OffloadKey], b: Collection[OffloadKey]):
+        self._a = a
+        self._b = b
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._a or key in self._b
+
+
 class CPUOffloadingManager(OffloadingManager):
     """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
@@ -257,7 +274,14 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        extra_protected: Collection[OffloadKey] | None = None,
     ) -> PrepareStoreOutput | None:
+        """Allocate chunks for ``keys``, evicting idle chunks if needed.
+
+        ``extra_protected`` lists chunks that must survive this call's
+        eviction in addition to ``keys`` (e.g. primary HITs a scheduler
+        lookup walk already counted but has not pinned yet).
+        """
         keys = list(keys)
         if self.counts is not None:
             self._record_accesses(keys)
@@ -325,7 +349,9 @@ class CPUOffloadingManager(OffloadingManager):
 
             # Chunks from the original input are excluded from eviction candidates:
             # a chunk that was already stored must remain in the cache after this call.
-            protected = set(keys)
+            protected: set[OffloadKey] = set(keys)
+            if extra_protected:
+                protected = _UnionKeys(protected, extra_protected)  # type: ignore[assignment]
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
                 return None

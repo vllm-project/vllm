@@ -262,6 +262,15 @@ class TieringOffloadingManager(OffloadingManager):
         # object is reused for all chunk lookups of a given request per engine step.
         self._pending_load_submissions: dict[int, dict[str, PendingPromotion]] = {}
 
+        # Primary-tier keys reported HIT by lookup() during the current
+        # scheduler step. A HIT is only pinned later, when the scheduler calls
+        # prepare_load() for the request, so until then a promotion started by
+        # a later lookup in the same step could evict it, and prepare_load()
+        # would then fail on a chunk the scheduler already counted as loaded
+        # ("Chunk ... not found in cache"). Promotions never evict these keys.
+        # Cleared at the end of each step in on_schedule_end().
+        self._step_hit_keys: set[OffloadKey] = set()
+
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in on_schedule_end().
         self._processed_jobs_this_step: bool = False
@@ -627,6 +636,7 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            self._step_hit_keys.add(key)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -701,7 +711,11 @@ class TieringOffloadingManager(OffloadingManager):
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
         # preventing duplicate promotion attempts.
-        primary_write_result = self.primary_tier.prepare_write([key], req_context)
+        # Never evict a primary HIT already reported this step: the scheduler
+        # has counted it and will prepare_load() it before the step ends.
+        primary_write_result = self.primary_tier.prepare_write(
+            [key], req_context, extra_protected=self._step_hit_keys
+        )
 
         if primary_write_result is None:
             # Primary tier is full; caller should treat the chunk as unavailable
@@ -1099,6 +1113,11 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
+        # Every HIT reported this step has been pinned by prepare_load() or
+        # belongs to a request that was not scheduled; either way it no
+        # longer needs protection from promotions.
+        self._step_hit_keys.clear()
+
         for req_id in context.new_req_ids:
             state = self._req_state.get(req_id)
             if state is None:
@@ -1155,6 +1174,7 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._step_hit_keys.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []
