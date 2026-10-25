@@ -272,6 +272,7 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
+    assert results[0].transfer_bytes == 0
     assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
     with open(dest, "rb") as f:
         assert f.read() == published
@@ -493,6 +494,43 @@ def test_store_reports_only_newly_written_blocks(fs_tier, monkeypatch, use_c_ext
     assert results[0].success
     assert results[0].transfer_bytes == 0
     assert tier._store_progress == {}
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_skips_block_published_after_filter(fs_tier, monkeypatch, use_c_ext):
+    """A block another writer publishes after the existence filter is not counted."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier
+    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    published = tier.file_mapper.get_file_name(key(2))
+    os.makedirs(os.path.dirname(published), exist_ok=True)
+    with open(published, "wb") as f:
+        f.write(b"other writer")
+
+    # The filter's existence check misses the file; the writer's own check sees it.
+    real_exists = os.path.exists
+    missed = set()
+
+    def exists_after_filter(path):
+        if path == published and path not in missed:
+            missed.add(path)
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", exists_after_filter)
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == tier._block_size
+    with open(published, "rb") as f:
+        assert f.read() == b"other writer"
 
 
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
