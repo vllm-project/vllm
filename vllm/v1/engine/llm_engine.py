@@ -8,6 +8,7 @@ from copy import copy
 from typing import Any
 
 import torch.nn as nn
+from torch.distributed import ProcessGroup
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
@@ -49,6 +50,20 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+
+def _has_unfinished_requests(
+    dp_group: ProcessGroup | None, has_unfinished: bool, on_idle: Callable[[], None]
+) -> bool:
+    aggregated_has_unfinished = (
+        ParallelConfig.has_unfinished_dp(dp_group, has_unfinished)
+        if dp_group is not None
+        else has_unfinished
+    )
+    if not aggregated_has_unfinished:
+        # Every rank must finish stepping before any rank drains pending work.
+        on_idle()
+    return aggregated_has_unfinished
 
 
 class LLMEngine:
@@ -203,12 +218,16 @@ class LLMEngine:
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
         if self.dp_group is None:
-            return has_unfinished or self.engine_core.dp_engines_running()
+            return _has_unfinished_requests(
+                None,
+                has_unfinished or self.engine_core.dp_engines_running(),
+                self._drain_stats,
+            )
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
-        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
-            self.dp_group, has_unfinished
+        aggregated_has_unfinished = _has_unfinished_requests(
+            self.dp_group, has_unfinished, self._drain_stats
         )
         if not has_unfinished and aggregated_has_unfinished:
             self.should_execute_dummy_batch = True
@@ -225,6 +244,28 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
+        if request_ids:
+            self._drain_stats_if_idle()
+
+    def _drain_stats_if_idle(self) -> None:
+        if (
+            self.dp_group is not None
+            or self.output_processor.has_unfinished_requests()
+            or self.engine_core.dp_engines_running()
+        ):
+            return
+        self._drain_stats()
+
+    def _drain_stats(self) -> None:
+        if self.logger_manager is None:
+            return
+        for stats in self.engine_core.drain_stats():
+            self.output_processor.update_scheduler_stats(stats)
+            self.logger_manager.record(
+                scheduler_stats=stats,
+                iteration_stats=None,
+                mm_cache_stats=self.renderer.stat_mm_cache(),
+            )
 
     def add_request(
         self,
@@ -360,6 +401,8 @@ class LLMEngine:
                     iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
+                if processed_outputs.request_outputs:
+                    self._drain_stats_if_idle()
                 if outputs.outputs:
                     self.do_log_stats_with_interval()
 
