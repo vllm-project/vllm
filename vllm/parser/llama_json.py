@@ -73,7 +73,7 @@ def _validate_complete_tool_output(text: str) -> bool | None:
         if text[position] != ";":
             return False
         position += 1
-    return False
+    return found
 
 
 def _llama_arg_converter(raw_args: str, partial: bool) -> str:

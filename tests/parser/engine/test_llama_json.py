@@ -96,7 +96,19 @@ def test_extract_tool_calls_with_arguments_key(parser):
 def test_extract_tool_calls_with_output_end_token(parser):
     model_output = (
         f'{TOOL_START}{{"name": "searchTool", '
-        '"arguments": {"query": "test"}}}<|eom_id|>'
+        '"arguments": {"query": "test"}}<|eom_id|>'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "searchTool"
+
+
+@pytest.mark.parametrize("suffix", [";", "; "])
+def test_extract_tool_calls_with_trailing_semicolon(parser, suffix):
+    model_output = (
+        f'{{"name": "searchTool", "arguments": {{"query": "test"}}}}{suffix}'
     )
     result = parser.extract_tool_calls(model_output, None)
 
