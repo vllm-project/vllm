@@ -11,13 +11,11 @@ if TYPE_CHECKING:
 
 
 class TokenizerLike(Protocol):
-    # Whether ``apply_chat_template`` accepts ``role: system`` messages at any
-    # position of the conversation, not only as the leading message, and still
-    # emits the generation prompt when the conversation ends with one. Encoder
-    # based tokenizers (no jinja chat template) set this so that API adapters
-    # can keep mid-conversation system messages in place instead of merging
-    # them into the leading system block, which breaks prefix caching for
-    # clients that append a system reminder on every turn.
+    # Whether ``apply_chat_template`` accepts ``role: system`` messages after the
+    # first turn. DeepSeek V4's encoder does; Qwen's template raises on them.
+    # When True, API adapters keep them in place instead of merging them into
+    # the leading system prompt, which would break prefix caching for clients
+    # like Claude Code that send a system reminder every turn.
     supports_inline_system_messages: ClassVar[bool] = False
 
     @classmethod
