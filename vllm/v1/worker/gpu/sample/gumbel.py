@@ -341,6 +341,31 @@ def _gumbel_sample_kernel(
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
+@triton.jit
+def _gumbel_finalize_kernel(
+    local_argmax_ptr,
+    local_argmax_stride,
+    local_max_ptr,
+    local_max_stride,
+    sampled_ptr,
+    num_blocks,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < num_blocks
+    local_max = tl.load(
+        local_max_ptr + token_idx * local_max_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    )
+    max_val = tl.max(local_max, axis=0)
+    # torch.argmax breaks ties toward the first occurrence.
+    max_block = tl.min(tl.where(local_max == max_val, block, BLOCK_SIZE), axis=0)
+    token_id = tl.load(local_argmax_ptr + token_idx * local_argmax_stride + max_block)
+    tl.store(sampled_ptr + token_idx, token_id)
+
+
 def gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
@@ -412,6 +437,14 @@ def gumbel_sample(
         PER_TOKEN_COL=per_token_col,
     )
     # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    sampled = logits.new_empty(num_tokens, dtype=torch.int64)
+    _gumbel_finalize_kernel[(num_tokens,)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        sampled,
+        num_blocks,
+        BLOCK_SIZE=triton.next_power_of_2(num_blocks),
+    )
     return sampled
