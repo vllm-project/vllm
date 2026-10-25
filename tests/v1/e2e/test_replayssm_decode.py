@@ -436,7 +436,9 @@ def _stress_mamba_block_size(worker) -> int:
 def _generate_with_preemption(llm, block_size: int):
     """Preempt active requests, then complete decode across three cache blocks."""
     engine = llm.llm_engine
-    max_tokens = 3 * block_size + 64
+    # MTP excludes one trailing block from prefix hits. Keep three reusable
+    # blocks, plus that proof block and a decode margin.
+    max_tokens = 4 * block_size + 64
     requests = {
         "short": ("The capital of France is", 256),
         "long": (
