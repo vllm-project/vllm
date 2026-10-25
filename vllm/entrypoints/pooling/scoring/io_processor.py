@@ -834,39 +834,15 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
 
 class JinaRankingIOProcessorMixin(PoolingIOProcessor):
-    def render(
-        self,
-        render_params: EncodeCMPLRenderParams
-        | EncodeChatRenderParams
-        | ScoringRenderParams,
-    ) -> PoolingEngineInput:
-        render_params = cast(EncodeCMPLRenderParams, render_params)
-        prompt = render_params["prompts"].get("prompt")
-        assert isinstance(prompt, str)
-        # Count before rendering, which can also truncate the prompt text in place.
-        num_docs = prompt.count("<|embed_token|>")
-        engine_input = super().render(render_params)
-        target_prompt = extract_target_prompt(
-            self.model_config, engine_input["prompts"]
-        )
-        token_ids = target_prompt.get("prompt_token_ids")
-        assert token_ids is not None
-
-        tokenizer = self.renderer.get_tokenizer()
-        doc_token_id = tokenizer.convert_tokens_to_ids("<|embed_token|>")
-        query_token_id = tokenizer.convert_tokens_to_ids("<|rerank_token|>")
-        if (
-            token_ids.count(doc_token_id) != num_docs
-            or token_ids.count(query_token_id) != 1
-        ):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["tok_params"].truncate_prompt_tokens is not None:
             raise VLLMValidationError(
-                "Truncation removed query or document markers required for Jina "
-                "ranking. Increase truncate_prompt_tokens or shorten the query "
-                "and documents before ranking.",
+                "JinaForRanking does not support truncate_prompt_tokens. Use "
+                "max_tokens_per_query and max_tokens_per_doc for scoring, or "
+                "truncate each input text on the client.",
                 parameter="truncate_prompt_tokens",
             )
-
-        return engine_input
+        return super().render(render_params)
 
     @staticmethod
     def format_docs_prompts_func(
@@ -886,9 +862,12 @@ class JinaRankingIOProcessorMixin(PoolingIOProcessor):
             special_tokens = default_special_tokens
 
         def sanitize_input(text: str) -> str:
-            for token in special_tokens.values():
-                text = text.replace(token, "")
-            return text
+            while True:
+                previous = text
+                for token in special_tokens.values():
+                    text = text.replace(token, "")
+                if text == previous:
+                    return text
 
         query = sanitize_input(query)
         docs = [sanitize_input(doc) for doc in docs]
@@ -984,10 +963,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        # Forward truncation from the real request: the base factory reads
-        # these off ctx.request, so omitting them here silently drops
-        # truncate_prompt_tokens for Jina rerank/score (unlike the embed and
-        # bi/cross-encoder paths, which read them from the real request).
         ctx.request = PoolingCompletionRequest(
             task="token_embed",
             input=prompts,
