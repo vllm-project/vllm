@@ -76,8 +76,8 @@ ACTIVE_BUILD_STATES = {
 }
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
-# ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders for branches that
-# predate .buildkite/scripts/rocm/build.sh.
+# ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
+# for branches that predate .buildkite/scripts/rocm/build.sh.
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
 
 
