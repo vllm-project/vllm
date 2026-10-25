@@ -210,7 +210,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-def _model_state_tensors(worker) -> dict[str, tuple[str, torch.Tensor]]:
+def _model_state_tensors(worker) -> dict[str, tuple[str, list]]:
     """Device tensors of the MRV2 model state, with the cuMem pool tag of each."""
     from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -223,7 +223,7 @@ def _model_state_tensors(worker) -> dict[str, tuple[str, torch.Tensor]]:
         if isinstance(value, torch.Tensor) and value.is_cuda and value.numel():
             ptr = value.data_ptr()
             tag = next((t for lo, hi, t in spans if lo <= ptr < hi), "none")
-            tensors[name] = (tag, value.cpu().clone())
+            tensors[name] = (tag, value.tolist())
     return tensors
 
 
@@ -241,7 +241,7 @@ def test_deep_sleep_model_state(monkeypatch):
     (``num_accepted_tokens_gpu``, all ones).
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    # Needed for collective_rpc to return tensors from the worker.
+    # Needed for collective_rpc to run a function on the worker.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     llm = LLM(
@@ -261,7 +261,7 @@ def test_deep_sleep_model_state(monkeypatch):
     after = llm.collective_rpc(_model_state_tensors)[0]
     assert after.keys() == before.keys()
     for name, (_, value) in before.items():
-        assert torch.equal(after[name][1], value), name
+        assert after[name][1] == value, name
 
 
 def _cudagraph_bytes(worker) -> int:
