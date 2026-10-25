@@ -63,6 +63,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
@@ -157,7 +158,7 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.hash_block_size
+        scheduler.kv_cache_manager
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -191,7 +192,7 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.hash_block_size
+        scheduler.kv_cache_manager
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
@@ -229,6 +230,86 @@ def test_routed_experts_hashes_follow_scheduled_tokens():
 
     assert num_sent_per_step == [4, 8, 10] + [10] * 15 + [11] * 4
     assert sent == request.block_hashes[:11]
+
+
+@pytest.mark.parametrize(
+    "external_tokens,max_cache_hit,sliding_window,expected_hit",
+    [
+        (0, 79, None, 64),
+        (0, 40, None, 32),
+        (0, 40, 32, 32),
+        (32, 79, None, 32),
+        (32, 16, None, 0),
+        (31, 79, None, 0),
+        (32, 79, 32, 32),
+        (32, 16, 32, 0),
+        (32, 0, None, 0),
+    ],
+    ids=[
+        "local",
+        "local-truncated",
+        "local-sliding-window-truncated",
+        "external",
+        "external-dropped",
+        "external-mid-block",
+        "external-sliding-window",
+        "external-sliding-window-dropped",
+        "none",
+    ],
+)
+def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
+    external_tokens, max_cache_hit, sliding_window, expected_hit
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_cache_spec=(
+            SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            )
+            if sliding_window
+            else None
+        ),
+        use_kv_connector=(
+            mock_kv(matched_tokens=external_tokens, is_async=False)
+            if external_tokens
+            else None
+        ),
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    if not external_tokens:
+        scheduler.add_request(first)
+        scheduler.schedule()
+        scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, Mock())
+    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    scheduler.aux_output_connector = connector
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
+
+
+def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
+    first, second, third = create_requests(num_requests=3, num_tokens=64)
+    for request in (first, second):
+        scheduler.add_request(request)
+        scheduler.schedule()
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.add_request(third)
+    metadata = scheduler.schedule().aux_output_connector_metadata
+
+    assert list(metadata.retained_block_hashes) == second.block_hashes
+    assert list(metadata.released_block_hashes) == first.block_hashes[:3]
 
 
 def test_finish_request():
@@ -2262,7 +2343,9 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.aux_output_connector = Mock()
+    scheduler.aux_output_connector = Mock(
+        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+    )
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -7894,6 +7977,35 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     scheduler.add_request(replay)
     output = scheduler.schedule()
     [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == expected_num_computed
+
+
+@pytest.mark.parametrize(
+    "max_cache_hit,expected_num_computed", [(95, 80), (0, 0)], ids=["kept", "capped"]
+)
+def test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs(
+    max_cache_hit, expected_num_computed
+):
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(16)
+    manager = scheduler.kv_cache_manager
+    _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
+    manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
+    connector = AuxOutputSchedulerConnector(manager, scheduler.connector)
+    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    scheduler.aux_output_connector = connector
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=6 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    scheduler.add_request(replay)
+
+    [new_req] = scheduler.schedule().scheduled_new_reqs
+
     assert new_req.num_computed_tokens == expected_num_computed
 
 
