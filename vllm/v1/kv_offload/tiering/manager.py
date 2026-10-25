@@ -150,13 +150,26 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
         self.complete_read = self.complete_load
-        self.prepare_write = self.prepare_store
-        self.complete_write = self.complete_store
         # Chunks of failed writes the writer may still be filling; their
         # release to the free pool is deferred until release_deferred_write().
         self._deferred_release_chunk_ids: set[int] = set()
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
+
+    def prepare_write(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
+        """Prepare a secondary-to-primary write. It has no store trigger."""
+        return self._prepare_store(keys, req_context)
+
+    def complete_write(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        success: bool = True,
+    ) -> None:
+        """Complete a secondary-to-primary write."""
+        self._complete_store(keys, req_context, success)
 
     def prepare_read(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -551,7 +564,6 @@ class TieringOffloadingManager(OffloadingManager):
             self.primary_tier.complete_write(
                 successful_keys,
                 transfer_job.req_context,
-                StoreTrigger.ON_COMPUTE,
                 True,
             )
         if not failed_keys:
@@ -569,7 +581,6 @@ class TieringOffloadingManager(OffloadingManager):
             self.primary_tier.complete_write(
                 failed_keys,
                 transfer_job.req_context,
-                StoreTrigger.ON_COMPUTE,
                 False,
             )
 
@@ -804,9 +815,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
         # preventing duplicate promotion attempts.
-        primary_write_result = self.primary_tier.prepare_write(
-            [key], req_context, StoreTrigger.ON_COMPUTE
-        )
+        primary_write_result = self.primary_tier.prepare_write([key], req_context)
 
         if primary_write_result is None:
             # Primary tier is full; caller should treat the chunk as unavailable

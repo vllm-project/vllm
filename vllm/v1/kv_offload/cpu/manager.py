@@ -265,6 +265,11 @@ class CPUOffloadingManager(OffloadingManager):
         req_context: ReqContext,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
+        return self._prepare_store(keys, req_context)
+
+    def _prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
         keys = list(keys)
         if self.counts is not None:
             self._record_accesses(keys)
@@ -379,6 +384,14 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         trigger: StoreTrigger,
+        success: bool = True,
+    ) -> None:
+        self._complete_store(keys, req_context, success)
+
+    def _complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []

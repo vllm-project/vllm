@@ -373,9 +373,7 @@ class TestTieringOffloadingManager:
             patch.object(self.primary_tier, "complete_write") as completed,
         ):
             self.manager._process_finished_jobs()
-        completed.assert_called_once_with(
-            to_keys([1, 2]), _CTX, StoreTrigger.ON_COMPUTE, False
-        )
+        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
 
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch
@@ -400,9 +398,7 @@ class TestTieringOffloadingManager:
             patch.object(self.primary_tier, "complete_write") as completed,
         ):
             self.manager._process_finished_jobs()
-        completed.assert_called_once_with(
-            to_keys([1]), _CTX, StoreTrigger.ON_COMPUTE, True
-        )
+        completed.assert_called_once_with(to_keys([1]), _CTX, True)
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup, monkeypatch):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
