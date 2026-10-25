@@ -11,12 +11,26 @@ import mmap
 import os
 import threading
 import time
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_vllm_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading import canonical_mapping
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -40,6 +54,7 @@ from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -952,46 +967,140 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         tier.shutdown()
 
 
-def test_fs_tier_cross_tp_round_trip(tmp_path):
-    """TP=2 replicated writer and TP=4 reader share namespace and bytes."""
-    root = str(tmp_path)
-    writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
-    expected = writer_tensor[0].clone()
+def _canonical_gqa_spec(tp_size: int, layout: str = "LBNHC"):
+    config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        extra_config={"canonical_layout": True, "cpu_bytes_to_use": 1 << 20},
+    )
+    config.model_config.get_total_num_kv_heads.return_value = 1
+    config.cache_config.kv_cache_layout = layout
+    config.parallel_config.distributed_executor_backend = "mp"
+    # Larger than the platform alignment, so padding cannot hide duplicate heads.
+    cache_spec = FullAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.float16
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], cache_spec)],
+    )
+    return TieringOffloadingSpec(build_offloading_config(config, kv_config))
+
+
+@pytest.mark.parametrize(
+    "canonical,writer_tp,reader_tp", [(False, 2, 4), (True, 1, 2), (True, 2, 1)]
+)
+def test_fs_tier_cross_tp_round_trip(tmp_path, canonical, writer_tp, reader_tp):
+    """Independent FS readers restore replicated MLA or canonical GQA bytes."""
+
+    def spec(tp):
+        if canonical:
+            return _canonical_gqa_spec(tp)
+        return _make_offloading_spec(
+            tp_size=tp, world_size=tp, rank=tp - 1, replicated_layout=True
+        )
+
+    writer_spec, reader_spec = spec(writer_tp), spec(reader_tp)
+    writer_size = writer_spec.kv_bytes_per_chunk if canonical else _BLOCK_ELEMENTS
+    reader_size = reader_spec.kv_bytes_per_chunk if canonical else _BLOCK_ELEMENTS
+    writer_tensor = _page_aligned_zero_tensor(4, writer_size, torch.uint8)
+    # Independent K/V and block patterns, without consulting the calculated size.
+    payload_size = 2 * 64 * 128 * 2 if canonical else _BLOCK_ELEMENTS
+    expected = torch.arange(2 * payload_size, dtype=torch.int64).reshape(2, -1)
+    expected = ((expected % 251) + 1).to(torch.uint8)
+    writer_tensor[:2, :payload_size] = expected
+    keys = [key(7), key(8)]
     writer = FileSystemTierManager(
-        offloading_spec=_make_offloading_spec(
-            tp_size=2, world_size=2, rank=0, replicated_layout=True
-        ),
+        offloading_spec=writer_spec,
         primary_kv_view=memoryview(writer_tensor.numpy()),
         tier_type="fs",
-        root_dir=root,
+        root_dir=str(tmp_path),
         n_read_threads=2,
         n_write_threads=2,
     )
     try:
-        writer.submit_store(make_job(1, [key(7)], [0]))
-        assert all(r.success for r in drain(writer))
-        writer_base = writer.file_mapper.base_path
-        writer_path = writer.file_mapper.get_file_name(key(7))
+        writer.submit_store(make_job(1, keys, [0, 1]))
+        results = drain(writer)
+        assert len(results) == 1 and results[0].success
+        paths = [writer.file_mapper.get_file_name(k) for k in keys]
     finally:
         writer.shutdown()
 
-    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader_tensor = _page_aligned_zero_tensor(4, reader_size, torch.uint8)
     reader = FileSystemTierManager(
-        offloading_spec=_make_offloading_spec(
-            tp_size=4, world_size=4, rank=3, replicated_layout=True
-        ),
+        offloading_spec=reader_spec,
         primary_kv_view=memoryview(reader_tensor.numpy()),
         tier_type="fs",
-        root_dir=root,
+        root_dir=str(tmp_path),
         n_read_threads=2,
         n_write_threads=2,
     )
     try:
-        assert reader.file_mapper.base_path == writer_base
-        assert reader.file_mapper.get_file_name(key(7)) == writer_path
-        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
-        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
-        assert all(r.success for r in drain(reader))
-        assert torch.allclose(reader_tensor[1], expected)
+        assert [reader.file_mapper.get_file_name(k) for k in keys] == paths
+        assert lookup_and_wait(reader, keys) == [LookupResult.HIT] * 2
+        reader.submit_load(make_job(2, keys, [3, 2], is_promotion=True))
+        results = drain(reader)
+        assert len(results) == 1 and results[0].success
+        assert torch.equal(reader_tensor[[3, 2]], expected)
+        assert [Path(p).read_bytes() for p in paths] == [
+            row.numpy().tobytes() for row in expected
+        ]
     finally:
         reader.shutdown()
+
+
+@pytest.mark.parametrize("layout,family", [("LBNHC", "nhd"), ("LBHNC", "hnd")])
+def test_canonical_fs_upgrade_isolates_legacy_files(
+    tmp_path, monkeypatch, layout, family
+):
+    """Rolling-upgrade peers cannot overwrite or delete the other format's files."""
+    new_spec = _canonical_gqa_spec(2, layout)
+    # Reproduce the old TP2 allocation and version without changing FS behavior.
+    old_spec = TieringOffloadingSpec(replace(new_spec.config, canonical_kv_replicas=1))
+    tensors = [
+        _page_aligned_zero_tensor(4, spec.kv_bytes_per_chunk, torch.uint8)
+        for spec in (old_spec, new_spec)
+    ]
+    tensors[0][0].fill_(17)
+    tensors[1][0].fill_(93)
+    tiers = []
+    try:
+        versions = (1, canonical_mapping.CANONICAL_FORMAT_VERSION)
+        for version, spec, tensor in zip(versions, (old_spec, new_spec), tensors):
+            with monkeypatch.context() as patch:
+                patch.setattr(canonical_mapping, "CANONICAL_FORMAT_VERSION", version)
+                tiers.append(
+                    FileSystemTierManager(
+                        offloading_spec=spec,
+                        primary_kv_view=memoryview(tensor.numpy()),
+                        tier_type="fs",
+                        root_dir=str(tmp_path),
+                    )
+                )
+        old, new = tiers
+        # Each reader misses the other version's key; both files remain intact.
+        for i, tier in enumerate(tiers):
+            tier.submit_store(make_job(i, [key(i)], [0]))
+            results = drain(tier)
+            assert len(results) == 1 and results[0].success
+            assert lookup_and_wait(tiers[1 - i], [key(i)]) == [LookupResult.MISS]
+        for i, tier in enumerate(tiers):
+            # Write the same logical key into the other namespace, too.
+            tier.submit_store(make_job(10 + i, [key(1 - i)], [0]))
+            results = drain(tier)
+            assert len(results) == 1 and results[0].success
+            tier.submit_load(make_job(20 + i, [key(i)], [1], is_promotion=True))
+            results = drain(tier)
+            assert len(results) == 1 and results[0].success
+            assert torch.equal(tensors[i][1], tensors[i][0])
+        for i, tier in enumerate(tiers):
+            for k in (key(0), key(1)):
+                assert Path(tier.file_mapper.get_file_name(k)).read_bytes() == (
+                    tensors[i][0].numpy().tobytes()
+                )
+        assert old.file_mapper.fields["canonical_format"] == f"v1-{family}"
+        assert new.file_mapper.fields["canonical_format"] == f"v2-{family}"
+        assert old.file_mapper.base_path != new.file_mapper.base_path
+    finally:
+        for tier in tiers:
+            tier.shutdown()
