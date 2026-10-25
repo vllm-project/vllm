@@ -10,6 +10,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import (
+    CPUActMethod,
     CPUQuantAlgo,
     CPUQuantMethod,
     convert_weight_packed_scale_zp,
@@ -51,6 +52,14 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
+
+_CPU_ACT_METHODS = {
+    MoEActivation.SILU: CPUActMethod.SILU_AND_MUL,
+    MoEActivation.GELU: CPUActMethod.GELU_AND_MUL,
+    MoEActivation.GELU_TANH: CPUActMethod.GELU_TANH_AND_MUL,
+    MoEActivation.SWIGLUOAI: CPUActMethod.SWIGLU,
+}
+
 # ===========================================================================
 # Weight layout
 # ===========================================================================
@@ -82,7 +91,70 @@ def swigluoai_w13_interleave_perm(
 # ===========================================================================
 
 
-class CPUUnquantizedExperts(mk.FusedMoEExpertsModular):
+class _CPUPaddedIntermediateMixin:
+    """Zero-pads the per-partition MoE intermediate dim to the kernel's
+    alignment before prepacking."""
+
+    moe_config: FusedMoEConfig
+    output_alignment: int
+    reduction_alignment: int
+
+    @classmethod
+    def _intermediate_alignment(cls) -> int:
+        return math.lcm(cls.output_alignment, cls.reduction_alignment)
+
+    @classmethod
+    def _padded_intermediate_size(cls, moe_config: FusedMoEConfig) -> int:
+        intermediate_size = moe_config.intermediate_size_per_partition
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            return intermediate_size
+        return round_up(intermediate_size, cls._intermediate_alignment())
+
+    def _pad_moe_intermediate(self, layer: torch.nn.Module) -> None:
+        """Zero-pad the per-partition MoE intermediate dim of both weights and
+        the expert bias and w13 scale, see `_padded_intermediate_size`."""
+        intermediate_size = self.moe_config.intermediate_size_per_partition
+        padded_size = self._padded_intermediate_size(self.moe_config)
+        if padded_size == intermediate_size:
+            return
+
+        num_experts, _, hidden_size = layer.w13_weight.shape
+
+        new_w13 = layer.w13_weight.new_zeros(num_experts, 2 * padded_size, hidden_size)
+        new_w13[:, :intermediate_size] = layer.w13_weight[:, :intermediate_size]
+        new_w13[:, padded_size : padded_size + intermediate_size] = layer.w13_weight[
+            :, intermediate_size:
+        ]
+        replace_parameter(layer, "w13_weight", new_w13)
+
+        new_w2 = layer.w2_weight.new_zeros(num_experts, hidden_size, padded_size)
+        new_w2[:, :, :intermediate_size] = layer.w2_weight
+        replace_parameter(layer, "w2_weight", new_w2)
+
+        # Assign through .data rather than replacing the Parameter: the quant
+        # config is built before this runs and holds a reference to these very
+        # objects, which is what feeds self.w1_bias / self.w1_scale in apply().
+        if hasattr(layer, "w13_bias"):
+            new_bias = layer.w13_bias.new_zeros(num_experts, 2 * padded_size)
+            new_bias[:, :intermediate_size] = layer.w13_bias[:, :intermediate_size]
+            new_bias[:, padded_size : padded_size + intermediate_size] = layer.w13_bias[
+                :, intermediate_size:
+            ]
+            layer.w13_bias.data = new_bias
+
+        for name in ("w13_weight_scale", "w13_scale"):
+            scale = getattr(layer, name, None)
+            if scale is None:
+                continue
+            new_scale = scale.new_ones(num_experts, 2 * padded_size, *scale.shape[2:])
+            new_scale[:, :intermediate_size] = scale[:, :intermediate_size]
+            new_scale[:, padded_size : padded_size + intermediate_size] = scale[
+                :, intermediate_size:
+            ]
+            scale.data = new_scale
+
+
+class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
     """Portable vector grouped-gemm unquantized MoE experts."""
 
     isa = "vec"
@@ -96,17 +168,6 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsModular):
     ):
         super().__init__(moe_config, quant_config)
         self._use_zentorch = False
-
-    @classmethod
-    def _intermediate_alignment(cls) -> int:
-        return math.lcm(cls.output_alignment, cls.reduction_alignment)
-
-    @classmethod
-    def _padded_intermediate_size(cls, moe_config: FusedMoEConfig) -> int:
-        intermediate_size = moe_config.intermediate_size_per_partition
-        if moe_config.activation == MoEActivation.SWIGLUOAI:
-            return intermediate_size
-        return round_up(intermediate_size, cls._intermediate_alignment())
 
     @classmethod
     def _supports_grouped_gemm(
@@ -216,38 +277,6 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsModular):
         replace_parameter(
             layer, "w2_weight", cpu_prepack_moe_weight(layer.w2_weight, self.isa)
         )
-
-    def _pad_moe_intermediate(self, layer: torch.nn.Module) -> None:
-        """Zero-pad the per-partition MoE intermediate dim of both weights and
-        the expert bias, see `_padded_intermediate_size`."""
-        intermediate_size = self.moe_config.intermediate_size_per_partition
-        padded_size = self._padded_intermediate_size(self.moe_config)
-        if padded_size == intermediate_size:
-            return
-
-        num_experts, _, hidden_size = layer.w13_weight.shape
-
-        new_w13 = layer.w13_weight.new_zeros(num_experts, 2 * padded_size, hidden_size)
-        new_w13[:, :intermediate_size] = layer.w13_weight[:, :intermediate_size]
-        new_w13[:, padded_size : padded_size + intermediate_size] = layer.w13_weight[
-            :, intermediate_size:
-        ]
-        replace_parameter(layer, "w13_weight", new_w13)
-
-        new_w2 = layer.w2_weight.new_zeros(num_experts, hidden_size, padded_size)
-        new_w2[:, :, :intermediate_size] = layer.w2_weight
-        replace_parameter(layer, "w2_weight", new_w2)
-
-        if hasattr(layer, "w13_bias"):
-            new_bias = layer.w13_bias.new_zeros(num_experts, 2 * padded_size)
-            new_bias[:, :intermediate_size] = layer.w13_bias[:, :intermediate_size]
-            new_bias[:, padded_size : padded_size + intermediate_size] = layer.w13_bias[
-                :, intermediate_size:
-            ]
-            # Assign through .data rather than replacing the Parameter: the
-            # quant config is built before this runs and holds a reference to
-            # this very object, which is what feeds self.w1_bias in apply().
-            layer.w13_bias.data = new_bias
 
     def workspace_shapes(
         self,
@@ -466,7 +495,12 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        # No SWIGLUOAI: apply() below does not pass gemm1_alpha/limit.
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -577,6 +611,8 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -684,7 +720,12 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -789,6 +830,8 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
             alpha,
             limit,
             True,  # is_vnni
+            None,  # a1_scale
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -900,7 +943,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1020,12 +1063,17 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            _CPU_ACT_METHODS[activation],
         )
 
 
-class CPUExpertsInt8(mk.FusedMoEExpertsModular):
+class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
     modular MoE experts."""
+
+    output_alignment = 32
+    reduction_alignment = 32
 
     def __init__(
         self,
@@ -1070,15 +1118,10 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
         )
         if not supported:
             return supported, reason
-        # convert_weight_packed (shared VNNI prepack) requires the w13
-        # OC/IC and w2 OC/IC to be multiples of TILE_N=16/TILE_K=32; the
-        # w1 gate-up kernel additionally requires the intermediate size
-        # itself (not 2x) to be a multiple of 32 (moe_int8.cpp), which
-        # dominates. Net effect: both dims must be multiples of 32.
+        # convert_weight_packed (shared VNNI prepack) and moe_int8.cpp need the
+        # hidden dim and the (padded) intermediate dim to be multiples of 32.
         if moe_config.hidden_dim % 32 != 0:
             return False, "kernel requires hidden dim divisible by 32"
-        if moe_config.intermediate_size_per_partition % 32 != 0:
-            return False, "kernel requires intermediate dim divisible by 32"
         return True, None
 
     @staticmethod
@@ -1087,7 +1130,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1129,6 +1172,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """VNNI-prepack INT8 MoE weights for CPU kernel."""
+        self._pad_moe_intermediate(layer)
         w13 = torch.ops._C.convert_weight_packed(layer.w13_weight)
         w2 = torch.ops._C.convert_weight_packed(layer.w2_weight)
         replace_parameter(layer, "w13_weight", w13)
@@ -1195,6 +1239,8 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -1736,7 +1782,7 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1878,4 +1924,5 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             x_scales,  # a1_scale: per-token FP8 activation scales
+            _CPU_ACT_METHODS[activation],
         )
