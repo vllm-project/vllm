@@ -56,6 +56,7 @@ def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
+    moe_backend: str | None = None,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -63,6 +64,7 @@ def resolve_layer_fused_shared_expert(
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
+        moe_backend: MoE backend that runs the fused shared expert.
 
     Returns:
         Whether AITER fused shared experts are enabled.
@@ -79,6 +81,7 @@ def resolve_layer_fused_shared_expert(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
+            moe_backend=moe_backend,
         )
         if fse_requested
         else (True, None)
@@ -235,6 +238,73 @@ def count_expert_num_tokens(
     return expert_num_tokens
 
 
+@triton.jit
+def _remap_topk_to_local_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+    OUT_INT32: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    if OUT_INT32:
+        out = tl.where(valid, local, -1)
+    else:
+        out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def remap_topk_to_local(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    """Map global expert ids to local ids; non-local or invalid routes become -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    with one kernel. Returns a NEW tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+
+    Args:
+        topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
+            the Triton kernel indexes by flat ``numel()`` offsets.
+        expert_map: Global-to-local mapping; -1 marks non-local experts.
+        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+
+    Returns:
+        Remapped local expert ids with the same shape as ``topk_ids``.
+
+    """
+    if out_dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"out_dtype must be int32 or int64, got {out_dtype}")
+    assert topk_ids.is_contiguous()
+    out = torch.empty(topk_ids.shape, dtype=out_dtype, device=topk_ids.device)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _remap_topk_to_local_kernel[grid](
+        topk_ids,
+        expert_map,
+        out,
+        n,
+        BLOCK=BLOCK,
+        OUT_INT32=out_dtype == torch.int32,
+    )
+    return out
+
+
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
@@ -258,6 +328,7 @@ def _fp8_quantize(
     A_scale: torch.Tensor | None,
     per_act_token: bool,
     block_shape: list[int] | None = None,
+    is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
@@ -272,7 +343,9 @@ def _fp8_quantize(
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        A, A_scale = per_token_group_quant_fp8(
+            A, block_k, column_major_scales=is_scale_transposed
+        )
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
@@ -395,6 +468,7 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
+    is_scale_transposed: bool = False,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -402,7 +476,9 @@ def moe_kernel_quantize_input(
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)
         else:
-            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize(
+                A, A_scale, per_act_token_quant, block_shape, is_scale_transposed
+            )
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(

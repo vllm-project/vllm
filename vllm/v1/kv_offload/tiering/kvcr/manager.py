@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Collection, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
 from kvcr import (
@@ -42,6 +42,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemoryRef,
     OpHandle,
     PinRequestId,
@@ -262,8 +263,20 @@ class _VllmKeyAdapter:
 _JobState = tuple[int, int, bool, set[OffloadKey] | None]
 
 
+# Held for the process lifetime after a startup failure that could not stop
+# native work: an export blocks close() and keeps the mapping alive against GC,
+# so nothing can unmap memory NIXL may still be writing into.
+_RETAINED_NATIVE_BUFFERS: list[object] = []
+
+
 class KVCRSecondaryTierManager(SecondaryTierManager):
     """Secondary tier wrapper around the KVCR KV P2P API."""
+
+    # Serves framework pin requests from serve_external_requests(), but only
+    # once per step for now: opting in would also poll the KVCR library from
+    # the tiering manager's polling thread, which it is not yet verified to
+    # tolerate.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     @classmethod
     @override
@@ -447,7 +460,17 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 ),
                 guard_config,
             )
-        except BaseException:
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, KVCRStartupError):
+                # Native work may still touch these.
+                _RETAINED_NATIVE_BUFFERS.append(
+                    ctypes.c_char.from_buffer(primary_kv_view)
+                )
+                if local_mapping is not None:
+                    _RETAINED_NATIVE_BUFFERS.append(
+                        ctypes.c_char.from_buffer(local_mapping)
+                    )
+                raise
             control.close()
             if local_mapping is not None:
                 local_mapping.close()
@@ -523,7 +546,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         stats = cast(OffloadingConnectorStats | None, self._kvcr.get_stats())
         if stats is not None:
             # Add the framework namespace only at the vLLM boundary.
-            for metrics in stats.data.values():
+            for metrics in stats.metric_sections():
                 for name in tuple(metrics):
                     metrics[_vllm_metric_name(name)] = metrics.pop(name)
         return stats
