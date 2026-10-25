@@ -2203,6 +2203,7 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/backends
     --ignore=v1/attention/test_gdn_aiter_flydsl.py
     --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py
@@ -2597,6 +2598,148 @@ steps:
   - rust/src/bench/tests/python_serve_flags.txt
   commands:
   - pytest -v -s benchmarks/
+
+- label: ":amd: (MI355) ROCM_AITER_MLA_SPARSE Backend Shard %N"
+  timeout_in_minutes: 40
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 3
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/deepseek_v32
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends
+  - tests/v1/attention/model_shapes.py
+  - tests/v1/attention/utils.py
+  commands:
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s -m 'not slow_test' v1/attention/backends/rocm_aiter_mla_sparse v1/attention/backends/rocm_dsv32_indexer --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_AITER_MLA_SPARSE Engine Runtime Shard %N"
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/deepseek_v32
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - vllm/models/glm5next
+  - vllm/v1/worker
+  - vllm/v1/core/sched
+  - vllm/compilation
+  - tests/v1/e2e/attention
+  commands:
+  - pytest -v -s -m 'not slow_test' v1/e2e/attention/test_rocm_aiter_mla_sparse_runtime.py -k 'not context_parallel' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  # 2-GPU case runs in the DCP step below.
+
+- label: ":amd: (MI355) ROCM_AITER_MLA_SPARSE DCP Rejection"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/deepseek_v32
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - vllm/v1/worker
+  - tests/v1/e2e/attention
+  commands:
+  - pytest -v -s v1/e2e/attention/test_rocm_aiter_mla_sparse_runtime.py -k context_parallel
+
+- label: ":amd: (MI355) [Nightly] ROCM_AITER_MLA_SPARSE Full Matrix Shard %N"
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/deepseek_v32
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends
+  - tests/v1/e2e/attention
+  commands:
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s -m slow_test v1/attention/backends/rocm_aiter_mla_sparse v1/e2e/attention/test_rocm_aiter_mla_sparse_runtime.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_AITER_MLA_SPARSE Perf"
+  timeout_in_minutes: 40
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/deepseek_v32
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - benchmarks/attention_benchmarks/
+  commands:
+  - mkdir -p attn-perf
+  - for cfg in benchmarks/attention_benchmarks/configs/rocm_aiter_mla_sparse_*.yaml; do VLLM_ROCM_USE_AITER=1 python3 benchmarks/attention_benchmarks/benchmark.py --config $$cfg --output-json attn-perf/$$(basename $$cfg .yaml).json; done
+  - buildkite-agent artifact upload "attn-perf/*.json"
 
 - label: ":amd: (MI355) Attention Benchmark Smoke" # TBD
   timeout_in_minutes: 25
@@ -5902,6 +6045,7 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/backends
     --ignore=v1/attention/test_gdn_aiter_flydsl.py
     --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py

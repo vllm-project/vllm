@@ -849,13 +849,24 @@ def _run_single_benchmark(
     #
     # sparse_mla_force_mqa overrides: even for prefill metadata, use MQA.
     force_mqa = getattr(config, "sparse_mla_force_mqa", False)
-    force_dense_mha = getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
+    mha_mode = getattr(config, "sparse_mla_mha_mode", "auto")
+    force_dense_mha = mha_mode == "dense"
     if force_mqa:
         has_decode = True
         has_prefill = False
     elif is_sparse:
         has_decode = metadata.num_decode_tokens > 0
         has_prefill = metadata.num_prefills > 0
+        # As MLAAttention._use_sparse_mha: prefill rows that neither dense nor
+        # masked MHA can serve (no masked MHA kernel, e.g. on ROCm, and rows
+        # longer than topk) run through sparse MQA with the decodes.
+        prefill = metadata.prefill
+        mha_ok = mha_mode != "auto" or (
+            prefill is not None
+            and (prefill.use_dense_mha or getattr(impl, "masked_mha_available", False))
+        )
+        if has_prefill and not mha_ok:
+            has_decode, has_prefill = True, False
     else:
         has_decode = metadata.decode is not None
         has_prefill = metadata.prefill is not None
@@ -929,7 +940,6 @@ def _run_single_benchmark(
             prefill_quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     fused_output = output_scale is not None and fuse_quant_op
-    mha_mode = getattr(config, "sparse_mla_mha_mode", "auto")
 
     # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
