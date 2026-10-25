@@ -1,5 +1,8 @@
 # Features
 
+See [KV Offloading](kv_offloading_usage.md) for CPU cache configuration and
+[concurrent prefix sharing](kv_offloading_usage.md#concurrent-requests-sharing-a-prefix).
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

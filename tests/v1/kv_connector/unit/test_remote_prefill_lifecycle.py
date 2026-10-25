@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -200,6 +202,24 @@ def test_shared_external_prefix_preserves_isolation(monkeypatch, isolation):
     assert scheduler.connector.update_state_after_alloc.call_count == 2
 
 
+def test_shared_external_prefix_respects_auxiliary_cache_restrictions(monkeypatch):
+    """Requests needing auxiliary outputs cannot bypass their external hit cap."""
+    scheduler = _shared_load_scheduler(monkeypatch)
+    owner, follower = [
+        create_request(num_tokens=48, common_prefix_len=32) for _ in range(2)
+    ]
+    scheduler.add_request(owner)
+    scheduler.schedule()
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, scheduler.connector
+    )
+    scheduler.add_request(follower)
+    output = scheduler.schedule()
+    assert follower.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens[follower.request_id] == 48
+    assert not scheduler._shared_load_followers
+
+
 def test_shared_external_prefix_late_follower_after_owner_abort(monkeypatch):
     scheduler = _shared_load_scheduler(monkeypatch)
     owner = create_request(num_tokens=48, common_prefix_len=32)
@@ -360,6 +380,7 @@ def test_basic_lifecycle():
     scheduled_req = scheduler_output.scheduled_new_reqs[0]
     num_scheduled_tokens = scheduler_output.num_scheduled_tokens[request_id]
     num_computed_tokens = scheduled_req.num_computed_tokens
+    assert scheduled_req.prompt_token_ids is not None
     total_prompt_tokens = len(scheduled_req.prompt_token_ids)
     assert num_scheduled_tokens == total_prompt_tokens - num_computed_tokens
 
@@ -856,6 +877,8 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         block_size=BLOCK_SIZE,
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    # mamba_cache_mode "none" only runs without prefix caching.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     kv_cache_config = make_kv_cache_config(
         block_size=BLOCK_SIZE,
@@ -877,6 +900,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # ── Step 1: first chunk ──
     scheduler_output = scheduler.schedule()
 
+    assert request.prompt_token_ids is not None
     assert len(request.prompt_token_ids) == NUM_TOKENS - 1
     assert request.max_tokens == 1
     assert scheduler_output.num_scheduled_tokens[request_id] == BATCH_SIZE
@@ -1012,8 +1036,10 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     full_group.kv_cache_spec = replace(full_group.kv_cache_spec, block_size=block_size)
     if swa_enabled:
         sliding_group = kv_cache_config.kv_cache_groups[-1]
+        sliding_spec = sliding_group.kv_cache_spec
+        assert isinstance(sliding_spec, SlidingWindowSpec)
         sliding_group.kv_cache_spec = replace(
-            sliding_group.kv_cache_spec,
+            sliding_spec,
             page_size_padded=full_group.kv_cache_spec.page_size_bytes,
         )
     scheduler = create_scheduler(
@@ -1079,6 +1105,7 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         disable_hybrid_kv_cache_manager=False,
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = mamba_cache_mode == "align"
     kv_cache_config = make_kv_cache_config(
         block_size,
         mamba_enabled=True,
@@ -1086,8 +1113,10 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         num_blocks=num_blocks,
     )
     mamba_group = kv_cache_config.kv_cache_groups[-1]
+    mamba_spec = mamba_group.kv_cache_spec
+    assert isinstance(mamba_spec, MambaSpec)
     mamba_group.kv_cache_spec = replace(
-        mamba_group.kv_cache_spec,
+        mamba_spec,
         block_size=mamba_block_size,
         num_speculative_blocks=num_spec_tokens,
     )

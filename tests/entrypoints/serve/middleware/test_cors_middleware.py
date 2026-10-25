@@ -4,7 +4,7 @@
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from vllm.entrypoints.launchers.cli_args import FrontendArgs
+from vllm.entrypoints.common.cli_args import FrontendArgs
 from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 
 
