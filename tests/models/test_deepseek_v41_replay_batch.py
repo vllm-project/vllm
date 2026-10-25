@@ -548,3 +548,8 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert replay.forward_context.batch_descriptor.num_tokens == 512
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+    # The graph's padding rows stay out of expert routing.
+    is_padding = replay.forward_context.is_padding
+    assert is_padding.tolist() == [False] * len(REPLAY_ROWS) + [True] * (
+        512 - len(REPLAY_ROWS)
+    )
