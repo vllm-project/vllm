@@ -871,8 +871,8 @@ class CPUOffloadingWorker(OffloadingWorker):
         )
         self._store_handler = make_handler(gpu_to_cpu=True)
         self._load_handler = make_handler(gpu_to_cpu=False)
-        # Own stream, so sync loads do not queue behind async loads.
-        self._sync_load_handler = make_handler(gpu_to_cpu=False)
+        # Own stream, so expedited loads do not queue behind regular loads.
+        self._expedited_load_handler = make_handler(gpu_to_cpu=False)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
@@ -881,27 +881,27 @@ class CPUOffloadingWorker(OffloadingWorker):
         return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
         """Async CPU -> GPU."""
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
-
-    def submit_sync_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> bool:
-        return self._sync_load_handler.transfer_async(job_id, src_spec, dst_spec)
+        handler = self._expedited_load_handler if expedited else self._load_handler
+        return handler.transfer_async(job_id, src_spec, dst_spec)
 
     def get_finished(self) -> list[TransferResult]:
         return (
             self._store_handler.get_finished()
             + self._load_handler.get_finished()
-            + self._sync_load_handler.get_finished()
+            + self._expedited_load_handler.get_finished()
         )
 
     def wait(self, job_ids: set[int]) -> None:
         self._store_handler.wait(job_ids)
         self._load_handler.wait(job_ids)
-        self._sync_load_handler.wait(job_ids)
+        self._expedited_load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
         handler_failed = False
@@ -911,7 +911,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             logger.exception("Failed to shut down store offloading handler")
             handler_failed = True
 
-        for handler in (self._load_handler, self._sync_load_handler):
+        for handler in (self._load_handler, self._expedited_load_handler):
             try:
                 handler.shutdown()
             except Exception:

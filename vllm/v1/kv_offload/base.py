@@ -662,16 +662,17 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> GPU.
 
-    def submit_sync_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> bool:
-        """Like submit_load, for a load waited on within the step. Workers can
-        keep it from queueing behind async loads."""
-        return self.submit_load(job_id, src_spec, dst_spec)
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

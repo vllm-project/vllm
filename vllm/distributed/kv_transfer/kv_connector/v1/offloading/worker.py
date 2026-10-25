@@ -257,11 +257,14 @@ class OffloadingConnectorWorker:
                 # Its request already runs this step: no finished_recving.
                 sync_job_ids.add(job_id)
                 self._load_jobs[job_id] = None
-                submit = self.worker.submit_sync_load
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec, expedited=True
+                )
             else:
                 self._load_jobs[job_id] = entry.req_id
-                submit = self.worker.submit_load
-            success = submit(job_id, entry.src_spec, entry.dst_spec)
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec
+                )
             assert success
         if sync_job_ids:
             self.worker.wait(sync_job_ids)
