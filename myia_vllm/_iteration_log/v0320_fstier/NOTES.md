@@ -2350,3 +2350,27 @@ Same generation since 09:04:20Z (RC=0, 0 OOM, health 200/4.3 ms, shm 24G).
   Minimax reset (23:05Z) before calling it a trend. 4 more WEDGE `fail 1/2` under long
   prefills, never 2/2; VRAM GPU 0 22,834 (creep +29 MiB/2 h, margin 166 MiB).
 - 0 new external IP with 200, 0 window+1. Commit 84.9 % (back under 85).
+
+## 25/10 21:48-21:55Z — ★ DEPLOYED: fs admission filter live (user GO "maintenant")
+
+User moved Q38 forward ("si c'est mieux de coupler… faites-le ce soir si possible.
+Possible maintenant ?") — executed immediately rather than waiting for the 23:05Z
+Minimax reset: a warm boot with the user present beats a marginally quieter window.
+
+- Recreate `vllm-medium-swift15-27b` on `VLLM_IMAGE_SWIFT15=vllm-openai-v0320-fsadmit:v1`
+  21:48:52Z. Warm boot (compile cache volume shared): health 200 at 21:53:46Z
+  (4 min 54 s, compilation 2.57 s). KV 831,723 tokens identical, VRAM cold
+  21,100 / 19,676 MiB.
+- **Filter active**: one-time line `manager.py:286 fs admission: cascades to STORAGE
+  tiers require >= 2 primary-tier lookup hit(s)` at 21:53:27Z. Rollback switches:
+  `MYIA_FS_ADMIT_MIN_HITS=0` (recreate) or image back to tierpin.
+- /dev/shm purge post-boot: 7 orphans of the dead generation, 48G -> 24G.
+- Generation probe: `enable_thinking:false` -> "OK" (first probe's null content was
+  the documented thinking-budget trap, §5bis).
+- Fleet warned before the gesture: global dashboard (crossPost workspace-vllm) +
+  DM claudish (skip/busy suggestion until ~23:00Z; their morning hub recreate is
+  unchanged and now lands on an engine that already logs `x-claudish-client`).
+- Baseline for the gates (pre-restart generation, since 09:04Z): fs writes 594.5 GB,
+  fs reads 82.7 GB, fs chunk hits 3,152, prompt tokens 325.0 M, preemptions 28.
+  First-hour measurement at the 23:41Z cycle: fs write rate (was 33-47 GB/h) and
+  disk-served share (acceptance: >= 80 % of the 2.2 % baseline share).
