@@ -262,7 +262,14 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-        for k_cls in backend_to_kernel_cls(backend):
+        candidates = backend_to_kernel_cls(backend)
+        if config.is_lora_enabled and backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+                TrtLlmNvFp4LoRAExperts,
+            )
+
+            candidates = [*candidates, TrtLlmNvFp4LoRAExperts]
+        for k_cls in candidates:
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
