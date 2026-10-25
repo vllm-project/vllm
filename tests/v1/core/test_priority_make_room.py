@@ -1743,6 +1743,122 @@ def test_prometheus_counts_the_requests_preempted_to_make_room(max_preemptions):
         unregister_vllm_metrics()
 
 
+@pytest.mark.parametrize(
+    "long_prefill_token_threshold, held_tokens", [(256, 256), (0, 511)]
+)
+def test_the_scheduler_stats_count_the_budget_caps_holds(
+    long_prefill_token_threshold, held_tokens
+):
+    """The steps in which the cap holds lower-priority prefill back, once each,
+    and the prefill tokens it holds back in them: a running chunk's, as the
+    running loop would have scheduled it, up to the long prefill threshold, or
+    else the 511 tokens of the step's budget the decode leaves. A held admission
+    counts its step."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True,
+        priority_prefill_budget_cap_tokens=4,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        max_model_len=2048,
+        num_blocks=400,
+    )
+    _run_until_decoding(scheduler, _request("decode", 40, priority=2, arrival_time=0))
+    scheduler.add_request(_request("prefill", 2000, priority=2, arrival_time=1))
+    _step(scheduler)
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=2))
+    held = []
+    for step in range(5):
+        if step == 1:
+            scheduler.add_request(_request("late", 300, priority=2, arrival_time=3))
+        scheduler_output = scheduler.schedule()
+        stats = scheduler.update_from_output(
+            scheduler_output, _model_runner_output(scheduler, scheduler_output)
+        )[0].scheduler_stats
+        held.append((stats.num_prefill_held_steps, stats.num_prefill_held_tokens))
+    assert held == [(1, held_tokens)] * 4 + [(0, 0)]
+
+
+def test_the_scheduler_stats_count_a_step_that_holds_only_an_admission():
+    """With no lower-priority chunk to hold, a held admission counts its step,
+    with no tokens."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True,
+        priority_prefill_budget_cap_tokens=4,
+        max_model_len=2048,
+        num_blocks=400,
+    )
+    _run_until_decoding(scheduler, _request("decode", 40, priority=2, arrival_time=0))
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=1))
+    scheduler.add_request(_request("late", 300, priority=2, arrival_time=2))
+    held = []
+    for _ in range(5):
+        scheduler_output = scheduler.schedule()
+        stats = scheduler.update_from_output(
+            scheduler_output, _model_runner_output(scheduler, scheduler_output)
+        )[0].scheduler_stats
+        held.append((stats.num_prefill_held_steps, stats.num_prefill_held_tokens))
+    assert held == [(1, 0)] * 4 + [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    "long_prefill_token_threshold, held_tokens", [(128, 2 * 128), (384, 511)]
+)
+def test_the_held_tokens_of_a_step_are_at_most_what_its_budget_leaves(
+    long_prefill_token_threshold, held_tokens
+):
+    """Two lower-priority prefill chunks held in one step count what the running
+    loop would have scheduled for them: a held chunk takes nothing from the
+    step's budget, so each counts against what the chunks held before it leave.
+    Both chunks' 128 fit in the 511 tokens the decode leaves; of 384 each, the
+    second chunk would have had 127."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True,
+        priority_prefill_budget_cap_tokens=4,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        max_model_len=2048,
+        num_blocks=400,
+    )
+    _run_until_decoding(scheduler, _request("decode", 40, priority=2, arrival_time=0))
+    scheduler.add_request(_request("a", 2000, priority=2, arrival_time=1))
+    scheduler.add_request(_request("b", 2000, priority=2, arrival_time=2))
+    assert _step(scheduler).num_scheduled_tokens.keys() == {"decode", "a", "b"}
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=3))
+    held = []
+    for _ in range(5):
+        scheduler_output = scheduler.schedule()
+        stats = scheduler.update_from_output(
+            scheduler_output, _model_runner_output(scheduler, scheduler_output)
+        )[0].scheduler_stats
+        held.append((stats.num_prefill_held_steps, stats.num_prefill_held_tokens))
+    assert held == [(1, held_tokens)] * 4 + [(0, 0)]
+
+
+@pytest.mark.parametrize("budget_cap", [False, True])
+def test_prometheus_counts_the_budget_caps_holds(budget_cap):
+    """As vllm:priority_prefill_held_steps and _tokens, only with the cap on."""
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m"),
+        scheduler_config=SchedulerConfig.default_factory(
+            policy="priority", priority_prefill_budget_cap=budget_cap
+        ),
+    )
+    try:
+        logger = PrometheusStatLogger(vllm_config)
+        logger.record(
+            SchedulerStats(num_prefill_held_steps=2, num_prefill_held_tokens=512), None
+        )
+        labels = {"model_name": "facebook/opt-125m", "engine": "0"}
+        held = [
+            prometheus_client.REGISTRY.get_sample_value(f"{name}_total", labels)
+            for name in (
+                "vllm:priority_prefill_held_steps",
+                "vllm:priority_prefill_held_tokens",
+            )
+        ]
+        assert held == ([2, 512] if budget_cap else [None, None])
+    finally:
+        unregister_vllm_metrics()
+
+
 # Off is stock
 
 

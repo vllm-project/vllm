@@ -454,6 +454,14 @@ class Scheduler(SchedulerInterface):
         # The step in which each KV load in flight was first seen: a load holds
         # lower-priority prefill back for its first budget cap tokens steps.
         self._load_hold_start: dict[Request, int] = {}
+        # The budget cap's holds since the last scheduler stats: the steps in
+        # which it held lower-priority prefill back, and the prefill tokens it
+        # held back in them; and the last such step, with the tokens held back in
+        # it so far.
+        self._num_prefill_held_steps = 0
+        self._num_prefill_held_tokens = 0
+        self._prefill_held_step = -1
+        self._prefill_held_step_tokens = 0
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -877,6 +885,16 @@ class Scheduler(SchedulerInterface):
             ):
                 # A request of a higher priority awaits its first tokens: this
                 # step is theirs and the decodes'.
+                num_held_tokens = (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                )
+                if 0 < long_prefill_token_threshold < num_held_tokens:
+                    num_held_tokens = long_prefill_token_threshold
+                self._count_prefill_hold(
+                    num_held_tokens, min(token_budget, input_budget - draft_slots)
+                )
                 req_index += 1
                 continue
 
@@ -1155,6 +1173,7 @@ class Scheduler(SchedulerInterface):
                     and request.priority > first_tokens_priority
                 ):
                     # Nor does a prefill of a lower priority start meanwhile.
+                    self._count_prefill_hold(0)
                     if request_queue is self.kv_holding_waiting:
                         # Requests holding KV blocks are drained first, so the
                         # request whose first tokens are due may be behind it.
@@ -3239,13 +3258,19 @@ class Scheduler(SchedulerInterface):
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
         num_priority_preemptions = self._num_priority_preemptions
+        num_prefill_held_steps = self._num_prefill_held_steps
+        num_prefill_held_tokens = self._num_prefill_held_tokens
         self._num_priority_preemptions = 0
+        self._num_prefill_held_steps = 0
+        self._num_prefill_held_tokens = 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             num_priority_preemptions=num_priority_preemptions,
+            num_prefill_held_steps=num_prefill_held_steps,
+            num_prefill_held_tokens=num_prefill_held_tokens,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3535,6 +3560,20 @@ class Scheduler(SchedulerInterface):
         ):
             priorities.append(request.priority)
         return min(priorities, default=None)
+
+    def _count_prefill_hold(self, num_tokens: int, budget: int = 0) -> None:
+        """Count a step in which the budget cap holds lower-priority prefill
+        back, once, and the prefill tokens it holds back in it: those the running
+        loop would have scheduled for a held chunk of `num_tokens`, within the
+        `budget` the step has left less the chunks held before it, which took
+        nothing from it. So a step's held tokens are at most its budget."""
+        if self._prefill_held_step != self.current_step:
+            self._prefill_held_step = self.current_step
+            self._prefill_held_step_tokens = 0
+            self._num_prefill_held_steps += 1
+        num_tokens = max(0, min(num_tokens, budget - self._prefill_held_step_tokens))
+        self._prefill_held_step_tokens += num_tokens
+        self._num_prefill_held_tokens += num_tokens
 
     def _running_slot_free(self) -> bool:
         """Whether a running slot is free: a waiting request, or one whose KV
