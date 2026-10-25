@@ -673,11 +673,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 from vllm.v1.attention.backends.mla.indexer import (
                     _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_NATIVE_DECODE_LENS_KERNEL,
                     _PREPARE_UNIFORM_DECODE_KERNEL,
                 )
 
                 _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
                 _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _PREPARE_NATIVE_DECODE_LENS_KERNEL.register_warmup()
                 _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
                 if backend_name != "DEEPSEEK_V32_INDEXER":
