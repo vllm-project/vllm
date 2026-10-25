@@ -435,7 +435,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M3",
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        extras={"m3": "MiniMaxAI/MiniMax-M3"},
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -1143,7 +1144,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M3",
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        extras={"m3": "MiniMaxAI/MiniMax-M3"},
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -1592,6 +1594,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Gemma4DSparkModel": _HfExamplesInfo(
         "google/gemma-4-12B-it",
         speculative_model="deepseek-ai/dspark_gemma4_12b_block7",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
+    "DSparkMiniMaxDraftModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        speculative_model="MiniMaxAI/MiniMax-M3.1-Flash",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
+    "MiniMaxM3DSparkModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        speculative_model="MiniMaxAI/MiniMax-M3.1-Flash",
         is_available_online=False,
         use_original_num_layers=True,
     ),

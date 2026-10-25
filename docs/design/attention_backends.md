@@ -203,6 +203,11 @@ automatic priority lists above. A lightning indexer scores KV blocks, the
 top-k blocks (plus fixed init/local blocks) are selected, and attention
 attends only to those blocks; index keys live in a separate side cache.
 
+On ROCm (MI350/MI355) MiniMax-M3.1-Flash uses the FP8 MSA/indexer path.
+NVFP4 KV and indexer caches are rejected with a recipe that requantizes
+routed experts NVFP4→MXFP4 and keeps FP8 caches. Native NVFP4 sparse
+attention is NVIDIA-only.
+
 --8<-- "gen:table-minimax"
 
 ## MLA (Multi-head Latent Attention) Backends

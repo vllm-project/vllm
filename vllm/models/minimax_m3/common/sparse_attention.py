@@ -26,6 +26,9 @@ from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
+from vllm.models.minimax_m3.common.rocm_compat import (
+    minimax_m31_rocm_nvfp4_unsupported,
+)
 from vllm.platforms import current_platform
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
@@ -549,6 +552,8 @@ def select_main_backend_and_impl_cls(
         and kv_cache_dtype != "fp8_e5m2"
     )
     use_nvfp4 = get_kv_quant_mode(kv_cache_dtype).is_nvfp4
+    if use_nvfp4 and current_platform.is_rocm():
+        raise ValueError(minimax_m31_rocm_nvfp4_unsupported("KV cache"))
     if use_nvfp4 and kv_cache_dtype != "nvfp4":
         raise ValueError(
             "MiniMax M3 sparse attention supports only the 'nvfp4' NVFP4 KV "

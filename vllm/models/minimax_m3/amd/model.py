@@ -122,6 +122,10 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
 )
+from vllm.models.minimax_m3.common.rocm_compat import (
+    default_minimax_indexer_kv_dtype,
+    is_minimax_draft_weight,
+)
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -742,7 +746,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # (--attention-config '{"indexer_kv_dtype": ...}'). fp8 e4m3 is what the
         # MSA indexer needs; bf16 keeps the platform-neutral indexer.
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-            "bf16"
+            default_minimax_indexer_kv_dtype()
         )
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
@@ -1430,7 +1434,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
             num_kv_heads = max(1, config.num_key_value_heads // tp_size)
             indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-                "bf16"
+                default_minimax_indexer_kv_dtype()
             )
             # The only MSA indexer probe. It has to live here rather than in
             # the layer because the buffers it gates are one allocation shared
@@ -1617,8 +1621,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # The MTP module is not modeled yet.
-            if "mtp." in name:
+            # MTP / nested DSpark tensors belong to the draft, not the target.
+            if is_minimax_draft_weight(name):
                 continue
 
             # The checkpoint stores block scales as ``weight_scale_inv``; the

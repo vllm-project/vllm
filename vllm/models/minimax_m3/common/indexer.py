@@ -27,6 +27,9 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.models.minimax_m3.common.rocm_compat import (
+    minimax_m31_rocm_nvfp4_unsupported,
+)
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
@@ -120,6 +123,10 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         elif indexer_kv_dtype == "bf16":
             cache_dtype = torch.bfloat16
         else:
+            if current_platform.is_rocm() and indexer_kv_dtype in ("mxfp4", "nvfp4"):
+                raise NotImplementedError(
+                    minimax_m31_rocm_nvfp4_unsupported("indexer cache")
+                )
             raise NotImplementedError(
                 f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
                 "MiniMax M3 indexer cache (only 'bf16' or 'fp8'/'fp8_e4m3')."
@@ -531,12 +538,23 @@ def select_indexer_impl_cls(
         )
         return MiniMaxM3IndexerTritonCPImpl
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
+        if current_platform.is_rocm():
+            raise NotImplementedError(
+                minimax_m31_rocm_nvfp4_unsupported("indexer cache")
+            )
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
     is_cuda = current_platform.is_cuda()
     is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
+    if is_fp8 and current_platform.is_rocm():
+        raise NotImplementedError(
+            "The MiniMax M3 Triton indexer does not support an FP8 cache on "
+            "ROCm. On MI350/MI355 with AITER sparse PA, the FP8 MSA indexer is "
+            "selected automatically; otherwise set --attention-config "
+            '\'{"indexer_kv_dtype": "bf16"}\'.'
+        )
     if is_fp8 and not (is_cuda and current_platform.supports_fp8()):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 support."
