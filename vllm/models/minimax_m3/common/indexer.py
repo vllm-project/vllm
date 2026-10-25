@@ -111,7 +111,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         head_dim: int,
         prefix: str,
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
     ) -> None:
         super().__init__()
@@ -354,7 +354,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -495,23 +495,53 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
 def select_indexer_impl_cls(
     *,
     topk_blocks: int,
-    indexer_kv_dtype: IndexerKVDType = "bf16",
+    indexer_kv_dtype: IndexerKVDType | str = "bf16",
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer (bf16 only).
+    Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
+    support.
     """
+    if get_current_vllm_config().attention_config.minimax_m3_indexer_cp:
+        # AttentionConfig already rejects non-bf16 index caches; platform and
+        # TP size are only known here.
+        tp_size = get_tensor_model_parallel_world_size()
+        if not current_platform.is_rocm() or tp_size < 2:
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp requires ROCm with "
+                f"tensor_parallel_size > 1 (got tensor_parallel_size={tp_size})"
+            )
+        if indexer_kv_dtype != "bf16":
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp requires a bf16 index "
+                f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+            )
+        from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+            MiniMaxM3IndexerTritonCPImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            tp_size,
+        )
+        return MiniMaxM3IndexerTritonCPImpl
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
-    is_sm100 = (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    )
+    is_cuda = current_platform.is_cuda()
+    is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
+    if is_fp8 and not (is_cuda and current_platform.supports_fp8()):
+        raise NotImplementedError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 support."
+        )
+    is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
     use_msa = (
         is_sm100
         and topk_blocks == 16
@@ -530,7 +560,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
@@ -566,7 +596,7 @@ class MiniMaxM3Indexer(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()

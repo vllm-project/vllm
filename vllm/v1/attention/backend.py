@@ -48,11 +48,12 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
 
-    def __init__(self, base: int):
-        self.base = base
+    def __repr__(self) -> str:
+        return f"MultipleOf({self.base})"
 
 
 class AttentionBackend(ABC):
@@ -67,6 +68,9 @@ class AttentionBackend(ABC):
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
+
+    # Can forward() run with key/value omitted after a fused op wrote the cache?
+    supports_kv_cache_update_bypass: bool = False
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -503,19 +507,13 @@ class CommonAttentionMetadata:
         # but not the right per-request boundaries. Padding requests have a query
         # length of zero and are skipped by the device boundary search.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
+        from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 
         num_output_tokens = max(num_mapped_tokens, num_tokens)
         assert buffer.shape[0] >= num_output_tokens
-        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
-            self.query_start_loc,
-            buffer,
-            self.query_start_loc.shape[0] - 1,
-            num_mapped_tokens,
-            num_output_tokens,
-            num_warps=4,
+        self._token_to_req_indices_cache = compute_token_to_req_indices(
+            self.query_start_loc, buffer, num_mapped_tokens, num_output_tokens
         )
-        self._token_to_req_indices_cache = buffer[:num_output_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -557,9 +555,7 @@ M = TypeVar("M")
 
 
 class AttentionCGSupport(Enum):
-    """Constants for the cudagraph support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never cudagraph supported."""
+    """Constants for the cudagraph support of the attention backend"""
 
     ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
@@ -606,8 +602,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
-    # Whether all step-dependent draft decode metadata can be updated in place,
-    # allowing one metadata build to be reused across autoregressive draft steps.
+    # Whether update_draft_decode_metadata() can regenerate all decode metadata
+    # from persistent device buffers with capture-safe ops only. Lets a
+    # speculator record the refresh inside its draft decode CUDA graph, so no
+    # eager build() is needed between steps or between the batches that replay
+    # it, whether the graph holds one draft forward or a multi-step loop.
     supports_draft_decode_metadata_update: bool = False
 
     @abstractmethod
@@ -622,10 +621,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
-        self.kernel_block_size: int | None = None
-
-    def set_kernel_block_size(self, kernel_block_size: int) -> None:
-        self.kernel_block_size = kernel_block_size
 
     @classmethod
     def get_cudagraph_support(
@@ -698,7 +693,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
-            common_prefix_len: The length of the common prefix of the batch.
+            common_prefix_len: Deprecated and always 0. Kept for compatibility
+                with out-of-tree builders.
             common_attn_metadata: The common attention metadata.
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
@@ -755,28 +751,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         )
 
     def update_draft_decode_metadata(self, metadata: M) -> None:
-        """Update step-dependent draft decode metadata in place.
+        """Update draft decode metadata in place.
 
-        The fused draft loop may call this method during full CUDA graph
-        capture. CUDA graph replay does not run this Python method, so
-        implementations must emit capture-safe operations and keep replayed
-        tensor state in persistent storage.
+        Speculators can record this call inside their draft decode CUDA graphs,
+        so it runs once at capture and never again in Python. Implementations
+        must emit only capture-safe operations and write results into persistent
+        tensors that ``metadata`` already references.
         """
         raise NotImplementedError
-
-    def use_cascade_attention(
-        self,
-        common_prefix_len: int,
-        query_lens: np.ndarray,
-        num_query_heads: int,
-        num_kv_heads: int,
-        use_alibi: bool,
-        use_sliding_window: bool,
-        use_local_attention: bool,
-        num_sms: int,
-        dcp_world_size: int,
-    ) -> bool:
-        return False
 
 
 class AttentionLayer(Protocol):
@@ -813,8 +795,9 @@ class AttentionImplBase(ABC, Generic[T]):
     is_sparse: ClassVar[bool] = False
 
     # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
-    # impls without one run the top-k MQA path for all requests.
-    supports_dense_mha_prefill: ClassVar[bool] = True
+    # impls without one run the top-k MQA path for all requests. Impls may
+    # override it per instance, depending on the kv-cache layout.
+    supports_dense_mha_prefill: bool = True
 
     # Required attributes that all impls should have
     num_heads: int
@@ -970,6 +953,16 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
 
+    def set_interleaved_v_cache(self):
+        """Opt this implementation into the interleaved V-cache layout for all of
+        its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
+        for every eligible layer when it is constructed, i.e. before any KV
+        cache is written, so fused and unfused paths stay consistent whether or
+        not the pattern matches. Default is a no-op; backends whose kernels
+        read an interleaved V-cache under this fusion (e.g. ROCM_ATTN) override.
+        """
+        return False
+
     def fused_rope_kvcache_supported(self):
         """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
@@ -1095,6 +1088,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def reserve_workspace(self) -> None:
+        """Called in the memory profiling run to claim persistent workspace
+        that is otherwise reserved after profiling."""
+        return
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),
@@ -1115,6 +1113,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         if kv_cache.numel() == 0:
             return
@@ -1127,6 +1126,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            skip_scale=skip_scale,
         )
 
 
