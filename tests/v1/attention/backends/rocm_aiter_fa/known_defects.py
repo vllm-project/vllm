@@ -92,14 +92,6 @@ KNOWN_DEFECTS["shuffle-unsupported-features"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["shuffle-lbhnc-layout"] = Defect(
-    "Under shuffle the backend lists LBHNC, but shuffle decode needs K and V "
-    "as dense planes (LHBNC).",
-    (
-        _CAP + "test_kv_cache_layouts[shuffle]",
-        _KV_CACHE + "test_every_listed_layout_gives_identical_attention[shuffle]",
-    ),
-)
 
 KNOWN_DEFECTS["fp8-e5m2-declared"] = Defect(
     "fp8_e5m2 is declared, but ROCm reshape_and_cache_flash rejects it at "
