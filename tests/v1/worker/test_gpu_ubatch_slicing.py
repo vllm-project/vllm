@@ -29,6 +29,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import create_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
@@ -592,17 +595,34 @@ def test_runner_allocates_one_buffer_pair_per_microbatch():
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
-    def __init__(self, trace: list[tuple[str, int]]):
+    def __init__(
+        self,
+        trace: list[tuple[str, int]],
+        capturer: RoutedExpertsCapturer | None = None,
+    ):
         super().__init__()
         self.trace = trace
+        self.capturer = capturer
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         self.trace.append(("enter", dbo_current_ubatch_id()))
         out = input_ids.float().unsqueeze(-1) * 2 + positions.float().unsqueeze(-1)
         # Stands in for the expert all-to-all handoff point.
         dbo_yield()
+        if self.capturer is not None:
+            self.capturer.capture(0, input_ids.view(-1, 1).int())
         self.trace.append(("exit", dbo_current_ubatch_id()))
         return out
+
+
+def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCapturer:
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank = 0
+    capturer.tp_size = 1
+    capturer.device_buffer = torch.full(
+        (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
+    )
+    return capturer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -622,7 +642,8 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
     trace: list[tuple[str, int]] = []
-    model = _YieldingModel(trace)
+    capturer = _make_capturer(16, device)
+    model = _YieldingModel(trace, capturer)
     output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
@@ -632,6 +653,9 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
 
     # Both microbatches reach the handoff before either finishes.
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    torch.testing.assert_close(
+        capturer.device_buffer[:, 0, 0], model_inputs["input_ids"].int()
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -850,7 +874,8 @@ def test_capturable_run_replays_as_a_cudagraph():
         ],
     )
 
-    model = _YieldingModel([])
+    capturer = _make_capturer(num_tokens, device)
+    model = _YieldingModel([], capturer)
     graph = torch.cuda.CUDAGraph()
     finish = runner.begin_capturable_run(
         model, model_inputs, ubatch_state, for_capture=True
@@ -867,6 +892,7 @@ def test_capturable_run_replays_as_a_cudagraph():
         (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
     )
     torch.testing.assert_close(captured, expected)
+    assert (capturer.device_buffer == 3).all()
 
 
 def _request_slices(input_batch: InputBatch) -> list[slice]:
