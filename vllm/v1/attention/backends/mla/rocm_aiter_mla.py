@@ -37,7 +37,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
+from vllm.v1.attention.backends.mla.triton_mla import (
+    _compute_num_kv_splits,
+    _decode_programs_per_split,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
@@ -334,8 +337,6 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
 
 
-# Heads per stage-1 program in the grouped MLA decode kernel (its BLOCK_H).
-_DECODE_HEADS_PER_PROGRAM: Final = 16
 # Tuned on MI325X with microbenchmarks
 _BATCH_OCCUPANCY_MULTIPLIER: Final = 4
 
@@ -346,7 +347,7 @@ def _triton_dcp_verify_num_kv_splits(
     # Split only until the stage-1 grid fills the GPU. Past that, splits add
     # scratch and combine work, and large batches overflow the kernel's int32
     # attn_logits offsets.
-    programs_per_split = max(1, num_rows) * cdiv(num_heads, _DECODE_HEADS_PER_PROGRAM)
+    programs_per_split = _decode_programs_per_split(num_rows, num_heads)
     occupancy_splits = triton.next_power_of_2(
         cdiv(_BATCH_OCCUPANCY_MULTIPLIER * sm_count, programs_per_split)
     )
