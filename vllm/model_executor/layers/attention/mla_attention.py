@@ -815,6 +815,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
+            and self._k_scale_float == 1.0,
         )
 
     def prepare_kv_cache_update(
@@ -1245,8 +1247,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
             # prefill and decode. Release the now-unused raw weight.
-            self.kv_b_proj.weight = torch.nn.Parameter(
-                torch.empty(0), requires_grad=False
+            replace_parameter(
+                self.kv_b_proj, "weight", self.kv_b_proj.weight.new_empty(0)
             )
             return
 
