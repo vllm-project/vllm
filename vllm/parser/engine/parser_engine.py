@@ -879,6 +879,11 @@ class ParserEngine(Parser):
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
 
+        # Slots include calls rejected by name (never sent), which the
+        # non-streaming result drops. Stream each call at its position there.
+        for tc in tool_call_deltas:
+            tc.index = sum(slot.name_sent for slot in self._tool_slots[: tc.index])
+
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 

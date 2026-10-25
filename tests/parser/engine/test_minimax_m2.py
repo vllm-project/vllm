@@ -241,6 +241,37 @@ class TestStreaming:
         assert collect_function_name(results) is None
         assert collect_tool_arguments(results) == ""
 
+    def test_streaming_rejected_tool_does_not_shift_index(
+        self, mock_tokenizer, mock_request
+    ):
+        """A rejected call must not leave a gap in streamed indices.
+
+        Non-streaming returns only the valid call, at position 0. Clients
+        assemble streamed calls by index, so the valid call must stream as 0.
+        """
+        tools = make_tools("search")
+        parser = MinimaxM2Parser(mock_tokenizer)
+        mock_request.tools = tools
+
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<minimax:tool_call>",
+                '<invoke name="img_gen">',
+                '<parameter name="prompt">cat</parameter>',
+                "</invoke>",
+                '<invoke name="search">',
+                '<parameter name="query">news</parameter>',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        indices = {tc.index for delta, _ in results if delta for tc in delta.tool_calls}
+        assert indices == {0}
+        assert collect_function_name(results) == "search"
+        assert json.loads(collect_tool_arguments(results)) == {"query": "news"}
+
 
 WRITE_CALL_HEAD = (
     '<minimax:tool_call>\n<invoke name="write_file">\n'
