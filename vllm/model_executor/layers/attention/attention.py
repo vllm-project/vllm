@@ -518,8 +518,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype.startswith("nvfp4")
             )
 
-            # check if query quantization is supported
-            if self.impl.supports_quant_query_input:
+            # check if query quantization is supported; models that fuse it
+            # pass an already quantized query.
+            if (
+                self.impl.supports_quant_query_input
+                and query.dtype != current_platform.fp8_dtype()
+            ):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:

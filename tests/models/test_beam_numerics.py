@@ -249,9 +249,14 @@ def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
 @pytest.mark.parametrize("kv_heads", [1, 2])
 @pytest.mark.parametrize("nhd", [False, True])
 @pytest.mark.parametrize("rotary_dim,neox", [(128, True), (64, False), (0, True)])
+@pytest.mark.parametrize("kv_cache_dtype", ["bfloat16", "fp8"])
 @torch.inference_mode()
-def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, neox):
-    """Cache insertion preserves Q/K and follows live slot mappings on replay."""
+def test_qk_norm_rope_inserts_only_mapped_kv(
+    rows, kv_heads, nhd, rotary_dim, neox, kv_cache_dtype
+):
+    """Cache insertion preserves Q/K and follows live slot mappings and scales on
+    replay; FP8 output matches the unfused quantization exactly."""
+    from vllm import _custom_ops as ops
     from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
 
     torch.manual_seed(42)
@@ -264,9 +269,13 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
     args = (q, k, weight, weight, 1e-6, positions, rope, 128, rotary_dim, neox)
     pages = (rows + 127) // 128 + 1
     shape = (pages, 128, kv_heads, 256) if nhd else (pages, kv_heads, 128, 256)
-    cache = torch.zeros(shape, device="cuda", dtype=q.dtype)
+    fp8 = kv_cache_dtype == "fp8"
+    cache = torch.zeros(shape, device="cuda", dtype=torch.uint8 if fp8 else q.dtype)
     if nhd:
         cache = cache.transpose(1, 2)
+    scales = [torch.tensor(1.0, device="cuda") for _ in range(3)]
+    quant = dict(zip(("q_scale", "k_scale", "v_scale"), scales)) if fp8 else {}
+    kernel_cache = cache.view(torch.float8_e4m3fn) if fp8 else cache
     live = max(1, rows - 1)
     slots = torch.randperm(pages * 128, device="cuda")[:live].clone()
     if live > 1:
@@ -274,7 +283,12 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
 
     def fused():
         return beam_qk_norm_rope(
-            *args, ssmax=True, value=v, kv_cache=cache, slot_mapping=slots
+            *args,
+            ssmax=True,
+            value=v,
+            kv_cache=kernel_cache,
+            slot_mapping=slots,
+            **quant,
         )
 
     fused()
@@ -288,10 +302,31 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
     if live > 1:
         slots[0] = -1
     cache.zero_()
+    for scale, value in zip(scales, (0.37, 1.9, 0.011)):
+        scale.fill_(value)
     graph.replay()
     expected = beam_qk_norm_rope(*args, ssmax=True)
-    for result, reference in zip(actual, expected):
-        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+    if fp8:
+        reference_q, _ = ops.scaled_fp8_quant(expected[0], scales[0])
+        assert torch.equal(actual[0].view(torch.uint8), reference_q.view(torch.uint8))
+        reference_cache = torch.zeros_like(cache)
+        key_cache, value_cache = (
+            reference_cache.view(torch.float8_e4m3fn).transpose(1, 2).split(128, -1)
+        )
+        ops.reshape_and_cache_flash(
+            expected[1].view(rows, kv_heads, 128),
+            v.view(rows, kv_heads, 128),
+            key_cache,
+            value_cache,
+            slots,
+            "fp8",
+            scales[1],
+            scales[2],
+        )
+        assert torch.equal(cache, reference_cache)
+        return
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
     valid = slots >= 0
     mapped = slots[valid]
     reference_cache = torch.zeros_like(cache)
@@ -302,6 +337,61 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
         -1, kv_heads, 128
     )
     torch.testing.assert_close(cache, reference_cache, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("rope", [True, False])
+@torch.inference_mode()
+def test_qk_norm_rope_fp8_nonfinite_matches_reference(rope):
+    """NaN and infinity quantize exactly like the unfused path."""
+    from vllm import _custom_ops as ops
+    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+
+    torch.manual_seed(0)
+    fp8, rows, q_heads, kv_heads = torch.float8_e4m3fn, 8, 12, 2
+    q = torch.randn(rows, q_heads * 128, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(rows, kv_heads * 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(rows, kv_heads * 128, device="cuda", dtype=torch.bfloat16)
+    q[0, 5] = float("nan")
+    k[1, 3] = float("nan")
+    k[2, 7] = float("inf")
+    v[3, 0], v[4, 1], v[5, 2] = float("nan"), float("inf"), float("-inf")
+    weight = torch.randn(128, device="cuda")
+    positions = torch.arange(rows, device="cuda")
+    angle = torch.randn(4096, 64, device="cuda")
+    rope_cache = torch.cat((angle.cos(), angle.sin()), -1) if rope else None
+    args = (q, k, weight, weight, 1e-6, positions, rope_cache, 128, 128 * rope, True)
+    initial = torch.zeros(2, kv_heads, 16, 256, device="cuda", dtype=torch.uint8)
+    cache = initial.clone()
+    slots = torch.arange(rows, device="cuda")
+    scale = torch.tensor(1.0, device="cuda")
+    actual_q, _ = beam_qk_norm_rope(
+        *args,
+        ssmax=not rope,
+        value=v,
+        kv_cache=cache.view(fp8),
+        slot_mapping=slots,
+        q_scale=scale,
+        k_scale=scale,
+        v_scale=scale,
+    )
+    expected_q, expected_k = beam_qk_norm_rope(*args, ssmax=not rope)
+    reference_q, _ = ops.scaled_fp8_quant(expected_q, scale)
+    assert torch.equal(actual_q.view(torch.uint8), reference_q.view(torch.uint8))
+    reference_cache = initial.clone()
+    key_cache, value_cache = reference_cache.view(fp8).transpose(1, 2).split(128, -1)
+    ops.reshape_and_cache_flash(
+        expected_k.view(rows, kv_heads, 128),
+        v.view(rows, kv_heads, 128),
+        key_cache,
+        value_cache,
+        slots,
+        "fp8",
+        scale,
+        scale,
+    )
+    assert reference_cache.view(fp8).float().isnan().any()
+    assert torch.equal(cache, reference_cache)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

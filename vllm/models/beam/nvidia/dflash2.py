@@ -111,25 +111,25 @@ class DFlash2BeamAttention(nn.Module):
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        from .attention_ops import supports_fused_kv_insert
+
+        self.fuse_kv_insert = supports_fused_kv_insert(self.attn)
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        from .attention_ops import beam_qk_norm_rope
+        from .attention_ops import beam_qk_norm_rope, fused_kv_insert_kwargs
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        cache, slots = None, None
         mapping = get_forward_context().slot_mapping
         assert isinstance(mapping, dict)
-        if mapping and self.attn.kv_cache.dtype == q.dtype == torch.bfloat16:
-            slots = mapping[self.attn.layer_name]
-            cache = self.attn.kv_cache
+        insert: dict[str, torch.Tensor] = {}
+        if mapping and self.fuse_kv_insert:
             assert self.attn.attn_backend.get_name() in ("FLASH_ATTN", "FLASHINFER")
             assert self.attn.impl.dcp_world_size == 1
             assert self.attn.kv_sharing_target_layer_name is None
-            assert cache.dtype == q.dtype == torch.bfloat16
-            assert cache.ndim == 4
+            insert = fused_kv_insert_kwargs(self.attn, mapping[self.attn.layer_name])
         rope = self.rotary_emb
         q, k = beam_qk_norm_rope(
             q,
@@ -143,10 +143,13 @@ class DFlash2BeamAttention(nn.Module):
             rope.rotary_dim,
             rope.is_neox_style,
             value=v,
-            kv_cache=cache,
-            slot_mapping=slots,
+            **insert,
         )
-        output = self.attn(q, k, v) if cache is None else self.attn(q, None, None)
+        output = (
+            self.attn(q, None, None, output_dtype=v.dtype)
+            if insert
+            else self.attn(q, k, v)
+        )
         output, _ = self.o_proj(output)
         return output
 
