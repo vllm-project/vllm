@@ -217,6 +217,7 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 
 - **`non-zero status: 7 cannot register cq buf`**: When using Infiniband/RoCE, make sure host VM and pods show `ulimit -l` "unlimited".
 - **`init failed for transport: IBGDA`**: The InfiniBand GDA kernel modules are missing. Run `tools/ep_kernels/configure_system_drivers.sh` on each GPU node and reboot. Also fixes error `NVSHMEM API called before NVSHMEM initialization has completed`.
+- **`Failed to get RDMA connection speed` followed by `ZeroDivisionError` in `get_theoretical_num_sms`**: Multi-node `deepep_v2` could not read the NIC rate from `ibstat`. Install `infiniband-diags` inside the container (the vLLM images include it) and make sure `ibstat` lists the NIC named by `EP_NIC_NAME` (default `mlx5_0`). See the [EP kernels guide](../../tools/ep_kernels).
 - **NVSHMEM peer disconnect**: Usually a networking misconfiguration. If deploying via Kubernetes, verify that every pod runs with `hostNetwork: true`, `securityContext.privileged: true` to access Infiniband.
 
 ### Benchmarking

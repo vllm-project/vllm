@@ -17,6 +17,11 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
+The `vllm-runtime-base` stage installs the system packages that the final
+images need at runtime, including `infiniband-diags`, which provides the
+`ibstat` executable that multi-node DeepEPv2 uses to detect RDMA bandwidth.
+The build runs `ibstat --version` to verify it.
+
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
