@@ -697,6 +697,11 @@ class DeepseekV4DecoderLayer(nn.Module):
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
+    # DSpark's draft consumes aux hidden states from layers that may sit on
+    # an upstream PP stage; the Eagle3 relay (pack/collect below) carries
+    # them across the boundary, so aux states are supported under PP.
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1114,15 +1119,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 full_num_tokens,
             )
 
-        aux_hidden_states = [
-            aux_hidden_by_layer[layer_id]
-            for layer_id in self.aux_hidden_state_layers
-            if layer_id in aux_hidden_by_layer
-        ] + late_aux
+        aux_hidden_states = (
+            self.collect_remote_aux_hidden_states(intermediate_tensors)
+            + [
+                aux_hidden_by_layer[layer_id]
+                for layer_id in self.aux_hidden_state_layers
+                if layer_id in aux_hidden_by_layer
+            ]
+            + late_aux
+        )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "pre_mix": pre_mix}
+                {
+                    "hidden_states": hidden_states,
+                    "pre_mix": pre_mix,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         # MTP needs full HC states; otherwise collapse and normalize locally

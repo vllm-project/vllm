@@ -19,6 +19,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
+from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -275,7 +276,9 @@ def _insert_context_kv(
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
-    # load_dspark_model always aliases the target's.
+    # TP builds alias the target's embedding (load_dspark_model). Under PP
+    # the target's embed_tokens is a PPMissingLayer on the last stage, so the
+    # draft loads its own copy (see load_weights).
     has_own_embed_tokens = False
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
@@ -287,6 +290,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        # PP>1: the target's embed_tokens is a PPMissingLayer on the last
+        # stage, so the draft must load its own copy. Gates
+        # maybe_share_target_embed's share path.
+        self.has_own_embed_tokens = get_pp_group().world_size > 1
         self.linear_scale_name = _linear_scale_param_name(
             vllm_config, getattr(self.config, "expert_dtype", "fp4")
         )
@@ -406,6 +413,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_confidence_head = False
 
         for name, loaded_weight in weights:
+            if name == "embed.weight" and self.has_own_embed_tokens:
+                # PP>1: load the draft's own embedding from the checkpoint;
+                # the target's lives on the first stage.
+                param = params_dict["model.embed_tokens.weight"]
+                param.weight_loader(param, loaded_weight)
+                loaded_params.add("model.embed_tokens.weight")
+                continue
             mapped = self._remap_dspark_name(name)
             if mapped is None:
                 continue
@@ -485,6 +499,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
+        if self.has_own_embed_tokens:
+            # A renamed checkpoint key must fail loudly here, not produce a
+            # draft with an unloaded embedding table.
+            assert "model.embed_tokens.weight" in loaded_params, (
+                "PP>1: the draft must load its own embed.weight, but the "
+                "checkpoint never yielded it"
+            )
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
