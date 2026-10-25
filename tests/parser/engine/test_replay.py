@@ -314,7 +314,7 @@ class TestParserEngineAdjustRequest:
         tokenizer = make_mock_tokenizer(sample)
         parser = parser_cls(tokenizer, sample.tools)
         request = _test_request()
-        assert request.skip_special_tokens is True
+        assert request.to_sampling_params(1, {}).skip_special_tokens is True
         adjusted = parser.adjust_request(request)
         assert adjusted.skip_special_tokens is False
 

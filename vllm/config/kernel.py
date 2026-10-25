@@ -275,10 +275,14 @@ class KernelConfig:
     """
     vLLM IR op priority for dispatching/lowering during the forward pass.
     Platform defaults appended automatically during VllmConfig.__post_init__.
+
+    Deprecated: vLLM IR is being removed, and this option will be removed in
+    v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
-    """If True, run FlashInfer autotuning during kernel warmup."""
+    """Benchmark FlashInfer kernel implementations during warmup and use the
+    fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
@@ -295,8 +299,8 @@ class KernelConfig:
     monokernel: bool = False
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
-    in a single launch (DeepSeek-V4.1 on MI355X). A deployment that cannot run
-    it is refused at startup."""
+    in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
+    MI355X). A deployment that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
