@@ -22,6 +22,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
@@ -48,9 +50,10 @@ def _shrink_config(config):
 
 def _num_hisparse_spills(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
-    coordinator = get_hisparse_coordinator(
-        client.engine_core.scheduler.kv_cache_manager
-    )
+    assert isinstance(client, InprocClient)
+    scheduler = client.engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
+    coordinator = get_hisparse_coordinator(scheduler.kv_cache_manager)
     return coordinator.next_spill_id
 
 
@@ -65,7 +68,9 @@ def _offload_load_bytes() -> float:
 
 
 def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
-    engine_core = runner.llm.llm_engine.engine_core.engine_core
+    client = runner.llm.llm_engine.engine_core
+    assert isinstance(client, InprocClient)
+    engine_core = client.engine_core
     model_runner = engine_core.model_executor.driver_worker.worker.model_runner
     connector = model_runner.kv_connector.kv_connector
     if isinstance(connector, MultiConnector):
