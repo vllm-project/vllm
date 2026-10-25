@@ -1775,9 +1775,8 @@ class MooncakeStoreWorker:
                         ret,
                     )
             for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
-                # The groups of a hybrid model overlay one allocation; each
-                # group's values cover only its own layers. A group without
-                # layers on this PP rank still writes its keys, from all layers.
+                # In a hybrid model each KV cache group registers only its own
+                # layers. A group with no layers on this PP rank registers all.
                 group_caches = [
                     group_kernel_blocks(view, self.num_blocks)
                     for layer_name in group.layer_names
