@@ -23,10 +23,6 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
 )
-from vllm.distributed.aux_output_connector.memory import (
-    get_available_host_memory,
-    validate_shm_budget,
-)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
@@ -180,40 +176,11 @@ class AuxOutputWorkerConnector:
         )
         bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
         block_nbytes = hash_block_size * bytes_per_token
-        max_seqs = vllm_config.scheduler_config.max_num_seqs
-        max_step_blocks = (
-            max_num_batched_tokens + hash_block_size - 1
-        ) // hash_block_size + max_seqs
-        staging_blocks = self._max_concurrent_batches * max_step_blocks + max_seqs
-        staging_bytes = (
-            staging_blocks * block_nbytes
-            + self._max_concurrent_batches * max_num_batched_tokens * bytes_per_token
-        )
-        if self._indexer is not None:
-            # The combined byte record is assembled after the D2H copy.
-            staging_bytes += max_num_batched_tokens * bytes_per_token
-        logger.info(
-            "AuxOutput payload: R3=%d B/token, indexer=%d B/token; "
-            "scheduler block=%d tokens, SHM object=%d tokens (%d B)",
-            self._r3_nbytes,
-            self._indexer.fixed_bytes_per_token if self._indexer else 0,
-            scheduler_block_size,
-            hash_block_size,
-            block_nbytes,
-        )
-        max_bytes = validate_shm_budget(
-            num_blocks=kv_cache_config.num_blocks,
-            scheduler_block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-            bytes_per_token=bytes_per_token,
-            max_bytes=vllm_config.aux_output_config.max_bytes,
-            available_host_bytes=get_available_host_memory(),
-            staging_bytes=staging_bytes,
-            local_output_workers=max(
-                1, vllm_config.parallel_config.data_parallel_size_local
-            ),
-            required_context_tokens=vllm_config.model_config.max_model_len,
-        )
+        max_bytes = vllm_config.aux_output_config.max_bytes
+        if max_bytes is None:
+            max_bytes = (
+                kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
+            )
         store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
