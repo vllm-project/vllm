@@ -119,6 +119,7 @@ impl Error {
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate => true,
             Self::Text(error) => error.is_request_validation_error(),

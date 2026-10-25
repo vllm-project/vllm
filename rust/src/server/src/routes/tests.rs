@@ -799,6 +799,48 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_with_tools_returns_400_when_tool_parser_disabled() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tool-parser-disabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_dev_mode(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat.with_tool_call_parser(ParserSelection::None),
+        )),
+        false,
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn scale_out_generate_route_follows_api_server_options() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-scale-out-api-server-options",
