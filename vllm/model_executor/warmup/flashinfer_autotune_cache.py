@@ -14,6 +14,8 @@ from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from flashinfer.autotune_cache import MeasurementPolicy
+
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -103,6 +105,23 @@ def resolve_flashinfer_autotune_v2_root() -> Path | None:
     """
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     return Path(override_dir).expanduser() if override_dir else None
+
+
+def resolve_flashinfer_measurement_policy(
+    runner: "GPUModelRunner", *, managed: bool
+) -> "MeasurementPolicy | None":
+    mode = runner.vllm_config.kernel_config.flashinfer_autotune_execution_mode
+    if mode == "auto":
+        return None
+    if not managed:
+        raise ValueError(
+            "flashinfer_autotune_execution_mode requires an eligible "
+            "FlashInfer managed-cache deployment."
+        )
+
+    from flashinfer.autotune_cache import MeasurementPolicy
+
+    return MeasurementPolicy(execution_mode=mode)
 
 
 def sync_flashinfer_autotune_cache(
