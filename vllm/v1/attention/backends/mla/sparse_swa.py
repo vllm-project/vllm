@@ -1086,17 +1086,23 @@ def _compute_swa_indices_and_lens_kernel(
     is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
     tl.store(is_valid_token_ptr + token_idx, is_valid)
     # Rows past num_valid_tokens are tail padding the grid covers so the
-    # kernel also zeroes the lens/indices tail (the old slice-fill).
+    # kernel also zeroes the lens tail (the old slice-fill). The index
+    # row-clear stops at num_valid_tokens: the pre-fusion kernel never
+    # wrote indices past it, and on decode+chunked-prefill steps the far
+    # tail spans the chunk's rows, where full-width clears cost megabytes
+    # of dead stores.
     if not is_valid or pid >= num_valid_tokens:
         tl.store(swa_lens_ptr + pid, 0)
-        # Clear the row so a padded token cannot gather through stale indices.
-        for i in range(0, index_width, TRITON_BLOCK_SIZE):
-            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-            tl.store(
-                swa_indices_ptr + pid * swa_indices_stride + offset,
-                -1,
-                mask=offset < index_width,
-            )
+        if pid < num_valid_tokens:
+            # Clear the row so a padded token cannot gather through stale
+            # indices.
+            for i in range(0, index_width, TRITON_BLOCK_SIZE):
+                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+                tl.store(
+                    swa_indices_ptr + pid * swa_indices_stride + offset,
+                    -1,
+                    mask=offset < index_width,
+                )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
@@ -1296,16 +1302,20 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         token_idx = pid + token_offset
         is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
         tl.store(is_valid_token_ptr + token_idx, is_valid)
+        # Same tail bound as the causal kernel: lens zero to the buffer end,
+        # index row-clears only within num_valid_tokens.
         if not is_valid or pid >= num_valid_tokens:
             tl.store(swa_lens_ptr + pid, 0)
-            # Clear the row so a padded token cannot gather through stale indices.
-            for i in range(0, index_width, TRITON_BLOCK_SIZE):
-                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-                tl.store(
-                    swa_indices_ptr + pid * swa_indices_stride + offset,
-                    -1,
-                    mask=offset < index_width,
-                )
+            if pid < num_valid_tokens:
+                # Clear the row so a padded token cannot gather through stale
+                # indices.
+                for i in range(0, index_width, TRITON_BLOCK_SIZE):
+                    offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+                    tl.store(
+                        swa_indices_ptr + pid * swa_indices_stride + offset,
+                        -1,
+                        mask=offset < index_width,
+                    )
             return
 
         req_idx = tl.load(token_to_req_indices_ptr + token_idx)
