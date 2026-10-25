@@ -45,6 +45,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -93,6 +94,8 @@ def _make_kv_cache_config(
     register_all_kvcache_specs(
         vllm_config=None
     )  # Ensure specs are registered for tests
+    total_size = _BYTES_PER_BLOCK * num_blocks * num_groups
+    byte_offset = 0
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         spec = (
@@ -119,12 +122,14 @@ def _make_kv_cache_config(
         )
         tensors.append(
             KVCacheTensor(
-                size=_BYTES_PER_BLOCK * num_blocks,
+                size=total_size,
                 layers=layer_names,
                 layer_stride=_BYTES_PER_BLOCK * num_blocks,
                 block_stride=_BYTES_PER_BLOCK,
+                offset=byte_offset,
             )
         )
+        byte_offset += _BYTES_PER_BLOCK * num_blocks
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
@@ -243,6 +248,55 @@ def test_connector_reports_configured_cache_source(
 
     assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}  # type: ignore[arg-type]
     assert connector.get_external_cache_hit_sources(None, 0) == {}  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("num_layers", [1, 2])
+@pytest.mark.parametrize("backend", ["cpu", "disk"])
+def test_connector_explicit_cpu_blocks_align_uneven_stages(
+    tmp_path, num_layers: int, backend: str
+):
+    """The same configured pool size must fit lighter and heavier PP stages."""
+    config = _make_kv_cache_config(num_blocks=16)
+    names = [f"layer_{i}" for i in range(num_layers)]
+    config.kv_cache_groups[0].layer_names = names
+    config.kv_cache_tensors[0].layers = names
+    config.kv_cache_tensors[0].size *= num_layers
+    vllm_config = _make_vllm_config()
+    extra = {
+        "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 8,
+        "num_cpu_blocks": 4,
+        "kv_offload_backend": backend,
+    }
+    if backend == "disk":
+        extra.update(
+            disk_path=str(tmp_path / "offload.bin"),
+            disk_capacity_bytes=_BYTES_PER_BLOCK * 8,
+        )
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config = extra
+    connector = SimpleCPUOffloadConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, config
+    )
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager.num_cpu_blocks == 4
+    assert len(connector.scheduler_manager.cpu_block_pool.blocks) == 4
+
+
+@pytest.mark.parametrize(
+    "count, capacity_bytes",
+    [(count, _BYTES_PER_BLOCK * 8) for count in [0, -1, True, 1.5, "4", 9]]
+    + [(1, _BYTES_PER_BLOCK // 2)],
+)
+def test_connector_rejects_invalid_explicit_cpu_blocks(count, capacity_bytes):
+    config = _make_kv_cache_config(num_blocks=16)
+    vllm_config = _make_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config = {
+        "cpu_bytes_to_use_per_rank": capacity_bytes,
+        "num_cpu_blocks": count,
+    }
+    with pytest.raises(ValueError, match="num_cpu_blocks"):
+        SimpleCPUOffloadConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
 
 
 def make_scheduler(
@@ -1736,6 +1790,40 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "local_tokens,cached_chunk_blocks,expected_external_tokens",
+    [(0, 4, 64), (0, 5, 80), (16, 4, 0), (16, 5, 0), (64, 4, 0), (64, 5, 16)],
+)
+def test_chunked_local_cpu_lookup_requires_chunk_aligned_prefix(
+    local_tokens: int, cached_chunk_blocks: int, expected_external_tokens: int
+) -> None:
+    """Recompute suffixes whose relative and absolute chunk boundaries differ."""
+    config = _make_kv_cache_config(num_blocks=32, num_groups=2)
+    config.kv_cache_groups[1].kv_cache_spec = ChunkedLocalAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        attention_chunk_size=64,
+    )
+    fix = make_scheduler(num_cpu_blocks=32, kv_cache_config=config)
+    scheduler = fix.scheduler
+    request = make_request(num_blocks=5)
+    pool = scheduler.cpu_block_pool
+    cached = _allocate_gpu_blocks(pool, request, 5, group_id=0)
+    cached += _allocate_gpu_blocks(pool, request, cached_chunk_blocks, group_id=1)
+    pool.free_blocks(cached)
+    free_before_lookup = pool.get_num_free_blocks()
+
+    assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (
+        expected_external_tokens,
+        expected_external_tokens > 0,
+    )
+
+    scheduler.request_finished(request, [])
+    assert pool.get_num_free_blocks() == free_before_lookup
+
+
 # ---------------------------------------------------------------------------
 # Test 11: TOCTOU between Phase A and Phase B (regression for #39702)
 # ---------------------------------------------------------------------------
@@ -2340,6 +2428,26 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: PP / spec-decode sizing alignment
+# ---------------------------------------------------------------------------
+def test_scheduler_uses_worker_aligned_num_cpu_blocks() -> None:
+    """Authoritative worker-aligned sizing overrides config-only estimates."""
+    num_gpu_blocks = 16
+    cpu_capacity = 4 * _BYTES_PER_BLOCK
+    light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=light,
+        cpu_capacity_bytes=cpu_capacity,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        aligned_num_cpu_blocks=1,
+    )
+    assert sched.num_cpu_blocks == 1
 
 
 def _make_hybrid_attention_mamba_scheduler(

@@ -29,7 +29,7 @@ use vllm_engine_core_client::protocol::output::StopReason;
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
@@ -129,6 +129,7 @@ async fn collect_chat_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -147,6 +148,8 @@ async fn collect_chat_completion(
         is_named_tool_choice,
     }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
             "failed to collect chat completion response: {}",
@@ -232,6 +235,10 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
+                refusal: None,
+                annotations: None,
+                audio: None,
+                function_call: None,
                 tool_calls,
                 reasoning: if include_reasoning { reasoning } else { None },
             },
@@ -239,12 +246,16 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
+            routed_experts: None,
+            weight_versions: None,
         }],
+        service_tier: None,
         usage: Some(usage),
         metrics,
         system_fingerprint: None,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
+        prompt_text: None,
         kv_transfer_params,
         ec_transfer_params,
     })
@@ -260,6 +271,7 @@ async fn chat_completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -278,6 +290,8 @@ async fn chat_completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
         "chat.completion.chunk",
@@ -820,9 +834,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
         FinishReason::Repetition(_) => Ok("repetition"),
-        FinishReason::Error => {
-            bail_server_error!("Internal server error");
-        }
+        FinishReason::Error(error) => Err(engine_error(error.as_deref())),
     }
 }
 
@@ -932,7 +944,7 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error, false).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), false).is_err());
     }
 
     #[test]
