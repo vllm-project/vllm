@@ -43,6 +43,9 @@ version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
 echo "Version in wheel: $version"
 
 # copy wheel to its own bucket
+if [[ ( "$version" == *+cpu || "$version" == *.cpu ) && "$wheel" == *_x86_64.whl ]]; then
+  bash .buildkite/scripts/stage-cpu-triton-wheels.sh
+fi
 aws s3 cp "$wheel" "$S3_COMMIT_PREFIX"
 
 echo "Wheel uploaded. Index generation is handled by a separate step."
