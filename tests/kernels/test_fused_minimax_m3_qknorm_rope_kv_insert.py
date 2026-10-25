@@ -553,7 +553,7 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize(
     "block_size,num_kv_heads,tp_shard",
-    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4)],
+    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4), (256, 1, 2), (256, 1, 4)],
 )
 def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
     torch.manual_seed(1)
@@ -581,7 +581,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
         num_blocks * block_size, dtype=torch.int64, device=device
     )[:num_tokens]
     index_slot_mapping = torch.roll(slot_mapping, shifts=1)
-    if block_size == 128 and num_tokens > 1:
+    if block_size >= 128 and num_tokens > 1:
         index_slot_mapping[-1] = -1
 
     def run(index_dtype, index_cache=None, index_slots=None):
@@ -641,7 +641,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
     )
     torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
 
-    if block_size == 128:
+    if block_size >= 128:
         from vllm.config import VllmConfig, set_current_vllm_config
         from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
 
@@ -665,10 +665,11 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
             assert cache.kv_cache.data_ptr() == packed.data_ptr()
             page = index_slot_mapping // block_size
             offset = index_slot_mapping % block_size
-            index_slots = page * (block_size // tp_shard) + offset // tp_shard
-            index_slots.masked_fill_(
-                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
-            )
+            rows = block_size // tp_shard
+            owner = offset // rows if block_size == 256 else offset % tp_shard
+            local = offset % rows if block_size == 256 else offset // tp_shard
+            index_slots = page * rows + local
+            index_slots.masked_fill_((index_slot_mapping < 0) | (owner != rank), -1)
             qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
                 torch.float8_e4m3fn, cache.kv_cache, index_slots
             )
@@ -678,9 +679,13 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
                 (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
             ):
                 assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
-            assert torch.equal(
-                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
+            rows = block_size // tp_shard
+            expected = (
+                idxc_fp[:, rank * rows : (rank + 1) * rows]
+                if block_size == 256
+                else idxc_fp[:, rank::tp_shard]
             )
+            assert torch.equal(idxc_sh.view(torch.uint8), expected.view(torch.uint8))
 
 
 # ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────

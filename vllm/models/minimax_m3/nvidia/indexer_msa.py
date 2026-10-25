@@ -55,6 +55,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
+    MultipleOf,
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -94,6 +95,10 @@ _COMM_SHAPE: tuple[int, ...] | None = None
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
     """Indexer side-cache backend selecting the MSA builder."""
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [128, 256]
 
     @staticmethod
     def get_builder_cls() -> type["MiniMaxM3IndexerMSAMetadataBuilder"]:
@@ -169,9 +174,11 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.page_size = kv_cache_spec.block_size
+        self.logical_block_table: torch.Tensor | None = None
+        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         content = kv_cache_spec.state_content_bytes
         full = kv_cache_spec.head_size * kv_cache_spec.dtype.itemsize
-        self.page_size = kv_cache_spec.block_size
         self.index_k_tp = 1 if content is None else full // content
         self.prefill_local_score = (
             self.index_k_tp > 1
@@ -273,6 +280,18 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         seq_lens = common_attn_metadata.seq_lens
         block_table = common_attn_metadata.block_table_tensor
         query_start_loc = common_attn_metadata.query_start_loc
+        if self.page_size == 256 and self.index_k_tp == 1:
+            if self.logical_block_table is None:
+                self.logical_block_table = torch.empty(
+                    self.max_num_reqs,
+                    block_table.shape[1] * 2,
+                    dtype=block_table.dtype,
+                    device=block_table.device,
+                )
+            logical = self.logical_block_table[:num_reqs]
+            logical[:, 0::2].copy_(block_table).mul_(2)
+            logical[:, 1::2].copy_(logical[:, 0::2]).add_(1)
+            block_table = logical
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -353,7 +372,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
 
                 kv_lens_cpu = seq_lens[:num_reqs].cpu().to(torch.int32)
-                nvp = (kv_lens_cpu + PAGE_SIZE - 1) // PAGE_SIZE
+                table_page_size = self.page_size if self.index_k_tp > 1 else PAGE_SIZE
+                nvp = (kv_lens_cpu + table_page_size - 1) // table_page_size
                 side_kv = kv_lens_cpu[lo:hi]
                 plan = _fmha_sm100_plan(
                     side_qo,
@@ -380,8 +400,24 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 if self.index_k_tp > 1:
                     gather_pages = page_table.to(torch.int64)
                     page_table = torch.arange(
-                        page_table.numel(), dtype=torch.int32, device=page_table.device
+                        page_table.numel() * (self.page_size // PAGE_SIZE),
+                        dtype=torch.int32,
+                        device=page_table.device,
                     )
+                    if self.page_size == 256:
+                        offsets = (
+                            torch.cat((nvp[lo:hi].new_zeros(1), nvp[lo:hi].cumsum(0)))
+                            * 2
+                        )
+                        counts = (side_kv + PAGE_SIZE - 1) // PAGE_SIZE
+                        page_table = torch.cat(
+                            [
+                                page_table[
+                                    int(offsets[i]) : int(offsets[i]) + int(counts[i])
+                                ]
+                                for i in range(num_prefills)
+                            ]
+                        )
             local_chunks = None
             local_scores = None
             candidate_buffers = None
@@ -534,6 +570,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             -1, self.num_index_heads * self.index_cache.tp_shard, self.index_head_dim
         )
         kv = self.index_cache.kv_cache
+        page_size = kv.shape[1] * self.index_cache.tp_shard
+        if not sharded and page_size == 256:
+            kv = kv.view(-1, PAGE_SIZE, self.index_head_dim)
         # Shared persistent top-k output buffer; the unified top-k below writes
         # the selected block ids into buf[:num_tokens].
         buf = self.topk_indices_buffer
@@ -580,6 +619,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     d.decode_query_len,
                     d.max_decode_query_len,
                     scores,
+                    page_size=page_size,
+                    world_size=comm.world,
                     use_pdl=True,
                     prefetch_history=True,
                 )
@@ -661,14 +702,16 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             prefill_q = index_q[nd:]
             if p.gather_pages is not None:
                 assert self.index_k_comm is not None
-                kv = gather_prefill_pages(kv, p.gather_pages, self.index_k_comm)
+                kv = gather_prefill_pages(
+                    kv, p.gather_pages, self.index_k_comm, page_size=page_size
+                )
                 h = self.num_index_heads
                 prefill_q = prefill_q[
                     :, self.index_k_rank * h : (self.index_k_rank + 1) * h
                 ]
                 prefill_q = prefill_q.contiguous()
             # Index-K cache (num_blocks, 128, D) -> paged MQA (num_blocks,1,128,D).
-            k_pages = kv.view(kv.shape[0], 1, PAGE_SIZE, self.index_head_dim)
+            k_pages = kv.view(-1, 1, PAGE_SIZE, self.index_head_dim)
             # fmha writes its max_score natively as [nnz_p, H, max_k_tiles] into
             # the prefill region (stride-aware; plan max_k_tiles forced to
             # md.max_k_tiles so the shape matches exactly -> no copy).
@@ -786,13 +829,7 @@ def resolve_index_k_shard(
     tp = get_tensor_model_parallel_world_size()
     if get_comm(vllm_config, total_index_heads) is None:
         return 1
-    logger.info_once(
-        "MiniMax M3 index-K cache sharded over TP%d (%d of %d tokens per block "
-        "per rank)",
-        tp,
-        PAGE_SIZE // tp,
-        PAGE_SIZE,
-    )
+    logger.info_once("MiniMax M3 index-K cache sharded over TP%d", tp)
     return tp
 
 
@@ -985,9 +1022,11 @@ class IndexKShardComm:
                 device=self.device,
             )
             # Decode writes four pages per stage, including the final partial stage.
+            page_size = vllm_config.cache_config.block_size or PAGE_SIZE
             score_cols = min(
                 MAX_K_TILES,
-                cdiv(vllm_config.model_config.max_model_len, 4 * PAGE_SIZE) * 4,
+                cdiv(vllm_config.model_config.max_model_len, 4 * page_size)
+                * (4 * page_size // PAGE_SIZE),
             )
             self.scores = torch.empty(
                 (self.max_decode_tokens, total_index_heads, score_cols),
@@ -1039,10 +1078,13 @@ class IndexKShardComm:
 
 
 def gather_prefill_pages(
-    kv_shard: torch.Tensor, pages: torch.Tensor, comm: IndexKShardComm | None = None
+    kv_shard: torch.Tensor,
+    pages: torch.Tensor,
+    comm: IndexKShardComm | None = None,
+    *,
+    page_size: int = 128,
 ) -> torch.Tensor:
-    """Full ``[P, 128, D]`` index-K pages of ``pages`` from every rank's shard
-    (token ``i * tp + r`` of a block comes from rank ``r``'s row ``i``)."""
+    """Reassemble physical pages from interleaved P128 or contiguous P256 shards."""
     from vllm.distributed.parallel_state import get_tp_group
 
     group = get_tp_group() if comm is None else comm.group
@@ -1051,9 +1093,10 @@ def gather_prefill_pages(
     _, rows, dim = kv_shard.shape
     local = kv_shard.view(torch.uint8).index_select(0, pages)
     gathered = group.all_gather(local, dim=0)
+    order = (1, 0, 2, 3) if page_size == 256 else (1, 2, 0, 3)
     full = (
         gathered.view(tp, num_pages, rows, dim)
-        .permute(1, 2, 0, 3)
+        .permute(order)
         .reshape(num_pages, rows * tp, dim)
     )
     return full.view(kv_shard.dtype)

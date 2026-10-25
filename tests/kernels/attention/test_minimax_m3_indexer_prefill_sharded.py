@@ -6,28 +6,39 @@ import torch
 
 from vllm.platforms import current_platform
 
-CASES = [
-    ([1], [0]),
-    ([1], [128]),
-    ([1], [256]),
-    ([65, 3], [194, 127]),
-    ([129], [127]),
-    ([3, 1], [32768, 32640]),
-    ([1027], [253]),
-    ([8193], [127]),
-    ([0, 65, 0, 3], [127, 194, 0, 127]),
-]
 
-requires_sm100 = pytest.mark.skipif(
+@pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="SM100 family required",
 )
-
-
-def _make_case(query_lens, prefixes, device_plan=False):
+@pytest.mark.parametrize(
+    "query_lens,prefixes",
+    [
+        ([1], [0]),
+        ([1], [127]),
+        ([1], [128]),
+        ([1], [256]),
+        ([65, 3], [194, 127]),
+        ([129], [127]),
+        ([3, 1], [32768, 32640]),
+        ([1027], [253]),
+        ([8193], [127]),
+        ([0, 65, 0, 3], [127, 194, 0, 127]),
+    ],
+)
+@pytest.mark.parametrize("page_size", [128, 256])
+@pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("initialize", [True, False])
+@pytest.mark.parametrize("device_plan", [False, True])
+@torch.inference_mode()
+def test_fmha_prefill_shard_scores(
+    query_lens, prefixes, page_size, tp, initialize, device_plan
+):
     from vllm.third_party.fmha_sm100.api import (
+        fmha_index_score_sharded,
         fmha_index_score_sharded_plan,
         fmha_index_score_sharded_plan_device,
+        sparse_topk_select_prefill,
     )
 
     from vllm.models.minimax_m3.nvidia.ops.index_prefill import prepare_prefill_window
@@ -36,16 +47,17 @@ def _make_case(query_lens, prefixes, device_plan=False):
     torch.manual_seed(12)
     lengths = [q + p for q, p in zip(query_lens, prefixes)]
     blocks = (max(lengths) + 127) // 128
+    pages = (max(lengths) + page_size - 1) // page_size
     total_q = sum(query_lens)
     heads = 4
-    table = torch.stack([torch.randperm(blocks, device="cuda") for _ in lengths]).int()
+    table = torch.stack([torch.randperm(pages, device="cuda") for _ in lengths]).int()
     for row in range(1, len(lengths)):
         table[row, 0] = table[0, 0]
     query = torch.randint(-2, 3, (total_q, heads, 128), device="cuda").to(
         torch.float8_e4m3fn
     )
     query[..., 0] = 16
-    cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
+    cache = torch.randint(-2, 3, (pages, page_size, 128), device="cuda").to(
         torch.float8_e4m3fn
     )
     plan = fmha_index_score_sharded_plan(
@@ -84,137 +96,109 @@ def _make_case(query_lens, prefixes, device_plan=False):
             ),
             workspace=torch.empty(32 << 20, device="cuda", dtype=torch.uint8),
         )
-    scores = torch.empty((total_q, heads, (blocks + 15) // 16 * 16), device="cuda")
-    positions = torch.cat(
-        [torch.arange(q, device="cuda") + p for q, p in zip(query_lens, prefixes)]
-    )
-    return lengths, table, query, cache, plan, scores, positions
-
-
-def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
-    reference = torch.full_like(like, -float("inf"))
-    start = 0
-    for req, (qlen, prefix) in enumerate(zip(query_lens, prefixes)):
-        positions = torch.arange(qlen, device="cuda") + prefix
-        q = query[start : start + qlen].float()
-        for block in range((prefix + qlen + 127) // 128):
-            keys = cache[table[req, block], rank::tp].float()
-            dots = torch.einsum("qhd,kd->qhk", q, keys)
-            key_positions = (
-                block * 128 + rank + tp * torch.arange(128 // tp, device="cuda")
-            )
-            dots.masked_fill_(
-                key_positions[None, None, :] > positions[:, None, None],
-                -float("inf"),
-            )
-            reference[start : start + qlen, :, block] = dots.amax(-1)
-        start += qlen
-    return reference
-
-
-@requires_sm100
-@pytest.mark.parametrize("query_lens,prefixes", CASES)
-@pytest.mark.parametrize("device_plan", [False, True])
-@pytest.mark.parametrize("tp", [2, 4])
-@torch.inference_mode()
-def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
-    from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
-
-    lengths, table, query, cache, plan, scores, _ = _make_case(
-        query_lens, prefixes, device_plan
-    )
+    score_cols = blocks if total_q == 1 else (blocks + 15) // 16 * 16
+    storage = torch.empty((total_q, heads, score_cols + 1), device="cuda")
+    scores = storage[..., :score_cols]
     for iteration in range(2):
         query = (-query.float()).to(query.dtype)
         # Future keys must not win before the last query, including page padding.
         for req, length in enumerate(lengths):
             if length == 0:
                 continue
-            page = table[req, (length - 1) // 128]
-            tail = (length - 1) % 128
+            page = table[req, (length - 1) // page_size]
+            tail = (length - 1) % page_size
             cache[page, tail:] = 0
             cache[page, tail:, 0] = -256 if iteration == 0 else 256
         for rank in range(tp):
-            scores.fill_(float("nan"))
+            rows = (
+                torch.arange(rank, 128, tp, device="cuda")
+                if page_size == 128
+                else torch.arange(
+                    rank * page_size // tp, (rank + 1) * page_size // tp, device="cuda"
+                )
+            )
+            storage.fill_(float("nan"))
             fmha_index_score_sharded(
                 query,
-                cache[:, rank::tp].contiguous(),
+                cache[:, rows].contiguous(),
                 table,
                 plan,
                 rank=rank,
                 tp=tp,
                 max_score=scores,
                 sm_scale=1.0,
+                initialize=initialize,
             )
-            reference = _reference(
-                query, cache, table, rank, query_lens, prefixes, scores, tp
-            )
-            torch.testing.assert_close(scores, reference, rtol=0, atol=0)
+            assert torch.isnan(storage[..., -1]).all()
+            reference = torch.full_like(scores, -float("inf"))
+            start = 0
+            for req, (qlen, prefix) in enumerate(zip(query_lens, prefixes)):
+                positions = torch.arange(qlen, device="cuda") + prefix
+                q = query[start : start + qlen].float()
+                for block in range((prefix + qlen + 127) // 128):
+                    if page_size == 256 and block % 2 != rank * 2 // tp:
+                        continue
+                    page = block // (page_size // 128)
+                    keys = cache[table[req, page], rows].float()
+                    dots = torch.einsum("qhd,kd->qhk", q, keys)
+                    key_positions = page * page_size + rows
+                    dots.masked_fill_(
+                        key_positions[None, None, :] > positions[:, None, None],
+                        -float("inf"),
+                    )
+                    reference[start : start + qlen, :, block] = dots.amax(-1)
+                start += qlen
+            if initialize or page_size == 256:
+                torch.testing.assert_close(scores, reference, rtol=0, atol=0)
+            else:
+                positions = torch.cat(
+                    [
+                        torch.arange(q, device="cuda") + p
+                        for q, p in zip(query_lens, prefixes)
+                    ]
+                )
+                valid = positions // 128 + 1
+                columns = torch.arange(scores.shape[-1], device="cuda")
+                mask = (columns[None, :] < valid[:, None])[:, None, :].expand_as(scores)
+                torch.testing.assert_close(
+                    scores[mask], reference[mask], rtol=0, atol=0
+                )
 
-
-@requires_sm100
-@pytest.mark.parametrize("query_lens,prefixes", CASES)
-@pytest.mark.parametrize("poison", [float("nan"), float("inf")])
-@torch.inference_mode()
-def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
-    """Without the -inf fill, every query's causal page prefix is still written,
-    so the prefill top-k is unchanged even over a poisoned score buffer."""
-    from vllm.third_party.fmha_sm100.api import (
-        fmha_index_score_sharded,
-        sparse_topk_select_prefill,
-    )
-
-    _, table, query, cache, plan, scores, positions = _make_case(query_lens, prefixes)
-    valid_pages = (positions // 128 + 1).to(torch.int32)
-    heads = query.shape[1]
-    total_q = query.shape[0]
-    for rank in range(2):
-        shard = cache[:, rank::2].contiguous()
-        fmha_index_score_sharded(
-            query, shard, table, plan, rank=rank, max_score=scores, sm_scale=1.0
-        )
-        expected = torch.empty((heads, total_q, 33), dtype=torch.int32, device="cuda")
-        sparse_topk_select_prefill(
-            scores, valid_pages, expected, force_begin_blocks=1, force_end_blocks=2
-        )
-
-        scores.fill_(poison)
-        fmha_index_score_sharded(
-            query,
-            shard,
-            table,
-            plan,
-            rank=rank,
-            max_score=scores,
-            sm_scale=1.0,
-            initialize=False,
-        )
-        reference = _reference(query, cache, table, rank, query_lens, prefixes, scores)
-        columns = torch.arange(scores.shape[-1], device="cuda")
-        in_prefix = (columns[None, :] < valid_pages[:, None])[:, None, :].expand_as(
-            scores
-        )
-        torch.testing.assert_close(
-            scores[in_prefix], reference[in_prefix], rtol=0, atol=0
-        )
-        actual = torch.empty_like(expected)
-        sparse_topk_select_prefill(
-            scores, valid_pages, actual, force_begin_blocks=1, force_end_blocks=2
-        )
-        torch.testing.assert_close(
-            actual[..., :16].view(torch.float32).sort(-1).values,
-            expected[..., :16].view(torch.float32).sort(-1).values,
-            rtol=0,
-            atol=0,
-        )
-        ids = actual[..., 16:32]
-        live = ids >= 0
-        assert torch.all((ids < valid_pages[None, :, None]) | ~live)
-        assert torch.all((ids[..., 1:] > ids[..., :-1]) | ~live[..., 1:])
-        assert torch.all((ids == 0).any(-1))
-        for offset in (1, 2):
-            forced = (valid_pages - offset).clamp_min(0)
-            assert torch.all((ids == forced[None, :, None]).any(-1))
-        assert torch.all(actual[..., 32] == 1)
+            if not initialize:
+                positions = torch.cat(
+                    [
+                        torch.arange(q, device="cuda") + p
+                        for q, p in zip(query_lens, prefixes)
+                    ]
+                )
+                valid = (positions // 128 + 1).to(torch.int32)
+                actual = torch.empty(
+                    (heads, total_q, 33), device="cuda", dtype=torch.int32
+                )
+                expected = torch.empty_like(actual)
+                for values, carrier in ((scores, actual), (reference, expected)):
+                    sparse_topk_select_prefill(
+                        values.contiguous(),
+                        valid,
+                        carrier,
+                        force_begin_blocks=1,
+                        force_end_blocks=2,
+                    )
+                torch.testing.assert_close(
+                    actual[..., :16].view(torch.float32).sort(-1).values,
+                    expected[..., :16].view(torch.float32).sort(-1).values,
+                    rtol=0,
+                    atol=0,
+                )
+                ids = actual[..., 16:32]
+                live = ids >= 0
+                assert torch.all((ids < valid[None, :, None]) | ~live)
+                assert torch.all((ids[..., 1:] > ids[..., :-1]) | ~live[..., 1:])
+                assert torch.all((ids == 0).any(-1))
+                for offset in (1, 2):
+                    forced = (valid - offset).clamp_min(0)
+                    assert torch.all((ids == forced[None, :, None]).any(-1))
+                assert torch.all(actual[..., 32] == 1)
 
 
 @pytest.mark.parametrize("tp", [2, 4])

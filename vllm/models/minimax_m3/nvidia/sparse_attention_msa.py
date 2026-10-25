@@ -53,6 +53,7 @@ from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
@@ -107,6 +108,10 @@ class MiniMaxM3SparseMSANvfp4Backend(MiniMaxM3SparseMSABackend):
     """MSA backend over HND NVFP4 KV cache pages in per-head K/V slots."""
 
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["nvfp4"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [128, 256]
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
@@ -227,7 +232,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             num_q_heads=self.num_q_heads,
             num_kv_heads=self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
-            page_size=SPARSE_BLOCK_SIZE,
+            page_size=self.kv_cache_spec.block_size,
             topk_blocks=self.topk_blocks,
             min_batch_size=self.msa_cutlass_min_batch_size,
         ):
@@ -240,7 +245,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
                 decode.decode_query_len,
                 num_q_heads=self.num_q_heads,
                 num_kv_heads=self.num_kv_heads,
-                page_size=SPARSE_BLOCK_SIZE,
+                page_size=self.kv_cache_spec.block_size,
                 topk_blocks=self.topk_blocks,
                 q8kv4=self.q8kv4_decode,
                 plan_cache=self.msa_cutlass_plan_cache,

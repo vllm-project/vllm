@@ -2175,12 +2175,14 @@ def test_decode_index_score_cutedsl_correctness(
     + [(world, 4, 4, 128, cols) for world in (2, 4) for cols in (36, 40)],
 )
 @pytest.mark.parametrize("candidate_source", ["reference", "native_publish"])
+@pytest.mark.parametrize("page_size", [128, 256])
 @pytest.mark.parametrize("pdl_mode", ["off", "wait", "prefetch"])
 def test_sharded_decode_index_score_matches_reference(
     world,
     decode_query_len,
     max_decode_query_len,
     split_k,
+    page_size,
     score_columns,
     candidate_source,
     pdl_mode,
@@ -2194,6 +2196,9 @@ def test_sharded_decode_index_score_matches_reference(
         minimax_m3_index_select_publish_candidates,
     )
 
+    score_columns = (
+        (score_columns + page_size // 32 - 1) // (page_size // 32) * (page_size // 32)
+    )
     torch.manual_seed(0)
     heads, head_dim = 4, HEAD_DIM
     heads_per_rank = heads // world
@@ -2204,7 +2209,12 @@ def test_sharded_decode_index_score_matches_reference(
     )
     total_q = seq_lens.numel() * decode_query_len
     q = torch.randn(total_q, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
-    kv = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(q.dtype)
+    kv = torch.randn(num_pages, page_size, head_dim, device="cuda").to(q.dtype)
+    logical_table = block_table
+    if page_size == 256:
+        logical_table = (
+            block_table[..., None] * 2 + torch.arange(2, device="cuda")
+        ).flatten(1)
     # Local destinations isolate score/head routing from the real TP transport test.
     recv = [
         torch.zeros(
@@ -2228,8 +2238,8 @@ def test_sharded_decode_index_score_matches_reference(
     active_q = 3 * decode_query_len
     expected[:, :active_q] = _reference_decode_index_score(
         q[:active_q],
-        kv,
-        block_table[:3],
+        kv.view(-1, BLOCK_SIZE, head_dim),
+        logical_table[:3],
         seq_lens[:3],
         decode_query_len,
         score_columns,
@@ -2241,7 +2251,14 @@ def test_sharded_decode_index_score_matches_reference(
             scores.fill_(-float("inf"))
             minimax_m3_index_decode_score_sharded_cutedsl(
                 q,
-                kv[:, rank::world].contiguous(),
+                (
+                    kv[
+                        :,
+                        rank * (page_size // world) : (rank + 1) * (page_size // world),
+                    ]
+                    if page_size == 256
+                    else kv[:, rank::world]
+                ).contiguous(),
                 block_table,
                 seq_lens,
                 rank,
@@ -2249,6 +2266,8 @@ def test_sharded_decode_index_score_matches_reference(
                 max_decode_query_len,
                 scores,
                 split_k=split_k,
+                page_size=page_size,
+                world_size=world,
                 use_pdl=pdl_mode != "off",
                 prefetch_history=pdl_mode == "prefetch",
             )
@@ -2320,11 +2339,12 @@ def test_sharded_decode_index_score_matches_reference(
     reason="Sharded index decode requires Blackwell.",
 )
 @pytest.mark.parametrize("world", [2, 4])
-def test_sharded_decode_prefetch_waits_for_current_qk(world):
+@pytest.mark.parametrize("page_size", [128, 256])
+def test_sharded_decode_prefetch_waits_for_current_qk(world, page_size):
     """An early-triggered producer may still be writing Q and the tail K page."""
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         MAX_K_TILES,
-        minimax_m3_index_decode_score_sharded_cutedsl,
+        IndexDecodeScoreShardedKernel,
     )
     from vllm.triton_utils import tl, triton
 
@@ -2345,36 +2365,56 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
 
     qlen, heads = 4, 4
     q = torch.zeros((qlen, heads, 128), device="cuda", dtype=torch.float8_e4m3fn)
-    cache = torch.ones((33, 128, 128), device="cuda").to(q.dtype)
-    shard = cache[:, ::world].contiguous()
-    table = torch.arange(33, device="cuda", dtype=torch.int32).unsqueeze(0)
-    lengths = torch.tensor([4096 + qlen], device="cuda", dtype=torch.int32)
+    pages, length = (33, 4096 + qlen) if page_size == 128 else (4, 1024)
+    cache = torch.ones((pages, page_size, 128), device="cuda").to(q.dtype)
+    if page_size == 128:
+        rank = 0
+        shard = cache[:, ::world].contiguous()
+        current_keys = shard[-1, : qlen // world]
+        cache[-1, :qlen] = 4.0
+    else:
+        # This four-page group spans 1024 tokens, not 512. Its last half-page
+        # contains current K and must not be prefetched before the producer.
+        rank, rows = world - 1, page_size // world
+        shard = cache[:, rank * rows : (rank + 1) * rows].contiguous()
+        current_keys = shard[-1, -qlen:]
+        cache[-1, -qlen:] = 4.0
+    table = torch.arange(pages, device="cuda", dtype=torch.int32).unsqueeze(0)
+    lengths = torch.tensor([length], device="cuda", dtype=torch.int32)
     scores = torch.full((qlen, heads, MAX_K_TILES), -float("inf"), device="cuda")
-    cache[-1, :qlen] = 4.0
+    blocks = pages * page_size // 128
+    reference_table = torch.arange(blocks, device="cuda", dtype=torch.int32)[None]
     expected = _reference_decode_index_score(
-        torch.full_like(q, 2), cache, table, lengths, qlen, MAX_K_TILES
+        torch.full_like(q, 2),
+        cache.reshape(-1, 128, 128),
+        reference_table,
+        lengths,
+        qlen,
+        MAX_K_TILES,
+    )
+    if page_size == 256:
+        expected[..., ::2] = -float("inf")
+    kernel = IndexDecodeScoreShardedKernel.compile(
+        heads,
+        8,
+        1,
+        world_size=world,
+        page_size=page_size,
+        use_pdl=True,
+        prefetch_history=True,
     )
 
     def launch():
+        # The P256 wrapper fills scores. Move that fence before the producer so
+        # it cannot hide an unsafe prefetch in the actual compiled scorer.
+        scores.fill_(-float("inf"))
         q.zero_()
-        shard[-1].zero_()
+        current_keys.zero_()
         # Ordinary launch fences metadata; the scorer alone opts into PDL.
         delayed_writer[(1,)](
-            q, shard[-1], q.numel(), qlen // world * 128, launch_pdl=False
+            q, current_keys, q.numel(), current_keys.numel(), launch_pdl=False
         )
-        minimax_m3_index_decode_score_sharded_cutedsl(
-            q,
-            shard,
-            table,
-            lengths,
-            0,
-            qlen,
-            8,
-            scores,
-            split_k=1,
-            use_pdl=True,
-            prefetch_history=True,
-        )
+        kernel(q, shard, table, scores, lengths, rank)
 
     launch()
     graph = torch.cuda.CUDAGraph()
@@ -2382,7 +2422,9 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
         launch()
     for _ in range(4):
         graph.replay()
-        torch.testing.assert_close(scores.transpose(0, 1)[..., :33], expected[..., :33])
+        torch.testing.assert_close(
+            scores.transpose(0, 1)[..., :blocks], expected[..., :blocks]
+        )
 
 
 @pytest.mark.skipif(
