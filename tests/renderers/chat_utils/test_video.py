@@ -661,8 +661,12 @@ async def test_parse_video_async_without_audio_track_dropped_from_mm_data(
 
     # The conversation text carries the video placeholder. The audio
     # placeholder is emitted at parse time (before resolve drops the audio
-    # item) and gets prepended as a missing placeholder; downstream model
-    # processors re-derive placeholders from mm_data, so this only matters
-    # as a documented artifact of the two-phase parse/resolve split.
+    # item) and `get_full_multimodal_text_prompt` hoists it to the front as a
+    # missing placeholder. This is a documented artifact of the two-phase
+    # parse/resolve split: model processors consume `mm_data` (which has no
+    # audio) rather than this text directly, so the hoisted placeholder does
+    # not carry a data item. Pin it here so changes to the hoist behavior do
+    # not silently diverge from the documented contract.
     text = conversation[0]["content"]
     assert "<|vision_start|><|VIDEO|><|vision_end|>" in text
+    assert text.startswith("Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>")
