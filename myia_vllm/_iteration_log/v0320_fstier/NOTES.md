@@ -2308,3 +2308,30 @@ Same engine generation since 09:04:20Z (RC=0, OOM 0, 3 containers up, health 200
   serves `19451:Image/` (wave 2 armed).
 - **DST**: Europe/Paris switched to winter time last night — the host is UTC+1 now, not UTC+2.
   Spec line corrected (this PR).
+
+## 25/10 20:55Z — phase 1a landed: overlay v0320-fsadmit (PR #202, NOT deployed)
+
+All three workstreams of the mandate are now in main; the engine has not been touched.
+
+- **Phase 1a** (PR #202): new overlay `overlay_v0320_fsadmit/`, image
+  `vllm-openai-v0320-fsadmit:v1` built for testing, referenced by no profile.
+  Frequency gate at `MYIA_FS_ADMIT_MIN_HITS` (default 2 = the Dynamo default;
+  0 = exact upstream write-through = rollback). The one design subtlety worth
+  remembering: the threshold-crossing cascade is submitted **from inside
+  `lookup()`**, because a chunk that stays hot in RAM is never re-stored — a
+  store-time-only gate would never persist a stable socle, and after every
+  restart the socles would stop reaching the fs entirely. Tests (CPU-only
+  throwaway containers): 7/7 admission + upstream v0.32.0 62/62 (default) and
+  44/44 + 51/51 (rollback mode, fs events included — byte-identical).
+- **GDN latest-state rule**: documented no-op stub — the tiering manager has
+  no conversation-chain identity (keys are opaque hashes); home is upstream
+  #60000 `TieringAdmissionPolicy` or phase 2.
+- **Deploy**: proposed for the 26/10 09:00-11:00Z window, alongside the
+  claudish recreate, so `x-claudish-client` counters start at the same boot.
+  Registry Q38 opened with that default. Post-deploy acceptance gate:
+  disk-served prompt-token share >= 80 % of the 2.2 % baseline.
+- claudish corrections absorbed (18:36Z): the "33 % hole" was an instrument
+  artifact; real haiku landing 54 % PAYG / 38 % swift; ai-01 pays 90 % of its
+  haiku in cash — swift saturates at 3-4 concurrent ~190K conversations.
+  PR claudish#685 merged 19:44Z (checks green) after body+comments+reviews
+  read; rides tomorrow's recreate with the #686 header.
