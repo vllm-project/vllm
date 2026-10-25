@@ -433,4 +433,4 @@ class InklingFA4RelAttentionKernel(
         )
 
 
-INKLING_FA4_REL_ATTENTION_KERNEL = InklingFA4RelAttentionKernel()
+_INKLING_FA4_REL_ATTENTION_KERNEL = InklingFA4RelAttentionKernel()

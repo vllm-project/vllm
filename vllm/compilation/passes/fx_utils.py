@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import operator
 from collections.abc import Iterable, Iterator
 
 from torch import fx
@@ -27,15 +26,6 @@ def find_auto_fn(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node:
     node = find_auto_fn_maybe(nodes, op)
     assert node is not None, f"Could not find {op} in nodes {nodes}"
     return node
-
-
-# Returns the getitem node that extracts the idx-th element from node
-# (if it exists)
-def find_getitem_maybe(node: fx.Node, idx: int) -> fx.Node | None:
-    for user in node.users:
-        if is_func(user, operator.getitem) and user.args[1] == idx:
-            return user
-    return None
 
 
 # An auto-functionalization-aware utility for finding nodes with a specific op

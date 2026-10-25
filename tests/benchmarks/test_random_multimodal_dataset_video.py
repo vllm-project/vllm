@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import tempfile
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
+from unittest.mock import Mock
 
 import cv2
 import pybase64 as base64
@@ -61,11 +64,17 @@ def test_map_config_to_modality(video_dataset: RandomMultiModalDataset):
 
 
 @pytest.mark.benchmark
-def test_generate_mm_item_video(video_dataset: RandomMultiModalDataset):
-    """Test generating multimodal items for video configurations."""
+def test_generate_mm_item_video(
+    video_dataset: RandomMultiModalDataset,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Generate a decodable video without leaving temporary files behind."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     # Test video item generation
     video_config = (64, 48, 8)  # height, width, num_frames
     result = video_dataset.generate_mm_item(video_config)
+    assert not list(tmp_path.iterdir())
 
     # Check the result structure matches OpenAI API format
     assert isinstance(result, dict)
@@ -103,6 +112,33 @@ def test_generate_mm_item_video(video_dataset: RandomMultiModalDataset):
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("writer_opened", [False, True], ids=["open", "write"])
+def test_generate_synthetic_video_cleans_up_on_error(
+    video_dataset: RandomMultiModalDataset,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_opened: bool,
+):
+    """Release the writer and remove temporary storage when encoding fails."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    writer = Mock(spec=cv2.VideoWriter)
+    writer.isOpened.return_value = writer_opened
+    writer.write.side_effect = RuntimeError("Failed to write video frame")
+    monkeypatch.setattr(cv2, "VideoWriter", lambda *args, **kwargs: writer)
+
+    error = (
+        "Failed to write video frame"
+        if writer_opened
+        else "Failed to create video writer"
+    )
+    with pytest.raises(RuntimeError, match=error):
+        video_dataset.generate_synthetic_video(48, 64, 8)
+
+    assert not list(tmp_path.iterdir())
+    writer.release.assert_called_once_with()
 
 
 @pytest.mark.benchmark

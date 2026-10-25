@@ -72,6 +72,8 @@ class NgramProposer:
         """Batch version of ngram proposer using numba for acceleration.
 
         Args:
+            num_requests:
+                Number of requests in the batch.
             valid_ngram_requests:
                 Set of indices of requests that need ngram proposals.
             num_tokens_no_spec:
@@ -87,6 +89,7 @@ class NgramProposer:
             list[list[int]]:
                 A list where each element is a list of proposed
                 token IDs for the corresponding request.
+
         """
         draft_token_ids: list[list[int]] = []
 
@@ -211,8 +214,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
     max_model_len: int,
     k: int,
 ) -> np.ndarray:
-    """
-    Find the longest n-gram which matches the suffix of the given tokens
+    """Find the longest n-gram which matches the suffix of the given tokens
     whose length is within [min_ngram, max_ngram] (inclusive).
 
     If found, we will extract k right after the matched ngram.

@@ -20,10 +20,13 @@ use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_te
 const REASONING_START: &str = "<|channel>thought\n";
 const CHANNEL_START: &str = "<|channel>";
 const CHANNEL_END: &str = "<channel|>";
+const FRAMED_CHANNEL_END: &str = "\n<channel|>";
 const TOOL_CALL_START: &str = "<|tool_call>";
 const TOOL_CALL_END: &str = "<tool_call|>";
 const STRING_DELIM: &str = "<|\"|>";
 const CALL_PREFIX: &str = "call:";
+/// Bare header prefix some Gemma4 checkpoints emit instead of [`CALL_PREFIX`].
+const BARE_CALL_PREFIX: &str = ":";
 
 type Gemma4Input<'i> = Partial<&'i str>;
 
@@ -259,7 +262,9 @@ fn reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event
 
 /// Parse a Gemma4 reasoning end marker.
 fn reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    literal(CHANNEL_END).value(Gemma4Event::ReasoningEnd).parse_next(input)
+    alt((literal(FRAMED_CHANNEL_END), literal(CHANNEL_END)))
+        .value(Gemma4Event::ReasoningEnd)
+        .parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call start marker.
@@ -270,7 +275,7 @@ fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event
 /// Parse a Gemma4 tool-call header.
 fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     let (name,) = seq!(
-        _: literal(CALL_PREFIX),
+        _: alt((literal(CALL_PREFIX), literal(BARE_CALL_PREFIX))),
         gemma4_tool_name,
         _: literal("{"),
     )
@@ -308,7 +313,8 @@ fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
 
 /// Parse a safe reasoning run before the next Gemma4 marker.
 fn safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    safe_text_len_mul(input, &[CHANNEL_END, TOOL_CALL_START]).map(|_| Gemma4Event::Reasoning)
+    safe_text_len_mul(input, &[FRAMED_CHANNEL_END, CHANNEL_END, TOOL_CALL_START])
+        .map(|_| Gemma4Event::Reasoning)
 }
 
 /// Parse raw Gemma4 arguments through the first end marker outside a Gemma string.
@@ -613,48 +619,56 @@ mod tests {
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "get_time".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "write_file".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "Edit".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "search".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "set".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "get_status".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "todowrite".to_string(),
                 description: None,
                 parameters: json!({ "type": "object" }),
                 strict: None,
+                defer_loading: None,
             },
         ]
     }
@@ -684,6 +698,18 @@ mod tests {
         }
         output.append(parser.finish().unwrap());
         output.coalesce()
+    }
+
+    #[test]
+    fn gemma4_reasoning_framing_preserves_extra_newlines_at_every_split() {
+        let wire = "<|channel>thought\n\n  reason\n\n<channel|>    answer\n";
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_eq!(output.reasoning_text(), "\n  reason\n", "split {split}");
+            assert_eq!(output.normal_text(), "    answer\n", "split {split}");
+        }
+        let output = collect_stream(&["<|channel>thought\nreason\n<channel"]);
+        assert_eq!(output.reasoning_text(), "reason\n<channel");
     }
 
     fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
@@ -748,6 +774,44 @@ mod tests {
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "London" })
         );
+    }
+
+    #[test]
+    fn gemma4_accepts_bare_tool_call_opener_at_every_split() {
+        let wire = concat!(
+            "Hello: world",
+            "<|tool_call>:get_weather{location:<|\"|>London<|\"|>}<tool_call|>",
+            "<|tool_call>call:set{flag:true}<tool_call|>",
+        );
+        let assert_output = |output: &UnifiedParserOutput, case: &str| {
+            assert_eq!(output.normal_text(), "Hello: world", "{case}");
+            let calls = output
+                .calls()
+                .into_iter()
+                .map(|call| {
+                    let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap();
+                    (call.name.clone(), arguments)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                calls,
+                [
+                    (
+                        Some("get_weather".to_string()),
+                        json!({ "location": "London" })
+                    ),
+                    (Some("set".to_string()), json!({ "flag": true })),
+                ],
+                "{case}"
+            );
+        };
+
+        let output = test_parser().parse_complete(wire).unwrap();
+        assert_output(&output, "complete");
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_output(&output, &format!("split {split}"));
+        }
     }
 
     #[test]

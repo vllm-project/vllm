@@ -232,15 +232,16 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
     def canonical_view(rank: int, world_size: int) -> torch.Tensor:
         region = SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=num_blocks,
+            num_chunks=num_blocks,
             rank=rank,
-            kv_bytes_per_block=row_stride,
+            kv_bytes_per_chunk=row_stride,
             cpu_page_size=row_stride // world_size,
         )
         regions.append(region)
         # The Triton load path dereferences CPU pointers on the GPU, which is
         # only legal on pinned memory; production pins via CPUOffloadingWorker
         pin_mmap_region(region)
+        assert region.is_pinned
         return region.create_next_canonical_view(_CANONICAL_PAGE)
 
     try:

@@ -73,15 +73,34 @@ RESIDUAL_CUTE_CASES = [
     for num_tokens, _ in spec.residual_configs
 ]
 
+GLM_GPU_TABLES = (
+    ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
+    ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
+)
+GLM_GPU_TABLE_IDS = [f"sm{major}{minor}" for (major, minor), _ in GLM_GPU_TABLES]
+
 GLM_CUTE_CASES = [
-    (spec, config)
-    for spec in glm52_gemm.GLM52_PROJECTIONS.values()
-    for _, config in spec.cute_configs
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens, _ in spec.cute_configs
 ]
 
 QWEN4_EXP_SM90_CASES = [
     (n, k, num_tokens, config)
     for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
+QWEN4_EXP_SM100_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
+QWEN4_EXP_SM121_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS.items()
     for num_tokens, config in plans.items()
 ]
 
@@ -173,10 +192,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     let (3216, 7168) ship without its DISPATCH_DSV3_SHAPE(7168, 3216).
     """
     source = (
-        Path(__file__).resolve().parents[2]
-        / "csrc"
-        / "libtorch_stable"
-        / "dsv3_fused_a_gemm.cu"
+        Path(__file__).resolve().parents[2] / "csrc" / "dsv3_fused_a_gemm.cu"
     ).read_text(encoding="utf-8")
     # Benchmark-only shapes live behind VLLM_K3_BENCH_SHAPES and are not built
     # by default, so they must not count as available.
@@ -198,12 +214,11 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     }
     assert compiled, "failed to parse the dispatch list"
 
-    specs = [
+    specs: list[k3_gemm.ProjectionSpec | glm52_gemm.GLM52ProjectionSpec] = [
         *KIMI_K3_PROJECTIONS.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM90.values(),
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
+        *(spec for _, table in GLM_GPU_TABLES for spec in table.values()),
     ]
     missing = sorted(
         (spec.n, spec.k)
@@ -269,6 +284,73 @@ def test_kda_overlap_configs_match_measured_table() -> None:
     }
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="KDA CuTeDSL helper requires CUDA"
+)
+@pytest.mark.parametrize(
+    "compute_capability,supported",
+    [((9, 0), False), ((10, 0), True), ((10, 3), True), ((12, 0), True)],
+)
+def test_kda_mixed_precision_bf16_fma_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    compute_capability: tuple[int, int],
+    supported: bool,
+) -> None:
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl import kda_skinny_gemm
+
+    capability = compute_capability[0] * 10 + compute_capability[1]
+    monkeypatch.setattr(
+        kda_skinny_gemm.current_platform,
+        "has_device_capability",
+        lambda target, device_id=0: capability >= target,
+    )
+
+    assert kda_skinny_gemm._has_mixed_precision_bf16_fma() is supported
+
+
+@pytest.mark.parametrize("num_tokens", [2, 8, 14])
+def test_kda_skinny_gemms_sm90_cuda_graph(num_tokens: int) -> None:
+    """Hopper must compile and capture the pre-SM100 FMA specialization."""
+    _require_capability_and_cute((9, 0))
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.kda_skinny_gemm import (
+        KdaSkinnyGemm,
+    )
+
+    torch.manual_seed(43 + num_tokens)
+    hidden_states = torch.randn(num_tokens, 7168, dtype=torch.bfloat16, device="cuda")
+    f_ab_weight = torch.randn(144, 7168, dtype=torch.bfloat16, device="cuda")
+    f_b_weight = torch.randn(1536, 128, dtype=torch.bfloat16, device="cuda")
+    gemm = KdaSkinnyGemm()
+
+    gemm.run_k(gemm.run_n(hidden_states, f_ab_weight), f_b_weight)
+    torch.accelerator.synchronize()
+
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        projected_fab = gemm.run_n(hidden_states, f_ab_weight)
+        projected_fb = gemm.run_k(projected_fab, f_b_weight)
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    expected_fab = torch.nn.functional.linear(
+        hidden_states.float(), f_ab_weight.float()
+    )
+    expected_fb = torch.nn.functional.linear(
+        expected_fab[:, :128].to(torch.bfloat16).float(), f_b_weight.float()
+    )
+    for actual, expected in (
+        (projected_fab, expected_fab),
+        (projected_fb, expected_fb),
+    ):
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.float().flatten(), expected.flatten(), dim=0
+        ).item()
+        assert cosine > 0.999
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 16])
 def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
@@ -282,8 +364,34 @@ def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
     assert kda._projection_overlap_max_tokens == 0
 
 
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [
+        ((9, 0), None),
+        ((10, 0), "cute-dsl"),
+        ((10, 3), "cute-dsl"),
+        ((10, 7), None),
+        ((12, 0), None),
+    ],
+)
+def test_kda_qkvg_flashinfer_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected: str | None,
+) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda candidate: candidate == capability,
+    )
+
+    assert k3_gemm._kda_qkvg_flashinfer_backend() == expected
+
+
+@pytest.mark.parametrize("backend", ["cute-dsl", None])
 def test_kda_qkvg_autotune_enables_full_overlap(
     monkeypatch: pytest.MonkeyPatch,
+    backend: str | None,
 ) -> None:
     flashinfer_gemm = pytest.importorskip("flashinfer.gemm")
 
@@ -304,10 +412,20 @@ def test_kda_qkvg_autotune_enables_full_overlap(
         return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
 
     monkeypatch.setattr(flashinfer_gemm, "mm_bf16", fake_mm_bf16)
+    monkeypatch.setattr(
+        k3_gemm,
+        "_kda_qkvg_flashinfer_backend",
+        lambda: backend,
+    )
 
     k3_gemm.autotune_kda_qkvg(kda)
 
-    assert calls == [(torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")]
+    expected_calls = []
+    if backend is not None:
+        expected_calls.append(
+            (torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")
+        )
+    assert calls == expected_calls
     assert (
         kda._projection_overlap_max_tokens == k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS
     )
@@ -357,6 +475,39 @@ def test_glm52_projection_plans_are_separate() -> None:
     assert all(backend == "cute" for backend, _ in eh_plan.values())
 
 
+@pytest.mark.parametrize(
+    "capability,expected",
+    [
+        ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
+        ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
+        ((10, 0), None),
+        ((9, 0), None),
+    ],
+)
+def test_glm52_low_latency_table_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec] | None,
+) -> None:
+    monkeypatch.setattr(
+        glm52_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == capability,
+    )
+    # Keep build_glm52_plan from registering CuTe warmup configs process-wide.
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    assert glm52_gemm._low_latency_table() is expected
+
+    # The MTP eh_proj is a plain nn.Linear and gets its plan from the same table.
+    eh_weight = torch.empty(6144, 12288, dtype=torch.bfloat16, device="meta")
+    eh_plan = glm52_gemm.build_glm52_plan(eh_weight, torch.bfloat16)
+    assert eh_plan == (
+        None if expected is None else expected[(6144, 12288)].build_plan()
+    )
+
+
 def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     single_row = torch.empty(1, 144)[:, :128]
     multiple_rows = torch.empty(2, 144)[:, :128]
@@ -366,8 +517,11 @@ def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     assert not glm52_gemm._is_supported_row_major(multiple_rows)
 
 
+@pytest.mark.parametrize("capability,table", GLM_GPU_TABLES, ids=GLM_GPU_TABLE_IDS)
 def test_glm52_installer_maps_only_selected_unquantized_shapes(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    table: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec],
 ) -> None:
     class FakeLinearBase(nn.Module):
         def __init__(
@@ -407,8 +561,14 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
     root.wrong_shape.fused_qkv_a_proj = FakeLinearBase(
         qkv_a.n + 1, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
+    # o_proj at TP4 is only in the SM107 table.
+    root.attn.o_proj = FakeLinearBase(6144, 4096, glm52_gemm.UnquantizedLinearMethod())
     monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
-    monkeypatch.setattr(glm52_gemm, "_is_sm103", lambda: True)
+    monkeypatch.setattr(
+        glm52_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == capability,
+    )
     monkeypatch.setattr(
         glm52_gemm.shape_dynamic_skinny_gemm,
         "is_available",
@@ -428,8 +588,15 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         root.attn.q_b_proj.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
-    assert root.attn.fused_qkv_a_proj.quant_method._plan == qkv_a.build_plan()
+    assert (
+        root.attn.fused_qkv_a_proj.quant_method._plan
+        == table[(qkv_a.n, qkv_a.k)].build_plan()
+    )
     assert root.attn.q_b_proj.quant_method._plan == q_b.build_plan()
+    if (6144, 4096) in table:
+        assert root.attn.o_proj.quant_method._plan == table[(6144, 4096)].build_plan()
+    else:
+        assert type(root.attn.o_proj.quant_method) is glm52_gemm.UnquantizedLinearMethod
     assert isinstance(
         root.same_shape_other_name.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
@@ -598,8 +765,8 @@ def test_low_latency_table_capability_routing(
 def test_qwen4_exp_hopper_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
 
-    assert len(plans) == 9
-    assert sum(map(len, plans.values())) == 31
+    assert len(plans) == 7
+    assert sum(map(len, plans.values())) == 24
     assert (320, 10240) in plans
     assert (10240, 320) not in plans
     for (n, k), shape_plans in plans.items():
@@ -613,8 +780,11 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
-        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_SM103_GEMM_PLANS),
+        ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
+        ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
+        ((12, 0), {}),
         ((8, 0), {}),
     ],
 )
@@ -625,11 +795,16 @@ def test_qwen4_exp_gemm_capability_routing(
 ) -> None:
     monkeypatch.setattr(
         qwen4_exp_gemm.current_platform,
-        "is_device_capability",
-        lambda target: capability == target,
+        "get_device_capability",
+        lambda: capability,
     )
 
-    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+    assert (
+        qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+            qwen4_exp_gemm.current_platform.get_device_capability(), {}
+        )
+        == expected_plans
+    )
 
 
 def test_installation_is_shape_specific_and_unquantized(
@@ -737,7 +912,7 @@ def _require_capability_and_dsv3(capability: tuple[int, int]) -> None:
         not torch.cuda.is_available()
         or torch.cuda.get_device_capability() != capability
     ):
-        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
+        pytest.skip(f"dsv3_fused_a selection requires SM{capability[0]}{capability[1]}")
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         pytest.skip("dsv3_fused_a_gemm was not built")
 
@@ -760,21 +935,24 @@ def _require_sm103_and_cute() -> None:
     _require_capability_and_cute((10, 3))
 
 
-@pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
+def _glm52_device_plan(
+    weight: torch.Tensor, num_tokens: int, backend: str
+) -> dict[int, glm52_gemm.ResolvedCall]:
+    """Plan from the device's own table, checked to route M to ``backend``."""
+    plan = glm52_gemm.build_glm52_plan(weight, torch.bfloat16)
+    assert plan is not None and plan[num_tokens][0] == backend
+    return plan
+
+
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_CUTE_CASES)
 def test_glm_cute_selected_shapes(
-    spec: glm52_gemm.GLM52ProjectionSpec,
-    config: SkinnyGemmConfig,
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
 ) -> None:
-    _require_sm103_and_cute()
+    _require_capability_and_cute(capability)
     torch.manual_seed(42)
-    x = torch.randn(
-        config.num_rows,
-        spec.k,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
-    plan = spec.build_plan()
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "cute")
 
     output = glm52_gemm.run_glm52_plan(plan, x, weight)
 
@@ -806,6 +984,52 @@ def test_qwen4_exp_sm90_selected_shapes(
     assert cosine > 0.999
 
 
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM100_CASES)
+def test_qwen4_exp_sm100_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((10, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM121_CASES)
+def test_qwen4_exp_sm121_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((12, 1))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION
@@ -825,20 +1049,14 @@ def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     assert output is None
 
 
-@pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_CUTE_CASES)
 def test_glm_cute_selected_shapes_cuda_graph_capture(
-    spec: glm52_gemm.GLM52ProjectionSpec,
-    config: SkinnyGemmConfig,
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
 ) -> None:
-    _require_sm103_and_cute()
-    x = torch.randn(
-        config.num_rows,
-        spec.k,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
-    plan = spec.build_plan()
+    _require_capability_and_cute(capability)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "cute")
     glm52_gemm.run_glm52_plan(plan, x, weight)
     torch.accelerator.synchronize()
 
@@ -947,14 +1165,12 @@ DSV3_CASES = sorted(
     for num_tokens in _dsv3_probe_tokens(spec.dsv3_tokens)
 )
 
-GLM_DSV3_CASES = [
-    (num_tokens, spec)
-    for spec in (
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
-    )
-    for num_tokens in sorted(_dsv3_probe_tokens(spec.dsv3_tokens))
-]
+GLM_DSV3_CASES = sorted(
+    (capability, num_tokens, spec.n, spec.k)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens in _dsv3_probe_tokens(spec.dsv3_tokens)
+)
 
 
 @pytest.mark.parametrize("capability,num_tokens,n,k", DSV3_CASES)
@@ -976,17 +1192,17 @@ def test_dsv3_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("num_tokens,spec", GLM_DSV3_CASES)
+@pytest.mark.parametrize("capability,num_tokens,n,k", GLM_DSV3_CASES)
 def test_glm_dsv3_selected_shapes(
-    num_tokens: int,
-    spec: glm52_gemm.GLM52ProjectionSpec,
+    capability: tuple[int, int], num_tokens: int, n: int, k: int
 ) -> None:
-    _require_sm103_and_dsv3()
+    _require_capability_and_dsv3(capability)
     torch.manual_seed(42)
-    x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "dsv3_fused_a")
 
-    output = glm52_gemm.run_glm52_plan(spec.build_plan(), x, weight)
+    output = glm52_gemm.run_glm52_plan(plan, x, weight)
 
     assert output is not None
     reference = torch.nn.functional.linear(x, weight)

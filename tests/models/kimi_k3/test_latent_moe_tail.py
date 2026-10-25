@@ -15,11 +15,13 @@ from tests.utils import (
     multi_process_parallel,
 )
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
@@ -43,12 +45,11 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         hidden_dim = LATENT_SIZE
         hidden_dim_unpadded = LATENT_SIZE
         experts_per_token = 16
-        defer_moe_finalize = False
+        _defer_moe_finalize = False
         defer_moe_finalize_max_num_tokens = -1
-
-        @property
-        def use_deferred_moe_finalize(self) -> bool:
-            return self.defer_moe_finalize
+        defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
+        limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
+        use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
 
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -59,7 +60,8 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     transform = SimpleNamespace(
         norm=SimpleNamespace(weight=norm_weight, variance_epsilon=EPS),
         up_proj=SimpleNamespace(
-            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE))
+            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE)),
+            quant_method=UnquantizedLinearMethod(),
         ),
     )
 
@@ -84,6 +86,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         SimpleNamespace(
             is_cuda=lambda: True,
             is_device_capability_family=lambda capability: capability == 100,
+            current_device=lambda: torch.device("cuda"),
         ),
     )
     monkeypatch.setattr(
@@ -98,7 +101,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.defer_moe_finalize
+    assert moe_config.use_deferred_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 

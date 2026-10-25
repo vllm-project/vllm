@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
 const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
     parser_name: "Seed-OSS",
     tool_call_start: "<seed:tool_call>",
+    first_tool_call_start: "\n\n<seed:tool_call>",
+    next_tool_call_start: "\n<seed:tool_call>",
     tool_call_end: "</seed:tool_call>",
+    trim_parameter_newlines: true,
 };
 
 /// Tool parser for Seed-OSS XML-style tool calls.
@@ -52,14 +57,14 @@ impl SeedOssToolParser {
 }
 
 impl ToolParser for SeedOssToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 
@@ -79,6 +84,7 @@ mod tests {
 
     use super::SeedOssToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -248,6 +254,14 @@ mod tests {
         assert_eq!(
             error.to_report_string(),
             "tool parser parsing failed: incomplete Seed-OSS tool call"
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<SeedOssToolParser>(
+            "\n\n",
+            "<seed:tool_call>\n<function=get_weather>\n</function>\n</seed:tool_call>",
         );
     }
 }
