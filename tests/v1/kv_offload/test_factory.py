@@ -172,6 +172,9 @@ def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    # Pin the ROCm answer too: on a ROCm runner the shared-region path is off,
+    # and the dedup under test never engages.
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     tokens_per_block = 8
     spec = _create_spec(
