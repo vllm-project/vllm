@@ -368,54 +368,59 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 
 @pytest.mark.cpu_test
-def test_update_state_after_alloc_tracks_cached_blocks_per_group():
-    """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
-    KV cache group. Each group's count must be tracked independently rather
-    than collapsed to a single scalar, or DCP read-phase alignment
-    (local_num_computed_blocks) would misalign one of the groups."""
+@pytest.mark.parametrize("num_external_tokens", [0, 2])
+@pytest.mark.parametrize("sequence_type", [list, tuple])
+@pytest.mark.parametrize(
+    "pattern,cached_count,unhashed_ids",
+    [
+        ("NNHUUUU", 1, [13, 14, 15, 16]),
+        ("NHNUHU", 2, [13, 15]),
+        ("NNNN", 0, []),
+        ("", 0, []),
+    ],
+)
+def test_update_state_after_alloc_tracks_cached_blocks_per_group(
+    num_external_tokens, sequence_type, pattern, cached_count, unhashed_ids
+):
+    """Preserve per-group DCP offsets and clipped pull IDs, including holes."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
-    scheduler = object.__new__(NixlPullConnectorScheduler)
-    scheduler._reqs_in_batch = set()
-    scheduler._reqs_need_save = {}
-    scheduler._reqs_need_recv = {}
-    scheduler.use_host_buffer = False
-    scheduler.is_bidirectional_kv_xfer_enabled = False
-    scheduler._is_hma_required = False
-    scheduler.kv_cache_config = MagicMock(
-        select_transfer_block_ids=lambda block_ids: block_ids
+    vllm_config = create_vllm_config(block_size=16)
+    scheduler = NixlPullConnectorScheduler(
+        vllm_config,
+        "test-engine",
+        make_kv_cache_config(block_size=16, swa_enabled=True, sw_size=32),
     )
 
-    def cached(block_id):
-        return KVCacheBlock(block_id=block_id, _block_hash=object())
+    null = KVCacheBlock(block_id=0, is_null=True)
 
-    def uncached(block_id):
-        return KVCacheBlock(block_id=block_id)
+    def make_group(states, offset):
+        group = []
+        for i, state in enumerate(states, offset):
+            block = null if state == "N" else KVCacheBlock(block_id=i)
+            if state == "H":
+                block.set_block_hash(bytes([i]))
+            group.append(block)
+        return sequence_type(group)
 
-    # Group 0 (full-attention): 2 of 3 blocks cached.
-    # Group 1 (sliding-window): 1 of 3 blocks cached.
-    blocks = KVCacheBlocks(
-        blocks=(
-            [cached(0), cached(1), uncached(2)],
-            [cached(10), uncached(11), uncached(12)],
-        )
-    )
-
+    blocks = KVCacheBlocks((make_group("HHU", 1), make_group(pattern, 10)))
     request = create_request(do_remote_prefill=True)
 
-    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
-    _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
+    _, local_ids, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
         request.request_id
     ]
-    assert local_num_computed_blocks == (2, 1)
-    # There are external tokens to pull, so the scheduler parks the request and
-    # is waiting to see it in finished_recving.
-    assert awaiting_kvs is True
+    assert local_num_computed_blocks == (2, cached_count)
+    if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        unhashed_ids = unhashed_ids[-3:]
+    assert local_ids == (([3], unhashed_ids) if num_external_tokens else ())
+    assert awaiting_kvs is (num_external_tokens > 0)
+    scheduler.shutdown()
 
 
 @pytest.mark.cpu_test
