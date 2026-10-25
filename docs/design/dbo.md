@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This system currently only targets DP+EP deployments.
+The core motivation of the DBO system in vLLM is to overlap communication with the surrounding computation. DP+EP deployments overlap sparse all-to-all communication in the MoE layer; pure-TP deployments on Model Runner V2 overlap TP all-reduces.
 
 ## Introduction
 
@@ -29,17 +29,27 @@ Below is the overlap schedule that is currently implemented in vLLM.
 
 ## Running with DBO
 
+### Data and expert parallelism
+
 To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve command. This must be run in conjunction with `--data-parallel-size N` where N is greater than 1 and `--enable-expert-parallel`. Additionally, there are two configuration knobs.
 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+DP+EP DBO requires DeepEP. Install DeepEP and set `--all2all-backend` to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+
+### Pure tensor parallelism
+
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and use `--enable-dbo` with
+`--tensor-parallel-size` greater than one, one DP rank, and expert parallelism
+disabled. The decode and prefill thresholds above select which batches split
+into microbatches. See the [MiniMax M3 MI355X example](attention_backends.md#nvfp4-indexer-context-parallelism-on-mi355x)
+for combining prefill overlap with NVFP4 indexer context parallelism at TP4.
 
 ## DBO Components
 
@@ -59,7 +69,7 @@ The `UBatchWrapper` class is a model wrapper that's responsible for all of the t
 
 The implementation runs the model twice, once for each microbatch. Each model invocation occurs within a UBatch thread. These threads are launched in parallel and are synchronized using the `UBatchContext`. Each thread is provided with a sliced version of the attention metadata that is used to run its half of the batch.
 
-CUDA graphs for DBO are entirely managed by the `UBatchWrapper`. Because of this, DBO only supports running with Full CUDA graphs. However, once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
+On Model Runner V1, CUDA graphs for DBO are entirely managed by the `UBatchWrapper`, which supports only Full CUDA graphs. Model Runner V2 also supports eager microbatch execution. Once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
 
 #### Interfaces
 

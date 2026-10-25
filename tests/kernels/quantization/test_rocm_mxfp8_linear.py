@@ -85,14 +85,16 @@ def test_rocm_mxfp8_linear_preserves_non_gfx950_tiles(monkeypatch, n, k, fallbac
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
     monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
-    for num_tokens in (1, 8, 16, 17):
+    for num_tokens in (1, 8, 16, 17, 48, 64):
         assert rocm_native._select_cfg(num_tokens, n, k) == fallback
 
 
 @pytest.mark.parametrize(
     "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize(
+    "num_tokens", [1, 2, 7, 8, 16, 31, 32, 33, 48, 49, 64, 65, 128, 1024]
+)
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.

@@ -159,6 +159,17 @@ def _select_cfg(M, N, K):
             return 16, 16, 1024, 2, 3
         if K == 768 and N == 6144:
             return 16, 16, 256, 2, 3
+    if _ON_GFX950 and 32 < M <= 64:
+        if K == 6144:
+            if N == 2560 and M > 48:
+                return 64, 16, 512, 4, 2
+            if N == 1536:
+                return 32, 16, 1024, 2, 2
+        if N == 6144:
+            if K == 2048:
+                return 32, 16, 512, 4, 2
+            if K == 768:
+                return 64, 32, 256, 4, 2
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in

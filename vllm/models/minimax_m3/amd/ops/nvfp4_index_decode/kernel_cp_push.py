@@ -101,8 +101,9 @@ def _wave_scan(x, lane):
     return x
 
 
-def compile_score_push():
-    name = "m3_nvfp4_index_score_push_cp"
+def compile_score_push(query_groups: int = 1):
+    """Score four-row tiles, sharing each request's block table across tiles."""
+    name = f"m3_nvfp4_index_score_push_cp_qg{query_groups}"
 
     @fx.struct
     class Shared:
@@ -187,7 +188,10 @@ def compile_score_push():
         for i in range_constexpr(2):
             lut_l[tx * 2 + i] = fx.Int32(lut_g[tx * 2 + i])
         r_ok = tx < i32_num_reqs
-        seq_t = fx.Int32(global_i32_ptr(arg_seq)[r_ok.select(tx, fx.Int32(0))])
+        req = r_ok.select(tx // query_groups, fx.Int32(0))
+        seq_t = fx.Int32(global_i32_ptr(arg_seq)[req])
+        if const_expr(query_groups > 1):
+            seq_t = _max(seq_t - (query_groups - 1 - tx % query_groups) * QL, 0)
         seq_t = r_ok.select(seq_t, fx.Int32(0))
         # This rank's index-q rows of requests pid, pid + nwg, ... to slot me of
         # every rank; their flags follow below.
@@ -402,7 +406,7 @@ def compile_score_push():
             pgj = fx.Int32(
                 buffer_ops.buffer_load(
                     btr,
-                    need.select(rj * i32_bt_stride + bj, fx.Int32(0)),
+                    need.select((rj // query_groups) * i32_bt_stride + bj, fx.Int32(0)),
                     vec_width=1,
                     dtype=fx.Int32,
                 )

@@ -2,6 +2,26 @@ group: Models - Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":amd: (MI355) MiniMax M3 Indexer and MXFP8 Projections"
+  key: minimax-m3-nvfp4-indexer-dbo
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: mi355_4
+  dind: false
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
+  - tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+  - tests/kernels/attention/minimax_m3_nvfp4_ref.py
+  - tests/kernels/quantization/test_rocm_mxfp8_linear.py
+  - tests/models/minimax_m3/test_rocm_nvfp4_indexer_cp.py
+  commands:
+  - pytest -v -s kernels/attention/test_minimax_m3_nvfp4_index.py -k index_decode_cp_push
+  - pytest -v -s kernels/quantization/test_rocm_mxfp8_linear.py
+  - pytest -v -s models/minimax_m3/test_rocm_nvfp4_indexer_cp.py
+
 - label: ":nvidia: (L4) Qwen4 Exp SP"
   key: qwen4-exp-sp-tests-4-gpus
   timeout_in_minutes: 30

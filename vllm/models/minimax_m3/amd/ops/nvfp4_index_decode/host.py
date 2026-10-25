@@ -156,14 +156,14 @@ def minimax_m3_nvfp4_index_score_decode(
 
 
 @functools.cache
-def _get_kernel_cp_push():
+def _get_kernel_cp_push(query_groups: int):
     from . import kernel_cp_push
 
-    return kernel_cp_push.compile_score_push()
+    return kernel_cp_push.compile_score_push(query_groups)
 
 
 def minimax_m3_nvfp4_index_score_push_cp(
-    iq: torch.Tensor,  # this rank's index head [num_reqs * 4, 128] e4m3
+    iq: torch.Tensor,  # this rank's index head [num_reqs * query_len, 128] e4m3
     index_cache: torch.Tensor,  # [num_blocks, 128, 72] uint8
     dests: list[int],  # head h's scores [rows, row_stride] fp32 on rank h
     row_stride: int,
@@ -178,15 +178,18 @@ def minimax_m3_nvfp4_index_score_push_cp(
     iq_bufs: list[int],  # rank p's index-q receive buffer [4, iq_rows, 128] e4m3
     iq_rows: int,
     grid: int = 0,
+    query_len: int = 4,
 ) -> None:
     """This rank's share of all four heads' decode scores, pushed to the heads'
     ranks; returns once every rank's scores have arrived."""
     from . import kernel_cp_push
 
     rows = iq.shape[0]
-    assert rows % 4 == 0 and rows <= iq_rows
+    assert query_len in (4, 8) and rows % query_len == 0
+    assert rows <= iq_rows
     assert iq.dtype == torch.float8_e4m3fn and iq.shape[1] == kernel_cp_push.D
     assert iq.stride(1) == 1 and iq.stride(0) == kernel_cp_push.D
+    # Each four-row tile owns separate query flags and a rebased causal end.
     num_reqs = rows // 4
     assert num_reqs <= kernel_cp_push.MAX_REQS
     if not grid:
@@ -197,7 +200,7 @@ def minimax_m3_nvfp4_index_score_push_cp(
         return
     assert dest_bytes < 2**31 * 4, "score offsets must fit in int32 elements"
     run_compiled(
-        _get_kernel_cp_push(),
+        _get_kernel_cp_push(query_len // 4),
         iq.data_ptr(),
         index_cache.data_ptr(),
         nvfp4_e4m3_lut(iq.device).data_ptr(),

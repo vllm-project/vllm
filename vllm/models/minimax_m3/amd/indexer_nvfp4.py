@@ -4,8 +4,8 @@
 
 Keys score as ``e4m3_rn_satfinite(e2m1 * scale)`` with AITER's init / local
 sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
-table. With ``indexer_decode_cp`` at TP4, decode steps of 4 rows per request
-and at most 256 requests score context-parallel (``ops/index_cp``).
+table. With ``indexer_decode_cp`` at TP4, decode steps of 4 or 8 rows per
+request, up to 256 four-row tiles, score context-parallel (``ops/index_cp``).
 """
 
 import torch
@@ -30,9 +30,9 @@ logger = init_logger(__name__)
 
 # Index heads per rank (TP4 / TP2 / TP1).
 NUM_INDEX_HEADS = (1, 2, 4)
-# Decode CP: rows per request (DSpark 3) and the request cap.
-CP_QUERY_LEN = 4
-CP_MAX_REQS = 256
+# Decode CP: rows per request (DSpark 3 or 7) and four-row tile capacity.
+CP_QUERY_LENS = (4, 8)
+CP_MAX_TILES = 256
 
 
 def rocm_nvfp4_indexer_unsupported_reason(
@@ -134,8 +134,8 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             # The push has no back-pressure; under DBO no all-reduce orders it.
             or dbo_enabled()
             or self.num_index_heads != 1
-            or query_len != CP_QUERY_LEN
-            or num_decodes > CP_MAX_REQS
+            or query_len not in CP_QUERY_LENS
+            or num_decodes * (query_len // 4) > CP_MAX_TILES
             or num_decodes * query_len > cp.max_rows
         ):
             return None
@@ -190,6 +190,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
                     self.init_blocks,
                     self.local_blocks,
                     score_block_width(d.max_seq_len, self.block_size),
+                    query_len=d.decode_query_len,
                 )
             else:
                 score = self._new_score(nd, d.max_seq_len)

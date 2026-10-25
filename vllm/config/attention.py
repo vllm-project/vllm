@@ -96,20 +96,20 @@ class AttentionConfig:
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend; MiniMax M3 supports nvfp4 on SM100/SM103/SM107 with at
-    most 8 decode queries per request."""
+    support in the backend. MiniMax M3 supports nvfp4 on SM100/SM103/SM107
+    (at most 8 decode queries per request) and MI355X (ROCm gfx950)."""
 
     indexer_decode_cp: bool = False
     """Split the sparse-attention indexer's decode scoring across the
     tensor-parallel ranks by context instead of by index head: each rank scores
     a 1/TP slice of the index-K pages for every head and the ranks exchange
-    their local top-k, so each reads 1/TP of the index-K cache per sparse
+    their scoring results, so each reads 1/TP of the index-K cache per sparse
     layer. The index-K cache stays replicated, so this is unrelated to
     `--decode-context-parallel-size`, which shards the KV cache itself; the two
     cannot be combined. Implemented for the MiniMax M3 NVFP4 indexer, which
     needs `indexer_kv_dtype="nvfp4"` and TP 4 (one index head per rank); it is
-    ignored with a warning where it does not apply. It pays off from about 4
-    concurrent decodes at 128K context and grows with batch and context."""
+    ignored with a warning where it does not apply. On NVIDIA, it pays off from
+    about 4 concurrent decodes at 128K context and grows with batch and context."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with

@@ -230,7 +230,7 @@ def test_index_decode_graph_replays_new_lengths(num_heads, query_len):
         _check_decode(out, q, keys, table, lens, query_len, 1, 2)
 
 
-def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid):
+def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid, query_len=4):
     """The context-parallel scorer on one GPU, the other ranks' index-q rows
     and flags pre-set locally: per rank, the single-head scorer's bits on its
     blocks, -inf past the length inside its last run, nothing elsewhere; the
@@ -239,7 +239,7 @@ def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid):
     table, num_blocks = _block_table(lens, share=True)
     seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
     cache = _index_cache(num_blocks, page_step)
-    query_len, heads = cp.QL, cp.HEADS
+    heads = cp.HEADS
     rows = num_reqs * query_len
     q = (torch.randn(rows, heads, D, device="cuda") * 0.5).to(torch.float8_e4m3fn)
     max_seq_len = max(lens)
@@ -251,7 +251,14 @@ def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid):
             init_blocks, local_blocks, query_len, max_seq_len,
         )  # fmt: skip
     blocks = torch.arange(width, device="cuda")
-    nblk = ((seq_lens + BLOCK - 1) // BLOCK).repeat_interleave(query_len)[:, None]
+    groups = query_len // cp.QL
+    tile_lens = (
+        seq_lens[:, None]
+        - torch.arange(groups - 1, -1, -1, device="cuda")[None, :] * cp.QL
+    ).clamp_min(0)
+    nblk = (
+        ((tile_lens + BLOCK - 1) // BLOCK).flatten().repeat_interleave(cp.QL)[:, None]
+    )
     seen = torch.zeros(heads, rows, width, dtype=torch.int32, device="cuda")
     for rank in range(cp.WORLD):
         counts = torch.zeros(cp.CNT_WORDS, dtype=torch.int32, device="cuda")
@@ -273,6 +280,7 @@ def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid):
                 q[:, rank].contiguous(), cache, dests, width, rows * width * 4,
                 table, seq_lens, init_blocks, local_blocks, rank, counts,
                 [flags.data_ptr()] * 4, [iq_buf.data_ptr()] * 4, rows, grid=grid,
+                query_len=query_len,
             )  # fmt: skip
             outs.append(actual)
         torch.accelerator.synchronize()
@@ -287,25 +295,34 @@ def _check_cp_push(lens, page_step, init_blocks, local_blocks, grid):
             actual[:, inside].view(torch.int32), expected[:, inside].view(torch.int32)
         ), rank
         seen += inside.int()
-    assert torch.equal(seen, (~expected.isnan()).int())
+    assert torch.equal(seen, (blocks < nblk)[None].expand_as(seen).int())
 
 
 @pytest.mark.parametrize("num_reqs", [1, 5, 17, 45])
 @pytest.mark.parametrize("page_step", [1, 2])
 @pytest.mark.parametrize(("init_blocks", "local_blocks"), [(1, 2), (0, 1)])
 @pytest.mark.parametrize("grid", [3, 768])
+@pytest.mark.parametrize("query_len", [4, 8])
 def test_index_decode_cp_push_matches_single_head(
-    num_reqs, page_step, init_blocks, local_blocks, grid
+    num_reqs, page_step, init_blocks, local_blocks, grid, query_len
 ):
     """Grid 3: many runs and requests per workgroup."""
     torch.manual_seed(num_reqs)
-    _check_cp_push(_lens(num_reqs, 9000), page_step, init_blocks, local_blocks, grid)
+    _check_cp_push(
+        _lens(num_reqs, 9000), page_step, init_blocks, local_blocks, grid, query_len
+    )
 
 
 @pytest.mark.parametrize("grid", [3, 768])
-def test_index_decode_cp_push_all_padding(grid):
+@pytest.mark.parametrize("query_len", [4, 8])
+def test_index_decode_cp_push_all_padding(grid, query_len):
     """Padding requests only (graph capture): nothing written."""
-    _check_cp_push([0] * 5, 1, 1, 2, grid)
+    _check_cp_push([0] * 5, 1, 1, 2, grid, query_len)
+
+
+def test_index_decode_cp_push_eight_row_request_capacity():
+    """Eight-row requests fill all 256 query-flag slots, including ragged tails."""
+    _check_cp_push([129, 2049, 4095, 0] * 32, 2, 1, 2, 768, 8)
 
 
 def _prefill_case(q_lens, seq_lens_list, num_heads, page_step=1):
@@ -387,8 +404,15 @@ def test_index_prefill_matches_reference(
         q_lens, seq_lens_list, num_heads, page_step=2 if num_heads == 2 else 1
     )
     width = (max(seq_lens_list) + BLOCK - 1) // BLOCK + 3
-    args = (table, cu, seq_lens, init_blocks, local_blocks)
-    args += (max(q_lens), max(seq_lens_list))
+    args = (
+        table,
+        cu,
+        seq_lens,
+        init_blocks,
+        local_blocks,
+        max(q_lens),
+        max(seq_lens_list),
+    )
 
     def run(shared, mq):
         monkeypatch.setattr(prefill_host, "PIN_SHARED", shared)

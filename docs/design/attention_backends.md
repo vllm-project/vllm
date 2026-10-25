@@ -205,6 +205,48 @@ attends only to those blocks; index keys live in a separate side cache.
 
 --8<-- "gen:table-minimax"
 
+### NVFP4 indexer context parallelism on MI355X
+
+On MI355X with TP4, enable NVFP4 indexer decode context parallelism with
+`--attention-config '{"indexer_kv_dtype":"nvfp4","indexer_decode_cp":true}'`
+and `--kv-cache-dtype nvfp4`. The ROCm implementation additionally supports
+NVFP4 KV caches beyond the types listed in the table above.
+This path supports four or eight verification rows per request (DSpark with
+three or seven speculative tokens). Each batch can use up to 256 four-row tiles:
+256 requests with three draft tokens, or 128 requests with seven draft tokens.
+Other query lengths and larger batches use the local indexer.
+Keep `--decode-context-parallel-size 1`: the indexer uses the four existing TP ranks.
+
+With Model Runner V2, this can be combined with [pure-TP DBO](dbo.md#pure-tensor-parallelism).
+Unsplit decode steps use context parallelism, while active microbatches use the
+local indexer so they do not share its communication buffers. For example:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 \
+VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 \
+vllm serve amd/MiniMax-M3.1-Flash-Quark-MXFP4 \
+  --tensor-parallel-size 4 --language-model-only --moe-backend aiter \
+  --enable-batch-sharded-sampling \
+  --block-size 128 --kv-cache-dtype nvfp4 \
+  --attention-config '{"indexer_kv_dtype":"nvfp4","indexer_decode_cp":true}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+  --disable-hybrid-kv-cache-manager --enable-prefix-caching \
+  --max-num-batched-tokens 32768 --max-num-seqs 64 \
+  --enable-dbo --dbo-prefill-token-threshold 16384 \
+  --dbo-decode-token-threshold 32768
+```
+
+The high decode threshold keeps decode steps unsplit so the CP indexer remains
+eligible. Large prefill steps can still overlap their TP all-reduces with DBO.
+
+`--enable-batch-sharded-sampling` spreads target and DSpark draft sampling
+across TP ranks. This reduces duplicated sampling work for the large vocabulary
+and multi-token verification batches.
+
+For long text prompts, install `fastokens>=0.2.0` and set
+`VLLM_USE_FASTOKENS=1` to reduce CPU tokenization time. See the
+[fastokens backend setup](../configuration/optimization.md#fastokens-backend).
+
 ## MLA (Multi-head Latent Attention) Backends
 
 MLA uses separate backends for prefill and decode phases.
