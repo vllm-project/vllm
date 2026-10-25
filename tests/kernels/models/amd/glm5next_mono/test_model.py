@@ -127,10 +127,10 @@ class Probe:
 def model_dir(tmp_path_factory):
     """The checkpoint's config.json, cut to its first six layers and a small
     vocabulary; its quantization config is the checkpoint's own."""
-    from huggingface_hub import hf_hub_download
+    from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
-    with open(hf_hub_download(MODEL, "config.json")) as f:
-        config = json.load(f)
+    config = get_hf_file_to_dict("config.json", MODEL)
+    assert config is not None, f"no config.json for {MODEL}"
     text = config["text_config"]
     assert text["mlp_layer_types"][:LAYERS] == ["dense"] * 3 + ["sparse"] * 3
     assert text["layer_types"][3] == "deepseek_sparse_attention"
@@ -203,9 +203,10 @@ def _logit_errors(got, want):
 
 def _assert_close(got, want):
     """The kernels quantize expert inputs to MXFP8 where vLLM's MoE uses MXFP4,
-    so the logits are close but not equal. Seen on these weights over two runs,
-    against vLLM in the same mode: eager cos 0.9984-0.9993, top-1 95-98%; FULL
-    graphs cos 0.9984-0.9989, top-1 89-94%; the worst row 12% in every mode.
+    so the logits are close but not equal. Seen on these weights over four runs
+    on three nodes, against vLLM in the same mode: eager cos 0.9981-0.9993,
+    top-1 89-98%; FULL graphs (bf16 or e4m3 KV) cos 0.9984-0.9990, top-1 88-95%;
+    the worst row at most 12% in every mode.
     vLLM's own FULL graphs differ from its eager path by more (cos 0.9977,
     top-1 83%). A kernel layer that breaks moves every row."""
     cos, rows, top1 = _logit_errors(got, want)
