@@ -368,6 +368,8 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
+        if self.scheduler_config.enable_realtime_unbounded:
+            self._check_reanchor_headroom()
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -1961,6 +1963,26 @@ class Scheduler(SchedulerInterface):
                 return None  # a non-sliding (full-attention) group is present
             sw = mgr_sw if sw is None else max(sw, mgr_sw)
         return sw
+
+    def _check_reanchor_headroom(self) -> None:
+        """Re-anchoring fires at max_model_len - margin and drops whole scheduler
+        blocks past the sliding window, so there must be at least one there.
+        Below that it fires late, inside the margin, and never at all if
+        max_model_len - sliding_window is under one block."""
+        sw = self._reanchor_sliding_window
+        if sw is None:
+            return
+        margin = self.scheduler_config.realtime_reanchor_margin_tokens
+        headroom = self.max_model_len - margin - sw
+        if headroom < self.block_size:
+            raise ValueError(
+                "enable_realtime_unbounded: re-anchoring drops whole blocks of "
+                f"{self.block_size} tokens, so max_model_len - "
+                "realtime_reanchor_margin_tokens - sliding_window "
+                f"({self.max_model_len} - {margin} - {sw} = {headroom}) must be "
+                f"at least {self.block_size}. Raise --max-model-len or lower "
+                "the margin."
+            )
 
     def _reanchor_session(self, request: Request) -> bool:
         """[EXPERIMENTAL] Re-anchor a streaming session's RoPE clock down by D
