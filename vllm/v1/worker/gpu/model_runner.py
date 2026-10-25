@@ -1120,6 +1120,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
                         ),
+                        uses_inputs_embeds=self.uses_inputs_embeds,
                     )
                     self.model_state.capture_inner_cudagraphs(
                         input_buffers,

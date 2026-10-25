@@ -624,6 +624,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        uses_inputs_embeds: bool = False,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
@@ -698,6 +699,14 @@ class ModelCudaGraphManager(CudaGraphManager):
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+            elif (
+                uses_inputs_embeds
+                and model_state.dummy_inputs_embeds(num_tokens) is not None
+                and not requires_raw_input_tokens(model)
+            ):
+                # Same rule as GPUModelRunner.execute_model, so capture passes
+                # the inputs that replay passes.
+                model_inputs["input_ids"] = None
 
             if desc.num_ubatches > 1:
                 # Prepare and park threads before capture; finish runs inside it.

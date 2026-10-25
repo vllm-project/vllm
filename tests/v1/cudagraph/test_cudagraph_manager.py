@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -306,6 +306,77 @@ def test_speculator_capture_preserves_decode_query_bounds(
     assert model_state.prepare_attn.call_count == 2
     for call in model_state.prepare_attn.call_args_list:
         assert call.args[0].max_query_len == expected_max_query_len
+
+
+@pytest.mark.parametrize(
+    "uses_inputs_embeds,state_embeds,raw_tokens,keeps_input_ids",
+    [
+        (True, True, False, False),
+        (True, True, True, True),
+        (True, False, False, True),
+        (False, True, False, True),
+    ],
+)
+def test_capture_input_ids_match_execute_model(
+    monkeypatch, uses_inputs_embeds, state_embeds, raw_tokens, keeps_input_ids
+):
+    """Capture must pass input_ids exactly when execute_model does; the
+    breakable graph's DEBUG check compares the two calls' tensor arguments."""
+    num_tokens = 4
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: object()
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "set_forward_context", lambda *a, **kw: nullcontext()
+    )
+    desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens, num_tokens)
+
+    def capture(self, create_forward_fn, progress_bar_desc):
+        create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+
+    embeds = torch.zeros(num_tokens, 8)
+    # A state without dummy_inputs_embeds supplies inputs_embeds only through
+    # its own inputs, so execute_model keeps input_ids.
+    model_state = SimpleNamespace(
+        prepare_dummy_inputs=lambda num_reqs, n: {"inputs_embeds": embeds[:n]},
+        dummy_inputs_embeds=lambda n: embeds[:n] if state_embeds else None,
+    )
+    calls = []
+
+    class Model:
+        requires_raw_input_tokens = raw_tokens
+
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return torch.zeros(num_tokens, 8)
+
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager(
+        _create_vllm_config(), torch.device("cpu"), CUDAGraphMode.FULL, 1
+    )
+    manager.capture(
+        Model(),
+        model_state,
+        InputBuffers(num_tokens, num_tokens, torch.device("cpu")),
+        None,
+        MagicMock(),
+        [],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        uses_inputs_embeds=uses_inputs_embeds,
+    )
+
+    assert len(calls) == 1
+    assert (calls[0]["input_ids"] is not None) == keeps_input_ids
+    assert calls[0]["inputs_embeds"] is not None
 
 
 _DECODE_QUERY_LEN = 3
