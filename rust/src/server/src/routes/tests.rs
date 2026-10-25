@@ -63,6 +63,7 @@ use super::{
 };
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::LoadLoraError;
+use crate::npy::npy_base64;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -8304,6 +8305,74 @@ async fn non_stream_completions_routed_experts_return_rows_before_frontend_stop(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_routed_experts_keep_previous_update_rows() {
+    // The second engine update reports three tokens with one routing row.
+    // Python trims only the matching update, so the first update's rows stay
+    // intact and the response keeps five rows, not four.
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        let first = routed_rows(TensorDtype::U8, 5, (0..10).collect());
+        engine_outputs(vec![
+            request_output_with_routed_experts(request_id, bytes_to_token_ids(b"a"), None, first),
+            request_output_with_routed_experts(
+                request_id,
+                bytes_to_token_ids(b"bcd"),
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![100, 101]),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+        "stream": false,
+        "stop": ["b"],
+    });
+    let (status, json) = post_json(&mut app, "/v1/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["text"], "a");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        json["choices"][0]["routed_experts"],
+        npy_base64(&routed_rows(TensorDtype::U8, 5, (0..10).collect())).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_routed_experts_keep_rows_when_current_update_has_none() {
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            request_output_with_routed_experts(
+                request_id,
+                bytes_to_token_ids(b"a"),
+                None,
+                routed_rows(TensorDtype::U8, 3, (0..6).collect()),
+            ),
+            request_output(request_id, bytes_to_token_ids(b"bc"), None),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+        "stream": false,
+        "stop": ["b"],
+    });
+    let (status, json) = post_json(&mut app, "/v1/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["text"], "a");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        json["choices"][0]["routed_experts"],
+        npy_base64(&routed_rows(TensorDtype::U8, 3, (0..6).collect())).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_trims_routed_experts_after_stop_string_in_one_update() {
     // "cx" completes at token 4 of the 6-token update, so the two trailing
     // rows are dropped with the two surplus tokens.
@@ -8402,6 +8471,58 @@ async fn non_stream_chat_routed_experts_survive_stream_interval_merging() {
     engine_task.await.expect("mock engine task");
     assert_eq!(json["choices"][0]["message"]["content"], "abcd");
     assert_eq!(json["choices"][0]["routed_experts"], ROUTED_U8_4X1X2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_routed_experts_stop_string_during_stream_interval() {
+    // `stream_interval=3` merges "b" and "c"; the stop string matches in "b",
+    // so "c"'s row is discarded and "b"'s row is kept with the earlier rows.
+    let (mut app, engine_task) = test_app_with_engine_outputs(|request_id| {
+        engine_outputs(vec![
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'a' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 3, (0..6).collect()),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'b' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![6, 7]),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'c' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![8, 9]),
+            ),
+            request_output_with_routed_experts(
+                request_id,
+                vec![b'd' as u32],
+                None,
+                routed_rows(TensorDtype::U8, 1, vec![10, 11]),
+            ),
+        ])
+    })
+    .await;
+    let body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": false,
+        "stream_interval": 3,
+        "stop": ["b"],
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+    assert_eq!(json["choices"][0]["message"]["content"], "a");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        json["choices"][0]["routed_experts"],
+        npy_base64(&routed_rows(TensorDtype::U8, 4, (0..8).collect())).unwrap()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

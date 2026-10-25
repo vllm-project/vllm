@@ -19,7 +19,7 @@ pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage, WeightVersionSpan,
-    concat_routed_experts_rows,
+    concat_routed_experts_rows, validate_routed_experts_rows,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};

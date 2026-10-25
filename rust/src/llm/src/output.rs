@@ -487,6 +487,43 @@ impl GenerateOutputStream {
     }
 }
 
+/// Validate that a routed-expert chunk has a non-empty shape whose element
+/// count and dtype byte size match its data length.
+///
+/// `WireNdArray` keeps the raw wire bytes without validating them, and the
+/// routed-expert path slices those bytes by row, so malformed data would
+/// otherwise be silently truncated or panic.
+pub fn validate_routed_experts_rows(array: &WireNdArray, request_id: &str) -> Result<()> {
+    if array.shape.is_empty() {
+        return Err(crate::Error::RoutedExpertsShapeMismatch {
+            request_id: request_id.to_string(),
+        });
+    }
+    let Some(expected_bytes) = array
+        .shape
+        .iter()
+        .try_fold(1usize, |elements, &dim| elements.checked_mul(dim))
+        .and_then(|elements| elements.checked_mul(array.dtype.scalar.element_size()))
+    else {
+        return Err(crate::Error::RoutedExpertsShapeMismatch {
+            request_id: request_id.to_string(),
+        });
+    };
+    let Some(data) = array.data.as_raw_view() else {
+        return Err(crate::Error::RoutedExpertsShapeMismatch {
+            request_id: request_id.to_string(),
+        });
+    };
+    if data.len() != expected_bytes {
+        return Err(crate::Error::RoutedExpertsDataLengthMismatch {
+            request_id: request_id.to_string(),
+            expected_bytes,
+            actual_bytes: data.len(),
+        });
+    }
+    Ok(())
+}
+
 /// Concatenate routed-expert rows along the token axis, like Python's
 /// `np.concatenate`.
 ///
@@ -500,18 +537,30 @@ pub fn concat_routed_experts_rows(
     let Some(first) = chunks.first() else {
         return Ok(None);
     };
+    if chunks.len() == 1 {
+        validate_routed_experts_rows(first, request_id)?;
+        // A single chunk is already contiguous; avoid copying its bytes.
+        return Ok(Some(Box::new(
+            chunks.into_iter().next().expect("checked above"),
+        )));
+    }
+
     let row_shape = first.shape.get(1..);
-    let mut num_rows = 0;
+    let mut num_rows: usize = 0;
     let mut data = Vec::new();
     for chunk in &chunks {
-        if chunk.shape.is_empty() || chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape
-        {
+        validate_routed_experts_rows(chunk, request_id)?;
+        if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
             return Err(crate::Error::RoutedExpertsShapeMismatch {
                 request_id: request_id.to_string(),
             });
         }
-        num_rows += chunk.shape[0];
-        data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
+        num_rows = num_rows.checked_add(chunk.shape[0]).ok_or_else(|| {
+            crate::Error::RoutedExpertsShapeMismatch {
+                request_id: request_id.to_string(),
+            }
+        })?;
+        data.extend_from_slice(chunk.data.as_raw_view().expect("validated above"));
     }
     let mut shape = first.shape.clone();
     shape[0] = num_rows;
@@ -661,6 +710,8 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
 #[cfg(test)]
 mod tests {
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
+
     use super::*;
 
     #[test]
@@ -674,5 +725,45 @@ mod tests {
             error,
             crate::Error::RoutedExpertsShapeMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn routed_experts_reject_data_length_mismatch() {
+        let chunk = WireNdArray::from_raw(TensorDtype::U8, vec![2, 1, 2], vec![0, 1, 2]);
+        let error = concat_routed_experts_rows(vec![chunk], "req-routed").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::RoutedExpertsDataLengthMismatch {
+                expected_bytes: 4,
+                actual_bytes: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn routed_experts_reject_shape_product_overflow() {
+        let chunk = WireNdArray::from_raw(TensorDtype::U8, vec![usize::MAX, 2], Vec::new());
+        let error = concat_routed_experts_rows(vec![chunk], "req-routed").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::RoutedExpertsShapeMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn routed_experts_keep_zero_row_payload_and_reuse_single_chunk() {
+        let zero_rows = WireNdArray::from_raw(TensorDtype::U8, vec![0, 1, 2], Vec::new());
+        let collected = concat_routed_experts_rows(vec![zero_rows], "req-routed")
+            .unwrap()
+            .expect("a zero-row array is still a payload");
+        assert_eq!(collected.shape, vec![0, 1, 2]);
+        assert!(collected.data.as_raw_view().unwrap().is_empty());
+
+        let chunk = WireNdArray::from_raw(TensorDtype::U8, vec![2, 1, 2], (0..4).collect());
+        let data_ptr = chunk.data.as_raw_view().unwrap().as_ptr();
+        let collected =
+            concat_routed_experts_rows(vec![chunk], "req-routed").unwrap().expect("payload");
+        assert_eq!(collected.data.as_raw_view().unwrap().as_ptr(), data_ptr);
     }
 }

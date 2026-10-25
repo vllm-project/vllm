@@ -13,6 +13,7 @@ use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
     FinishReason, GenerateOutput, RequestTimestamps, TokenUsage, concat_routed_experts_rows,
+    validate_routed_experts_rows,
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
@@ -145,7 +146,6 @@ pub async fn decoded_text_event_stream(
         let routed_experts_delta = std::mem::take(&mut output.routed_experts_delta);
         let current_has_routed_rows =
             output.routed_experts.is_some() || !routed_experts_delta.is_empty();
-        routed_experts_chunks.extend(routed_experts_delta);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -312,20 +312,39 @@ pub async fn decoded_text_event_stream(
                 trace!(full_text, "request finished with terminal decoded text");
             }
 
-            let mut routed_experts = match output.routed_experts {
-                Some(rows) => Some(rows),
-                None => concat_routed_experts_rows(
-                    std::mem::take(&mut routed_experts_chunks),
-                    &request_id,
-                )?,
+            let terminal_rows = output.routed_experts;
+            let routed_experts = match terminal_rows {
+                Some(rows) => {
+                    // Terminal rows cover the whole request; per-update chunks
+                    // are no longer needed.
+                    routed_experts_chunks.clear();
+                    if num_surplus_tokens > 0 {
+                        Some(Box::new(drop_trailing_rows(
+                            *rows,
+                            num_surplus_tokens,
+                            &request_id,
+                        )?))
+                    } else {
+                        Some(rows)
+                    }
+                }
+                None => {
+                    let delta = if current_has_routed_rows && num_surplus_tokens > 0 {
+                        trim_trailing_delta_rows(
+                            routed_experts_delta,
+                            num_surplus_tokens,
+                            &request_id,
+                        )?
+                    } else {
+                        routed_experts_delta
+                    };
+                    routed_experts_chunks.extend(delta);
+                    concat_routed_experts_rows(
+                        std::mem::take(&mut routed_experts_chunks),
+                        &request_id,
+                    )?
+                }
             };
-            // Drop the rows of tokens removed after the stop string was
-            // matched, including tokens from engine updates coalesced by
-            // `stream_interval` that Python would never have appended.
-            if current_has_routed_rows && num_surplus_tokens > 0 {
-                routed_experts = routed_experts
-                    .map(|rows| Box::new(drop_trailing_rows(*rows, num_surplus_tokens)));
-            }
 
             // Intentionally drop the stream with explicit cause, so that the engine core
             // can distinguish between such normal completion vs an unexpected
@@ -358,6 +377,7 @@ pub async fn decoded_text_event_stream(
             return Ok(());
         }
 
+        routed_experts_chunks.extend(routed_experts_delta);
         if intermediate {
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
@@ -378,20 +398,63 @@ pub async fn decoded_text_event_stream(
 ///
 /// Mirrors Python `OutputProcessor._trim_surplus_tokens()`, which removes the
 /// rows of tokens generated past a stop string.
-fn drop_trailing_rows(array: WireNdArray, num_rows: usize) -> WireNdArray {
+fn drop_trailing_rows(
+    array: WireNdArray,
+    num_rows: usize,
+    request_id: &str,
+) -> crate::Result<WireNdArray> {
+    validate_routed_experts_rows(&array, request_id)?;
     let Some(&rows) = array.shape.first() else {
-        return array;
+        return Ok(array);
     };
     let kept_rows = rows.saturating_sub(num_rows);
     if kept_rows == rows {
-        return array;
+        return Ok(array);
     }
-    let data = array.data.as_raw_view().expect("resolved on decode");
-    let row_bytes = data.len().checked_div(rows).unwrap_or(0);
+    let data = array.data.as_raw_view().expect("validated above");
+    let row_bytes = data.len() / rows;
     let data = data.slice(..row_bytes * kept_rows);
     let mut shape = array.shape;
     shape[0] = kept_rows;
-    WireNdArray::from_raw_bytes(array.dtype, shape, data)
+    Ok(WireNdArray::from_raw_bytes(array.dtype, shape, data))
+}
+
+/// Trim rows from the tail of one engine output's routing chunks.
+///
+/// Chunks from earlier outputs are kept by the caller and never passed here:
+/// Python trims the EngineCore update that matched the stop string, not the
+/// already-accumulated rows. A chunk that is trimmed to zero rows stays as a
+/// legal zero-row array, while chunks after the stop position are dropped.
+fn trim_trailing_delta_rows(
+    chunks: Vec<WireNdArray>,
+    num_rows: usize,
+    request_id: &str,
+) -> crate::Result<Vec<WireNdArray>> {
+    if chunks.len() == 1 {
+        let chunk = chunks.into_iter().next().expect("length checked");
+        return Ok(vec![drop_trailing_rows(chunk, num_rows, request_id)?]);
+    }
+
+    let mut remaining = num_rows;
+    let mut kept = Vec::with_capacity(chunks.len());
+    for chunk in chunks.into_iter().rev() {
+        if remaining == 0 {
+            kept.push(chunk);
+            continue;
+        }
+        let rows = chunk.shape.first().copied().unwrap_or(0);
+        if remaining > rows {
+            remaining -= rows;
+        } else {
+            // This includes the update where the stop string matched. Python
+            // keeps its zero-row slice, so the result stays an array rather
+            // than becoming `None`.
+            kept.push(drop_trailing_rows(chunk, remaining, request_id)?);
+            remaining = 0;
+        }
+    }
+    kept.reverse();
+    Ok(kept)
 }
 
 /// If stop string matches, returns tuple
@@ -433,6 +496,7 @@ mod tests {
 
     use futures::{Stream, StreamExt as _, stream};
     use vllm_engine_core_client::AbortCause;
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
     use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
     use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
@@ -462,6 +526,191 @@ mod tests {
     /// Convert ASCII string to token IDs (one byte per token).
     fn ascii_tokens(s: &str) -> Vec<u32> {
         s.bytes().map(u32::from).collect()
+    }
+
+    /// One `[rows, 1, 2]` uint8 routing chunk whose bytes encode row order.
+    fn routed_rows(num_rows: usize, first: u8) -> WireNdArray {
+        let data = (0..num_rows * 2).map(|offset| first.wrapping_add(offset as u8)).collect();
+        WireNdArray::from_raw(TensorDtype::U8, vec![num_rows, 1, 2], data)
+    }
+
+    #[tokio::test]
+    async fn stop_string_trim_does_not_touch_previous_engine_output_rows() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut previous = GenerateOutput::for_test(Some(prompt), ascii_tokens("a"), None);
+        previous.routed_experts_delta = vec![routed_rows(100, 0)];
+
+        // This update reports three sampled tokens but only one routing row.
+        // Python only trims the current EngineCore update's chunk, so the
+        // previous 100 rows must survive.
+        let mut current = GenerateOutput::for_test(None, ascii_tokens("bcd"), None);
+        current.routed_experts_delta = vec![routed_rows(1, 200)];
+
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        let collected = decoded_text_event_stream(
+            "test-nonuniform".into(),
+            tokenizer,
+            stream::iter([Ok(previous), Ok(current)]),
+            opts(&["b"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(collected.text, "a");
+        let rows = collected.routed_experts.expect("rows");
+        assert_eq!(rows.shape, vec![100, 1, 2]);
+        assert_eq!(rows.data.as_raw_view().unwrap().len(), 200);
+    }
+
+    #[tokio::test]
+    async fn stop_string_without_routing_in_current_output_keeps_previous_rows() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut previous = GenerateOutput::for_test(Some(prompt), ascii_tokens("a"), None);
+        previous.routed_experts_delta = vec![routed_rows(3, 0)];
+
+        // No `routed_experts` payload for this update, so Python does not trim
+        // the previously accumulated chunks.
+        let current = GenerateOutput::for_test(None, ascii_tokens("bc"), None);
+
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        let collected = decoded_text_event_stream(
+            "test-no-current-rows".into(),
+            tokenizer,
+            stream::iter([Ok(previous), Ok(current)]),
+            opts(&["b"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(collected.text, "a");
+        let rows = collected.routed_experts.expect("rows");
+        assert_eq!(rows.shape, vec![3, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn stop_string_drops_later_updates_inside_one_merged_output() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut previous = GenerateOutput::for_test(Some(prompt), ascii_tokens("a"), None);
+        previous.routed_experts_delta = vec![routed_rows(3, 0)];
+
+        // Two engine updates coalesced by `stream_interval`: "b" matched the
+        // stop string and keeps its row; "c" arrived after the match and its
+        // row must be discarded.
+        let mut current = GenerateOutput::for_test(None, ascii_tokens("bc"), None);
+        current.routed_experts_delta = vec![routed_rows(1, 10), routed_rows(1, 20)];
+
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        let collected = decoded_text_event_stream(
+            "test-merged-stop".into(),
+            tokenizer,
+            stream::iter([Ok(previous), Ok(current)]),
+            opts(&["b"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(collected.text, "a");
+        let rows = collected.routed_experts.expect("rows");
+        assert_eq!(rows.shape, vec![4, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn stop_string_with_zero_skipped_prompt_rows_keeps_empty_payload() {
+        // `routed_experts_prompt_start == prompt_len` leaves only a legal
+        // zero-row chunk for the prefill update; the stop string removes no
+        // additional rows.
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut output = GenerateOutput::for_test(Some(prompt), ascii_tokens("a"), None);
+        output.routed_experts_delta = vec![routed_rows(0, 0)];
+
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        let collected = decoded_text_event_stream(
+            "test-skipped-prompt".into(),
+            tokenizer,
+            stream::iter([Ok(output)]),
+            opts(&["a"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(collected.text, "");
+        let rows = collected.routed_experts.expect("a zero-row payload is not None");
+        assert_eq!(rows.shape, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn stop_string_keeps_zero_row_array_when_trimming_to_empty() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut output = GenerateOutput::for_test(Some(prompt), ascii_tokens("ab"), None);
+        output.routed_experts_delta = vec![routed_rows(1, 0)];
+
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        let collected = decoded_text_event_stream(
+            "test-zero-row".into(),
+            tokenizer,
+            stream::iter([Ok(output)]),
+            opts(&["a"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(collected.text, "");
+        let rows = collected.routed_experts.expect("an empty payload is not None");
+        assert_eq!(rows.shape, vec![0, 1, 2]);
+        assert!(rows.data.as_raw_view().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trim_trailing_delta_rows_follows_python_chunk_rules() {
+        // Python `OutputProcessor._trim_surplus_tokens()` trims only the
+        // EngineCore update that matched the stop string; later updates are
+        // discarded. These row counts follow that rule, including keeping a
+        // zero-row slice for the matching chunk.
+        let cases = [
+            // (rows per chunk, dropped tokens, rows left)
+            (vec![3, 2], 2, 3),
+            (vec![3, 2], 1, 4),
+            (vec![1, 1, 1], 2, 1),
+            (vec![2, 2], 3, 1),
+            (vec![0, 2], 1, 1),
+        ];
+        for (chunk_rows, dropped, expected_rows) in cases {
+            let chunks: Vec<_> = chunk_rows
+                .iter()
+                .enumerate()
+                .map(|(index, &rows)| routed_rows(rows, index as u8 * 10))
+                .collect();
+            let trimmed = trim_trailing_delta_rows(chunks, dropped, "test").unwrap();
+            let rows: usize = trimmed.iter().map(|chunk| chunk.shape[0]).sum();
+            assert_eq!(
+                rows, expected_rows,
+                "chunk rows {chunk_rows:?}, dropped {dropped}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_trailing_rows_rejects_data_length_mismatch() {
+        let array = WireNdArray::from_raw(TensorDtype::U8, vec![2, 1, 2], vec![0, 0, 0]);
+        let error = drop_trailing_rows(array, 1, "test").unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Llm(vllm_llm::Error::RoutedExpertsDataLengthMismatch {
+                expected_bytes: 4,
+                actual_bytes: 3,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
