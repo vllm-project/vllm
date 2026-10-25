@@ -1162,7 +1162,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             min_seqlen_q=min_seqlen_q,
             dropout_p=0.0,
             softmax_scale=self.scale,
-            causal=True,
+            causal=attn_metadata.causal,
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
@@ -1445,6 +1445,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         query.shape[1],
                         query.shape[2],
                     )
+                    q_descale = None
+                    if k_descale is not None:
+                        # mha_v3 takes all-fp8 or no-fp8 inputs: quantize q
+                        # per tensor to match the fp8 cache.
+                        fp8 = current_platform.fp8_dtype()
+                        q_scale = (
+                            decode_query.abs().amax().float() / torch.finfo(fp8).max
+                        ).clamp_(min=1e-12)
+                        decode_query = (decode_query / q_scale).to(fp8)
+                        q_descale = q_scale.expand(num_decodes, self.num_kv_heads)
                     decode_out = flash_attn_with_kvcache(
                         q=decode_query,
                         k_cache=key_cache,
@@ -1454,7 +1464,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         causal=attn_metadata.causal,
                         window_size=self.sliding_window,
                         softcap=self.logits_soft_cap,
-                        q_descale=None,
+                        q_descale=q_descale,
                         k_descale=k_descale,
                         v_descale=v_descale,
                         page_table=attn_metadata.block_table[:num_decodes],

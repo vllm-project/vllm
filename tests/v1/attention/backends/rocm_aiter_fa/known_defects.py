@@ -67,18 +67,6 @@ KNOWN_DEFECTS["prefill-features"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["non-causal"] = Defect(
-    "Non-causal extend runs with causal=True, and non-causal decode with an "
-    "fp8 cache passes a bf16 query to mha_v3 (Mixed FP8 and non-FP8 tensors).",
-    (
-        _DISPATCH + "test_dispatch_row[fp8-D6-decode-noncausal]",
-        _DISPATCH + "test_non_causal_in_every_phase[auto-extend]",
-        _DISPATCH + "test_non_causal_in_every_phase[auto-mixed]",
-        _DISPATCH + "test_non_causal_in_every_phase[fp8-decode]",
-        _DISPATCH + "test_non_causal_in_every_phase[fp8-extend]",
-        _DISPATCH + "test_non_causal_in_every_phase[fp8-mixed]",
-    ),
-)
 
 KNOWN_DEFECTS["shuffle-unsupported-features"] = Defect(
     "The shuffle KV layout accepts sliding window, sinks, soft cap, ALiBi "
