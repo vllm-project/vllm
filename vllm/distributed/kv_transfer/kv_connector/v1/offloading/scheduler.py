@@ -1128,11 +1128,8 @@ class OffloadingConnectorScheduler:
                         ):
                             group_state.block_ids[j] = 0
 
-    def _add_store_jobs(
-        self, handler: StoreTriggerHandler, output: StoreJobsOutput
-    ) -> dict[int, TransferJob]:
-        """Give each store job of a handler a job ID and its trigger, and track
-        it."""
+    def _add_store_jobs(self, output: StoreJobsOutput) -> dict[int, TransferJob]:
+        """Give each store job of a handler a job ID, and track it."""
         if output.num_allocation_failures:
             self._connector_stats.increase_counter(
                 _ConnectorMetricName.ALLOCATION_FAILURE,
@@ -1140,7 +1137,6 @@ class OffloadingConnectorScheduler:
             )
         store_jobs: dict[int, TransferJob] = {}
         for job, job_status in output.jobs:
-            job_status.trigger = handler.trigger
             req_status = self._req_status[job_status.req_id]
             job_id = self._generate_job_id()
             # a store can only be issued when no load is pending.
@@ -1239,7 +1235,7 @@ class OffloadingConnectorScheduler:
         store_jobs: dict[int, TransferJob] = {}
         for handler in self._store_handlers.values():
             store_jobs |= self._add_store_jobs(
-                handler, handler.build_store_jobs(scheduler_output, self._req_status)
+                handler.build_store_jobs(scheduler_output, self._req_status)
             )
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
