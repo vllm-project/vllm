@@ -3432,9 +3432,11 @@ class Scheduler(SchedulerInterface):
         # or with deferred frees in the next, after the running loop has grown
         # the decodes once more.
         num_steps = 2 if self.defer_block_free else 1
-        num_blocks_short += sum(
-            self._num_growth_blocks(req, num_steps) for req in self.running
-        )
+        if num_steps > 1:
+            num_growth_blocks = sum(
+                self._num_growth_blocks(req, num_steps) for req in self.running
+            )
+        num_blocks_short += num_growth_blocks
         if num_blocks_short <= self._num_released_blocks([], hit):
             return set()
         victims: list[Request] = []

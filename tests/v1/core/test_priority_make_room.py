@@ -280,6 +280,28 @@ def test_no_growth_is_counted_when_the_victims_allowed_cannot_make_room(
     assert "hi" not in output.num_scheduled_tokens
 
 
+def test_without_deferred_frees_the_growth_is_counted_once(monkeypatch):
+    """Without deferred frees, one step of growth is counted until the victims'
+    blocks are free: the sum the fit is checked against, once for each running
+    request, and then each victim's own as it is added."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=4)
+    _run_three_low_priority_requests(scheduler)
+    num_growth_blocks = scheduler._num_growth_blocks
+    counted: list[tuple[str, int]] = []
+
+    def counting(request: Request, num_steps: int) -> int:
+        counted.append((request.request_id, num_steps))
+        return num_growth_blocks(request, num_steps)
+
+    monkeypatch.setattr(scheduler, "_num_growth_blocks", counting)
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=4))
+    output = _step(scheduler)
+    assert output.preempted_req_ids == {"other"}
+    assert sorted(counted) == sorted(
+        [("p1", 1), ("big", 1), ("small", 1), ("other", 1), ("other", 1)]
+    )
+
+
 def test_preempting_an_inflight_prefill_frees_its_reservation():
     """The waiting request needs 7 blocks beside the 8 that an in-flight prefill
     still needs, with 8 free. The prefill, the latest arrival, holds 4 blocks
