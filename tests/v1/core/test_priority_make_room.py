@@ -261,6 +261,25 @@ def test_no_preemption_beyond_the_per_step_cap(max_preemptions, victims):
     assert ("hi" in output.num_scheduled_tokens) == bool(victims)
 
 
+def test_no_growth_is_counted_when_the_victims_allowed_cannot_make_room(
+    monkeypatch,
+):
+    """The 15 blocks take three preemptions and two are allowed: the decodes'
+    growth could only add to the shortfall, so make-room gives up without
+    counting it."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=2)
+    _run_three_low_priority_requests(scheduler)
+
+    def num_growth_blocks(request: Request, num_steps: int) -> int:
+        raise AssertionError("counted the decodes' growth")
+
+    monkeypatch.setattr(scheduler, "_num_growth_blocks", num_growth_blocks)
+    scheduler.add_request(_request("hi", _num_tokens(15), priority=0, arrival_time=4))
+    output = _step(scheduler)
+    assert not output.preempted_req_ids
+    assert "hi" not in output.num_scheduled_tokens
+
+
 def test_preempting_an_inflight_prefill_frees_its_reservation():
     """The waiting request needs 7 blocks beside the 8 that an in-flight prefill
     still needs, with 8 free. The prefill, the latest arrival, holds 4 blocks

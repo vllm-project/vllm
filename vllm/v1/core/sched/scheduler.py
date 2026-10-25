@@ -3411,10 +3411,19 @@ class Scheduler(SchedulerInterface):
             (req for req in self.running if req.priority > request.priority),
             key=lambda req: (req.priority, req.arrival_time),
             reverse=True,
-        )
+        )[: self.max_priority_preemptions_per_step]
         if not candidates:
             return set()
         num_blocks_short = self._num_blocks_short(request, hit)
+        if (
+            num_blocks_short > 0
+            and not self.need_mamba_block_aligned_split
+            and num_blocks_short > self._num_released_blocks(candidates, hit)
+        ):
+            # Not even all the candidates would make room: the decodes' growth
+            # only adds to the shortfall. (Mamba's align mode can count growth
+            # below zero, for a request holding blocks ahead of its tokens.)
+            return set()
         num_growth_blocks = sum(self._num_growth_blocks(req, 1) for req in self.running)
         if num_blocks_short + num_growth_blocks <= 0:
             # It fits in this step, after the running loop.
@@ -3429,7 +3438,7 @@ class Scheduler(SchedulerInterface):
         if num_blocks_short <= self._num_released_blocks([], hit):
             return set()
         victims: list[Request] = []
-        for victim in candidates[: self.max_priority_preemptions_per_step]:
+        for victim in candidates:
             victims.append(victim)
             num_blocks_short -= self._num_growth_blocks(victim, num_steps)
             if num_blocks_short <= self._num_released_blocks(victims, hit):
