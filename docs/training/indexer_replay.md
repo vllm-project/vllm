@@ -75,6 +75,9 @@ Before creating the Store, startup queries system available RAM and the remainin
 container cgroup memory, using the smaller value. The Store uses anonymous shared
 `mmap`, so `/dev/shm` mount free space is not its capacity limit; see the
 [Linux tmpfs documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html).
+Schedulers that enforce their memory request outside cgroups can export the budget
+in `VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES` from their job wrapper; startup then uses
+the smallest of that value, the cgroup headroom and available RAM.
 The check reserves runtime headroom, accounts for staging and estimated metadata,
 and divides the remaining budget across local DP output workers. It then rounds
 down to complete SHM objects and infers the maximum GPU KV block count. The same

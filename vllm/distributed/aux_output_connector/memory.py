@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host-memory admission checks for anonymous AuxOutput SHM arenas."""
 
-import os
-
 import psutil
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     get_cgroup_memory_limit,
@@ -16,61 +15,23 @@ logger = init_logger(__name__)
 _METADATA_BYTES_PER_OBJECT = 512
 
 
-def _slurm_memory_limit() -> int | None:
-    """Return the job's Slurm memory allocation in bytes, or None.
-
-    Slurm exports the request in MiB. Many clusters do not enforce it through a
-    cgroup memory controller, so the scheduler quota is the only place the real
-    limit is visible; ignoring it lets the admission check pass on a node with
-    far less memory than the job may use.
-    """
-    per_node = os.environ.get("SLURM_MEM_PER_NODE")
-    if per_node:
-        try:
-            return int(per_node) * 1024 * 1024
-        except ValueError:
-            return None
-    per_cpu = os.environ.get("SLURM_MEM_PER_CPU")
-    cpus = os.environ.get("SLURM_CPUS_ON_NODE") or os.environ.get("SLURM_CPUS_PER_TASK")
-    if per_cpu and cpus:
-        try:
-            return int(per_cpu) * int(cpus) * 1024 * 1024
-        except ValueError:
-            return None
-    return None
-
-
-def _cgroup_memory_current() -> int | None:
-    """Return this process' cgroup memory usage even when the limit is unset."""
-    try:
-        with open("/proc/self/cgroup") as fh:
-            for line in fh:
-                if not line.startswith("0::"):
-                    continue
-                relative = line.strip().split("::", 1)[1].lstrip("/")
-                path = f"/sys/fs/cgroup/{relative}/memory.current"
-                with open(path) as current:
-                    return int(current.read().strip())
-    except (OSError, ValueError):
-        pass
-    try:
-        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as usage:
-            return int(usage.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def get_available_host_memory() -> int:
-    """Return current system/cgroup headroom for anonymous shared mappings."""
+    """Return current headroom for anonymous shared mappings.
+
+    The budget is the smallest of the host's available memory, the cgroup
+    headroom, and an explicit ``VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES`` override.
+    The override is for schedulers that enforce their memory request outside
+    cgroups; translating a vendor-specific allocation into that variable is the
+    job wrapper's responsibility, so this module stays scheduler agnostic.
+    """
     available: int = psutil.virtual_memory().available
     limit = get_cgroup_memory_limit()
     usage = get_cgroup_memory_usage()
     if limit is not None and usage is not None:
         available = min(available, max(0, limit - usage))
-    slurm_limit = _slurm_memory_limit()
-    if slurm_limit is not None:
-        used = _cgroup_memory_current() or 0
-        available = min(available, max(0, slurm_limit - used))
+    configured = envs.VLLM_AUX_OUTPUT_HOST_MEMORY_BYTES
+    if configured is not None:
+        available = min(available, configured)
     return available
 
 
