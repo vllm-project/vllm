@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
+    VLLM_ROCM_MUSE_MOE_ROUTE_MODE: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1268,6 +1269,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
     ).lower(),
+    # Muse Spark on ROCm: take the AITER MXFP4 experts' per-route rows from
+    # fused_moe(per_slot_output=) when the installed AITER has it, instead of
+    # top-1 over a per-route copy of the input. Disabled by =0.
+    "VLLM_ROCM_MUSE_MOE_ROUTE_MODE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_MUSE_MOE_ROUTE_MODE", "1"))
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
