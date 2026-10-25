@@ -504,14 +504,17 @@ class DeepseekSparseSWAIndexBatch:
         self._shared: tuple[Any, ...] | None = None
         self._open = False
         # Staging for the batched launch's parameter table, sized to the
-        # largest group count seen. The host side is pageable on purpose: a
-        # pageable H2D copy captures its source before the call returns, so
-        # the table can be refilled while the previous copy is still queued.
-        # A pinned staging buffer would need a fresh allocation per step for
-        # the same guarantee.
+        # largest group count seen. The host side must be pinned: a pageable
+        # H2D copy serializes on the stream through a driver staging buffer
+        # (measured as a uniform per-step stall), while a pinned copy is a
+        # true async DMA. Refilling a pinned source is only safe once the
+        # previous copy retired, so an event guards the refill; while it is
+        # pending the launch falls back to a fresh table, whose lifetime the
+        # caching allocator already guards.
         self._params_host: torch.Tensor | None = None
         self._params_host_rows: np.ndarray | None = None
         self._params_device: torch.Tensor | None = None
+        self._params_copied: torch.cuda.Event | None = None
 
     @property
     def open(self) -> bool:
@@ -676,15 +679,25 @@ class DeepseekSparseSWAIndexBatch:
                 replay_start,
             ) in self._groups
         ]
-        if self._params_host is None or self._params_host.shape[0] < num_groups:
-            self._params_host = torch.empty(num_groups, 8, dtype=torch.int64)
+        if (
+            self._params_host is None
+            or self._params_host.shape[0] < num_groups
+            or (self._params_copied is not None and not self._params_copied.query())
+        ):
+            self._params_host = torch.empty(
+                num_groups, 8, dtype=torch.int64, pin_memory=True
+            )
             self._params_host_rows = self._params_host.numpy()
             self._params_device = torch.empty(
                 num_groups, 8, dtype=torch.int64, device=self._device
             )
+            self._params_copied = None
         self._params_host_rows[:num_groups] = rows
         params = self._params_device[:num_groups]
         params.copy_(self._params_host[:num_groups], non_blocking=True)
+        if self._params_copied is None:
+            self._params_copied = torch.cuda.Event()
+        self._params_copied.record()
         _COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL(
             params,
             query_start_loc,
