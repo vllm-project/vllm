@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.decisions.question_types import (
 from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
 from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
+    MIN_WARM_PREFIX_TOKENS,
     ClefFlashStrategy,
     D3Strategy,
     DiffusionGemmaCanvasStrategy,
@@ -460,6 +461,54 @@ async def test_state_is_prefilled_once_before_the_reads(
         read_ids = read.args[0]["prompt_token_ids"]
         assert read_ids[: len(warm_ids)] == warm_ids
         assert read.args[1].logprob_token_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_in_prefix", [True, False])
+async def test_multimodal_prefix_warmup_preserves_input(
+    serving_and_engine, monkeypatch, image_in_prefix
+):
+    serving, engine = serving_and_engine
+    strategy = serving.strategy
+    monkeypatch.setattr(ModelConfig, "is_hybrid", property(lambda self: True))
+    engine.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=True)
+    )
+    shared = MIN_WARM_PREFIX_TOKENS + 10
+    prompts = [[1] * shared + [2, 3], [1] * shared + [4, 5]]
+    image_end = 20 if image_in_prefix else shared + 1
+    engine_input = mm_input(
+        prompts[0],
+        {"image": object()},
+        {"image": ["image-hash"]},
+        {"image": [PlaceholderRange(offset=8, length=image_end - 8)]},
+        prompt="the original rendered prompt",
+        cache_salt="tenant",
+    )
+
+    await strategy._warm_shared_prefix(
+        prompts,
+        "request",
+        engine_input=engine_input,
+        lora_request=None,
+        priority=0,
+        cache_salt="tenant",
+        trace_headers=None,
+    )
+
+    if not image_in_prefix:
+        engine.generate.assert_not_called()
+        return
+    warm_input = engine.generate.call_args.args[0]
+    assert warm_input["type"] == "multimodal"
+    assert warm_input["prompt_token_ids"] == prompts[0][:shared]
+    assert warm_input["mm_kwargs"] is engine_input["mm_kwargs"]
+    assert warm_input["mm_hashes"] is engine_input["mm_hashes"]
+    assert warm_input["mm_placeholders"] is engine_input["mm_placeholders"]
+    assert warm_input["cache_salt"] == "tenant"
+    assert "prompt" not in warm_input
+    assert engine_input["prompt_token_ids"] == prompts[0]
+    assert engine_input["prompt"] == "the original rendered prompt"
 
 
 def test_canvas_read():
