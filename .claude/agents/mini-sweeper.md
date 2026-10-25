@@ -20,6 +20,11 @@ ToolSearch(query: "select:mcp__sk-agent__call_agent")
 1. **COLLECTE — déterministe, par TOI (jamais le mini)** :
    - Issues/PRs : `gh issue list --state all --json number,title,body,updatedAt,labels --limit 500`
      (pareil `pr list`). Un item = number + title + body (tronqués à ~40 lignes si besoin).
+   - **Quotas partagés (note user 25/10)** : `gh`/APIs externes = ressources à quota commun —
+     collecte en **quelques appels bulk** (un `list --limit 500` couvre des centaines d'items),
+     JAMAIS de boucle per-item (`gh issue view` × N) qui affamerait les autres agents. Si le
+     balayage exige >~10 appels API, regrouper, paginer dans l'appel, ou différer. Les sources
+     locales (fichiers, logs, dashboards RSM) n'ont pas cette contrainte.
    - Dashboard : `roosync_dashboard(action:"read", type:..., section:"all")` → messages
      découpés en items (id, auteur, date, corps ≤40 lignes).
    - Dépôt : `Glob`/`Grep` produisent des listes de fichiers/extraits.

@@ -92,7 +92,10 @@ dédié porte le même travail. Critère transverse : rien de critique sans vér
 **Outils** (note user 25/10) : chaque famille suppose des outils spécifiques — et FrogNano les
 a, des deux côtés : harnais Claude Code (sous-agents avec `gh`, `Grep`, lecture web) ou sk-agent
 (MCPs branchés). La condition est la **configuration** — c'est elle la barrière, pas la capacité
-du modèle ; c'est exactement ce que les sous-agents tout faits ci-dessous éliminent.
+du modèle ; c'est exactement ce que les sous-agents tout faits ci-dessous éliminent. Seule
+réserve : les sources à **quota partagé** (`gh`/APIs) se collectent en quelques appels bulk
+(1 `list --limit 500` = des centaines d'items), jamais en boucle per-item qui affamerait les
+autres agents ; les ressources locales (fichiers, logs, dashboards) n'ont pas ce problème.
 
 ### Le nudge harnais (rendre le geste réflexe — user 25/10)
 
