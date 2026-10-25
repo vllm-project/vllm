@@ -1423,8 +1423,7 @@ def wait_for_engine_startup(
 
     bootstrap_server = None
     if (
-        parallel_config.data_parallel_external_lb
-        and parallel_config.enable_elastic_ep
+        parallel_config.uses_external_elastic_ep
         and parallel_config.data_parallel_rank == 0
     ):
         from vllm.distributed.elastic_ep.bootstrap import (
@@ -1501,20 +1500,19 @@ def wait_for_engine_startup(
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
         msg = msgspec.msgpack.decode(ready_msg_bytes)
         if msg["status"] == "BOOTSTRAP":
-            participant = next(
-                (
-                    engine
-                    for engine in core_engines
-                    if int.from_bytes(engine.identity, "little") == msg.get("rank")
-                ),
-                None,
-            )
             if bootstrap_server is None:
                 error = "This listener does not support automatic Elastic EP bootstrap"
-            elif participant is None or participant.state != CoreEngineState.NEW:
-                error = "DP rank is not awaiting initial startup; recovery is required"
             else:
-                bootstrap_server.reply(handshake_socket, eng_identity, msg)
+                bootstrap_server.reply(
+                    handshake_socket,
+                    eng_identity,
+                    msg,
+                    available_ranks={
+                        int.from_bytes(engine.identity, "little")
+                        for engine in core_engines
+                        if not engine.local and engine.state == CoreEngineState.NEW
+                    },
+                )
                 continue
             handshake_socket.send_multipart(
                 (eng_identity, msgspec.msgpack.encode({"error": error}))

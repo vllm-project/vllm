@@ -252,6 +252,8 @@ class ParallelConfig:
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+    elastic_ep_auto_bootstrap: bool = False
+    """Use native automatic startup, independently of request load balancing."""
     elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
     """Maximum data parallel size supported by elastic expert parallelism."""
 
@@ -660,6 +662,12 @@ class ParallelConfig:
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     @property
+    def uses_external_elastic_ep(self) -> bool:
+        return self.enable_elastic_ep and (
+            self.data_parallel_external_lb or self.elastic_ep_auto_bootstrap
+        )
+
+    @property
     def cpu_distributed_timeout(self) -> timedelta | None:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
@@ -930,6 +938,7 @@ class ParallelConfig:
             "_data_parallel_master_port_list",
             "_coord_store_port",
             "_external_elastic_ep_bootstrap",
+            "elastic_ep_auto_bootstrap",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -983,7 +992,7 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb and not self.elastic_ep_auto_bootstrap:
                 raise NotImplementedError(
                     "Elastic EP is not compatible with data_parallel_hybrid_lb. "
                     "Elastic EP supports a single API server/core client path "

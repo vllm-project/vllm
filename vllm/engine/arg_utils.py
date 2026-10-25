@@ -1276,8 +1276,10 @@ class EngineArgs:
             "--data-parallel-rank",
             "-dpn",
             type=int,
-            help="Data parallel rank of this instance. "
-            "When set, enables external load balancer mode for MoE "
+            help="Data parallel rank of this instance. With automatic Elastic EP "
+            "bootstrap, this is the first of --data-parallel-size-local ranks; "
+            "multi-rank clients use local load balancing. Otherwise, setting "
+            "this enables external load balancer mode for MoE "
             "data-parallel deployments. Unsupported for non-MoE models; "
             "launch independent vLLM instances instead.",
         )
@@ -2499,10 +2501,17 @@ class EngineArgs:
                 self.data_parallel_size_local = max(
                     local_world_size // world_size_within_dp, 1
                 )
+        automatic_local_lb = (
+            self.elastic_ep_auto_bootstrap
+            and self.data_parallel_size_local is not None
+            and self.data_parallel_size_local > 1
+        )
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
-        )
-        if self.enable_fault_tolerance and not data_parallel_external_lb:
+        ) and not automatic_local_lb
+        if self.enable_fault_tolerance and not (
+            data_parallel_external_lb or automatic_local_lb
+        ):
             raise ValueError(
                 "Fault tolerance requires external load balancer mode "
                 "(--data-parallel-external-lb or --data-parallel-rank). "
@@ -2510,7 +2519,7 @@ class EngineArgs:
             )
         if (
             self.data_parallel_size > 1
-            and data_parallel_external_lb
+            and (data_parallel_external_lb or automatic_local_lb)
             and not model_config.is_moe
         ):
             raise ValueError(
@@ -2518,8 +2527,12 @@ class EngineArgs:
                 "For external load balancing, launch independent vLLM "
                 "instances without --data-parallel-* arguments."
             )
-        # Local DP rank = 1, use pure-external LB.
-        if data_parallel_external_lb:
+        if automatic_local_lb:
+            data_parallel_size_local = self.data_parallel_size_local or 1
+            self.data_parallel_hybrid_lb = (
+                data_parallel_size_local < self.data_parallel_size
+            )
+        elif data_parallel_external_lb:
             if self.data_parallel_rank is None:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
@@ -2536,7 +2549,6 @@ class EngineArgs:
                     "omit it."
                 )
             data_parallel_size_local = 1
-            # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
@@ -2646,6 +2658,7 @@ class EngineArgs:
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
+            elastic_ep_auto_bootstrap=self.elastic_ep_auto_bootstrap,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             _external_elastic_ep_bootstrap=bootstrap_identity,
             enable_dbo=self.enable_dbo,
