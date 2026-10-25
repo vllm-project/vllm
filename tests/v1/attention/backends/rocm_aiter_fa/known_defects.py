@@ -80,17 +80,6 @@ KNOWN_DEFECTS["non-causal"] = Defect(
     ),
 )
 
-KNOWN_DEFECTS["shuffle-unsupported-features"] = Defect(
-    "The shuffle KV layout accepts sliding window, sinks, soft cap, ALiBi "
-    "and multi-token decode, then asserts or computes wrong results at the "
-    "first decode instead of refusing the config.",
-    (
-        _CAP + "test_shuffle_layout_rejects_window_and_sinks[shuffle-*]",
-        _DISPATCH + "test_shuffle_refuses_features_it_cannot_decode[*]",
-        _BUILDER + "test_shuffle_layout_refuses_multi_token_decode",
-        _ENGINE + "test_shuffle_layout_refuses_sliding_window_model",
-    ),
-)
 
 KNOWN_DEFECTS["shuffle-lbhnc-layout"] = Defect(
     "Under shuffle the backend lists LBHNC, but shuffle decode needs K and V "
