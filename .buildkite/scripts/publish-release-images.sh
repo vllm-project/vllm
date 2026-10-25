@@ -72,13 +72,30 @@ fi
 # ---- ROCm ----
 # Copied from ECR (publish.sh). The default stack (rocm) also owns the plain :latest / :v<ver> tags.
 
+# pin_rocm <ref>  — <ref>@<digest>, so what was checked is what is published
+pin_rocm() {
+  local d
+  d=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
+  [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "cannot resolve the digest of $1" >&2; return 1; }
+  echo "$1@$d"
+}
+
 publish_rocm_stack() {
-  local v s sfx ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
+  local v s sfx img base ver ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
   v=$(buildkite-agent meta-data get "rocm-$1-variant")
+  img=$(pin_rocm "$ecr-$v")
+  base=$(pin_rocm "$ecr-$v-base")
+  # Another build of this commit (e.g. a branch push) may have retagged it with its own version.
+  ver=$(docker buildx imagetools inspect "$img" \
+    --format '{{index .Image.Config.Labels "org.opencontainers.image.version"}}')
+  if [[ ${ver%%+*} != "$RELEASE_VERSION" ]]; then
+    echo "ERROR: $img is version '$ver', not $RELEASE_VERSION" >&2
+    exit 1
+  fi
   sfx=("-$v"); if [[ $1 == rocm ]]; then sfx+=(""); fi
   for s in "${sfx[@]}"; do
-    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$ecr-$v"
-    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$ecr-$v-base"
+    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$img"
+    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$base"
   done
 }
 

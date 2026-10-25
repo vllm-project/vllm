@@ -111,8 +111,8 @@ pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/$V
 
 ### Download wheels directly
 \`\`\`bash
-aws s3 ls  s3://vllm-wheels/rocm/$COMMIT/$V/
-aws s3 cp  --recursive --include "*.whl" s3://vllm-wheels/rocm/$COMMIT/$V/ .
+aws s3 ls  s3://${S3_BUCKET:-vllm-wheels}/rocm/$COMMIT/$V-wheels/
+aws s3 cp  --recursive --exclude "*" --include "*.whl" s3://${S3_BUCKET:-vllm-wheels}/rocm/$COMMIT/$V-wheels/ .
 \`\`\`
 EOF
     ;;

@@ -235,7 +235,8 @@ def _today() -> datetime.date:
     return datetime.datetime.now(datetime.UTC).date()
 
 
-# Its own status for "no wheel for this image"; Dockerfile.rocm fails the step on it.
+# Its own status for "no wheel for this image". Dockerfile.rocm fails the image build on any
+# failure here; bake reports that as exit 1, which the image-build step retries once.
 EXIT_NO_WHEEL = 10
 
 

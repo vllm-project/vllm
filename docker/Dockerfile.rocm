@@ -216,7 +216,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
  && git checkout ${DEEPEP_BRANCH} \
  && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} --rocm-gfx942-fp8-fnuz-max 224 bdist_wheel --dist-dir=/app/deep_install
 
-# rdma-core recent enough for rocshmem (replaces the distro libraries in runtime).
+# rdma-core recent enough for DeepEP's rocshmem. CI only: it replaces the distro libibverbs, which
+# the vendor NIC providers in the runtime (AINIC, Broadcom bnxt_re) are built against.
 FROM dev AS build_rdma_core
 RUN git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core \
     && cd /tmp/rdma-core && mkdir build && cd build \
@@ -287,7 +288,6 @@ RUN --mount=type=cache,target=/root/.cache/pip /bin/bash -lc 'set -euo pipefail;
 RUN echo "MORI_NIC_BACKEND=${NIC_BACKEND}" >> /app/versions.txt \
     && echo "AINIC_VERSION=${AINIC_VERSION}" >> /app/versions.txt
 
-COPY --from=build_rdma_core /out /
 # Install torchcodec from source for ROCm/torch ABI compatibility.
 RUN --mount=type=bind,source=tools/install_torchcodec_rocm.sh,target=/tmp/install_torchcodec.sh \
     --mount=type=cache,target=/root/.cache/uv \
@@ -300,11 +300,10 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
     --mount=type=bind,source=requirements/rocm.txt,target=/r/rocm.txt \
     --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
     --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl \
-    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deepep \
     --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -c /etc/rocm-constraints.txt -c /r/test.txt -r /r/rocm.txt \
-        /nixl/*.whl /deepep/*.whl /lmcache/*.whl quart msgpack aiohttp pyzmq \
+        /nixl/*.whl /lmcache/*.whl quart msgpack aiohttp pyzmq \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
@@ -355,13 +354,16 @@ FROM runtime AS test-deps
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
+# DeepEP and the rdma-core its rocshmem needs: CI only, as before (see build_rdma_core).
+COPY --from=build_rdma_core /out /
+RUN --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deepep \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    ldconfig && uv pip install --system -c /etc/rocm-constraints.txt /deepep/*.whl
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=type=bind,source=tests/vllm_test_utils,target=/tu,rw \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
     && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
     && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
-# No VLLM_GPU_SYNC_CHECK yet: AMD CI never ran with it, and ROCm code paths still sync
-# (EPLB, sparse MLA, indexers, moondream3). Enable it once those are fixed.
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 # ==== per-commit stages: nothing below is part of the runtime key ====
@@ -530,7 +532,10 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
         out="$(python3 -P /tmp/select.py)" || { echo "$out" >&2; exit 1; }; \
         echo "$out"; spec="$(echo "$out" | head -n 1)"; \
     fi; \
-    if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi; \
+    if [ -n "$spec" ]; then \
+        pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
+        python3 -c 'import aiter' || exit 1; \
+    fi; \
     # A wheel built against a newer glibc or libstdc++ than this image installs and imports fine
     # but fails every test that loads its modules; fail here instead.
     if [ -n "$spec" ]; then \
@@ -545,6 +550,8 @@ COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
+# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
+ENV VLLM_GPU_SYNC_CHECK=error
 
 FROM test AS test-smoke
 RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"

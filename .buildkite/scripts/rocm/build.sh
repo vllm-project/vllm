@@ -11,15 +11,18 @@
 #   keys     Print current Ks/Kr keys and whether their images exist (on-call debug).
 #   base     Ensure stack, runtime and test-deps images exist; write their refs to Buildkite metadata.
 #   ci       Build and push this build's per-commit test image.
-#   release  Release image + wheels on the CI-tested layers (release pipeline, AWS agents).
+#   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
-#        in docker/Dockerfile.rocm_base.
+#        in docker/Dockerfile.rocm_base
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
-#   Release pipeline:    its ECR repo     (reads rocm/vllm-ci and its cache, writes neither; own cache in ECR)
+#   Other untrusted:     rocm/vllm-dev    (br-<branch>- tags and caches: nightlies, branch builds)
+#   Release pipeline:    its ECR repo     (never takes images from rocm/vllm-ci: it builds the
+#                                          stack and runtime from source, with the trusted cache as a
+#                                          build cache; writes neither; own cache in ECR)
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
@@ -43,8 +46,13 @@ PFX=""
 if [[ $MODE == release ]]; then
   CACHE_TO=$REPO:cache-
 elif [[ $REPO != "$TRUSTED" ]]; then
-  PFX="pr${BUILDKITE_PULL_REQUEST:-local}-"
-  CACHE_TO=$REPO:cache-pr${BUILDKITE_PULL_REQUEST:-local}-
+  if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]]; then
+    PFX="pr$BUILDKITE_PULL_REQUEST-"
+  else   # not a PR (AITER nightly, branch or manual builds): one namespace per branch
+    br=$(printf %s "${BUILDKITE_BRANCH:-local}" | tr -c 'A-Za-z0-9.-' - | cut -c1-40)
+    PFX="br-$br-"
+  fi
+  CACHE_TO=$REPO:cache-$PFX
   # Only the compile stages' cache: everything else is cheap or in the trusted cache.
   export CACHE_CI=false
 fi
@@ -155,15 +163,18 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 # ---------------------------------------------------------------------------
 # Resolve a content-keyed image without building if it already exists.
 # Resolution order:
-#   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any build to reuse.
+#   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any CI build to reuse. Not for release:
+#      CI agents also run PR code, so release never ships an image it did not build itself.
 #   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds and the release pipeline write here.
 #   3. Neither found: build via bake and push.
 # A <sibling-suffix> means the image only counts as present when the sibling
 # tag also exists (used by stack: must have both the image and -wheels).
 ensure() {
-  local target=$1 tag=$2 sibling=${3:-} ref d
+  local target=$1 tag=$2 sibling=${3:-} ref d refs
+  refs=("$REPO:$PFX$tag")
+  [[ $MODE == release ]] || refs=("$TRUSTED:$tag" "${refs[@]}")
 
-  for ref in "$TRUSTED:$tag" "$REPO:$PFX$tag"; do
+  for ref in "${refs[@]}"; do
     if d=$(digest "$ref") && { [[ -z $sibling ]] || digest "$ref$sibling" >/dev/null; }; then
       echo "Reusing $ref@$d" >&2
       echo "$ref@$d"
@@ -243,9 +254,9 @@ case $MODE in
     ;;
 
   release)
-    # Build and push the release image + wheels on the CI-tested layers, reused by digest from
-    # rocm/vllm-ci; a key CI has not built yet is built here into $REPO. Only the all-arch
-    # compile and the release layers are new.
+    # Build and push the release image + wheels into $REPO. The stack and runtime come from this
+    # repo only (built here once per key, from the same Dockerfiles and keys CI tests), with the
+    # trusted cache as a build cache: images in rocm/vllm-ci are never shipped as they are.
     STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
     export STACK_IMAGE   # before ensure runtime: a runtime built here must use this stack
     STACK_WHEELS=${STACK_IMAGE%@*}-wheels

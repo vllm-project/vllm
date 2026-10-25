@@ -23,6 +23,7 @@ run_all_patterns:
   - "rust-toolchain.toml"
   - "tools/build_rust.py"
   - "tools/install_torchcodec_rocm.sh"
+  - "tools/vllm-rocm/therock_wheels.py"
   - "tests/vllm_test_utils/"
   - "vllm/envs.py"
   - "vllm/__init__.py"

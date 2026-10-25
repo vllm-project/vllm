@@ -54,13 +54,19 @@ def test_stack_key_covers_stack_inputs():
     assert context_sources(dockerfile) <= key_paths("Ks", stack="rocm")
 
 
-def run_ci_build(tmp_path: Path, **env: str) -> tuple[int, str, list[str]]:
-    """build.sh ci against fake git, docker and buildkite-agent; returns (status,
-    stderr, calls). FAILURE=bake|missing|upload breaks the kernel symbol map."""
+def run_build(
+    tmp_path: Path, mode: str = "ci", existing: tuple[str, ...] = (), **env: str
+) -> tuple[int, str, list[str]]:
+    """build.sh <mode> against fake git, docker and buildkite-agent; returns (status,
+    stderr, calls). `existing` are the image refs the registry already has.
+    FAILURE=bake|missing|upload breaks the kernel symbol map."""
     (tmp_path / "docker").symlink_to(ROOT / "docker")
     fake = tmp_path / "bin"
     fake.mkdir()
     calls = tmp_path / "calls"
+    calls.touch()
+    registry = tmp_path / "registry"
+    registry.write_text("".join(f"{ref}\n" for ref in existing))
     (fake / "git").write_text(
         """#!/bin/bash
 case $1 in
@@ -71,16 +77,30 @@ esac
     )
     (fake / "docker").write_text(
         """#!/bin/bash
-[[ $1 == buildx && $2 == bake ]] || exit 0
-target=${@: -1}
-echo "bake $target" >> calls
-case $target in
-  ci) mkdir -p .rocm-wheel && touch .rocm-wheel/vllm-0.whl ;;
-  kernel-symbol-map)
-    [[ $FAILURE == bake ]] && exit 1
-    mkdir -p .rocm-kernel-map && cd .rocm-kernel-map
-    [[ $FAILURE == missing ]] || echo map > kernel_symbol_map.rocm.json.gz ;;
+[[ $1 == buildx ]] || exit 0
+case $2 in
+  imagetools)
+    if [[ $3 == inspect ]]; then
+      found=0
+      while read -r ref; do [[ $4 == "$ref"* ]] && found=1; done < "$REGISTRY"
+      ((found)) || { echo "$4: not found" >&2; exit 1; }
+      echo "Digest: sha256:$(printf '0%.0s' {1..64})"
+    else
+      echo "create ${@: -1}" >> "$CALLS"
+    fi ;;
+  bake)
+    echo "bake ${*:5}" >> "$CALLS"
+    case ${@: -1} in
+      base|runtime|test-deps) printf '%s\n' "$TAG" "$TAG-wheels" >> "$REGISTRY" ;;
+      version) mkdir -p .rocm-version && echo 1.0 > .rocm-version/vllm-version.txt ;;
+      ci) mkdir -p .rocm-wheel && touch .rocm-wheel/vllm-0.whl ;;
+      kernel-symbol-map)
+        [[ $FAILURE == bake ]] && exit 1
+        mkdir -p .rocm-kernel-map && cd .rocm-kernel-map
+        [[ $FAILURE == missing ]] || echo map > kernel_symbol_map.rocm.json.gz ;;
+    esac ;;
 esac
+exit 0
 """
     )
     (fake / "buildkite-agent").write_text(
@@ -100,18 +120,89 @@ exit 0
         "PATH": f"{fake}:{os.environ['PATH']}",
         "ROCM_CI_REPO": "rocm/vllm-ci",
         "BUILDKITE_BUILD_ID": "b1",
+        "BUILDKITE_COMMIT": "c1",
         "CALLS": str(calls),
+        "REGISTRY": str(registry),
         "FAILURE": "",
         **env,
     }
     result = subprocess.run(
-        ["bash", str(ROOT / ".buildkite/scripts/rocm/build.sh"), "rocm", "ci"],
+        ["bash", str(ROOT / ".buildkite/scripts/rocm/build.sh"), "rocm", mode],
         cwd=tmp_path,
         env=run_env,
         capture_output=True,
         text=True,
     )
     return result.returncode, result.stderr, calls.read_text().splitlines()
+
+
+run_ci_build = run_build
+
+
+def built_tags(calls: list[str], stderr: str) -> list[str]:
+    return [line.split(" as ", 1)[1] for line in stderr.splitlines() if " as " in line]
+
+
+TRUSTED_KEYED = tuple(
+    f"rocm/vllm-ci:{name}-rocm-" for name in ("stack", "runtime", "test-deps")
+)
+
+
+def test_release_never_ships_images_from_the_ci_repo(tmp_path):
+    # The trusted CI repo has every key; release must still build its own into ECR.
+    status, stderr, calls = run_build(
+        tmp_path,
+        "release",
+        ROCM_CI_REPO="ecr/release",
+        existing=TRUSTED_KEYED,
+    )
+    assert status == 0, stderr
+    assert not any(
+        "rocm/vllm-ci:" in line
+        for line in stderr.splitlines()
+        if line.startswith("Reusing")
+    )
+    assert [t.split(":")[1].rsplit("-", 1)[0] for t in built_tags(calls, stderr)] == [
+        "stack-rocm",
+        "runtime-rocm",
+    ]
+    assert all(t.startswith("ecr/release:") for t in built_tags(calls, stderr))
+
+
+def test_ci_builds_reuse_the_trusted_images(tmp_path):
+    status, stderr, calls = run_build(
+        tmp_path,
+        "base",
+        ROCM_CI_REPO="rocm/vllm-dev",
+        existing=TRUSTED_KEYED,
+        BUILDKITE_PULL_REQUEST="7",
+    )
+    assert status == 0, stderr
+    assert not built_tags(calls, stderr)
+    assert stderr.count("Reusing rocm/vllm-ci:") == 3
+
+
+@pytest.mark.parametrize(
+    ("pull_request", "branch", "prefix"),
+    [
+        ("7", "feature", "pr7-"),
+        ("false", "main", "br-main-"),
+        ("false", "releases/v1.2", "br-releases-v1.2-"),
+    ],
+)
+def test_untrusted_builds_get_their_own_namespace(
+    tmp_path, pull_request, branch, prefix
+):
+    status, stderr, calls = run_build(
+        tmp_path,
+        "base",
+        ROCM_CI_REPO="rocm/vllm-dev",
+        BUILDKITE_PULL_REQUEST=pull_request,
+        BUILDKITE_BRANCH=branch,
+    )
+    assert status == 0, stderr
+    tags = built_tags(calls, stderr)
+    assert tags and all(t.startswith(f"rocm/vllm-dev:{prefix}") for t in tags)
 
 
 def test_ci_build_uploads_the_kernel_symbol_map_when_asked(tmp_path):

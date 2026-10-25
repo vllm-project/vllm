@@ -494,10 +494,11 @@ steps:
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
   # =============================================================================
-  # One group per ROCm stack, on this pipeline's own agents. The build step reuses the CI-tested
-  # stack and runtime images from rocm/vllm-ci by digest, compiles csrc for all release arches and
-  # pushes <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the
-  # steps after it only copy those (.buildkite/scripts/rocm/publish.sh).
+  # One group per ROCm stack, on this pipeline's own agents. The build step builds the stack and
+  # runtime from source into ECR (once per content key, with the CI cache as a build cache; it never
+  # ships images from rocm/vllm-ci), compiles csrc for all release arches and pushes
+  # <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the steps
+  # after it only copy those (.buildkite/scripts/rocm/publish.sh).
   # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
   #   the root wheel index.
   # =============================================================================
