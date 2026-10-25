@@ -881,10 +881,7 @@ class ExternalElasticEPScaleCoordinator:
         """Record scale notifications emitted by EngineCore processes.
         The stored keys are later polled by the external scale coordinator."""
         parallel_config = self.client.vllm_config.parallel_config
-        if not (
-            parallel_config.enable_elastic_ep
-            and parallel_config.data_parallel_external_lb
-        ):
+        if not parallel_config.uses_external_elastic_ep:
             return
 
         notification_type_str, dp_rank = notification_data

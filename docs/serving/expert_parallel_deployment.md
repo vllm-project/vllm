@@ -178,14 +178,16 @@ by manual launches. Do not set `VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`; automatic
 bootstrap selects the launch path.
 
 Initial ranks form the complete initial world without synthetic resize requests.
-Discovery reserves a rank for one process and one handshake; the subsequent
-engine handshake checks that reservation before initialization. Discovery is
+Discovery reserves a rank or local rank range for one client and one handshake;
+each subsequent engine handshake checks that reservation before initialization. Discovery is
 not membership commit or serving readiness, and does not trigger a resize. The
 external load balancer must still follow each endpoint's serving health.
 
-This mode supports external MP DP with one local DP rank and one API server per
-process. Hybrid load balancing and headless startup do not use this discovery
-path. Fault tolerance may be enabled with an FT-capable all-to-all backend, as
+This mode supports external MP DP with one API server/core client per process.
+The default local rank count is one; see [Local Rank Ranges](#local-rank-ranges)
+for multi-rank startup. Local routing is inferred automatically for multi-rank
+clients; do not add explicit hybrid-LB or start-rank options. Headless startup
+does not use this discovery path. Fault tolerance may be enabled with an FT-capable all-to-all backend, as
 required by vLLM (`nixl_ep` or `deepep_low_latency`); automatic bootstrap does not perform
 failure recovery or fill inactive slots in a committed topology. A rank removed
 by a completed shrink may join a later expansion when the engine's handshake
@@ -199,6 +201,64 @@ without a matching initial or append handshake, startup fails or times out accor
 `VLLM_ENGINE_READY_TIMEOUT_S`.
 
 Manual external Elastic EP launch arguments remain supported without this flag.
+
+### Local Rank Ranges
+
+One client can bootstrap several local engines together. Set
+`--data-parallel-rank` to its first global rank and
+`--data-parallel-size-local` to its local count. Do not enable
+`--data-parallel-multi-port-external-lb`: that option starts separate clients.
+
+For an initial DP8 world with four local ranks per client and a maximum of DP12,
+use the same template for each client, varying only `FIRST_DP_RANK` (0 or 4
+initially, then 8 for an append joiner):
+
+This illustrates the startup contract, not a complete resize workflow: the
+packed clients starting at 0 and 4 cannot initiate DP8→DP12 with the current
+resize coordinator (see the warning below).
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+    --enable-expert-parallel --enable-eplb \
+    --eplb-config '{"communicator":"pynccl","use_async":false}' \
+    --enable-elastic-ep --elastic-ep-auto-bootstrap \
+    --elastic-ep-initial-dp-size 8 --elastic-ep-max-dp-size 12 \
+    --data-parallel-rank "${FIRST_DP_RANK}" \
+    --data-parallel-size-local 4 \
+    --data-parallel-address "${DP_MASTER_ADDRESS}" \
+    --data-parallel-rpc-port 29550 --tensor-parallel-size 1
+```
+
+The client starting at rank 8 sends one discovery request for ranks 8–11. An
+active native DP12 append handshake reserves the complete range atomically;
+overlaps, ranges outside its expected participants and invalid counts are
+rejected without partially reserving ranks. The client resolves DP12 before
+constructing its engine configuration. Its existing process manager starts all
+four engines, which share the reservation and receive the same native
+rendezvous information. No client guesses the target from its last local rank.
+The initial seed remains 8 and `--data-parallel-size` stays omitted.
+
+Each process needs enough visible GPUs for its local engines; colocated clients
+need disjoint devices and distinct HTTP endpoints. Multi-rank clients use the
+existing local load-balancing client (`DPLBAsyncMPClient`), including its
+request-to-engine tracking for cancellation. Runtime load balancing is hybrid
+when the client owns only part of the world, or internal when it owns the
+whole world; it is not single-rank external LB.
+
+Without a rank hint, the client balances requests among its local engines.
+To target one explicitly through the OpenAI HTTP API, set
+`X-data-parallel-rank` to a **local** index from 0 through local count minus 1.
+For a client whose first global rank is 8, a header value of 2 selects global
+rank 10, not global rank 2. The original one-rank path stays direct and does
+not acquire a supervisor or a local load balancer.
+
+!!! warning "Bootstrap is not multi-rank resize coordination"
+    This extension provides range startup only. The current external resize
+    coordinator still requires one existing rank per client; resize requests
+    from clients owning multiple ranks fail explicitly. Coordinating prepare,
+    commit, per-rank control and completion for those clients requires a
+    separate coordinator extension. The range template alone is not an
+    end-to-end packed-client resize recipe.
 
 ## Expert Parallel Load Balancer (EPLB)
 

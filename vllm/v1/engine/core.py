@@ -1405,7 +1405,7 @@ class EngineCoreProc(EngineCore):
         if (
             envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
             and parallel_config is not None
-            and parallel_config.data_parallel_external_lb
+            and parallel_config.uses_external_elastic_ep
         ):
             from vllm.distributed.elastic_ep.external_elastic_ep import (
                 ExternalElasticEPScaleUpHandshakeMetadata,
@@ -2458,7 +2458,7 @@ class DPEngineCoreProc(EngineCoreProc):
                         raise SystemExit
                     if (
                         state.worker_type == "new"
-                        and self.vllm_config.parallel_config.data_parallel_external_lb
+                        and self.vllm_config.parallel_config.uses_external_elastic_ep
                     ):
                         # An independently launched rank has no external utility
                         # caller to join the post-commit resume barrier.

@@ -12,7 +12,7 @@ import torch
 import zmq
 
 import vllm.platforms as platforms
-from vllm.config import WatchdogConfig
+from vllm.config import ParallelConfig, WatchdogConfig
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
@@ -290,17 +290,13 @@ class _FinishedProcess:
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():
-    """Update the startup test argument so it reaches frontend failure handling."""
+    """Report a watched frontend's exit while engines are still starting."""
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
     recv, send = connection.Pipe(duplex=False)
     send.close()
 
-    parallel_config = SimpleNamespace(
-        data_parallel_size_local=1,
-        data_parallel_hybrid_lb=False,
-        data_parallel_external_lb=False,
-    )
+    parallel_config = ParallelConfig()
 
     try:
         launch = CoreEngineLaunch(

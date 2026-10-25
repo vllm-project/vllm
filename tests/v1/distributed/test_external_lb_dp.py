@@ -15,6 +15,8 @@ import pytest
 import pytest_asyncio
 import requests
 import zmq
+from prometheus_client.parser import text_string_to_metric_families
+from transformers import Qwen3MoeConfig
 
 from tests.utils import RemoteOpenAIServer
 from vllm.distributed.elastic_ep.bootstrap import (
@@ -55,7 +57,9 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
         {"elastic_ep_initial_dp_size": 1},
         {"elastic_ep_initial_dp_size": 5},
         {"data_parallel_hybrid_lb": True},
-        {"data_parallel_size_local": 2},
+        {"data_parallel_size_local": 0},
+        {"data_parallel_size_local": -1},
+        {"data_parallel_size_local": 3},
         {"data_parallel_backend": "ray"},
         {"data_parallel_rpc_port": 0},
         {"data_parallel_rpc_port": 65536},
@@ -99,14 +103,15 @@ def test_external_elastic_ep_bootstrap_binds_one_launch_to_one_handshake(scale_u
 
 @pytest.mark.parametrize("enable_fault_tolerance", [False, True])
 @pytest.mark.parametrize(
-    "rank,target_size,initial_size", [(2, 3, 2), (2, 4, 2), (3, 4, 2), (2, 3, 4)]
+    "rank,target_size,initial_size,local_size",
+    [(2, 3, 2, 1), (2, 4, 2, 1), (3, 4, 2, 1), (2, 3, 4, 1), (8, 12, 8, 4)],
 )
 def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
-    monkeypatch, rank, target_size, initial_size, enable_fault_tolerance
+    monkeypatch, rank, target_size, initial_size, local_size, enable_fault_tolerance
 ):
     """The active handshake resolves append startup, including retired initial ranks."""
     port = get_open_port()
-    bootstrap = ReconfigureDistributedRequest(
+    request = ReconfigureDistributedRequest(
         new_data_parallel_size=target_size,
         new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
         new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
@@ -119,9 +124,9 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
         handshake_address=f"tcp://127.0.0.1:{port}",
         expected_new_ranks=list(range(2, target_size)),
         addresses=EngineZmqAddresses(inputs=["tcp://127.0.0.1:12348"], outputs=[]),
-        bootstrap=bootstrap,
+        bootstrap=request,
         num_redundant_experts=0,
-        elastic_ep_max_dp_size=4,
+        elastic_ep_max_dp_size=max(4, target_size),
     )
     monkeypatch.delenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", raising=False)
     server.start()
@@ -130,9 +135,10 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
             elastic_ep_auto_bootstrap=True,
             elastic_ep_initial_dp_size=initial_size,
             data_parallel_rank=rank,
+            data_parallel_size_local=local_size,
             data_parallel_address="127.0.0.1",
             data_parallel_rpc_port=port,
-            elastic_ep_max_dp_size=4,
+            elastic_ep_max_dp_size=max(4, target_size),
             enable_elastic_ep=True,
             enable_expert_parallel=True,
             enable_eplb=True,
@@ -146,51 +152,134 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
         assert launch.data_parallel_size == target_size
         assert launch.scale_up
         assert args.enable_fault_tolerance is enable_fault_tolerance
-        with (
-            zmq.Context() as ctx,
-            make_zmq_socket(
-                ctx,
-                server.handshake_address,
-                zmq.DEALER,
-                bind=False,
-                identity=rank.to_bytes(2, "little"),
-                linger=0,
-            ) as socket,
-        ):
-            assert launch.identity is not None
-            socket.send(
-                msgspec.msgpack.encode(
-                    {
-                        "status": "HELLO",
-                        "bootstrap": ("stale", launch.identity[1]),
-                    }
+        for engine_rank in range(rank, rank + local_size):
+            with (
+                zmq.Context() as ctx,
+                make_zmq_socket(
+                    ctx,
+                    server.handshake_address,
+                    zmq.DEALER,
+                    bind=False,
+                    identity=engine_rank.to_bytes(2, "little"),
+                    linger=0,
+                ) as socket,
+            ):
+                assert launch.identity is not None
+                socket.send(
+                    msgspec.msgpack.encode(
+                        {
+                            "status": "HELLO",
+                            "bootstrap": ("stale", launch.identity[1]),
+                        }
+                    )
                 )
-            )
-            assert socket.poll(5000)
-            assert "does not match" in msgspec.msgpack.decode(socket.recv())["error"]
-            server.raise_if_failed()
-            socket.send(
-                msgspec.msgpack.encode(
-                    {
-                        "status": "HELLO",
-                        "bootstrap": launch.identity,
-                    }
+                assert socket.poll(5000)
+                assert (
+                    "does not match" in msgspec.msgpack.decode(socket.recv())["error"]
                 )
-            )
-            assert socket.poll(5000)
-            metadata = msgspec.msgpack.decode(
-                socket.recv(), type=ExternalElasticEPScaleUpHandshakeMetadata
-            )
-            assert metadata.engine_metadata.addresses.inputs == [
-                "tcp://127.0.0.1:12348"
-            ]
-            assert (
-                metadata.engine_metadata.parallel_config["data_parallel_size"]
-                == target_size
-            )
-            socket.send(msgspec.msgpack.encode({"status": "READY"}))
+                server.raise_if_failed()
+                socket.send(
+                    msgspec.msgpack.encode(
+                        {"status": "HELLO", "bootstrap": launch.identity}
+                    )
+                )
+                assert socket.poll(5000)
+                metadata = msgspec.msgpack.decode(
+                    socket.recv(), type=ExternalElasticEPScaleUpHandshakeMetadata
+                )
+                assert metadata.engine_metadata.addresses == server.addresses
+                assert metadata.engine_metadata.parallel_config == {
+                    "data_parallel_master_ip": request.new_data_parallel_master_ip,
+                    "data_parallel_master_port": request.new_data_parallel_master_port,
+                    "_data_parallel_master_port_list": (
+                        request.new_data_parallel_master_port_list
+                    ),
+                    "data_parallel_size": target_size,
+                    "_coord_store_port": request.coord_store_port,
+                }
+                socket.send(msgspec.msgpack.encode({"status": "READY"}))
     finally:
         server.stop()
+
+
+def test_external_elastic_ep_bootstrap_reserves_a_range_atomically():
+    server = ExternalElasticEPBootstrapServer(12, range(8, 12), scale_up=True)
+    first = server.discover(10, "existing")
+    with pytest.raises(ValueError, match="another launch"):
+        server.discover(8, "overlap", 4)
+    # The failed range must not claim its free prefix or suffix.
+    prefix = server.discover(8, "prefix", 2)
+    suffix = server.discover(11, "suffix")
+    for rank, launch in [(8, prefix), (9, prefix), (10, first), (11, suffix)]:
+        assert launch.identity is not None
+        server.validate(rank, list(launch.identity))
+    assert server.discover(8, "prefix", 2) == prefix
+    with pytest.raises(ValueError, match="different rank range"):
+        server.discover(8, "prefix")
+
+
+@pytest.mark.parametrize("rank,count", [(7, 2), (11, 2), (8, 0), (8, -1), (8, True)])
+def test_external_elastic_ep_bootstrap_rejects_an_invalid_range(rank, count):
+    server = ExternalElasticEPBootstrapServer(12, range(8, 12), scale_up=True)
+    with pytest.raises(ValueError):
+        server.discover(rank, "invalid", count)
+    launch = server.discover(8, "valid", 4)
+    assert launch.identity is not None
+    for engine_rank in range(8, 12):
+        server.validate(engine_rank, list(launch.identity))
+
+
+def test_external_elastic_ep_bootstrap_requires_the_whole_range_to_await_startup():
+    server = ExternalElasticEPBootstrapServer(8, range(4, 8), scale_up=False)
+    with pytest.raises(ValueError, match="expected bootstrap"):
+        server.discover(4, "late", 4, available_ranks={4, 5, 7})
+    launch = server.discover(4, "initial", 2, available_ranks={4, 5, 7})
+    assert launch.identity is not None
+    server.validate(4, list(launch.identity))
+    server.validate(5, list(launch.identity))
+
+
+@pytest.mark.parametrize("local_size", [1, 4, 8])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Real EngineArgs with EPLB requires a CUDA-like platform",
+)
+def test_external_lb_elastic_ep_local_range_config(local_size, tmp_path, monkeypatch):
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=16,
+        num_experts_per_tok=2,
+        vocab_size=128,
+    ).save_pretrained(tmp_path)
+    monkeypatch.setenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0")
+    config = (
+        EngineArgs(
+            model=str(tmp_path),
+            elastic_ep_auto_bootstrap=True,
+            elastic_ep_initial_dp_size=8,
+            elastic_ep_max_dp_size=12,
+            data_parallel_rank=0,
+            data_parallel_size_local=local_size,
+            enable_elastic_ep=True,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config={"use_async": False},
+        )
+        .create_engine_config()
+        .parallel_config
+    )
+    assert config.data_parallel_size == 8
+    assert config.data_parallel_size_local == local_size
+    assert config.data_parallel_external_lb is (local_size == 1)
+    assert config.data_parallel_hybrid_lb is (1 < local_size < 8)
+    assert config.elastic_ep_auto_bootstrap
+    assert config.uses_external_elastic_ep
 
 
 @pytest.mark.parametrize("enable_fault_tolerance", [False, True])
@@ -557,6 +646,19 @@ def _get_parallel_config(server: RemoteOpenAIServer):
     return vllm_config["parallel_config"]
 
 
+def _successful_requests_by_engine(
+    server: RemoteOpenAIServer, ranks: range
+) -> dict[int, float]:
+    response = requests.get(server.url_for("metrics"), timeout=10)
+    response.raise_for_status()
+    counts = dict.fromkeys(ranks, 0.0)
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name == "vllm:request_success_total":
+                counts[int(sample.labels["engine"])] += sample.value
+    return counts
+
+
 def _assert_expert_parallel_config(
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
 ):
@@ -672,6 +774,105 @@ def test_external_lb_elastic_ep_scale_up(
                     temperature=0.0,
                 )
             assert completion.choices[0].finish_reason in ("length", "stop")
+
+
+@pytest.mark.parametrize(
+    "first_ranks,local_size",
+    [((0, 2), 2), ((0,), 4)],
+    ids=["hybrid-local-ranges", "internal-local-range"],
+)
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    TP_SIZE != 1 or current_platform.device_count() < 4,
+    reason="External Elastic EP range bootstrap requires four GPUs with TP_SIZE=1",
+)
+@pytest.mark.skipif(
+    os.getenv("VLLM_USE_RUST_FRONTEND") == "1",
+    reason="Automatic Elastic EP bootstrap requires the Python frontend",
+)
+def test_external_lb_elastic_ep_bootstrap_local_range(
+    default_server_args, first_ranks, local_size
+):
+    """A client independently routes inference to every engine it bootstraps."""
+    server_args = [
+        *default_server_args,
+        "--enable-expert-parallel",
+        "--enable-elastic-ep",
+        "--elastic-ep-auto-bootstrap",
+        "--elastic-ep-initial-dp-size",
+        "4",
+        "--elastic-ep-max-dp-size",
+        "4",
+        "--data-parallel-size-local",
+        str(local_size),
+        "--data-parallel-address",
+        "127.0.0.1",
+        "--data-parallel-rpc-port",
+        str(get_open_port()),
+        "--tensor-parallel-size",
+        "1",
+        "--api-server-count",
+        "1",
+        "--attention-backend",
+        "TRITON_MLA",
+        "--enable-eplb",
+        "--eplb-config",
+        '{"communicator":"pynccl","use_async":false}',
+    ]
+    servers: list[RemoteOpenAIServer] = []
+
+    def start_client(first_rank: int):
+        server = RemoteOpenAIServer(
+            ELASTIC_EP_MODEL_NAME,
+            [*server_args, "--data-parallel-rank", str(first_rank)],
+            env_dict={
+                "VLLM_SERVER_DEV_MODE": "1",
+                current_platform.device_control_env_var: ",".join(
+                    str(current_platform.device_id_to_physical_device_id(i))
+                    for i in range(first_rank, first_rank + local_size)
+                ),
+            },
+        )
+        servers.append(server)
+        return server
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(first_ranks)) as executor:
+            clients = list(executor.map(start_client, first_ranks))
+        for first_rank, server in zip(first_ranks, clients):
+            config = _get_parallel_config(server)
+            assert config["data_parallel_size"] == 4
+            assert config["data_parallel_rank"] == first_rank
+            assert config["data_parallel_size_local"] == local_size
+            assert config["_api_process_count"] == 1
+            response = _send_scale_command(server, 2)
+            assert response.status_code == 400
+            assert "multi-rank resize coordination" in response.text
+
+            ranks = range(first_rank, first_rank + local_size)
+            with server.get_client() as client:
+                for local_rank in reversed(range(local_size)):
+                    expected = _successful_requests_by_engine(server, ranks)
+                    expected[first_rank + local_rank] += 1
+                    completion = client.completions.create(
+                        model=ELASTIC_EP_MODEL_NAME,
+                        prompt="Hello, my name is",
+                        max_tokens=5,
+                        temperature=0.0,
+                        extra_headers={"X-data-parallel-rank": str(local_rank)},
+                    )
+                    assert completion.choices[0].finish_reason in ("length", "stop")
+                    deadline = time.monotonic() + 10
+                    while (
+                        actual := _successful_requests_by_engine(server, ranks)
+                    ) != expected:
+                        assert time.monotonic() < deadline, (actual, expected)
+                        time.sleep(0.1)
+                    print(f"Client {first_rank}, local rank {local_rank}: {actual}")
+            assert not config["data_parallel_external_lb"]
+            assert config["data_parallel_hybrid_lb"] is (local_size < 4)
+    finally:
+        RemoteOpenAIServer.shutdown_many(servers)
 
 
 def test_external_lb_server_info(server_manager):
