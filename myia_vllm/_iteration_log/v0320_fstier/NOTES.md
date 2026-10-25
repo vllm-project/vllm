@@ -1871,3 +1871,42 @@ Autres relevés du cycle : condensation RSM en repli cloud à 20:38Z et 21:48Z (
 90 s pendant les pointes, repli nominal) ; `108.165.33.236` toujours 401-only (clé VL morte, suivi
 au census) ; `92.184.141.43` = même clé et même client (`OpenAI/JS 4.104.0`) que po-2027 en
 `92.184.141.186` → rotation d'IP mobile, pas d'alerte.
+
+## 25/10 00:47Z — mesure « après » propre (22:41→00:47Z) : pas de gain de débit mesurable ce soir ; verdict définitif reporté à une fenêtre de jour à volume comparable
+
+Fenêtre propre (sans effet de restart, 126 min) vs base AVANT (20:05→21:16Z, 72 min — qui
+elle-même portait son propre coût de restart Q32, donc la comparaison est plus proche qu'il n'y
+paraît). `.tmp/cmp_delta.py` (delta de snapshots de la même génération de moteur).
+
+| | AVANT (0.70, fs 96) | APRÈS propre (0.73, fs 250) | J-1 même heure (23/10, ancienne config) |
+|---|---|---|---|
+| génération tok/s | 59,2 | 46,3 | 55,7 (télémétrie) |
+| requêtes /min | 4,2 | 3,6 | — |
+| file > 120 s | 3,0 % | **1,3 %** | — |
+| TTFT > 120 s | 8,0 % | 8,8 % | — |
+| part du prompt calculée | 7,5 % | 10,5 % | — |
+| tokens calculés p90 / >100 K | 20 K / 2,3 % | 50 K / 3,8 % | — |
+| préemptions (fenêtre) | 3 | 6 (9 depuis boot) | 66/h ce jour-là |
+| flux concurrents (running) | 3,6 | 4,1 | 3,4 |
+| KV moyen / quand file | 75 % / 81 % | 69 % / 85 % | 54 % / 80 % |
+| décodage/flux hors file | 19,8 | 12,3 (total) / 17,3 (fin de nuit) | 24,0 |
+
+Lecture :
+- **Ce qu'on peut créditer au changement** : la queue d'admission s'améliore (queue > 120 s
+  divisée par deux, p99 identique), le moteur tient plus de conversations simultanées (4,1 vs
+  3,4-3,6 running ; KV occupé plus haut), et la rétention disque passe de 1,6 h à **5,0 h**
+  (plus vieux bloc 21:46Z à 00:47Z ; tier 241,6/250 GiB, 0 suppression à 00:20Z, cap atteint au
+  passage de 00:50Z → premières rotations attendues).
+- **Ce qu'on ne peut pas créditer ce soir** : le débit global baisse (−22 %) mais la demande
+  baisse aussi (−19 % de tokens de prompt) et le mélange nocturne est plus lourd en gros prefills
+  frais (>100 K tokens calculés : 3,8 % des requêtes ; p90 des tokens calculés 50 K). C'est la
+  nuit du maxing Minimax (cap tandem doublé), pas la même population que la veille. Le décodage
+  par flux hors file (17,3 en fin de nuit vs 19,8 avant, 24,0 la veille) est dans le bruit d'un
+  mélange à 5 flux, pas un ralentissement mesuré — rien n'indique de pagination GPU à 0,73
+  (GPU 0 stable 22 309 MiB, 0 OOM).
+- **Verdict définitif** : fenêtre de jour à volume comparable (demain, fenêtre à définir avec le
+  hub). Engagement tenu côté instruments : table hub 22:45→00:30Z non encore livrée à 00:49Z
+  (relancée), moteur côté rendu ici.
+- **0 assert `not found in cache` depuis l'overlay (18:52Z)** → condition de la PR amont
+  vllm-project tenue à ce stade ; ouverture prévue au cycle du matin (le 25/10 « au matin »,
+  ~06:41Z), sauf contre-ordre.
