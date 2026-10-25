@@ -96,8 +96,8 @@ struct Fp64Acc16 {
 };
 #endif
 
-__attribute__((always_inline)) static inline double sum_gt_to_double(
-    const float* buf, int n, float threshold) {
+FORCE_INLINE static double sum_gt_to_double(const float* buf, int n,
+                                            float threshold) {
   double s = 0.0;
   int j = 0;
 #if defined(__aarch64__)
@@ -119,8 +119,8 @@ __attribute__((always_inline)) static inline double sum_gt_to_double(
   return s;
 }
 
-__attribute__((always_inline)) static inline int count_within_tol(
-    const float* row, int V, float center, float tol) {
+FORCE_INLINE static int count_within_tol(const float* row, int V, float center,
+                                         float tol) {
   int n = 0;
   int i = 0;
 #if defined(__aarch64__)
@@ -139,8 +139,8 @@ __attribute__((always_inline)) static inline int count_within_tol(
   return n;
 }
 
-__attribute__((always_inline)) static inline void mask_write_below(
-    float* row, int V, float threshold, float fill) {
+FORCE_INLINE static void mask_write_below(float* row, int V, float threshold,
+                                          float fill) {
   int i = 0;
 #if defined(__aarch64__)
   const float32x4_t thr = vdupq_n_f32(threshold);
@@ -160,7 +160,7 @@ __attribute__((always_inline)) static inline void mask_write_below(
 // Vectorised max/min/finite-count over row[0..V). PAD lanes (<= pad_sentinel)
 // are blended to +inf so they don't corrupt reduce_min. Returns SIMD tail
 // start in *tail_i_out; caller handles remaining elements and clamps min<=max.
-__attribute__((always_inline)) static inline void vec_max_min_with_pad_blend(
+FORCE_INLINE static void vec_max_min_with_pad_blend(
     const float* row, int V, float pad_sentinel, float* max_out, float* min_out,
     int* n_finite_out, int* tail_i_out) {
   int i = 0;
@@ -194,8 +194,9 @@ __attribute__((always_inline)) static inline void vec_max_min_with_pad_blend(
   *tail_i_out = i;
 }
 
-__attribute__((always_inline)) static inline int gather_outliers(
-    const float* buf, int n, float threshold, float* out, double* sum_out) {
+FORCE_INLINE static int gather_outliers(const float* buf, int n,
+                                        float threshold, float* out,
+                                        double* sum_out) {
   int m = 0;
   double s = 0.0;
   for (int j = 0; j < n; ++j) {
