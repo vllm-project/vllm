@@ -5,12 +5,12 @@
 Each warmup-cache object (currently only :class:`FlashInferWarmupCache`)
 drives its own warmup pass on the daemon; the seeding flow itself
 (:class:`seed.SeedTransport`) is shared with future kinds such as weight
-shards. A target daemon installs
-its rank-matched cache before tuning, so both the daemon's own warmup and
-the later engine start skip re-tuning. The disk layout is the index: a
-request names the cache by the same key the layout uses (kind, config hash,
-dp rank, world rank) and the source resolves it to files under the cache
-root. There is no separate artifact store or registry.
+shards. A target daemon installs its rank-matched cache before tuning, so
+both the daemon's own warmup and the later engine start skip re-tuning. The
+disk layout is the index: a request names the cache by the same key the
+layout uses (kind, config hash, dp rank, world rank) and the source resolves
+it to files under the cache root. There is no separate artifact store or
+registry.
 
 The FlashInfer payload is a ``{filename: parsed JSON}`` map rather than a
 single document because upcoming kinds (Triton tuned configs) consist of
@@ -53,8 +53,7 @@ _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
 class WarmupCache(Seedable, Protocol):
     """One daemon warmup cache: its warmup pass and its cache's semantics.
 
-    The warmup layer; the seeding exchange with peer daemons is the shared
-    D2D layer in :mod:`seed` and :mod:`transport`.
+    The warmup layer; the D2D exchange lives in seed.py (SeedTransport).
     """
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
@@ -68,7 +67,6 @@ class FlashInferWarmupCache(WarmupCache):
     kind = "flashinfer_autotune"
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
-        """Run the FlashInfer autotune pass against the cached model."""
         vllm_config = daemon.vllm_config
         # Mirrors the gate in the engine's kernel warmup.
         if (

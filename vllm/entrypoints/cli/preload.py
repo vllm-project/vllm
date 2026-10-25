@@ -100,6 +100,37 @@ def _start_health_server(
     return server, thread
 
 
+def _validate_seed_args(
+    args: argparse.Namespace, *, world_size: int, num_groups: int
+) -> None:
+    """Validate the seed CLI options before any daemon spawns."""
+    for flag, host, port in (
+        ("--seed-listen", args.seed_listen_host, args.seed_listen_port),
+        ("--seed-source", args.seed_source_host, args.seed_source_port),
+    ):
+        if (host is None) != (port is None):
+            raise ValueError(f"{flag}-host and {flag}-port must be provided together")
+    has_endpoint = any(
+        value is not None
+        for value in (
+            args.seed_listen_host,
+            args.seed_listen_port,
+            args.seed_source_host,
+            args.seed_source_port,
+        )
+    )
+    if has_endpoint != bool(args.seed_token):
+        raise ValueError("Preload daemons must set --seed-token to enable D2D transfer")
+    for base_port in (args.seed_listen_port, args.seed_source_port):
+        if base_port is None:
+            continue
+        max_port = base_port + num_groups * world_size - 1
+        if not 1 <= base_port <= 65535 or max_port > 65535:
+            raise ValueError(
+                f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
+            )
+
+
 class PreloadSubcommand(CLISubcommand):
     """The `preload` subcommand for the vLLM CLI."""
 
@@ -215,26 +246,6 @@ class PreloadSubcommand(CLISubcommand):
         dp_size = parallel_config.data_parallel_size
         world_size = dp_size * pp_size * tp_size
 
-        listen_args = (args.seed_listen_host, args.seed_listen_port)
-        source_args = (args.seed_source_host, args.seed_source_port)
-        if any(value is None for value in listen_args) and any(
-            value is not None for value in listen_args
-        ):
-            raise ValueError(
-                "Weight cache listen host and port must be provided together"
-            )
-        if any(value is None for value in source_args) and any(
-            value is not None for value in source_args
-        ):
-            raise ValueError(
-                "Weight cache seed host and port must be provided together"
-            )
-        has_endpoint = any(value is not None for value in (*listen_args, *source_args))
-        if has_endpoint != bool(args.seed_token):
-            raise ValueError(
-                "Preload daemons must set --seed-token to enable D2D transfer"
-            )
-
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
         if dp_size == 1:
@@ -303,17 +314,7 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        for base_port in (
-            args.seed_listen_port,
-            args.seed_source_port,
-        ):
-            if base_port is None:
-                continue
-            max_port = base_port + len(groups) * world_size - 1
-            if not 1 <= base_port <= 65535 or max_port > 65535:
-                raise ValueError(
-                    f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
-                )
+        _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
 
         def _seed_endpoint(
             host: str | None, base_port: int | None, offset: int

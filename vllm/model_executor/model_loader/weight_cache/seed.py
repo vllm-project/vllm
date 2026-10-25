@@ -3,9 +3,8 @@
 """Daemon-to-daemon seeding over an authenticated JSON channel.
 
 A :class:`Seedable` is one kind of state a daemon can seed to or from a peer
-daemon: warmup caches today, weight shards (manifests moved over CUDA IPC or
-RDMA) later. The flow is shared — the target names what it wants by kind and
-kind-specific key fields, the source resolves the key to a payload, and the
+daemon: warmup caches today, weight shards later. The target names what it
+wants by kind and key fields; the source resolves the key to a payload; the
 target validates and installs it:
 
     request:  {"kind": "flashinfer_autotune", <key fields>..., "token": "..."}
@@ -16,11 +15,8 @@ Payloads are JSON values. Large binary state (weights) must not be inlined:
 the payload then describes the transfer (e.g. a storage manifest) and the
 kind's ``install`` drives the data plane itself.
 
-:class:`SeedTransport` is the communication layer: one authenticated listener
-per daemon serving the daemon's seedables, plus the target-side request round
-trip. The wire format is length-prefixed JSON (protocol.send_json/recv_json);
-the connection is unencrypted beyond the shared token, so keep the listener
-on a trusted network.
+The connection is unencrypted beyond the shared token; keep the listener on a
+trusted network.
 """
 
 import contextlib
@@ -40,7 +36,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 logger = init_logger(__name__)
 
 # Requests carry a kind and small key fields; payloads flow in responses.
-MAX_REMOTE_REQUEST_SIZE = 64 << 10
+_MAX_REMOTE_REQUEST_SIZE = 64 << 10
 _REQUEST_TIMEOUT_S = 30.0
 # An unauthenticated peer gets a whole-message deadline, not a per-read
 # timeout: per-read timeouts let a peer trickle bytes forever and stall the
@@ -62,8 +58,10 @@ class Seedable(Protocol):
     def resolve(self, request: dict[str, Any]) -> Any | None:
         """Source side: produce the payload named by ``request``.
 
-        Validate the wire key first — raise ValueError on any malformed field,
-        before touching local state. Return None on a miss.
+        Validate the wire key first — raise an error on any malformed field
+        (``ValueError`` for bad values, ``KeyError`` for missing ones), before
+        touching local state. The transport turns it into an error response.
+        Return None on a miss.
         """
         ...
 
@@ -104,8 +102,7 @@ class SeedTransport:
     def adopt(self, seedable: Seedable, ctx: Any) -> None:
         """Best-effort: fetch and install ``seedable`` from the source daemon.
 
-        Every failure mode (unreachable, refused, missing, incompatible)
-        degrades to the local path with a log line.
+        Any failure degrades to the local path with a log line.
         """
         response = self.request(
             {"kind": seedable.kind, **seedable.request_params(ctx)},
@@ -160,7 +157,7 @@ class SeedTransport:
             with socket.create_connection(source, timeout=_REQUEST_TIMEOUT_S) as sock:
                 send_json(sock, {**payload, "token": self._seed_config.token})
                 response = recv_json(sock)
-        except (OSError, ConnectionError, ValueError) as e:
+        except (OSError, ValueError) as e:
             logger.warning(
                 "Cannot fetch %s from %s over D2D; falling back locally: %s",
                 label,
@@ -211,7 +208,7 @@ class SeedTransport:
                 try:
                     request = recv_json(
                         conn,
-                        max_size=MAX_REMOTE_REQUEST_SIZE,
+                        max_size=_MAX_REMOTE_REQUEST_SIZE,
                         deadline=time.monotonic() + _REMOTE_REQUEST_TIMEOUT_S,
                     )
                     presented = (
@@ -230,6 +227,6 @@ class SeedTransport:
                     # Authenticated handlers (e.g. weight manifests) may be slow.
                     conn.settimeout(_AUTHENTICATED_TIMEOUT_S)
                     send_json(conn, self.handle_request(request))
-                except (OSError, ConnectionError, ValueError) as e:
+                except (OSError, ValueError) as e:
                     with contextlib.suppress(OSError):
                         send_json(conn, {"status": "error", "message": str(e)})
