@@ -9,6 +9,20 @@ It's a living document, updated as new features and datasets become available.
 
     For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
 
+## Attention Kernel Benchmark
+
+Run the attention kernel smoke benchmark from the repository root using the
+exact backend names:
+
+```bash
+python3 benchmarks/attention_benchmarks/benchmark.py \
+  --backends FLASH_ATTN FLASHINFER --batch-specs "8q1s1k"
+```
+
+If any configuration fails, the benchmark exits with status `1` after reporting
+results and writing any requested CSV or JSON output. Successful runs exit with
+status `0`. Profiling runs also propagate failures, but do not save timing metrics.
+
 ## Dataset Overview
 
 <style>
