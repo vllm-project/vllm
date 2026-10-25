@@ -135,6 +135,15 @@ class LoRAConfig:
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):
+        # Speculative decoding drafters don't run LoRA adapters.
+        if model_config.runner_type != "draft" and not model_config.is_lora_supported:
+            raise ValueError(
+                f"LoRA is not supported for {model_config.architecture} "
+                f"({model_config.model}). Supported models implement the "
+                "`SupportsLoRA` interface. Run this model without "
+                "`enable_lora`."
+            )
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
