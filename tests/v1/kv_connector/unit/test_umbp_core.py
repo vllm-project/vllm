@@ -1089,6 +1089,7 @@ def test_restored_prefix_skips_resident_blocks(resident):
     )
 
     stored = [b"c"] if resident else [b"a", b"b", b"c"]
+    assert isinstance(meta, UMBPConnectorMetadata)
     assert [plan.key for plan in meta.iter_store_plans()] == [
         codec.key(h, 0) for h in stored
     ]
@@ -1533,7 +1534,9 @@ def test_async_load_cancellation_preserves_other_requests():
 
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
-    assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["load_completed"] == 1
     assert finished == (None, {"second"})
     worker.wait_for_layer_load("")
     assert worker.get_kv_connector_stats() is None
@@ -1581,7 +1584,9 @@ def test_worker_partial_store_failure_reports_unpublished_objects():
     metadata = worker.build_connector_worker_meta()
     assert metadata.store_events == {9: StoreEventResult(1)}
     assert not hasattr(worker.runtime, "published")
-    assert worker.get_kv_connector_stats().reduce()["store_failed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_failed"] == 1
 
 
 @pytest.mark.parametrize("forward", [False, True])
@@ -1624,7 +1629,9 @@ def test_connector_finalizes_each_store_once_when_forward_hook_is_skipped(
         assert next_step == ({} if forward else expected)
         assert plan.key in runtime.store
 
-    stats = connector.get_kv_connector_stats().reduce()
+    connector_stats = connector.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["store_submitted"] == 2
     assert stats["store_completed"] == 2
 
@@ -1721,6 +1728,7 @@ def test_embedded_runtime_register_store_and_load(monkeypatch):
                 new_reqs=[consumer], scheduled_tokens={consumer.req_id: 1}
             )
         )
+        assert isinstance(load_metadata, UMBPConnectorMetadata)
         assert set(load_metadata.load_requests) == {consumer.req_id}
 
         load_worker.bind_connector_metadata(load_metadata)
@@ -2076,7 +2084,9 @@ def test_worker_submits_stores_once(grouped):
     assert worker.get_finished({"req"}) == (None, None)
     completed = worker.build_connector_worker_meta()
     assert completed.store_events == {19: StoreEventResult(1)}
-    assert worker.get_kv_connector_stats().reduce()["store_num_bytes"] == 32
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_num_bytes"] == 32
 
 
 def _replicated_kv_cache_config() -> KVCacheConfig:
