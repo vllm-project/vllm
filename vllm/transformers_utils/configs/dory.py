@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """Configuration for the normalized latent recurrent Dory architecture."""
 
 from huggingface_hub.dataclasses import strict
