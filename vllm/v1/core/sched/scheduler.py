@@ -3339,9 +3339,8 @@ class Scheduler(SchedulerInterface):
                 for req in self.running
                 if req.lora_request and req.lora_request.lora_int_id > 0
             }
-        # Each queue iterates in priority order.
         heads = (
-            next((req for req in queue if self._can_schedule(req, loras)), None)
+            self._first_schedulable(queue, loras)
             for queue in (self.kv_holding_waiting, self.waiting)
         )
         request = min((req for req in heads if req is not None), default=None)
@@ -3351,6 +3350,19 @@ class Scheduler(SchedulerInterface):
             # No room could be made for it: spare its prefix cache lookup.
             return None
         return request
+
+    def _first_schedulable(
+        self, queue: RequestQueue, loras: set[int]
+    ) -> Request | None:
+        """The first request in `queue`'s order that the waiting loop can
+        schedule in this step: mostly its first, which `peek_request` returns
+        without the copy of the heap that iterating a priority queue makes."""
+        if not queue:
+            return None
+        request = queue.peek_request()
+        if self._can_schedule(request, loras):
+            return request
+        return next((req for req in queue if self._can_schedule(req, loras)), None)
 
     def _can_schedule(self, request: Request, loras: set[int]) -> bool:
         """Whether the waiting loop can schedule the waiting `request` in this

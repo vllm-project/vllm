@@ -593,6 +593,22 @@ def test_no_blocks_are_released_without_victims_or_deferred_frees():
     assert scheduler._num_released_blocks([], ((Unread(),), BLOCK_SIZE)) == 0
 
 
+def test_the_request_is_found_without_iterating_its_queue(monkeypatch):
+    """Iterating a priority queue copies its heap: make-room takes the queue's
+    first request when the waiting loop can schedule it, as it mostly can."""
+    scheduler = _create_scheduler(max_priority_preemptions_per_step=4)
+    _run_three_low_priority_requests(scheduler)
+
+    def iterate(queue):
+        raise AssertionError("iterated a waiting queue")
+
+    monkeypatch.setattr(type(scheduler.waiting), "__iter__", iterate)
+    scheduler.add_request(_request("hi", 100, priority=0, arrival_time=4))
+    output = _step(scheduler)
+    assert output.preempted_req_ids == {"other"}
+    assert "hi" in output.num_scheduled_tokens
+
+
 def test_no_prefix_cache_lookup_without_a_lower_priority_running(monkeypatch):
     """When nothing runs at a lower priority than the waiting request, there is
     nothing to preempt for it, and make-room spares its prefix cache lookup."""
