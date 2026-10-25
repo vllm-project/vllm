@@ -3,6 +3,8 @@
 
 from copy import copy
 
+import pytest
+
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
@@ -82,6 +84,22 @@ def test_parallel_sampling_child_requests_preserve_session_id() -> None:
         child_request.sampling_params = child_params
 
         assert child_request.session_id == "session-1"
+
+
+@pytest.mark.parametrize(
+    ("seed", "n", "expected"),
+    [
+        (5, 3, [5, 6, 7]),
+        (2**63 - 1, 2, [2**63 - 1, -(2**63)]),
+        (2**63 - 2, 3, [2**63 - 2, 2**63 - 1, -(2**63)]),
+    ],
+)
+def test_child_seeds_stay_in_int64(seed: int, n: int, expected: list[int]) -> None:
+    """Child seeds must fit in int64; the MRV2 sampler stores them in an int64
+    buffer and an overflowing seed crashes EngineCore."""
+    parent_request = ParentRequest(make_request(SamplingParams(n=n, seed=seed)))
+    child_seeds = [parent_request.get_child_info(i)[1].seed for i in range(n)]
+    assert child_seeds == expected
 
 
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:

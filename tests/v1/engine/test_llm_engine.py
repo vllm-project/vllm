@@ -211,6 +211,16 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             )
 
 
+def test_parallel_sampling_max_seed(vllm_runner, example_prompts) -> None:
+    """`n>1` with the largest int64 seed must not overflow the child seeds."""
+    sampling_params = SamplingParams(n=2, seed=2**63 - 1, max_tokens=16)
+    with _vllm_model(False, vllm_runner) as vllm_model:
+        outputs = vllm_model.llm.generate(example_prompts[:1], sampling_params)
+    texts = [comp.text for comp in outputs[0].outputs]
+    assert len(texts) == 2
+    assert texts[0] != texts[1]
+
+
 def test_engine_metrics(vllm_runner, example_prompts):
     max_tokens = 100
     # Use spec decoding to test num_accepted_tokens_per_pos
