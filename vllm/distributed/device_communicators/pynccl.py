@@ -23,6 +23,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
+from vllm.utils.nccl import scoped_nccl_env
 from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
@@ -44,11 +45,18 @@ def defer_comm_warmup():
     while holding the driver lock (UCX under async EPLB, for one) keeps this
     rank's engine from launching its next step, on which a peer's all2all
     kernel waits, so that peer never reaches the warm-up.
+
+    The communicators also connect to their peers at creation
+    (NCCL_RUNTIME_CONNECT=0: a host-side exchange that launches no kernel)
+    instead of in their first collective, so the warm-up does not pay for it.
+    Every rank of a communicator must create it inside this block, or NCCL
+    hangs.
     """
     prev = _warmup_deferred()
     _warmup_tls.deferred = True
     try:
-        yield
+        with scoped_nccl_env({"NCCL_RUNTIME_CONNECT": "0"}):
+            yield
     finally:
         _warmup_tls.deferred = prev
 

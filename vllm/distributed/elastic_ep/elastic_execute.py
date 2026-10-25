@@ -51,6 +51,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.utils import is_moe_layer
+from vllm.utils.nccl import reread_nccl_env, scoped_nccl_env
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
@@ -161,6 +162,10 @@ class ElasticEPScalingExecutor:
         self._group_cleanup_future: Future[None] | None = None
         # The expert maps this rank's CUDA graphs were captured with.
         self._captured_expert_maps: list[torch.Tensor | None] | None = None
+        if worker.parallel_config.enable_elastic_ep:
+            # Before this process's first NCCL call: lets the target groups
+            # connect at creation (defer_comm_warmup, _connect_target_groups).
+            reread_nccl_env("NCCL_RUNTIME_CONNECT")
 
     @property
     def worker(self):
@@ -300,6 +305,7 @@ class ElasticEPScalingExecutor:
             self.transfer_weights(old_dp_size, new_dp_size)
         # Not warmed here: the warm-up deadlocks while serving (see
         # defer_comm_warmup); the commit warms these groups.
+        self._connect_target_groups(get_standby_dp_group(), standby_ep_group)
         if new_dp_size > old_dp_size and self._can_reuse_fused_moe_kernel():
             target_world_group = get_standby_world_group()
             assert target_world_group is not None
@@ -359,6 +365,18 @@ class ElasticEPScalingExecutor:
                 expert_weights=model.expert_weights,
             )
         torch.accelerator.synchronize()
+
+    def _connect_target_groups(self, dp_group, ep_group) -> None:
+        """Create the groups' device communicators now, which launches no
+        kernel, so the commit's warm-up does not pay for it."""
+        assert dp_group is not None and ep_group is not None
+        # Connect them too (no kernel either), or the warm-up's first
+        # collective does it during the commit.
+        with scoped_nccl_env({"NCCL_RUNTIME_CONNECT": "0"}):
+            for group in (dp_group, ep_group):
+                backend = group.device_group._get_backend(group.device)
+                if hasattr(backend, "eager_connect_single_device"):
+                    backend.eager_connect_single_device(group.device)
 
     def _warm_target_groups(self, dp_group, ep_group) -> None:
         assert dp_group is not None and ep_group is not None
@@ -684,6 +702,7 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
+        self._connect_target_groups(get_dp_group(), get_ep_group())
         if self._can_reuse_fused_moe_kernel():
             sync_flashinfer_autotune_cache(self.worker.model_runner, get_world_group())
 
