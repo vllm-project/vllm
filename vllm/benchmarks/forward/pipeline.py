@@ -195,9 +195,6 @@ class PipelineBench(ForwardBench):
             for key, value in _tensors(self.output).items()
         }
         self.result.update(
-            finite=all(
-                bool(t.isfinite().all()) for t in _tensors(self.output).values()
-            ),
             graph_vs_eager=max(comparisons.values(), key=lambda x: x["relative_rms"]),
             intermediate_graph_vs_eager=comparisons,
             state_reset_bytes=sum(
@@ -227,7 +224,7 @@ class PipelineBench(ForwardBench):
                     if pp._should_use_all_gather(key, tensor.numel(), tp, None):
                         tensor = tensor.reshape(tp.world_size, -1)[tp.rank_in_group]
                     sent.append(tensor)
-        clock = PipelineClock()
+        clock = None if profile else PipelineClock()
         # Warmup and drain are excluded by microbatch ID, not by local stage time.
         margin = 4 * pp.world_size
         count = 3 if profile else self.iters * self.samples
@@ -252,30 +249,30 @@ class PipelineBench(ForwardBench):
         with profiler as prof, scope:
             for _ in range(count + 2 * margin):
                 self.reset_graph.replay()
-                if not pp.is_first_rank:
-                    for tensor, buffer, sharded in received:
-                        dist.irecv(
-                            buffer,
-                            pp.ranks[pp.rank_in_group - 1],
-                            group=pp.device_group,
-                        ).wait()
-                        if sharded:
-                            tensor.copy_(
-                                tp.all_gather(buffer, dim=0).reshape(tensor.shape)
-                            )
-                start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
-                start.record()
+                for tensor, buffer, sharded in received:
+                    dist.irecv(
+                        buffer,
+                        pp.ranks[pp.rank_in_group - 1],
+                        group=pp.device_group,
+                    ).wait()
+                    if sharded:
+                        tensor.copy_(tp.all_gather(buffer, dim=0).reshape(tensor.shape))
+                if not profile:
+                    start, end = (
+                        torch.cuda.Event(enable_timing=True) for _ in range(2)
+                    )
+                    start.record()
                 self.graph.replay()
-                end.record()
-                starts.append(start)
-                ends.append(end)
-                if not pp.is_last_rank:
-                    for tensor in sent:
-                        dist.isend(
-                            tensor,
-                            pp.ranks[pp.rank_in_group + 1],
-                            group=pp.device_group,
-                        ).wait()
+                if not profile:
+                    end.record()
+                    starts.append(start)
+                    ends.append(end)
+                for tensor in sent:
+                    dist.isend(
+                        tensor,
+                        pp.ranks[pp.rank_in_group + 1],
+                        group=pp.device_group,
+                    ).wait()
             torch.accelerator.synchronize()
         if profile and not torch_profile:
             torch.cuda.profiler.stop()
@@ -304,15 +301,15 @@ class PipelineBench(ForwardBench):
                 "top_kernels": summary["kernels"][:10],
             }
             return
-        pipeline_checks = {
+        self.result["pipeline_vs_eager"] = {
             key: _compare(value, self.reference[key])
             for key, value in _tensors(self.output).items()
         }
-        self.result["pipeline_vs_eager"] = pipeline_checks
         self.result["finite"] = all(
             bool(t.isfinite().all()) for t in _tensors(self.output).values()
         )
         end_clock = PipelineClock()
+        assert clock is not None
         local = {
             "stage": pp.rank_in_group,
             "dp_rank": self.runner.dp_rank,
@@ -322,22 +319,25 @@ class PipelineBench(ForwardBench):
         }
         gathered: list[Any] = [None] * world.world_size
         dist.all_gather_object(gathered, local, group=world.cpu_group)
-        replica = [r for r in gathered if r["dp_rank"] == self.runner.dp_rank]
-        first = [r for r in replica if r["stage"] == 0]
-        last = [r for r in replica if r["stage"] == pp.world_size - 1]
-        latency = np.max([r["ends_us"] for r in last], axis=0) - np.min(
-            [r["starts_us"] for r in first], axis=0
-        )
-        latency = latency[margin:-margin]
-        arr = torch.tensor(latency, device=self.device)
-        dist.all_reduce(arr, op=dist.ReduceOp.MAX, group=world.device_group)
-        latency = arr.cpu().numpy()
+        latencies, uncertainties = [], []
+        for dp_rank in {r["dp_rank"] for r in gathered}:
+            replica = [r for r in gathered if r["dp_rank"] == dp_rank]
+            first = [r for r in replica if r["stage"] == 0]
+            last = [r for r in replica if r["stage"] == pp.world_size - 1]
+            latencies.append(
+                np.max([r["ends_us"] for r in last], axis=0)
+                - np.min([r["starts_us"] for r in first], axis=0)
+            )
+            uncertainties.append(
+                max(r["clock_uncertainty_us"] for r in first)
+                + max(r["clock_uncertainty_us"] for r in last)
+            )
+        latency = np.max(latencies, axis=0)[margin:-margin]
         medians = np.median(latency.reshape(self.samples, self.iters), axis=1)
         self.result.update(
             pipeline_timeline=local,
             pipeline_warmup_microbatches=margin,
-            clock_uncertainty_us=max(r["clock_uncertainty_us"] for r in first)
-            + max(r["clock_uncertainty_us"] for r in last),
+            clock_uncertainty_us=max(uncertainties),
             latency_us={
                 "timer": "pipeline_correlated_gpu_events_rank_max",
                 "median": float(np.median(latency)),
