@@ -13,11 +13,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
-from vllm.v1.kv_cache_interface import (
-    FLASHINFER_REPLAYSSM_STATE_ALIGNMENT,
-    KVCacheSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 class MambaBase(AttentionLayerBase):
@@ -29,26 +25,25 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
+    use_flashinfer_replayssm: bool = False
+    state_alignment: int = 1
+    _replayssm_ring_start: torch.Tensor
+    _replayssm_prev_num_accepted: torch.Tensor
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.
 
         Each block's ``C`` bytes hold the layer's states (e.g. conv, ssm)
-        packed by dtype/shape. FlashInfer ReplaySSM aligns each state to 16 bytes.
+        packed by dtype/shape with the layer's state alignment.
         """
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
         offset = 0
-        alignment = (
-            FLASHINFER_REPLAYSSM_STATE_ALIGNMENT
-            if getattr(self, "use_flashinfer_replayssm", False)
-            else 1
-        )
         for shape, dtype in zip(self.get_state_shape(), self.get_state_dtype()):
             nbytes = prod(shape) * get_dtype_size(dtype)
             state = pages[:, offset : offset + nbytes].view(dtype)
             states.append(state.view(-1, *shape))
-            offset += round_up(nbytes, alignment)
+            offset += round_up(nbytes, self.state_alignment)
         self.kv_cache = tuple(states)
 
     @abstractmethod
@@ -86,7 +81,9 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
-            use_flashinfer_replayssm=getattr(self, "use_flashinfer_replayssm", False),
+            use_flashinfer_replayssm=self.use_flashinfer_replayssm,
+            state_alignment=self.state_alignment,
+            block_stride_alignment=self.state_alignment,
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

@@ -35,6 +35,7 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
+from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -151,6 +152,11 @@ class MambaHybridModelState(DefaultModelState):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
+        if self._use_flashinfer_replayssm:
+            initialize_replayssm_ring_trackers(
+                kv_cache_config,
+                self.vllm_config.compilation_config.static_forward_context,
+            )
         if not (self._align_mode or self._use_flashinfer_replayssm):
             return
         mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
@@ -327,6 +333,13 @@ class MambaHybridModelState(DefaultModelState):
             replayssm_prefilling = is_prefilling & ~(
                 (seq_lens_cpu_upper_bound[:num_reqs] > query_lens) & decode_rows
             )
+            # Resumed chunks can exceed the decode window after the prompt ends.
+            decode_threshold = (
+                self.vllm_config.num_speculative_tokens + 1
+                if num_accepted_tokens is not None
+                else 1
+            )
+            replayssm_prefilling |= query_lens > decode_threshold
             async_tensor_h2d(
                 replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
             )

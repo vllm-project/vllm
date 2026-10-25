@@ -213,6 +213,10 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.replayssm_utils import (
+    get_replayssm_block_copy_tensors,
+    initialize_replayssm_ring_trackers,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -230,12 +234,10 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
-    allocate_replayssm_ring_trackers,
     bind_kv_cache,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     customize_attention_spec,
-    get_replayssm_block_copy_tensors,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
@@ -7048,11 +7050,6 @@ class GPUModelRunner(
                 logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
                 kv_caches[layer_name] = kv_caches[target_layer_name]
 
-            replayssm_ring_trackers = allocate_replayssm_ring_trackers(
-                kv_caches,
-                self.compilation_config.static_forward_context,
-                kv_cache_config.kv_cache_groups,
-            )
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         )
@@ -7064,13 +7061,7 @@ class GPUModelRunner(
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
-            replayssm_ring_trackers=replayssm_ring_trackers,
             layer_kv_caches=map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
-        )
-        # Validate and cache optional ReplaySSM-owned state once cache binding
-        # has populated every layer. Block copies are a per-step hot path.
-        self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
-            self.compilation_config.static_forward_context
         )
         return kv_caches
 
@@ -7153,6 +7144,12 @@ class GPUModelRunner(
                 kernel_block_sizes,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+        initialize_replayssm_ring_trackers(
+            kv_cache_config, self.compilation_config.static_forward_context
+        )
+        self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
+            self.compilation_config.static_forward_context
+        )
 
         if (
             self.speculative_config

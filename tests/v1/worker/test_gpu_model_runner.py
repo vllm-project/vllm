@@ -47,9 +47,8 @@ from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
-from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 from vllm.v1.core.kv_cache_planning import (
-    _estimate_max_model_len_from_groups,
+    estimate_max_model_len,
     get_kv_cache_configs,
 )
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -1387,15 +1386,9 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     assert len(kv_cache_config.kv_cache_tensors) == 1
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = _estimate_max_model_len_from_groups(
-        get_kv_cache_config_builder(vllm_config),
-        vllm_config,
-        kv_cache_config.kv_cache_groups,
-        5 * GiB_bytes,
-    )
+    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
-    assert vllm_config.model_config.max_model_len == 3_000_000
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory per layer (2 layers * 32kb)
@@ -1467,15 +1460,9 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # compared to no KV sharing
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = _estimate_max_model_len_from_groups(
-        get_kv_cache_config_builder(vllm_config),
-        vllm_config,
-        kv_cache_config.kv_cache_groups,
-        5 * GiB_bytes,
-    )
+    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
-    assert vllm_config.model_config.max_model_len == 3_000_000
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)

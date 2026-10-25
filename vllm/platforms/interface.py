@@ -1055,6 +1055,7 @@ class Platform:
                 shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
                 dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
                 use_flashinfer_replayssm=vllm_config.use_flashinfer_replayssm,
+                state_alignment=16 if vllm_config.use_flashinfer_replayssm else 1,
                 block_size=-1,
             ).page_size_bytes
 

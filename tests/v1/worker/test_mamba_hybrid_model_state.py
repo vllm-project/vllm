@@ -20,6 +20,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridModelState,
@@ -222,6 +223,26 @@ def _input_batch(
         positions=torch.zeros(num_tokens, dtype=torch.int64),
         prompt_lens=None,
     )
+
+
+def test_replayssm_resumed_chunk_past_prompt_resets_history(monkeypatch):
+    """A resumed multi-token chunk uses prefill even after the prompt ends."""
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    state._use_flashinfer_replayssm = True
+    state._is_prefilling_gpu = torch.zeros(2, dtype=torch.bool)
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    batch = _input_batch([4, 8], [3, 0], [False, False])
+    batch.seq_lens_cpu_upper_bound = torch.tensor([68, 72], dtype=torch.int32)
+    batch.seq_lens = batch.seq_lens_cpu_upper_bound
+    metadata = _prepare_attn_metadata(state, monkeypatch, batch)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[68, 72], query_lens=[4, 8]), BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=metadata.is_prefilling)
+    num_decodes, num_prefills, _, _ = split_decodes_and_prefills(
+        common, decode_threshold=4, treat_short_extends_as_decodes=False
+    )
+    assert (num_decodes, num_prefills) == (1, 1)
+    assert state._is_prefilling_gpu.tolist() == [False, True]
 
 
 def _prepare_attn_metadata(

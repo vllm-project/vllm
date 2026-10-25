@@ -536,12 +536,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
+        self.state_alignment = 16 if self.use_flashinfer_replayssm else 1
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
             )
-        num_states = 5 if self.use_replayssm else 2
-        self.kv_cache = tuple(torch.tensor([]) for _ in range(num_states))
+        # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
+        _n_state = 5 if self.use_replayssm else 2
+        self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
@@ -1071,50 +1074,40 @@ class MambaMixer2(MambaBase, PluggableLayer):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
-        dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
+        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
-            dtypes = (
-                *dtypes,
-                *MambaStateDtypeCalculator.replayssm_ring_dtypes(
-                    self.model_config.dtype
-                ),
+            return MambaStateDtypeCalculator.append_replayssm_ring(
+                base_dtype, self.model_config.dtype
             )
-        return dtypes
+        return base_dtype
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         tp_world_size = get_tensor_model_parallel_world_size()
-        shapes: tuple[tuple[int, ...], ...] = (
-            MambaStateShapeCalculator.mamba2_state_shape(
-                intermediate_size=self.intermediate_size,
-                tp_world_size=tp_world_size,
-                n_groups=self.n_groups,
-                num_heads=self.num_heads,
-                head_dim=self.head_dim,
-                state_size=self.ssm_state_size,
-                conv_kernel=self.conv_kernel_size,
-                num_spec=self.num_spec,
-            )
+        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
+            intermediate_size=self.intermediate_size,
+            tp_world_size=tp_world_size,
+            n_groups=self.n_groups,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            shapes = (
-                *shapes,
-                *MambaStateShapeCalculator.replayssm_ring_shapes(
-                    num_heads=self.num_heads,
-                    head_dim=self.head_dim,
-                    state_size=self.ssm_state_size,
-                    n_groups=self.n_groups,
-                    tp_world_size=tp_world_size,
-                    logical_window=self.replayssm_buffer_len,
-                    backend=self.mamba_config.backend,
-                    num_speculative_tokens=self.num_spec,
-                ),
+            return MambaStateShapeCalculator.append_replayssm_ring(
+                base_shapes=base_shape,
+                n_groups=self.n_groups,
+                tp_world_size=tp_world_size,
+                logical_window=self.replayssm_buffer_len,
+                backend=self.mamba_config.backend,
+                num_speculative_tokens=self.num_spec,
             )
-        return shapes
+        return base_shape
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

@@ -2,16 +2,53 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-owned FlashInfer ReplaySSM state and request lifecycle."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, NamedTuple
 
 import torch
 
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+
+
+def initialize_replayssm_ring_trackers(
+    kv_cache_config: KVCacheConfig,
+    forward_context: Mapping[str, Any],
+) -> None:
+    """Allocate and bind one tracker pair per ReplaySSM cache group."""
+    for group in kv_cache_config.kv_cache_groups:
+        layers = [
+            layer
+            for name in group.layer_names
+            if isinstance(layer := forward_context.get(name), MambaBase)
+            and layer.use_flashinfer_replayssm
+        ]
+        if not layers:
+            continue
+        state = layers[0].kv_cache[0]
+        num_blocks, device = state.shape[0], state.device
+        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
+        num_committed = torch.zeros_like(ring_start)
+        for layer in layers:
+            layer._replayssm_ring_start = ring_start
+            layer._replayssm_prev_num_accepted = num_committed
+
+
+def get_replayssm_block_copy_tensors(
+    forward_context: Mapping[str, Any],
+) -> list[torch.Tensor]:
+    """Include shared trackers in scheduler block copies alongside packed pages."""
+    tensors: list[torch.Tensor] = []
+    for layer in forward_context.values():
+        if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
+            tensors.extend(
+                (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
+            )
+    return tensors
 
 
 def _reinterpret_u64_as_i64(value: int) -> int:

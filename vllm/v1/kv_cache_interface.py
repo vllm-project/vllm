@@ -1075,13 +1075,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
-FLASHINFER_REPLAYSSM_STATE_ALIGNMENT = 16
-
-
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    state_alignment: int = 1
+    """Byte alignment of each state within a page."""
     # Enables group-shared trackers and the FlashInfer replay lifecycle.
     use_flashinfer_replayssm: bool = False
     page_size_padded: int | None = None
@@ -1098,26 +1097,17 @@ class MambaSpec(KVCacheSpec):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.use_flashinfer_replayssm and self.page_size_padded is not None:
+        if self.page_size_padded is not None:
             object.__setattr__(
                 self,
                 "page_size_padded",
-                round_up(self.page_size_padded, FLASHINFER_REPLAYSSM_STATE_ALIGNMENT),
+                round_up(self.page_size_padded, self.state_alignment),
             )
-
-    def get_block_stride_alignment(self) -> int:
-        alignment = super().get_block_stride_alignment()
-        if self.use_flashinfer_replayssm:
-            return math.lcm(alignment, FLASHINFER_REPLAYSSM_STATE_ALIGNMENT)
-        return alignment
 
     @property
     def state_content_size_bytes(self) -> int:
-        alignment = (
-            FLASHINFER_REPLAYSSM_STATE_ALIGNMENT if self.use_flashinfer_replayssm else 1
-        )
         return sum(
-            round_up(prod(shape) * get_dtype_size(dtype), alignment)
+            round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
@@ -1166,6 +1156,7 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.state_alignment == self.state_alignment
             and spec.use_flashinfer_replayssm == self.use_flashinfer_replayssm
             and (
                 not self.use_flashinfer_replayssm

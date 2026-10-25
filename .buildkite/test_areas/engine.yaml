@@ -171,7 +171,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
-    - tests/evals/gsm8k/gsm8k_eval.py
     - tests/kernels/mamba/test_ssu_dispatch.py
     - vllm/v1/core/sched/
     - vllm/v1/worker/utils.py
@@ -194,7 +193,7 @@ steps:
     - vllm/v1/worker/gpu_worker.py
   commands:
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
-    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
+    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
 
 - label: ":nvidia: (L4) [Nightly] V1 E2E"
   key: v1-e2e-2-gpus

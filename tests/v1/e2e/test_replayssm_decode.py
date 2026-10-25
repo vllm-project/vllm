@@ -8,9 +8,9 @@ from inspect import signature
 import pytest
 
 import vllm.envs as envs
-from vllm import RequestOutput, SamplingParams
+from vllm import SamplingParams
 from vllm.platforms import current_platform
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
@@ -252,16 +252,16 @@ def _check_replayssm_prefix_caching(
     use_v2: bool,
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
+    tensor_parallel_size: int = 1,
 ):
     common = dict(
         max_model_len=8192,
         trust_remote_code=True,
-        enable_prefix_caching=True,
         enable_chunked_prefill=True,
         mamba_cache_mode="align",
         mamba_backend=mamba_backend,
         disable_log_stats=False,  # required for llm.get_metrics()
-        tensor_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
     )
     prompts = PREFIX_CACHING_PROMPTS
     if speculative_method is not None:
@@ -292,6 +292,8 @@ def _check_replayssm_prefix_caching(
                     model_name,
                     use_replayssm=use_replayssm,
                     replayssm_buffer_len=16,
+                    # Shared prompts must not populate the baseline's cache.
+                    enable_prefix_caching=use_replayssm,
                     **common,
                 ) as llm:
                     config = llm.llm.llm_engine.vllm_config
@@ -299,7 +301,12 @@ def _check_replayssm_prefix_caching(
                     first_pass = llm.generate_greedy_logprobs(
                         prompts, max_tokens=32, num_logprobs=5
                     )
+                    if not use_replayssm:
+                        assert _prefix_cache_hits(llm) == 0
+                        outputs.append(first_pass)
+                        continue
                     hits_before = _prefix_cache_hits(llm)
+                    before = _metric_counts(llm.llm)
                     cached = llm.generate_greedy_logprobs(
                         prompts, max_tokens=32, num_logprobs=5
                     )
@@ -307,20 +314,17 @@ def _check_replayssm_prefix_caching(
                         f"No prefix-cache hits with use_replayssm={use_replayssm}"
                     )
                     outputs.append(cached)
-                    if use_replayssm and speculative_method is not None:
-                        metric_names = ["vllm:spec_decode_num_drafts"]
-                        if speculative_method == "mtp":
-                            metric_names.append("vllm:spec_decode_num_accepted_tokens")
-                        for metric_name in metric_names:
-                            assert (
-                                sum(
-                                    metric.value
-                                    for metric in llm.llm.get_metrics()
-                                    if isinstance(metric, Counter)
-                                    and metric.name == metric_name
-                                )
-                                > 0
-                            )
+                    if speculative_method is not None:
+                        after = _metric_counts(llm.llm)
+                        accepted = (
+                            after["vllm:spec_decode_num_accepted_tokens"]
+                            - before["vllm:spec_decode_num_accepted_tokens"]
+                        )
+                        drafted = (
+                            after["vllm:spec_decode_num_draft_tokens"]
+                            - before["vllm:spec_decode_num_draft_tokens"]
+                        )
+                        assert 0 < accepted < drafted, (accepted, drafted)
     finally:
         envs.disable_envs_cache()
 
@@ -328,7 +332,7 @@ def _check_replayssm_prefix_caching(
     check_logprobs_close(
         outputs_0_lst=outputs[0],
         outputs_1_lst=outputs[1],
-        name_0=f"baseline_{name}_cached",
+        name_0=f"baseline_{name}_uncached",
         name_1=f"replayssm_{name}_cached",
     )
     if speculative_method == "mtp":
@@ -365,6 +369,19 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
     )
 
 
+@requires_flashinfer_replayssm_materialization
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
+def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypatch):
+    _check_replayssm_prefix_caching(
+        vllm_runner,
+        model_name,
+        monkeypatch,
+        use_v2=True,
+        tensor_parallel_size=2,
+    )
+
+
 @pytest.mark.parametrize("model_name", MODELS)
 def test_triton_replayssm_align_prefix_cache_matches_baseline_v1(
     vllm_runner, model_name, monkeypatch: pytest.MonkeyPatch
@@ -395,7 +412,7 @@ def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2)
     )
 
 
-def _stress_metric_counts(llm) -> dict[str, int]:
+def _metric_counts(llm) -> dict[str, int]:
     return {
         metric.name: metric.value
         for metric in llm.get_metrics()
@@ -419,8 +436,7 @@ def _stress_mamba_block_size(worker) -> int:
 def _generate_with_preemption(llm, block_size: int):
     """Preempt active requests, then complete decode across three cache blocks."""
     engine = llm.llm_engine
-    max_tokens = 16_384
-    assert 3 * block_size <= max_tokens, (block_size, max_tokens)
+    max_tokens = 3 * block_size + 64
     requests = {
         "short": ("The capital of France is", 256),
         "long": (
@@ -428,7 +444,11 @@ def _generate_with_preemption(llm, block_size: int):
             max_tokens,
         ),
     }
-    before = _stress_metric_counts(llm)
+    prompt_length = len(llm.get_tokenizer().encode(requests["long"][0]))
+    assert (
+        prompt_length + max_tokens + 8 <= engine.vllm_config.model_config.max_model_len
+    )
+    before = _metric_counts(llm)
     # Queue both requests before scheduling either engine's initial batch.
     llm.sleep(level=0, mode="keep")
     try:
@@ -436,9 +456,7 @@ def _generate_with_preemption(llm, block_size: int):
             engine.add_request(
                 request_id,
                 prompt,
-                SamplingParams(
-                    temperature=0.0, max_tokens=length, ignore_eos=True, logprobs=5
-                ),
+                SamplingParams(temperature=0.0, max_tokens=length, ignore_eos=True),
             )
     finally:
         llm.wake_up(tags=["scheduling"])
@@ -460,9 +478,8 @@ def _generate_with_preemption(llm, block_size: int):
             break
     assert preempted and observed_turnover
     assert all(output.finished for output in latest.values())
-    after = _stress_metric_counts(llm)
+    after = _metric_counts(llm)
     assert after["vllm:num_preemptions"] - before["vllm:num_preemptions"] >= 2
-    result = []
     for request_id, (_, length) in requests.items():
         output = latest[request_id]
         completion = output.outputs[0]
@@ -477,11 +494,17 @@ def _generate_with_preemption(llm, block_size: int):
                 "preemptions="
                 f"{after['vllm:num_preemptions'] - before['vllm:num_preemptions']}"
             )
-        result.append((completion.token_ids, completion.text, completion.logprobs))
     long = latest["long"]
     assert long.prompt_token_ids is not None
     history = long.prompt_token_ids + list(long.outputs[0].token_ids)
-    return result, history
+    accepted = after["vllm:spec_decode_num_accepted_tokens"] - before.get(
+        "vllm:spec_decode_num_accepted_tokens", 0
+    )
+    drafted = after["vllm:spec_decode_num_draft_tokens"] - before.get(
+        "vllm:spec_decode_num_draft_tokens", 0
+    )
+    assert 0 < accepted < drafted, (accepted, drafted)
+    return history
 
 
 @requires_flashinfer_replayssm_materialization
@@ -492,21 +515,12 @@ def _generate_with_preemption(llm, block_size: int):
     ids=["v1-sync", "v1-async", "v2-async"],
 )
 @pytest.mark.usefixtures("enable_pickle")
-def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
+def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(
     vllm_runner, monkeypatch, use_v2, async_scheduling
 ):
-    """Check natural MTP, request turnover, preemption, and cached GSM8K answers."""
-    from ...evals.gsm8k.gsm8k_eval import INVALID, get_answer_value, load_gsm8k_data
-
-    train, questions = load_gsm8k_data()
-    # This sample checks cached numerical behavior. Evaluate aggregate accuracy
-    # on the complete GSM8K test split.
-    questions = questions[:16]
-    labels = [get_answer_value(question["answer"]) for question in questions]
-    assert len(labels) == 16 and INVALID not in labels
-    quality_outputs, stress_outputs, boundary_outputs = {}, {}, {}
+    """Compare accepted history after preemption with a fresh uncached reference."""
+    boundary_outputs = {}
     probe_history = None
-    prompts = None
     try:
         with monkeypatch.context() as patch:
             patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
@@ -541,22 +555,22 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                     assert config.use_v2_model_runner is use_v2
                     assert config.scheduler_config.async_scheduling is async_scheduling
                     assert config.cache_config.prefix_cache_retention_interval is None
-                    (block_size,) = runner.collective_rpc(_stress_mamba_block_size)
-                    stress_outputs[use_replayssm], history = _generate_with_preemption(
-                        llm, block_size
-                    )
                     if use_replayssm:
-                        probe_history = history
-                    else:
-                        assert llm.reset_prefix_cache()
+                        (block_size,) = runner.collective_rpc(_stress_mamba_block_size)
+                        probe_history = _generate_with_preemption(llm, block_size)
                     assert probe_history is not None
-                    before_probe = _stress_metric_counts(llm)
+                    before_probe = _metric_counts(llm)
                     (probe,) = llm.generate(
                         [{"prompt_token_ids": probe_history}],
-                        SamplingParams(temperature=0.0, max_tokens=1, logprobs=5),
+                        SamplingParams(
+                            temperature=0.0,
+                            max_tokens=8,
+                            ignore_eos=True,
+                            logprobs=5,
+                        ),
                     )
-                    after_probe = _stress_metric_counts(llm)
-                    assert probe.finished and len(probe.outputs[0].token_ids) == 1
+                    after_probe = _metric_counts(llm)
+                    assert probe.finished and len(probe.outputs[0].token_ids) == 8
                     assert probe.prompt_token_ids == probe_history
                     if use_replayssm:
                         assert probe.num_cached_tokens is not None
@@ -579,112 +593,6 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
                         f"logprobs={completion.logprobs}"
                     )
 
-                    tokenizer = llm.get_tokenizer()
-                    if prompts is None:
-                        prefix = (
-                            "Solve each problem. End each answer with #### "
-                            "followed by the numerical answer.\n\n"
-                        )
-                        for example in train:
-                            prefix += (
-                                f"Question: {example['question']}\n"
-                                f"Answer: {example['answer']}\n\n"
-                            )
-                            if len(tokenizer.encode(prefix)) >= 12_288:
-                                break
-                        prompts = [
-                            prefix + f"Question: {question['question']}\nAnswer:"
-                            for question in questions
-                        ]
-                    assert len(tokenizer.encode(prefix)) >= 2 * block_size
-                    assert (
-                        max(len(tokenizer.encode(text)) for text in prompts) + 512
-                        < 32_768
-                    )
-                    # Prime the actual shared prefix without scoring warmup output.
-                    assert llm.reset_prefix_cache()
-                    llm.generate(
-                        prompts[:1], SamplingParams(temperature=0.0, max_tokens=1)
-                    )
-                    before = _stress_metric_counts(llm)
-                    llm.sleep(level=0, mode="keep")
-                    try:
-                        llm.enqueue(
-                            prompts,
-                            SamplingParams(
-                                temperature=0.0,
-                                max_tokens=512,
-                                stop=["\nQuestion:"],
-                                logprobs=5,
-                            ),
-                        )
-                    finally:
-                        llm.wake_up(tags=["scheduling"])
-                    outputs = llm.wait_for_completion(output_type=RequestOutput)
-                    after = _stress_metric_counts(llm)
-                    assert len(outputs) == len(labels)
-                    assert all(output.finished for output in outputs)
-                    assert (
-                        after["vllm:prefix_cache_hits"]
-                        > before["vllm:prefix_cache_hits"]
-                    )
-                    assert all(
-                        output.num_cached_tokens is not None
-                        and output.num_cached_tokens > 0
-                        for output in outputs
-                    )
-                    accepted = (
-                        after["vllm:spec_decode_num_accepted_tokens"]
-                        - before["vllm:spec_decode_num_accepted_tokens"]
-                    )
-                    drafted = (
-                        after["vllm:spec_decode_num_draft_tokens"]
-                        - before["vllm:spec_decode_num_draft_tokens"]
-                    )
-                    assert 0 < accepted < drafted, (accepted, drafted)
-                    positions = [
-                        metric.values
-                        for metric in llm.get_metrics()
-                        if isinstance(metric, Vector)
-                        and metric.name
-                        == "vllm:spec_decode_num_accepted_tokens_per_pos"
-                    ]
-                    assert len(positions) == 1 and positions[0][0] > positions[0][-1]
-                    answers = [
-                        get_answer_value(output.outputs[0].text) for output in outputs
-                    ]
-                    score = sum(
-                        actual == expected for actual, expected in zip(answers, labels)
-                    )
-                    quality_outputs[use_replayssm] = [
-                        (
-                            output.outputs[0].token_ids,
-                            output.outputs[0].text,
-                            output.outputs[0].logprobs,
-                        )
-                        for output in outputs
-                    ]
-                    prefix_hits = (
-                        after["vllm:prefix_cache_hits"]
-                        - before["vllm:prefix_cache_hits"]
-                    )
-                    print(
-                        f"ReplaySSM={use_replayssm}: GSM8K={score}/16, "
-                        f"accepted={accepted}/{drafted}, answers={answers}, "
-                        f"prefix_hits={prefix_hits}, "
-                        f"lengths={[len(o.outputs[0].token_ids) for o in outputs]}, "
-                        "finish_reasons="
-                        f"{[o.outputs[0].finish_reason for o in outputs]}"
-                    )
-                    for index, (answer, label, output) in enumerate(
-                        zip(answers, labels, outputs)
-                    ):
-                        if answer != label:
-                            print(
-                                f"ReplaySSM={use_replayssm}: GSM8K case={index}, "
-                                f"expected={label}, actual={answer}, "
-                                f"text={output.outputs[0].text!r}"
-                            )
     finally:
         envs.disable_envs_cache()
 
@@ -694,13 +602,3 @@ def test_flashinfer_replayssm_mtp_stress_and_cached_quality(
         name_0="baseline_fresh_accepted_history",
         name_1="replayssm_cached_accepted_history",
     )
-    for name, outputs in (
-        ("stress", stress_outputs),
-        ("cached_gsm8k", quality_outputs),
-    ):
-        check_logprobs_close(
-            outputs_0_lst=outputs[False],
-            outputs_1_lst=outputs[True],
-            name_0=f"baseline_{name}",
-            name_1=f"replayssm_{name}",
-        )

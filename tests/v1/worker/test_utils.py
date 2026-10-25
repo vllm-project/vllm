@@ -32,13 +32,15 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, MambaSpec
+from vllm.v1.worker.replayssm_utils import (
+    get_replayssm_block_copy_tensors,
+    initialize_replayssm_ring_trackers,
+)
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
-    allocate_replayssm_ring_trackers,
     bind_kv_cache,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
-    get_replayssm_block_copy_tensors,
     request_memory,
 )
 
@@ -1319,6 +1321,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.use_flashinfer_replayssm = True
+        self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -1345,6 +1348,8 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
         use_flashinfer_replayssm=True,
+        state_alignment=16,
+        block_stride_alignment=16,
     )
     groups = [
         KVCacheGroupSpec([names[0], names[2]], spec),
@@ -1355,23 +1360,22 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         attention_config=SimpleNamespace(hisparse_config=None),
     )
     config.cache_config.kv_cache_layout = layout.name
-    # Two packed layers plus one pair of int32 trackers per group.
-    budget = 4 * (256 + 16)
+    budget = 4 * 256
     kv_config = get_kv_cache_config_from_groups(config, groups, budget)
     assert kv_config.num_blocks == 4
-    assert get_kv_cache_config_from_groups(config, groups, budget - 1).num_blocks == 3
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     pages = {name: pages[name] for name in reversed(names)}
-    trackers = allocate_replayssm_ring_trackers(pages, ctx, groups)
     runner_pages: list[torch.Tensor] = []
-    bind_kv_cache(pages, ctx, runner_pages, replayssm_ring_trackers=trackers)
+    bind_kv_cache(pages, ctx, runner_pages)
+    initialize_replayssm_ring_trackers(kv_config, ctx)
     assert pages[names[0]].untyped_storage().nbytes() == 4 * 256
-    for index, mixer in enumerate(mixers):
+    for mixer in mixers:
         assert len(mixer.kv_cache) == 5
-        assert mixer._replayssm_ring_start is trackers[names[index]][0]
-        assert mixer._replayssm_prev_num_accepted is trackers[names[index]][1]
-    assert all(a is b for a, b in zip(trackers[names[0]], trackers[names[2]]))
-    assert trackers[names[0]][0] is not trackers[names[1]][0]
+    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
+    assert (
+        mixers[0]._replayssm_prev_num_accepted is mixers[2]._replayssm_prev_num_accepted
+    )
+    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
     extra = get_replayssm_block_copy_tensors(ctx)
     assert len({tensor.data_ptr() for tensor in extra}) == 4
     assert all(tensor.is_contiguous() and tensor.shape == (4,) for tensor in extra)
@@ -1386,7 +1390,10 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     for index, state in enumerate(states, start=1):
         assert torch.all(state[1] == index)
     assert all(torch.all(state[2] == 99) for state in mixers[1].kv_cache)
-    for index, tensor in enumerate(trackers[names[0]], start=7):
+    for index, tensor in enumerate(
+        (mixers[0]._replayssm_ring_start, mixers[0]._replayssm_prev_num_accepted),
+        start=7,
+    ):
         tensor[1] = index
     before = {name: page.clone() for name, page in pages.items()}
     copy_kv_cache_blocks_inplace([*runner_pages, *extra], 4, [KVCacheBlockCopy(1, 3)])
@@ -1395,7 +1402,8 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         assert torch.equal(page[:3], before[name][:3])
     assert mixers[2]._replayssm_ring_start[3] == 7
     assert mixers[2]._replayssm_prev_num_accepted[3] == 8
-    assert all(torch.count_nonzero(tensor) == 0 for tensor in trackers[names[1]])
+    assert torch.count_nonzero(mixers[1]._replayssm_ring_start) == 0
+    assert torch.count_nonzero(mixers[1]._replayssm_prev_num_accepted) == 0
 
     clear_layer_kv_caches(mixers)
     for mixer in mixers:

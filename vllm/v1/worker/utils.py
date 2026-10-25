@@ -626,46 +626,6 @@ def allocate_kv_cache(
     return kv_caches
 
 
-def allocate_replayssm_ring_trackers(
-    kv_caches: Mapping[str, torch.Tensor],
-    forward_context: Mapping[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
-) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    """Allocate two contiguous int32 trackers per physical cache-slot namespace."""
-    remaining = {
-        name
-        for name in kv_caches
-        if name in forward_context
-        and getattr(forward_context[name], "use_flashinfer_replayssm", False)
-    }
-    groups = []
-    for group in kv_cache_groups or ():
-        names = [name for name in group.layer_names if name in remaining]
-        remaining.difference_update(names)
-        groups.append(names)
-    # Unmapped layers cannot share a physical slot namespace.
-    groups.extend([name] for name in kv_caches if name in remaining)
-
-    trackers = {}
-    for names in groups:
-        if not names:
-            continue
-        first = kv_caches[names[0]]
-        num_blocks, device = first.shape[0], first.device
-        if any(
-            (kv_caches[name].shape[0], kv_caches[name].device) != (num_blocks, device)
-            for name in names
-        ):
-            raise ValueError(
-                "ReplaySSM layers in one cache group must share cache capacity"
-            )
-        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
-        num_committed = torch.zeros_like(ring_start)
-        for name in names:
-            trackers[name] = (ring_start, num_committed)
-    return trackers
-
-
 def prepare_kernel_block_sizes(
     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
 ) -> list[int]:
@@ -852,8 +812,6 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
-    replayssm_ring_trackers: Mapping[str, tuple[torch.Tensor, torch.Tensor]]
-    | None = None,
     layer_kv_caches: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Bind the allocated KV cache to both ModelRunner and forward context so
@@ -871,7 +829,6 @@ def bind_kv_cache(
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
-        replayssm_ring_trackers: Preallocated tracker pairs keyed by layer name.
         layer_kv_caches: The views to bind to layers when they differ from
             kv_caches (e.g. kernel-block views). The runner keeps kv_caches,
             which are addressed by scheduler block IDs.
@@ -899,36 +856,20 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    bind_kv_cache_to_layers(
-        layer_kv_caches or kv_caches,
-        forward_context,
-        replayssm_ring_trackers,
-    )
+    bind_kv_cache_to_layers(layer_kv_caches or kv_caches, forward_context)
 
 
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
-    replayssm_ring_trackers: Mapping[str, tuple[torch.Tensor, torch.Tensor]]
-    | None = None,
 ) -> None:
-    """Bind layer cache views and preallocated ReplaySSM trackers."""
+    """Bind layer cache views."""
     # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
     # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
-        layer = forward_context[layer_name]
-        layer.bind_kv_cache(kv_cache)
-        if getattr(layer, "use_flashinfer_replayssm", False):
-            if (
-                replayssm_ring_trackers is None
-                or layer_name not in replayssm_ring_trackers
-            ):
-                raise ValueError("FlashInfer ReplaySSM requires preallocated trackers")
-            layer._replayssm_ring_start, layer._replayssm_prev_num_accepted = (
-                replayssm_ring_trackers[layer_name]
-            )
+        forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
@@ -1002,26 +943,6 @@ def copy_kv_cache_blocks_inplace(
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
         blocks[dst] = blocks[src]
-
-
-def get_replayssm_block_copy_tensors(
-    forward_context: Mapping[str, Any],
-) -> list[torch.Tensor]:
-    """Collect FlashInfer ReplaySSM trackers for scheduler block copies.
-
-    Normal page copies include convolution state, SSM state, and replay rings.
-    Group-shared trackers remain separate; the copy helper deduplicates aliases.
-    """
-    extra_tensors: list[torch.Tensor] = []
-    for layer in forward_context.values():
-        if not getattr(layer, "use_flashinfer_replayssm", False):
-            continue
-        # Group-shared trackers appear once per layer; the block-copy helper
-        # deduplicates them by (device, data_ptr()).
-        extra_tensors.extend(
-            (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
-        )
-    return extra_tensors
 
 
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:

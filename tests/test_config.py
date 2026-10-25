@@ -109,16 +109,25 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
-    ("mode", "input_dtype", "use_ubatching", "error"),
+    ("mode", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
-        ("align", torch.bfloat16, False, None),
-        ("align", torch.float16, False, "bfloat16 model inputs"),
-        ("none", torch.float16, False, None),
-        ("align", torch.bfloat16, True, "ReplaySSM does not support microbatching"),
+        ("align", torch.bfloat16, False, 1, None),
+        ("align", torch.float16, False, 1, "bfloat16 model inputs"),
+        ("none", torch.float16, False, 1, None),
+        ("align", torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
+        ("align", torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
     ],
-    ids=["align-bf16", "align-fp16-rejected", "none-fp16", "microbatch-rejected"],
+    ids=[
+        "align-bf16",
+        "align-fp16-rejected",
+        "none-fp16",
+        "microbatch-rejected",
+        "pp-rejected",
+    ],
 )
-def test_flashinfer_replayssm_validates_config(mode, input_dtype, use_ubatching, error):
+def test_flashinfer_replayssm_validates_config(
+    mode, input_dtype, use_ubatching, pp_size, error
+):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
@@ -134,7 +143,7 @@ def test_flashinfer_replayssm_validates_config(mode, input_dtype, use_ubatching,
         ),
         mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1, use_ubatching=use_ubatching
+            pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
         ),
         kv_transfer_config=None,
         use_v2_model_runner=True,

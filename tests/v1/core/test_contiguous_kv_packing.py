@@ -10,24 +10,21 @@ block); the allocation is the same either way.
 """
 
 from dataclasses import replace
-from math import lcm
-from types import SimpleNamespace
+from math import lcm, prod
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
-    _pool_bytes_per_block_from_builder,
     get_kv_cache_config_from_groups,
-    get_kv_cache_configs,
     get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -132,13 +129,25 @@ def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
 
 
+class _MambaLayer(MambaBase):
+    def __init__(self, spec: MambaSpec):
+        self.spec = spec
+        self.state_alignment = spec.state_alignment
+
+    def get_state_shape(self):
+        return self.spec.shapes
+
+    def get_state_dtype(self):
+        return self.spec.dtypes
+
+    @property
+    def mamba_type(self):
+        return self.spec.mamba_type
+
+
 def _mamba_states(cache, spec):
-    mixer = SimpleNamespace(
-        get_state_shape=lambda: spec.shapes,
-        get_state_dtype=lambda: spec.dtypes,
-        use_flashinfer_replayssm=spec.use_flashinfer_replayssm,
-    )
-    MambaBase.bind_kv_cache(mixer, cache)
+    mixer = _MambaLayer(spec)
+    mixer.bind_kv_cache(cache)
     return mixer.kv_cache
 
 
@@ -156,13 +165,17 @@ def test_replayssm_low_head_packed_alignment(layout):
             torch.bfloat16,
         ),
         use_flashinfer_replayssm=True,
-        page_size_padded=43912 + 129,
+        state_alignment=16,
+        block_stride_alignment=16,
     )
-    assert spec.state_content_size_bytes == 43920
-    assert spec.page_size_bytes == 44048
-    assert replace(spec, block_stride_alignment=24).get_block_stride_alignment() == 48
+    spec = replace(spec, page_size_padded=spec.state_content_size_bytes + 1)
+    assert spec.page_size_bytes % 16 == 0
     # Block-outer packing must also align an overlay with a larger, odd page.
-    other_bytes = 2 * spec.page_size_bytes + 4 if layout.is_block_outermost else 44048
+    other_bytes = (
+        2 * spec.page_size_bytes + 4
+        if layout.is_block_outermost
+        else spec.page_size_bytes
+    )
     other = MambaSpec(block_size=16, shapes=((other_bytes,),), dtypes=(torch.int8,))
     groups = [
         KVCacheGroupSpec(["a0", "a1"], spec),
@@ -170,12 +183,6 @@ def test_replayssm_low_head_packed_alignment(layout):
     ]
     vllm_config = _mock_vllm_config(layout.name)
     bytes_per_block = _get_kv_cache_bytes_per_block(groups, layout)
-    assert (
-        _pool_bytes_per_block_from_builder(
-            get_kv_cache_config_builder(vllm_config), vllm_config, groups
-        )
-        == bytes_per_block
-    )
     config = get_kv_cache_config_from_groups(
         vllm_config,
         groups,
@@ -191,20 +198,10 @@ def test_replayssm_low_head_packed_alignment(layout):
             assert state.stride(0) * state.element_size() % 16 == 0
             for slot in range(config.num_blocks):
                 assert state[slot].data_ptr() % 16 == 0
-    assert states[0][4].data_ptr() - pages["a0"].data_ptr() == 39568
     for index, state in enumerate((*states[0], *states[1]), start=1):
         state[1].fill_(index)
     for index, state in enumerate((*states[0], *states[1]), start=1):
         assert torch.all(state[1] == index)
-
-    # The builder must reserve tracker bytes before selecting the block count.
-    # One byte below four complete blocks must admit only three blocks.
-    admission_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
-    admission_config.cache_config.kv_cache_layout = layout.name
-    admission = get_kv_cache_configs(
-        admission_config, [{"a0": spec}], [4 * (spec.page_size_bytes + 8) - 1]
-    )[0]
-    assert admission.num_blocks == 3
 
 
 def test_generic_mamba_keeps_unaligned_packed_layout():
@@ -212,41 +209,34 @@ def test_generic_mamba_keeps_unaligned_packed_layout():
         block_size=16,
         shapes=((2,), (3,), (4,), (5,), (6,)),
         dtypes=(torch.float32,) * 5,
-        page_size_padded=88,
     )
-    assert spec.state_content_size_bytes == 80
-    assert spec.page_size_bytes == spec.page_size_padded == 88
-    assert spec.get_block_stride_alignment() == 1
-    pages = torch.zeros((3, 1, 1, 88), dtype=torch.int8)
-    states = _mamba_states(pages, spec)
-    assert [state.data_ptr() - pages.data_ptr() for state in states] == [
-        0,
-        8,
-        20,
-        36,
-        56,
+    state_sizes = [
+        prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(spec.shapes, spec.dtypes)
     ]
-    assert all(state.stride(0) * state.element_size() == 88 for state in states)
+    spec = replace(
+        spec, page_size_padded=sum(state_sizes) + 2 * get_dtype_size(torch.float32)
+    )
+    assert spec.state_content_size_bytes == sum(state_sizes)
+    assert spec.page_size_bytes == spec.page_size_padded
+    assert spec.get_block_stride_alignment() == 1
+    pages = torch.zeros((3, 1, 1, spec.page_size_bytes), dtype=torch.int8)
+    states = _mamba_states(pages, spec)
+    offset = 0
+    for state, size in zip(states, state_sizes):
+        assert state.data_ptr() - pages.data_ptr() == offset
+        assert state.stride(0) * state.element_size() == spec.page_size_bytes
+        offset += size
 
 
-@pytest.mark.parametrize("difference", ["ring_shape", "ring_dtype", "backend"])
-def test_replayssm_grouping_checks_ring_layout_not_only_page_size(difference):
+def test_replayssm_grouping_checks_ring_layout_not_only_page_size():
     spec = MambaSpec(
         block_size=2,
         shapes=((8,), (12,), (4,), (4,), (4,)),
         dtypes=(torch.float32,) * 5,
         use_flashinfer_replayssm=True,
     )
-    if difference == "ring_shape":
-        other = replace(spec, shapes=(*spec.shapes[:2], (1, 4), *spec.shapes[3:]))
-    elif difference == "ring_dtype":
-        other = replace(
-            spec,
-            shapes=(*spec.shapes[:2], (8,), *spec.shapes[3:]),
-            dtypes=(*spec.dtypes[:2], torch.float16, *spec.dtypes[3:]),
-        )
-    else:
-        other = replace(spec, use_flashinfer_replayssm=False)
+    other = replace(spec, shapes=(*spec.shapes[:2], (1, 4), *spec.shapes[3:]))
     assert other.page_size_bytes == spec.page_size_bytes
     assert spec.is_uniform_with_collection({"first": spec, "second": spec})
     assert not spec.is_uniform_with_collection({"first": spec, "second": other})

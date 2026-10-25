@@ -9,8 +9,6 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import Any
 
-import torch
-
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
@@ -89,6 +87,67 @@ def _check_enough_kv_cache_memory(
         )
 
 
+def max_memory_usage_bytes(
+    vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
+) -> int:
+    """Get the maximum memory usage in bytes for the given KV cache specs."""
+    return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
+
+
+def estimate_max_model_len(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    available_memory: int,
+) -> int:
+    """Estimates the maximum model length that can fit in the available memory
+    using binary search.
+
+    This function temporarily modifies max_model_len during estimation but
+    restores the original value before returning, ensuring no side effects.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The estimated maximum model length that can fit in the available memory.
+
+    """
+    # Save the original max_model_len to restore after estimation
+    original_max_model_len = vllm_config.model_config.max_model_len
+
+    # Define a function to check if a given model length fits in memory
+    def fits_in_memory(model_len: int) -> bool:
+        # Temporarily modify the max_model_len for this calculation
+        vllm_config.model_config.max_model_len = model_len
+        # Calculate memory needed for the given model length
+        memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
+        return memory_needed <= available_memory
+
+    try:
+        # Binary search for the maximum model length
+        left, right = 1, original_max_model_len
+
+        # If even the smallest model length doesn't fit, return 0
+        if not fits_in_memory(left):
+            return 0
+
+        # Binary search for the maximum model length that fits
+        result = 1
+        while left <= right:
+            mid = (left + right) // 2
+            if fits_in_memory(mid):
+                result = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+        return result
+    finally:
+        # Always restore the original max_model_len to avoid side effects
+        vllm_config.model_config.max_model_len = original_max_model_len
+
+
 def check_enough_kv_cache_memory(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -108,26 +167,20 @@ def check_enough_kv_cache_memory(
     """
     # No need to check for available memory if the kv_cache_spec is empty
     if kv_cache_spec:
-        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
-        builder = get_kv_cache_config_builder(vllm_config)
         # Reserve the null block BlockPool permanently holds back, so the check
         # plans against usable blocks, as in get_kv_cache_configs. Group a copy
         # of the specs since grouping may unify them in-place.
-        groups = get_kv_cache_groups_from_builder(
-            builder, vllm_config, dict(kv_cache_spec)
-        )
+        groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
         check_memory = (
-            available_memory
-            - _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+            available_memory - _pool_bytes_per_block(vllm_config, groups)
             if groups
             else available_memory
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            partial(_max_memory_usage_bytes_from_groups, builder, vllm_config, groups),
+            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, builder, vllm_config, groups),
+            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
 
 
@@ -248,8 +301,7 @@ def _pool_bytes_per_block_from_builder(
             "KVCacheConfigBuilder._get_pool_bytes_per_block() for placements "
             "with several device allocations."
         )
-    # ReplaySSM trackers are allocated outside the page backing.
-    return backing_sizes.pop() + _get_replayssm_tracker_bytes_per_block(kv_cache_groups)
+    return backing_sizes.pop()
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -522,15 +574,6 @@ def _get_layer_block_stride(spec: KVCacheSpec) -> int:
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
-    """Return cache page and ReplaySSM tracker bytes per physical block."""
-    return _get_kv_cache_main_bytes_per_block(
-        kv_cache_groups, layout
-    ) + _get_replayssm_tracker_bytes_per_block(kv_cache_groups)
-
-
-def _get_kv_cache_main_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
-) -> int:
     """Return the largest cache group's bytes per block."""
     if not layout.is_block_outermost:
         # Each layer's block stride is its own padded page.
@@ -560,20 +603,6 @@ def _get_kv_cache_main_bytes_per_block(
         for layer_name in group.layer_names
     )
     return round_up(bytes_per_block, math.lcm(*alignments))
-
-
-def _get_replayssm_tracker_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    """Account for the two int32 trackers shared by each ReplaySSM group."""
-    tracker_bytes = 0
-    for group in kv_cache_groups:
-        for layer_name in group.layer_names:
-            spec = _get_per_layer_spec(group, layer_name)
-            if isinstance(spec, MambaSpec) and spec.use_flashinfer_replayssm:
-                tracker_bytes += 2 * get_dtype_size(torch.int32)
-                break
-    return tracker_bytes
 
 
 def validate_kv_cache_layout(
@@ -646,18 +675,12 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    main_bytes_per_block = _get_kv_cache_main_bytes_per_block(kv_cache_groups, layout)
-    bytes_per_block = main_bytes_per_block + _get_replayssm_tracker_bytes_per_block(
-        kv_cache_groups
-    )
-    assert bytes_per_block > 0
-    interleaved_block_stride = (
-        main_bytes_per_block if layout.is_block_outermost else None
-    )
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
+    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    size = main_bytes_per_block * num_blocks
+    size = bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
     #
