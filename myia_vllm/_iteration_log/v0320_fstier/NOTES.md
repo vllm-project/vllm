@@ -2062,3 +2062,60 @@ model=None) sans suite.
 `D:\vllm_image_backups` (25,45 Go, 3 tars) supprimé, copies sha256-vérifiées consolidées
 sous `F:\Backups-Cloud\vllm_image_backups\` (empreintes mesurées des deux côtés avant geste ;
 journal campagne Maintenance #165). Aucun tar n'était porteur prod.
+
+## 25/10 13:41Z — routine diurne saine ; signature #431 mesurée pour la première fois ; clé dominante identifiée ; `/tokenize` qualifié pour #674
+
+**Prod** : health 200 en 7 ms, `RC=0`, `StartedAt=09:04:20Z` (restart NCCL du matin, PR #190),
+3 conteneurs Up, 0 OOM, `/dev/shm` **24 G/63 G (39 %)**, GPU 0 **22 648** / GPU 1 **21 408** /
+GPU 2 15 011 MiB (CoursIA, hors périmètre). Watchdog : 1 restart (09:02:45Z, déjà documenté),
+puis **4 `fail 1/2` sans suite** (11:16:18, 12:40:54, 13:17:28, 13:24:21Z), 1 514 sondes OK.
+
+**Moteur sur 4 h 34** (compteurs créés 09:07:25Z) : prompt **136,1 M tok** dont
+`local_compute` **4,7 M (3,5 %)**, device 109,1 M, external_kv_transfer 22,3 M, host 19,2 M,
+disk 3,1 M → **hit préfixe 80,2 %** ; génération 1,266 M tok (77 tok/s moyens) ;
+**1 300 requêtes** (stop 821 + length 479, 0 error/abort) ; **préemptions 2**.
+Latences : TTFT p50 2,5 / p90 20 / p99 80 s ; **file p50 0,3 / p90 0,8 / p99 20 s** ;
+inter-token p50 25 ms / p90 50 ms ; décodage p50 10 / p90 120 / p99 480 s.
+
+**★ Première occurrence mesurée de la signature #431** — 2 × `400` corps **901 417 B** à
+**08:14:58Z et 08:15:08Z**, IP `90.65.170.144` (hairpin site), UA `Bun/1.3.14` (hub),
+`model=swift-1.5-27b`, `error_body` : « maximum context length is 262144 … prompt contains at
+least 262145 input tokens ». **Deux tentatives à 10 s d'intervalle = le retry local que la règle
+#431 interdit**, puis repli. Les deux sont **antérieures à l'arbitrage user de 12:25Z** : elles
+datent l'état d'avant le correctif que claudish ouvre. Aucune récidive depuis 12:25Z.
+
+**★ Clé dominante identifiée** — le middleware stocke `authorization[:24]+"..."`, soit
+`"Bearer "` + 17 caractères : sous ce schéma `sha256[:12]` = **`be312daf7c1c` EST
+`VLLM_API_KEY_MEDIUM`** (vérifié sur `myia_vllm/.env`, aucune valeur imprimée). Cela ferme la
+question ouverte de po-2025:claudish (« absente des 14 slots du hub ») : le hub porte une
+**référence** `${…}`, pas la valeur — c'est le piège d'instrument qu'ils avaient eux-mêmes
+documenté le 08/10. Part de trafic : **1 639 / 1 703 requêtes en 6 h = 96 %**.
+
+**Sécurité** — `ZOLTRAAK/0.2.0 (security-research; chesstournamentlift@gmail.com)` depuis
+`116.202.50.2` (Hetzner) : **3 × `GET /v1/models` → 401** (08:44:42-08:45:04Z) ; `129.80.213.237`
+(Mozilla) 1 × 401 ; `108.165.33.236` (Go-http-client) **59 × 401 depuis 07:48Z** avec
+`fp=1f7f6080cb65`, clé absente de notre `.env` **et** du hub. **Aucun accès accordé nulle part.**
+`82.66.89.184` (poste Paris user, Q13) réapparu 12:37→13:29Z, 6 req 200 ; `92.184.141.244`
+(2 req) — les deux en condensation RSM (UA `OpenAI/JS`, même clé).
+
+**★ `/tokenize` qualifié pour #674** (question bloquante de claudish) : `POST /tokenize` →
+**200 en 0,059 s** (1 011 tok), **0,037 s** (10 011 tok), **0,861 s** (**292 231 tok**, corps
+1,3 Mo) **alors que le moteur servait du trafic** ; rend `count`, `tokens` et
+**`max_model_len=262 144`** — donc le champ de vérité de `deriveContextLimit` est lisible côté hub
+sans moteur. Il **compte au-delà de la fenêtre sans erreur** (292 231 > 262 144 accepté) : la
+décision « skip context » peut se prendre sur le compte exact. Pas de réservation KV (API-server).
+
+**Signal condensation po-2025 (4/4 repli cloud sur le statut)** — **moteur disculpé par les
+chiffres** : file p90 **0,8 s**, TTFT p90 **20 s**. Le discriminant est le **budget de génération** :
+statut 15,4 Ko ≈ **4,1 K tokens de sortie** à 25-50 ms/token = **100-200 s** > timeout client 90 s ;
+résumé 2-4 Ko ≈ 0,5-1 K tokens = 12-50 s → passe. Correctif **côté client RSM** (roo-extensions) ;
+aucun levier moteur, le moteur tronque à la fenêtre (correction claudish 09:42Z).
+
+**Middleware** : journalise désormais `x-claudish-client` / `x-claudish-machine` (format figé par
+po-2025:claudish) — **inerte jusqu'au prochain restart**, aucun geste moteur pour l'activer.
+
+**Hôte** : commit **84,4 %** (marge 61,5 Go, seuil 85 %, aucun travail lourd) ; G: écriture OK
+(84 %, 628 Go libres) ; nbaudit `ok:true` 0 échec (vague 2 `Image/`). **Q36 = (c)**, option (a)
+« cap max_tokens » **réfutée par la mesure** (claudish : prompt > fenêtre → 400, sinon la
+génération est rabotée) ; les deux règles Q36 sont prises par claudish (implémentation après
+#679/#675, recreate unique demain après la fenêtre 09:00-11:00Z).
