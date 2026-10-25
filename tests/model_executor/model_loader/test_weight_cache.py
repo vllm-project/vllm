@@ -789,6 +789,42 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@create_new_process_for_each_test("spawn")
+def test_daemon_releases_cublas_workspaces():
+    """Startup cleanup releases cached GEMM scratch without freeing live tensors."""
+    import os
+
+    import torch
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.distributed import init_distributed_environment
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
+    os.environ["TORCH_CUBLAS_WORKSPACE_CACHE"] = "1"
+    config = VllmConfig(model_config=ModelConfig(model=QWEN_CASE.model))
+    address = f"tcp://127.0.0.1:{get_open_port()}"
+    server = WeightCacheDaemon(config, 0, 0, address)
+    torch.accelerator.set_device_index(0)
+    init_distributed_environment(1, 0, address, 0, backend="nccl")
+    torch._C._cuda_clearCublasWorkspaces()
+    matrix = torch.ones(128, 128, device="cuda")
+    result = torch.empty_like(matrix)
+    before = torch.accelerator.memory_allocated()
+    torch.mm(matrix, matrix, out=result)
+    torch.accelerator.synchronize()
+    assert torch.accelerator.memory_allocated() > before
+
+    server.release_distributed()
+    after = torch.accelerator.memory_allocated()
+    torch._C._cuda_clearCublasWorkspaces()
+    assert torch.accelerator.memory_allocated() == after, (
+        "daemon retained BLAS workspaces"
+    )
+    torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_daemon_reports_exported_weight_bytes():
     """The engine's budget excludes exactly the storages it maps from the
     daemon, not daemon-only allocations or tensors it does not export."""
