@@ -86,7 +86,7 @@ For more advanced usage, including parallel tool calls and different model-speci
 ## Named Function Calling
 
 vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
-high-quality one.
+high-quality one. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
@@ -100,7 +100,7 @@ In the Responses API, `tool_choice={"type": "function", "name": "..."}` can sele
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
-When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 ## None Function Calling
 
@@ -260,6 +260,12 @@ Known issues:
       it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
+
+3. With the official Mistral format (`--tokenizer_mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
+   Chat Completions tool calls are constrained by [mistral-common](https://github.com/mistralai/mistral-common)'s grammar.
+   For `tool_choice="required"` and named tool choice, this grammar allows content, including reasoning, before the tool calls, and the model is not told that a call is required.
+   A call is therefore not guaranteed: the model can keep answering in text until `max_tokens` (`finish_reason="length"`).
+   Tool names are enforced only for a named tool choice or when at least one tool sets `strict: true`, and argument schemas only for tools with `strict: true`.
 
 Recommended flags:
 
