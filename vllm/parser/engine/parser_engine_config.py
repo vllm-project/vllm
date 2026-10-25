@@ -39,6 +39,11 @@ class ParserState(Enum):
     TOOL_BETWEEN = auto()
 
 
+class ToolCallBodyCollection(Enum):
+    JSON_ARRAY = auto()
+    SEMICOLON_SEQUENCE = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class Transition:
     next_state: ParserState
@@ -86,11 +91,11 @@ class ParserEngineConfig:
 
     tool_args_json: bool = True
 
-    # The tool region body is a single JSON array of ``{"name", "arguments"}``
-    # objects (one marker → N calls, no closing terminal). The engine splits
-    # the array into one tool call per element; the array's ``]`` ends the
-    # region and any trailing text becomes content. Used by Granite.
-    tool_call_body_array: bool = False
+    # Framing for a tool region containing multiple top-level JSON objects.
+    # The engine emits one tool call per object. JSON_ARRAY is used by Granite;
+    # SEMICOLON_SEQUENCE handles Llama's ``{...}; {...}`` format.
+    # ...
+    tool_call_body_collection: ToolCallBodyCollection | None = None
 
     arg_structural_chars: frozenset[str] | None = None
 
