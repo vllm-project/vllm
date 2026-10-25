@@ -2335,3 +2335,18 @@ All three workstreams of the mandate are now in main; the engine has not been to
   haiku in cash — swift saturates at 3-4 concurrent ~190K conversations.
   PR claudish#685 merged 19:44Z (checks green) after body+comments+reviews
   read; rides tomorrow's recreate with the #686 header.
+
+## 25/10 21:41Z — routine cycle + M1 second window: the group gap holds
+
+Same generation since 09:04:20Z (RC=0, 0 OOM, health 200/4.3 ms, shm 24G).
+
+- **M1 window 2** (148 min, 19:13Z → 21:41Z): attention hit 9.6 % (348 files), GDN 2.0 %
+  (81 files); 81.1 GiB created (~33 GB/h evening rate vs 47 daytime). Two independent
+  windows now agree: GDN is written ~2x the attention bytes and read back 4-5x less.
+- **Evening load**: 201 requests with 100K-1M bodies in 2 h, all from the hub (hairpin);
+  window prefix-hit ~8 % of block queries (cumulative ratio diluted 61 % → 55 %) — fresh
+  contexts dominate (haiku lanes + compactions), i.e. exactly the socle-recompute cost
+  #198 targets. **Preemptions 27 (+10)** — KV pressure climbing; re-check after the
+  Minimax reset (23:05Z) before calling it a trend. 4 more WEDGE `fail 1/2` under long
+  prefills, never 2/2; VRAM GPU 0 22,834 (creep +29 MiB/2 h, margin 166 MiB).
+- 0 new external IP with 200, 0 window+1. Commit 84.9 % (back under 85).
