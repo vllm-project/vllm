@@ -588,10 +588,12 @@ class DeepseekSparseSWAIndexBatch:
                 return
             # stage() records the shared arguments with the first group.
             assert self._shared is not None
-            if torch.cuda.is_current_stream_capturing():
+            if torch.cuda.is_current_stream_capturing() or len(self._groups) == 1:
                 # A recording must capture each group's own launch; the
                 # batched kernel reads a parameter table this method rebuilds
-                # per step, which a replay would not refresh.
+                # per step, which a replay would not refresh. A single group
+                # pays the table upload to fuse nothing: one launch either
+                # way, so it takes the direct path too.
                 (
                     query_start_loc,
                     seq_lens,
