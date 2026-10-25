@@ -1550,6 +1550,9 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
+                n_predict = getattr(
+                    self.draft_model_config.hf_config, "n_predict", None
+                )
                 if (
                     "ParseAuxMTPModel" in self.draft_model_config.architectures
                     and self.num_speculative_tokens not in (None, 1)
@@ -1570,9 +1573,6 @@ class SpeculativeConfig:
                                 self.draft_model_config.hf_config
                             )
                         )
-                    n_predict = getattr(
-                        self.draft_model_config.hf_config, "n_predict", None
-                    )
                     if (
                         n_predict is not None
                         and self.num_speculative_tokens > n_predict

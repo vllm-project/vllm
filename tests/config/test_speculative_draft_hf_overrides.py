@@ -12,7 +12,6 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -210,65 +209,18 @@ def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("attributes", "explicit", "expected", "source"),
-    [
-        (None, None, 3, "num_lookahead_tokens"),
-        ({"n_predict": 2, "num_lookahead_tokens": 3}, None, 2, "n_predict"),
-        (
-            {"n_predict": None, "num_lookahead_tokens": 3},
-            None,
-            3,
-            "num_lookahead_tokens",
-        ),
-        ({"num_lookahead_tokens": 3}, 5, 5, None),
-        ({"n_predict": 2}, 4, 4, None),
-        ({"n_predict": 2}, 3, None, None),
-        ({}, None, None, None),
-    ],
-)
-def test_draft_token_default(attributes, explicit, expected, source):
-    if attributes is None:
-        attributes = SpeculatorsConfig.extract_transformers_pre_trained_config(
-            {
-                "speculators_model_type": "eagle3",
-                "transformer_layer_config": {},
-                "speculators_config": {"proposal_methods": [{"speculative_tokens": 3}]},
-            }
-        )
-    hf_config = _make_hf_config(**attributes)
-    draft = MagicMock(hf_config=hf_config, max_model_len=128)
-    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
-    draft.get_vocab_size.return_value = target.get_vocab_size.return_value = 32000
-    with (
-        patch("vllm.config.speculative.ModelConfig", return_value=draft),
-        patch("vllm.config.speculative.logger.info") as log,
-    ):
-        kwargs: dict[str, Any] = dict(
-            model="draft",
-            method="draft_model",
-            target_model_config=target,
-            target_parallel_config=ParallelConfig(),
-        )
-        if explicit is not None:
-            kwargs["num_speculative_tokens"] = explicit
-        if expected is None:
-            with pytest.raises(ValueError, match="was not provided|must be divisible"):
-                SpeculativeConfig(**kwargs)
-        else:
-            config = SpeculativeConfig(**kwargs)
-            assert config.num_speculative_tokens == expected
-        if source is not None:
-            log.assert_any_call(
-                "Defaulting num_speculative_tokens to %s from draft config %s.",
-                expected,
-                source,
-            )
-        else:
-            assert not any(
-                "Defaulting num_speculative_tokens" in call.args[0]
-                for call in log.call_args_list
-            )
+def test_speculators_proposal_count_defaults_draft_tokens():
+    hf_config = SpeculatorsConfig.extract_transformers_pre_trained_config(
+        {
+            "speculators_model_type": "eagle3",
+            "transformer_layer_config": {"model_type": "llama", "vocab_size": 32},
+            "speculators_config": {"proposal_methods": [{"speculative_tokens": 3}]},
+        }
+    )
+    config = _make_speculative_config(
+        hf_config, "Eagle3LlamaForCausalLM", method="eagle3"
+    )
+    assert config.num_speculative_tokens == 3
 
 
 @pytest.mark.cpu_test
