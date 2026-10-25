@@ -76,7 +76,7 @@ backoff==2.2.1
     # via -r requirements/test/rocm.in
 bitsandbytes==0.50.0
     # via -r requirements/test/rocm.in
-black==26.3.1
+black==26.10.1
     # via
     #   -r requirements/test/rocm.in
     #   datamodel-code-generator
@@ -252,7 +252,7 @@ fastsafetensors==0.3.3
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
-filelock==3.25.2
+filelock==4.2.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -314,8 +314,10 @@ googleapis-common-protos==1.73.0
     #   opentelemetry-exporter-otlp-proto-http
 gpt-oss==0.0.9
     # via -r requirements/test/rocm.in
-graphql-core==3.2.8
-    # via hypothesis-graphql
+graphql-core==3.2.13
+    # via
+    #   -r requirements/test/rocm.in
+    #   hypothesis-graphql
 greenlet==3.3.2
     # via sqlalchemy
 grpcio==1.78.0
@@ -414,8 +416,6 @@ imagehash==4.3.2
     # via -r requirements/test/rocm.in
 imageio==2.37.3
     # via scikit-image
-importlib-metadata==8.7.1
-    # via opentelemetry-api
 inflect==7.5.0
     # via datamodel-code-generator
 iniconfig==2.3.0
@@ -591,7 +591,7 @@ networkx==3.6.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.10.3
+nltk==3.10.4
     # via
     #   -r requirements/test/rocm.in
     #   rouge-score
@@ -673,46 +673,54 @@ opencv-python-headless==4.13.0.92
     #   mistral-common
 openpyxl==3.1.5
     # via -r requirements/test/rocm.in
-opentelemetry-api==1.40.0
+opentelemetry-api==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   mcp
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp==1.40.0
+opentelemetry-exporter-http-transport==0.66b1
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-opentelemetry-exporter-otlp-proto-common==1.40.0
+opentelemetry-exporter-otlp-common==0.66b1
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-exporter-otlp-proto-grpc==1.40.0
+opentelemetry-exporter-otlp-proto-common==1.45.1
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-otlp-proto-http==1.40.0
+opentelemetry-exporter-otlp-proto-http==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-prometheus==0.61b0
+opentelemetry-exporter-prometheus==0.66b1
     # via ray
-opentelemetry-proto==1.40.0
+opentelemetry-proto==1.45.1
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   ray
-opentelemetry-sdk==1.40.0
+opentelemetry-sdk==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   opentelemetry-semantic-conventions-ai
     #   ray
-opentelemetry-semantic-conventions==0.61b0
+opentelemetry-semantic-conventions==0.66b1
     # via
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions-ai
@@ -1054,6 +1062,7 @@ requests==2.34.2
     #   mistral-common
     #   msal
     #   mteb
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   ray
@@ -1400,7 +1409,7 @@ uvloop==0.22.1
     # via uvicorn
 vector-quantize-pytorch==1.28.0
     # via -r requirements/test/rocm.in
-virtualenv==21.14.12
+virtualenv==21.14.13
     # via
     #   -r requirements/test/rocm.in
     #   ray
@@ -1434,8 +1443,6 @@ yarl==1.25.1
     # via aiohttp
 z3-solver==4.15.4.0
     # via tilelang
-zipp==3.23.0
-    # via importlib-metadata
 
 # The following packages were excluded from the output:
 # torch

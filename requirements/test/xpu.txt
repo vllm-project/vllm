@@ -213,7 +213,7 @@ fastar==0.11.0
     #   fastapi-cloud-cli
 fastavro==1.12.2
     # via cohere
-filelock==3.32.3
+filelock==4.2.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -267,8 +267,10 @@ googleapis-common-protos==1.75.1
     #   opentelemetry-exporter-otlp-proto-http
 gpt-oss==0.0.9
     # via -r requirements/test/xpu.in
-graphql-core==3.2.11
-    # via hypothesis-graphql
+graphql-core==3.2.13
+    # via
+    #   -r requirements/test/xpu.in
+    #   hypothesis-graphql
 grpcio==1.83.0
     # via opentelemetry-exporter-otlp-proto-grpc
 h11==0.16.0
@@ -539,7 +541,7 @@ networkx==3.6.1
     # via torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.10.3
+nltk==3.10.4
     # via
     #   -r requirements/test/xpu.in
     #   rouge-score
@@ -619,43 +621,51 @@ opencv-python-headless==5.0.0.93
     #   albucore
     #   albumentations
     #   mistral-common
-opentelemetry-api==1.44.0
+opentelemetry-api==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
     #   mcp
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp==1.44.0
+opentelemetry-exporter-http-transport==0.66b1
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
-opentelemetry-exporter-otlp-proto-common==1.44.0
+opentelemetry-exporter-otlp-common==0.66b1
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-exporter-otlp-proto-common==1.45.1
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-proto==1.44.0
+opentelemetry-proto==1.45.1
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-sdk==1.44.0
+opentelemetry-sdk==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+    #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-semantic-conventions-ai
-opentelemetry-semantic-conventions==0.65b0
+opentelemetry-semantic-conventions==0.66b1
     # via
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions-ai
@@ -932,6 +942,7 @@ requests==2.34.2
     #   modelscope
     #   msal
     #   mteb
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   schemathesis

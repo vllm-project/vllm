@@ -77,7 +77,7 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/cuda.in
-black==26.5.1
+black==26.10.1
     # via
     #   -r requirements/test/cuda.in
     #   datamodel-code-generator
@@ -205,7 +205,7 @@ dill==0.3.8
     #   evaluate
     #   lm-eval
     #   multiprocess
-distlib==0.3.9
+distlib==0.4.4
     # via virtualenv
 distro==1.9.0
     # via
@@ -259,7 +259,7 @@ fastsafetensors==0.3.3
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
-filelock==4.0.7
+filelock==4.2.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -321,8 +321,10 @@ googleapis-common-protos==1.70.0
     #   opentelemetry-exporter-otlp-proto-http
 gpt-oss==0.0.9
     # via -r requirements/test/cuda.in
-graphql-core==3.2.6
-    # via hypothesis-graphql
+graphql-core==3.2.13
+    # via
+    #   -r requirements/test/cuda.in
+    #   hypothesis-graphql
 greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
@@ -418,8 +420,6 @@ imagehash==4.3.2
     # via -r requirements/test/cuda.in
 imageio==2.37.0
     # via scikit-image
-importlib-metadata==8.7.0
-    # via opentelemetry-api
 inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
@@ -586,7 +586,7 @@ networkx==3.2.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.10.3
+nltk==3.10.4
     # via
     #   -r requirements/test/cuda.in
     #   rouge-score
@@ -704,45 +704,53 @@ opencv-python-headless==4.13.0.90
     #   mistral-common
 openpyxl==3.1.5
     # via -r requirements/test/cuda.in
-opentelemetry-api==1.35.0
+opentelemetry-api==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   mcp
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp==1.35.0
+opentelemetry-exporter-http-transport==0.66b1
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-opentelemetry-exporter-otlp-proto-common==1.35.0
+opentelemetry-exporter-otlp-common==0.66b1
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-exporter-otlp-proto-grpc==1.35.0
+opentelemetry-exporter-otlp-proto-common==1.45.1
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-otlp-proto-http==1.35.0
+opentelemetry-exporter-otlp-proto-http==1.45.1
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-prometheus==0.56b0
+opentelemetry-exporter-prometheus==0.66b1
     # via ray
-opentelemetry-proto==1.35.0
+opentelemetry-proto==1.45.1
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   ray
-opentelemetry-sdk==1.35.0
+opentelemetry-sdk==1.45.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   ray
-opentelemetry-semantic-conventions==0.56b0
+opentelemetry-semantic-conventions==0.66b1
     # via opentelemetry-sdk
 opentelemetry-semantic-conventions-ai==0.4.13
     # via
@@ -764,7 +772,7 @@ outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==24.2
+packaging==26.3
     # via
     #   accelerate
     #   black
@@ -822,7 +830,7 @@ pillow==13.0.0
     #   scikit-image
     #   segmentation-models-pytorch
     #   torchvision
-platformdirs==4.3.6
+platformdirs==4.13.5
     # via
     #   black
     #   jupyter-core
@@ -1078,6 +1086,7 @@ requests==2.34.2
     #   mistral-common
     #   msal
     #   mteb
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   ray
@@ -1451,7 +1460,7 @@ uvloop==0.22.1
     # via uvicorn
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test/cuda.in
-virtualenv==21.14.0
+virtualenv==21.14.13
     # via
     #   -r requirements/test/cuda.in
     #   ray
@@ -1483,5 +1492,3 @@ xxhash==3.5.0
     #   evaluate
 yarl==1.25.1
     # via aiohttp
-zipp==3.23.0
-    # via importlib-metadata
