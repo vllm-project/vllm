@@ -153,6 +153,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
+    ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",

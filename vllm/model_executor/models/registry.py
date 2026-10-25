@@ -518,6 +518,10 @@ _MULTIMODAL_MODELS = {
     ),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
+    "MingV3ASRForConditionalGeneration": (
+        "ming_v3_asr",
+        "MingV3ASRForConditionalGeneration",
+    ),
     "MiniMaxM3SparseForConditionalGeneration": (
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForConditionalGeneration",
