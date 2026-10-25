@@ -25,6 +25,20 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class PCPBatchMetadata:
+    """Per-step metadata of a PCP rank-local batch."""
+
+    # Unpadded token count before PCP partitioning. Under adaptive verification,
+    # this can be smaller than the sum of global_query_lens_np.
+    global_num_tokens: int
+    # [num_reqs], aligned with local request segments; requests may repeat.
+    global_query_lens_np: np.ndarray
+    global_seq_lens_cpu_upper_bound_np: np.ndarray
+    # [num_reqs_after_padding], set only under PCP+DCP.
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -189,10 +203,12 @@ class PCPManager:
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
+            and getattr(model_config.hf_text_config, "model_type", None)
+            not in ("deepseek_v32", "glm_moe_dsa")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
+                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -688,7 +704,16 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
-            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            pcp=PCPBatchMetadata(
+                global_num_tokens=global_batch.num_tokens,
+                global_query_lens_np=num_scheduled_tokens[
+                    local_to_global_batch_req_idx_np
+                ],
+                global_seq_lens_cpu_upper_bound_np=global_batch.seq_lens_cpu_upper_bound.numpy()[
+                    local_to_global_batch_req_idx_np
+                ],
+                dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            ),
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
