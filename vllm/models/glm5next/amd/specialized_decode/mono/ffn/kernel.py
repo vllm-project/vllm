@@ -1373,7 +1373,15 @@ def build_flash_ffn_kernel(
                 cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
                 amp = _exp(ld_f32(r_a_log, h))
                 vr = tid // 4
-                k0 = (tid % 4) * 32
+                # the 4 lanes of a v row own interleaved 4-wide k chunks (lane c:
+                # k = 16 q + 4 c .. + 3), so a 16-byte store from each covers 64
+                # contiguous bytes of the row: one CTA writes a head's whole state
+                # every row, and scattered 16-byte pieces made that its slowest step
+                k0 = (tid % 4) * 4
+
+                def kof(i):
+                    return k0 + 16 * (i // 4) + i % 4
+
                 rd = fx.Int64(fx.max(row_idx(s0 + off), fx.Int32(0)))
                 r_rd = _rsrc(
                     rec_state + (rd * rec_stride + fx.Int64(h * KD * KD)) * fx.Int64(4)
@@ -1382,16 +1390,28 @@ def build_flash_ffn_kernel(
                 for q in range_constexpr(8):
                     w4 = fx.Vector(
                         bo.buffer_load(
-                            r_rd, vr * KD + k0 + 4 * q, vec_width=4, dtype=T.f32
+                            r_rd, vr * KD + k0 + 16 * q, vec_width=4, dtype=T.f32
                         )
                     )
                     hv += [w4[e] for e in range(4)]
+                # every row's inputs come from earlier stages, not the recurrence:
+                # poll them all before the walk (one wait, not three a row); the
+                # gate lanes past 2 * KD read the last gate, unused
+                gi = fx.min(tid, fx.Int32(2 * KD - 1))
+                gch = (gi // KD) * P + h * KD + gi % KD
+                pre = getf_many(
+                    [(mb("proj"), (s0 + j) * N_IN + ch) for j in range(tpr)]
+                    + [(mb("gates"), (s0 + j) * 2 * P + gch) for j in range(tpr)]
+                    + [(mb("proj"), (s0 + j) * N_IN + 3 * P + h) for j in range(tpr)]
+                )
+                # f_b's dt bias, added once as the gate goes to LDS
+                dtb = ld_f32(r_dtb, h * KD + fx.min(tid, fx.Int32(KD - 1)))
                 xin = []
                 for j in range_constexpr(tpr):
                     s = s0 + j
                     idx = row_idx(s)
                     valid = idx > 0
-                    x = getf_many([(mb("proj"), s * N_IN + ch)])[0]
+                    x = pre[j]
                     a = cw[CONV_TAPS - 1] * x
                     for i in range_constexpr(CONV_TAPS - 1):
                         a = a + cw[i] * win[i]
@@ -1401,19 +1421,13 @@ def build_flash_ffn_kernel(
                     win = [win[1], win[2], x]
                     xin.append(x)
                     if tid < 2 * KD:
-                        g = getf_many(
-                            [
-                                (
-                                    mb("gates"),
-                                    s * 2 * P + (tid // KD) * P + h * KD + tid % KD,
-                                )
-                            ]
-                        )[0]
-                        lds_st(xs, G1O + tid, g)
+                        g = pre[tpr + j]
+                        # f_b lanes store the row's per-k decay, computed once a k
+                        # here, not again by each of the 128 lanes that read it
+                        dec = _exp(div(KDA_LOWER_BOUND, 1.0 + _exp(-(amp * (g + dtb)))))
+                        lds_st(xs, G1O + tid, (tid < KD).select(dec, g))
                     if tid == 0:
-                        lds_st(
-                            misc, 0, getf_many([(mb("proj"), s * N_IN + 3 * P + h)])[0]
-                        )
+                        lds_st(misc, 0, pre[2 * tpr + j])
                     gpu.barrier()
                     if wave < 2:
                         a0 = lds_ld(xs, wave * KD + lane)
@@ -1425,13 +1439,10 @@ def build_flash_ffn_kernel(
                     rq = _rsq(lds_ld(misc, 1) + L2_EPS) * (KD**-0.5)
                     rk = _rsq(lds_ld(misc, 2) + L2_EPS)
                     beta = sigmoid(lds_ld(misc, 0))
-                    kk = [lds_ld(xs, KO + k0 + i) * rk for i in range(32)]
+                    kk = [lds_ld(xs, KO + kof(i)) * rk for i in range(32)]
                     dot = fx.Float32(0.0)
                     for i in range_constexpr(32):
-                        g = lds_ld(xs, G1O + k0 + i) + ld_f32(r_dtb, h * KD + k0 + i)
-                        hv[i] = hv[i] * _exp(
-                            div(KDA_LOWER_BOUND, 1.0 + _exp(-(amp * g)))
-                        )
+                        hv[i] = hv[i] * lds_ld(xs, G1O + kof(i))
                         dot = dot + hv[i] * kk[i]
                     for o_ in (1, 2):
                         dot = _xred(dot, o_, lambda a_, b_: a_ + b_)
@@ -1439,7 +1450,7 @@ def build_flash_ffn_kernel(
                     o = fx.Float32(0.0)
                     for i in range_constexpr(32):
                         hv[i] = hv[i] + vn * kk[i]
-                        o = o + hv[i] * (lds_ld(xs, QO + k0 + i) * rq)
+                        o = o + hv[i] * (lds_ld(xs, QO + kof(i)) * rq)
                     for o_ in (1, 2):
                         o = _xred(o, o_, lambda a_, b_: a_ + b_)
                     if valid:
@@ -1454,7 +1465,7 @@ def build_flash_ffn_kernel(
                                     hv[4 * q : 4 * q + 4], fx.Float32
                                 ),
                                 r_rs,
-                                vr * KD + k0 + 4 * q,
+                                vr * KD + k0 + 16 * q,
                             )
                     if tid % 4 == 0:
                         lds_st(
@@ -1731,6 +1742,13 @@ def build_flash_ffn_kernel(
             for tq in range(start("cache"), NREQ, G):
                 s0 = fx.Int32(tq) * tpr
                 kns, grs = [], []
+                # every row's inputs come from earlier stages: one wait for all
+                d = fx.min(tid, INDEX_DIM - 1)
+                pre = getf_many(
+                    [(mb("kva"), (s0 + j) * KV_LORA + tid) for j in range(tpr)]
+                    + [(mb("ik"), (s0 + j) * INDEX_DIM + d) for j in range(tpr)]
+                    + [(mb("ig"), (s0 + j) * INDEX_DIM + d) for j in range(tpr)]
+                )
                 for jr in range_constexpr(tpr):
                     s = s0 + jr
                     stamp("cache")
@@ -1739,16 +1757,9 @@ def build_flash_ffn_kernel(
                     pslot = row_word(s, ROW_POOL_SLOT)
                     tslot = row_word(s, ROW_TAIL_SLOT)
                     g = ld_bf16(r_gkv, tid)
-                    d = fx.min(tid, INDEX_DIM - 1)
                     lk = tid < INDEX_DIM
                     lnw, lnb = ld_f32(r_lnw, d), ld_f32(r_lnb, d)
-                    kv, kraw, graw = getf_many(
-                        [
-                            (mb("kva"), s * KV_LORA + tid),
-                            (mb("ik"), s * INDEX_DIM + d),
-                            (mb("ig"), s * INDEX_DIM + d),
-                        ]
-                    )
+                    kv, kraw, graw = pre[jr], pre[tpr + jr], pre[2 * tpr + jr]
                     rstd = _rsq(block_sum(kv * kv) * (1.0 / KV_LORA) + EPS)
                     row_off = fx.Int64(slot // KVB) * KVE + fx.Int64(
                         (slot % KVB) * KV_LORA
@@ -1861,12 +1872,17 @@ def build_flash_ffn_kernel(
                         e = (ppos % TAIL_RING) * INDEX_DIM + d
                         bo.buffer_store(kn.to(fx.BFloat16), r_tail, e)
                         bo.buffer_store(graw.to(fx.BFloat16), r_tail, e + TAIL_GATE)
-                    fx.memory_fence(
-                        ordering=fx.AtomicOrdering.Release, syncscope="agent"
-                    )
-                    gpu.barrier()
-                    if tid == 0:
-                        put(mb("kv_ready"), s, fx.Int32(1))
+                    # a verify step's later rows take the earlier rows' (k, gate)
+                    # from registers, not the caches: release once after the
+                    # request's last row, not after each
+                    if const_expr(jr == tpr - 1):
+                        fx.memory_fence(
+                            ordering=fx.AtomicOrdering.Release, syncscope="agent"
+                        )
+                        gpu.barrier()
+                        if tid == 0:
+                            for j in range_constexpr(tpr):
+                                put(mb("kv_ready"), s0 + j, fx.Int32(1))
 
         # ======================= q_b (FP8 or bf16): two 16-row tiles a task
         def dsa_q_b(tv, t32):
