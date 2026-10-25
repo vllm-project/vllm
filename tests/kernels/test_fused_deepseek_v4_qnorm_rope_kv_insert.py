@@ -532,6 +532,77 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     )
 
 
+# ── Test 2c2: KV-only op with fused kv_norm and row-strided input ───────────
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 64])
+@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("row_width", [HEAD_DIM, HEAD_DIM * 3])
+def test_kv_insert_fused_norm_row_strided(
+    num_tokens: int, block_size: int, row_width: int
+):
+    """The KV-only insert with ``kv_norm_weight`` matches RMSNorm followed by
+    the unfused insert, reading a row-strided kv (the layer's half of a merged
+    multi-layer projection output)."""
+    torch.manual_seed(3)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    max_pos = 4096
+
+    kv_buf = torch.randn(num_tokens, row_width, dtype=dtype, device=device)
+    kv = kv_buf[:, :HEAD_DIM]
+    norm_weight = torch.randn(HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    # Reference: RMSNorm in vLLM's fp32 math, rope, then the Triton encoder.
+    xf = kv.float()
+    inv_rms = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
+    normed = (xf * inv_rms * norm_weight.float()).to(dtype)
+    kv_ref = apply_rope_gptj_last_k(normed, positions, cos_sin_cache)
+    k_cache_ref = torch.zeros(
+        num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    quantize_and_insert_k_cache(
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
+    )
+
+    k_cache_fused = torch.zeros_like(k_cache_ref)
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kv,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        block_size,
+        None,
+        False,
+        kv_norm_weight=norm_weight,
+        kv_norm_eps=eps,
+    )
+
+    rec_ref = _dequant_cache(k_cache_ref, num_tokens, num_blocks, block_size)
+    rec_fused = _dequant_cache(k_cache_fused, num_tokens, num_blocks, block_size)
+
+    # NoPE: the torch and in-kernel norms reduce the sum of squares in
+    # different orders, so a value can land one bf16 ULP off the reference and
+    # round to the adjacent fp8 code — one code (16 * scale) of slack on top
+    # of the encoder's own half-ULP bound.
+    scales = _ue8m0_per_block_scales(kv_ref[:, :NOPE_DIM].float(), QUANT_BLOCK)
+    for t in range(num_tokens):
+        max_allowed = 32.0 * scales[t].max().item()
+        diff = (rec_fused[t, :NOPE_DIM] - kv_ref[t, :NOPE_DIM]).abs().max().item()
+        assert diff <= max_allowed, f"fused NoPE token {t} diff {diff} > {max_allowed}"
+    # RoPE: one ULP from the norm reduction order plus the rotation rounding.
+    max_ulp = int(
+        bf16_ulp_distance(rec_fused[:, NOPE_DIM:], rec_ref[:, NOPE_DIM:]).max().item()
+    )
+    assert max_ulp <= 2, f"RoPE bf16 region differs by {max_ulp} ULP (>2)"
+
+
 # ── Test 2d: mega-attention Q layout (is_q_interleaved) ──────────────────────
 
 Q_CHUNK = 16

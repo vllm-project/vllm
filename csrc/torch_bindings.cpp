@@ -420,7 +420,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_kv_rope_insert("
       "Tensor kv, Tensor! k_cache, Tensor slot_mapping, Tensor position_ids, "
       "Tensor cos_sin_cache, int cache_block_size, Tensor? fp8_scale=None, "
-      "bool kv_mxfp8=False) -> "
+      "bool kv_mxfp8=False, Tensor? kv_norm_weight=None, "
+      "float kv_norm_eps=1e-6) -> "
       "()");
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("

@@ -29,7 +29,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -63,6 +66,24 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
+
+
+def _duplicate_context_wkv_weights(
+    weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Load every draft layer's WKV into the cross-layer projection."""
+    for name, weight in weights:
+        yield name, weight
+        match = _CONTEXT_WKV_RE.fullmatch(name)
+        if match is None:
+            continue
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_layers:
+            continue
+        stacked_weight = weight.detach()
+        stacked_weight.shard_id = layer_idx
+        yield f"context_wkv_proj.{match.group(2)}", stacked_weight
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -129,6 +150,16 @@ class DSparkDeepseekV4Model(nn.Module):
             ]
         )
 
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "context_wkv_proj"),
+            disable_tp=True,
+        )
+
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target
         # checkpoint. v4.1 has no learned hc_head: the hc copies are
@@ -180,19 +211,18 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
-        for i, layer in enumerate(self.layers):
+        all_kv = self.context_wkv_proj(main_x).view(
+            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
+        )
+        for i, (layer, kv) in enumerate(
+            zip(self.layers, all_kv.unbind(1), strict=True)
+        ):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
-            attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
-            kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
-            _insert_context_kv(attn, kv, context_positions, slot_mapping)
+            _insert_context_kv(layer.attn, kv, context_positions, slot_mapping)
 
     def forward(
         self,
@@ -220,8 +250,9 @@ class DSparkDeepseekV4Model(nn.Module):
                 if getattr(self.config, "vision_n_layers", 0) > 0
                 else None,
             )
-        # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
-        hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        # The first layer broadcasts the 2D embedding to hc copies itself
+        # (hc_attn_fn_broadcast), like the target's entry layer.
+        hidden_states = inputs_embeds
 
         residual = post_mix = res_mix = pre_mix = None
         for layer in self.layers:
@@ -246,6 +277,23 @@ class DSparkDeepseekV4Model(nn.Module):
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
 
+    def finalize_mhc_broadcast_weights(self) -> None:
+        """Sum the entry layer's hc_attn_fn blocks for its broadcast branch.
+
+        The draft loads outside the target's finalize path, so its entry layer
+        would otherwise hit the broadcast branch with no summed projection.
+        """
+        layer = self.layers[0]
+        broadcast = (
+            layer.hc_attn_fn.detach()
+            .view(-1, layer.hc_mult, layer.hidden_size)
+            .sum(dim=1)
+        )
+        if layer.hc_attn_fn_broadcast is None:
+            layer.hc_attn_fn_broadcast = broadcast
+        else:
+            layer.hc_attn_fn_broadcast.copy_(broadcast)
+
 
 def _insert_context_kv(
     attn: nn.Module,
@@ -253,7 +301,7 @@ def _insert_context_kv(
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """Insert normalized context KV without constructing an unused query."""
+    """Insert context KV (kv_norm fused into the op) without a query."""
     # The bound cache already is [num_blocks, block_size, bytes_per_token], so
     # the record width needs no per-layer attribute -- one whose name the
     # attention layer is free to change (kv_bytes_per_token has to become
@@ -270,6 +318,8 @@ def _insert_context_kv(
         attn.swa_cache_layer.block_size,
         attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
         attn.kv_mxfp8,
+        kv_norm_weight=attn.kv_norm.weight,
+        kv_norm_eps=attn.kv_norm.variance_epsilon,
     )
 
 
@@ -362,6 +412,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     # --- Weight loading ----------------------------------------------------
 
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mhc_broadcast_weights()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
 
@@ -405,6 +458,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
+        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
@@ -434,6 +488,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
                 )
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+                loaded_params.add(name)
+                continue
 
             # E8M0 expert scales: keep raw exponent bytes.
             if ".experts." in name:
@@ -492,6 +552,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         Returns None for non-mtp weights (owned by the target model).
         """
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None
