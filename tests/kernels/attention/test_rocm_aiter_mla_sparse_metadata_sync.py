@@ -298,7 +298,9 @@ def test_build_fills_paged_kv_indptr_tail(monkeypatch):
 
 def test_sink_build_skips_persistent_metadata(monkeypatch):
     builder = _make_builder()
+    # A sink-only group never allocates the persistent work buffers.
     builder._use_persistent_metadata = False
+    builder._mla_work_meta_data = None
     fake_aiter = _patch_build_deps(monkeypatch)
 
     md = builder.build(
@@ -315,7 +317,7 @@ def test_sink_build_skips_persistent_metadata(monkeypatch):
     assert builder._prev_metadata_key is None
 
 
-def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
+def test_sparse_persistent_metadata_recomputes_without_syncing(monkeypatch):
     builder = _make_builder()
     common_metadata = _make_common_metadata()
     events: list[str] = []
@@ -342,7 +344,8 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
 
-    assert events == ["metadata", "sync"]
+    # The metadata kernel runs on the build stream; nothing waits for it.
+    assert events == ["metadata"]
     assert fake_get_mla_metadata_v1_mock.call_count == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["max_split_per_batch"] == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["dtype_q"] == torch.bfloat16
