@@ -83,4 +83,4 @@ steps:
   - pytest -v -s distributed/test_elastic_ep.py
   - VLLM_TARGET_DEVICE=cpu pytest -v -s v1/distributed/test_external_lb_dp.py -k external_elastic_ep
   - VLLM_USE_RUST_FRONTEND=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k test_external_lb_elastic_ep_scale_up
-  - VLLM_USE_RUST_FRONTEND=0 TP_SIZE=1 pytest -v -s v1/distributed/test_external_lb_dp.py -k 'test_external_lb_elastic_ep_bootstrap_local_range or test_external_lb_elastic_ep_local_range_config'
+  - VLLM_USE_RUST_FRONTEND=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k 'test_external_lb_elastic_ep_bootstrap_local_range or test_external_lb_elastic_ep_local_range_config or test_external_lb_elastic_ep_local_range_resize'

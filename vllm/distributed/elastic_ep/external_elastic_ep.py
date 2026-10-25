@@ -21,7 +21,11 @@ from vllm.v1.engine import (
     ReconfigureDistributedRequest,
     ReconfigureRankType,
 )
-from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
+from vllm.v1.engine.utils import (
+    CoreEngineProcManager,
+    EngineHandshakeMetadata,
+    EngineZmqAddresses,
+)
 from vllm.v1.utils import get_engine_client_zmq_addr
 
 if TYPE_CHECKING:
@@ -221,6 +225,7 @@ class _PreparedExternalElasticEPScale:
     num_redundant_experts: int
     scale_up: bool
     handshake_server: ExternalElasticEPScaleUpHandshakeServer | None
+    local_size: int = 1
 
 
 class ExternalElasticEPScaleCoordinator:
@@ -254,6 +259,11 @@ class ExternalElasticEPScaleCoordinator:
     ) -> None:
         parallel_config = self.client.vllm_config.parallel_config
         parallel_config.data_parallel_size = bootstrap.new_data_parallel_size
+        if parallel_config.data_parallel_size_local > 1:
+            parallel_config.data_parallel_hybrid_lb = (
+                parallel_config.data_parallel_size_local
+                < bootstrap.new_data_parallel_size
+            )
         parallel_config.data_parallel_master_ip = bootstrap.new_data_parallel_master_ip
         parallel_config.data_parallel_master_port = (
             bootstrap.new_data_parallel_master_port
@@ -328,8 +338,9 @@ class ExternalElasticEPScaleCoordinator:
         )
         return ip, self.reconfig_store_ref.port
 
-    def _get_error(self, store: Any, epoch: str) -> str | None:
-        error_key = self.key(epoch, "error")
+    @classmethod
+    def _get_error(cls, store: Any, epoch: str) -> str | None:
+        error_key = cls.key(epoch, "error")
         if not store.check([error_key]):
             return None
         return store.get(error_key).decode()
@@ -535,8 +546,9 @@ class ExternalElasticEPScaleCoordinator:
                 )
             backoff_step = await self._sleep_with_backoff(backoff_step)
 
+    @classmethod
     async def _wait_for_local_reconfig_finished(
-        self,
+        cls,
         control_store: Any,
         reconfig_store: Any,
         epoch: str,
@@ -544,38 +556,44 @@ class ExternalElasticEPScaleCoordinator:
         dp_rank: int,
         scale_up: bool,
         timeout_s: float = 600,
+        *,
+        local_size: int = 1,
     ) -> None:
-        """Wait until this rank's EngineCore finishes the scale transition."""
+        """Wait for every owned EngineCore to finish the scale transition."""
         if not scale_up and dp_rank >= bootstrap.new_data_parallel_size:
-            wait_key = self.key(epoch, "shutdown_complete", dp_rank)
+            notification = "shutdown_complete"
             timeout_msg = (
                 "Timed out waiting for local external Elastic EP scale-down "
                 "shutdown to finish."
             )
         else:
-            wait_key = self.key(epoch, "old_rank_finished", dp_rank)
+            notification = "old_rank_finished"
             timeout_msg = (
                 "Timed out waiting for local external Elastic EP "
                 "reconfiguration to finish."
             )
 
+        wait_keys = [
+            cls.key(epoch, notification, rank)
+            for rank in range(dp_rank, dp_rank + local_size)
+        ]
         loop = asyncio.get_running_loop()
         start = loop.time()
         backoff_step = 0
         while True:
-            error = self._get_error(control_store, epoch)
+            error = cls._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
                     error or "External Elastic EP scaling failed on another rank."
                 )
 
-            if reconfig_store.check([wait_key]):
+            if reconfig_store.check(wait_keys):
                 return
 
             now = loop.time()
             if now - start > timeout_s:
                 raise TimeoutError(timeout_msg)
-            backoff_step = await self._sleep_with_backoff(backoff_step)
+            backoff_step = await cls._sleep_with_backoff(backoff_step)
 
     async def _wait_for_all_old_ranks(
         self,
@@ -646,22 +664,29 @@ class ExternalElasticEPScaleCoordinator:
             self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
             self.prepared_scale = None
 
-    async def _wait_for_commit_ready(
-        self, prepared: _PreparedExternalElasticEPScale, timeout_s: float = 600
+    @classmethod
+    async def _wait_for_client_barrier(
+        cls,
+        prepared: _PreparedExternalElasticEPScale,
+        barrier: str,
+        timeout_s: float = 600,
     ) -> None:
-        # No engine may enter the collective pause until all old API ranks
-        # have finished draining; a drain failure must reach waiting peers.
+        # Validate every owner's range before preparing workers, then drain
+        # every owner before entering the collective commit pause.
         store = prepared.reconfig_store
-        await asyncio.to_thread(
-            store.set, self.key(prepared.epoch, "commit_ready", prepared.dp_rank), b"1"
-        )
+
+        def mark_local_ranks_ready() -> None:
+            for rank in range(prepared.dp_rank, prepared.dp_rank + prepared.local_size):
+                store.set(cls.key(prepared.epoch, barrier, rank), b"1")
+
+        await asyncio.to_thread(mark_local_ranks_ready)
         keys = [
-            self.key(prepared.epoch, "commit_ready", rank)
+            cls.key(prepared.epoch, barrier, rank)
             for rank in range(prepared.cur_data_parallel_size)
         ]
 
         def is_ready() -> bool:
-            error = self._get_error(prepared.control_store, prepared.epoch)
+            error = cls._get_error(prepared.control_store, prepared.epoch)
             if error is not None:
                 raise RuntimeError(error)
             return store.check(keys)
@@ -672,8 +697,10 @@ class ExternalElasticEPScaleCoordinator:
             if await asyncio.to_thread(is_ready):
                 return
             if asyncio.get_running_loop().time() - start > timeout_s:
-                raise TimeoutError("Timed out waiting for external Elastic EP drains.")
-            backoff_step = await self._sleep_with_backoff(backoff_step)
+                raise TimeoutError(
+                    f"Timed out waiting for external Elastic EP {barrier}."
+                )
+            backoff_step = await cls._sleep_with_backoff(backoff_step)
 
     async def prepare(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -756,8 +783,29 @@ class ExternalElasticEPScaleCoordinator:
                 reconfig_store, epoch, ExternalElasticEPScalePhase.PREPARING
             )
 
+            local_size = parallel_config.data_parallel_size_local
+            if dp_rank < new_data_parallel_size < dp_rank + local_size:
+                raise ValueError(
+                    "External Elastic EP resize must retain or retire the entire "
+                    f"local rank range [{dp_rank}, {dp_rank + local_size})."
+                )
+
+            prepared = _PreparedExternalElasticEPScale(
+                control_store=control_store,
+                reconfig_store=reconfig_store,
+                epoch=epoch,
+                bootstrap=bootstrap,
+                dp_rank=dp_rank,
+                cur_data_parallel_size=cur_data_parallel_size,
+                num_redundant_experts=num_redundant_experts,
+                scale_up=scale_up,
+                handshake_server=handshake_server,
+                local_size=local_size,
+            )
+            await self._wait_for_client_barrier(prepared, "prepare_ready")
+
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
-                await self.client.call_utility_async(
+                await self.client.call_utility_all_async(
                     "reinitialize_distributed", bootstrap
                 )
 
@@ -768,17 +816,7 @@ class ExternalElasticEPScaleCoordinator:
                 bootstrap.new_data_parallel_size,
                 handshake_server,
             )
-            self.prepared_scale = _PreparedExternalElasticEPScale(
-                control_store=control_store,
-                reconfig_store=reconfig_store,
-                epoch=epoch,
-                bootstrap=bootstrap,
-                dp_rank=dp_rank,
-                cur_data_parallel_size=cur_data_parallel_size,
-                num_redundant_experts=num_redundant_experts,
-                scale_up=scale_up,
-                handshake_server=handshake_server,
-            )
+            self.prepared_scale = prepared
         except BaseException as e:
             if epoch is not None:
                 self.active_epoch = epoch
@@ -816,23 +854,27 @@ class ExternalElasticEPScaleCoordinator:
             prepared.dp_rank < bootstrap.new_data_parallel_size
         )
         try:
-            await self._wait_for_commit_ready(prepared)
+            await self._wait_for_client_barrier(prepared, "commit_ready")
             for store in (prepared.control_store, prepared.reconfig_store):
                 self._set_phase(
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
                 )
+            if not remaining:
+                manager = self.client.resources.engine_manager
+                if isinstance(manager, CoreEngineProcManager):
+                    manager.expect_shutdown()
             await self.client.pause_scheduler_async(
                 mode=self.client._eep_commit_pause_mode() if remaining else "abort",
                 clear_cache=False,
             )
             if remaining:
-                await self.client.call_utility_async("commit_prepared_elastic_ep")
+                await self.client.call_utility_all_async("commit_prepared_elastic_ep")
             else:
                 reconfig_request = msgspec.structs.replace(
                     bootstrap,
                     new_data_parallel_rank=ReconfigureRankType.SHUTDOWN_CURRENT_RANK,
                 )
-                await self.client.call_utility_async(
+                await self.client.call_utility_all_async(
                     "reinitialize_distributed", reconfig_request
                 )
 
@@ -843,6 +885,7 @@ class ExternalElasticEPScaleCoordinator:
                 bootstrap,
                 prepared.dp_rank,
                 prepared.scale_up,
+                local_size=prepared.local_size,
             )
             if prepared.dp_rank == 0:
                 await self._wait_for_all_old_ranks(prepared)

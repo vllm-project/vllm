@@ -828,6 +828,11 @@ class MPClient(EngineCoreClient):
         # marks the engine as dead, and shuts down the client.
         def monitor_engine_cores():
             engine_manager.monitor_engine_liveness()
+            if (
+                isinstance(engine_manager, CoreEngineProcManager)
+                and engine_manager.retired
+            ):
+                return
             _self = self_ref()
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
@@ -1547,9 +1552,9 @@ class DPAsyncMPClient(AsyncMPClient):
                         dp_rank = parallel_config.data_parallel_rank
                         assert dp_rank == 0
                         assert dp_size == new_engine_count
-                        assert not parallel_config.data_parallel_hybrid_lb
-                        # External LB clients continue to manage only local ranks.
-                        if not parallel_config.data_parallel_external_lb:
+                        # Native external clients retain their fixed local range.
+                        if not parallel_config.uses_external_elastic_ep:
+                            assert not parallel_config.data_parallel_hybrid_lb
                             self.engine_ranks_managed = list(range(dp_size))
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines += [
@@ -1583,6 +1588,8 @@ class DPAsyncMPClient(AsyncMPClient):
                         # Coordinator including all EngineCores. Slice to get
                         # just the cores managed by this client.
                         ranks = self.engine_ranks_managed
+                        if len(counts) <= ranks[-1]:
+                            continue
                         count_slice = slice(ranks[0], ranks[-1] + 1)
                         sliced_counts = counts[count_slice]
                         self.lb_engines = sliced_counts
@@ -1669,12 +1676,6 @@ class DPAsyncMPClient(AsyncMPClient):
         return coordinator
 
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
-        if self.vllm_config.parallel_config.data_parallel_size_local > 1:
-            raise ValueError(
-                "External Elastic EP resizing currently requires one rank per "
-                "client; local rank-range bootstrap does not implement "
-                "multi-rank resize coordination."
-            )
         cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
 
         assert new_data_parallel_size != cur_data_parallel_size, (

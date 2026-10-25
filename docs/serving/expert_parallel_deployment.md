@@ -213,9 +213,8 @@ For an initial DP8 world with four local ranks per client and a maximum of DP12,
 use the same template for each client, varying only `FIRST_DP_RANK` (0 or 4
 initially, then 8 for an append joiner):
 
-This illustrates the startup contract, not a complete resize workflow: the
-packed clients starting at 0 and 4 cannot initiate DP8→DP12 with the current
-resize coordinator (see the warning below).
+The same template is used for the native resize workflow below; only the first
+rank varies between clients.
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
@@ -252,13 +251,43 @@ For a client whose first global rank is 8, a header value of 2 selects global
 rank 10, not global rank 2. The original one-rank path stays direct and does
 not acquire a supervisor or a local load balancer.
 
-!!! warning "Bootstrap is not multi-rank resize coordination"
-    This extension provides range startup only. The current external resize
-    coordinator still requires one existing rank per client; resize requests
-    from clients owning multiple ranks fail explicitly. Coordinating prepare,
-    commit, per-rank control and completion for those clients requires a
-    separate coordinator extension. The range template alone is not an
-    end-to-end packed-client resize recipe.
+#### Resize Local Rank Ranges
+
+Send one `POST /scale_elastic_ep` request per existing client, not per engine.
+Send the requests concurrently, with the same `new_data_parallel_size`. Each
+client coordinates preparation, draining and commit for all its owned engines
+and waits for every local completion. Surviving clients keep their first rank,
+local count and routing identities; only their global world metadata changes.
+
+For EP8→EP12→EP8 with TP1 and four local ranks per client:
+
+1. Start clients at first ranks 0 and 4 using the template above. Each owns four
+   engines, forming the initial DP8 world.
+2. Send `{"new_data_parallel_size":12}` concurrently to both clients. While
+   these requests are pending, start a third client at first rank 8 using the
+   unchanged initial-DP8 template. It discovers DP12 and starts ranks 8–11.
+3. Wait for both resize requests to succeed and verify serving from all three
+   clients. Local rank hints 0–3 can verify every owned engine independently.
+4. Send `{"new_data_parallel_size":8}` concurrently to **all three** clients,
+   including the retiring client at rank 8. Clients at 0 and 4 retain their
+   original four engines. All engines of the rank-8 client retire; its API
+   rejects inference while keeping `/health` and `POST /is_scaling_elastic_ep`
+   available until the external lifecycle owner stops the process or Pod.
+
+Wait for all three shrink requests to succeed before stopping the retired
+client's process or Pod. Separately verify surviving clients' serving readiness;
+a retired client's reachable health/status endpoints do not reopen inference.
+
+World sizes must retain or retire whole existing client ranges. For example,
+DP12→DP10 would split the rank-8 client's range and is rejected before existing
+engines start reconfiguration. The maximum DP size is still a bound, not the
+live target, and bootstrap discovery alone does not commit membership.
+
+To drain requests before the collective pause, set
+`VLLM_ELASTIC_EP_DRAIN_REQUESTS=1` on every client. A prepare/drain failure is
+propagated to peers; a failed commit leaves inference admission closed because
+the topology may be partially changed. Do not treat an HTTP response or a
+completed control-plane status as a substitute for current serving health.
 
 ## Expert Parallel Load Balancer (EPLB)
 

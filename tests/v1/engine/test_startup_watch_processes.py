@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from multiprocessing import connection
+from multiprocessing import connection, get_context
 from threading import Event
 from types import SimpleNamespace
 
@@ -27,6 +28,61 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import UniProcExecutor, multiproc_executor
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+def _exit_when_released(release, exit_code):
+    assert release.wait(timeout=15)
+    raise SystemExit(exit_code)
+
+
+@pytest.mark.parametrize("planned,exit_code", [(True, 0), (False, 0), (True, 3)])
+def test_engine_group_monitor_preserves_retiring_siblings(planned, exit_code):
+    """Planned clean exits wait for siblings; unexpected exits remain failures."""
+    ctx = get_context("spawn")
+    releases = [ctx.Event(), ctx.Event()]
+    processes = [
+        ctx.Process(
+            target=_exit_when_released,
+            args=(release, exit_code if index == 0 else 0),
+            name=f"engine-{index}",
+        )
+        for index, release in enumerate(releases)
+    ]
+    stopped, expected_shutdown = Event(), Event()
+    if planned:
+        expected_shutdown.set()
+    try:
+        for proc in processes:
+            proc.start()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            monitor = executor.submit(
+                engine_utils._wait_for_engine_processes,
+                processes,
+                stopped,
+                expected_shutdown,
+            )
+            releases[0].set()
+            assert connection.wait([processes[0].sentinel], timeout=10)
+            assert not connection.wait([processes[1].sentinel], timeout=0)
+            if planned and exit_code == 0:
+                assert not monitor.done()
+                releases[1].set()
+                result = monitor.result(timeout=10)
+                assert result is None, (result, [proc.exitcode for proc in processes])
+            else:
+                assert monitor.result(timeout=10) == processes[0].name
+            assert processes[0].exitcode == exit_code
+    finally:
+        stopped.set()
+        for release in releases:
+            release.set()
+        for proc in processes:
+            if proc.pid is not None:
+                proc.join(timeout=10)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=5)
+                proc.close()
 
 
 @pytest.mark.parametrize(

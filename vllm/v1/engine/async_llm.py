@@ -1280,7 +1280,7 @@ class AsyncLLM(EngineClient):
             )
             await self.wait_for_requests_to_drain(drain_timeout)
         except BaseException as e:
-            if self.vllm_config.parallel_config.data_parallel_external_lb:
+            if self.vllm_config.parallel_config.uses_external_elastic_ep:
                 await self.engine_core.abort_external_elastic_ep(
                     str(e) or type(e).__name__
                 )
@@ -1310,7 +1310,11 @@ class AsyncLLM(EngineClient):
         await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         # recreate stat loggers
-        if new_data_parallel_size > old_data_parallel_size and self.log_stats:
+        if (
+            new_data_parallel_size > old_data_parallel_size
+            and self.log_stats
+            and not parallel_config.uses_external_elastic_ep
+        ):
             # TODO(rob): fix this after talking with Ray team.
             # This resets all the prometheus metrics since we
             # unregister during initialization. Need to understand
@@ -1331,7 +1335,7 @@ class AsyncLLM(EngineClient):
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
         rank_will_retire = (
-            parallel_config.data_parallel_external_lb
+            parallel_config.uses_external_elastic_ep
             and new_data_parallel_size < old_data_parallel_size
             and parallel_config.data_parallel_rank >= new_data_parallel_size
         )
