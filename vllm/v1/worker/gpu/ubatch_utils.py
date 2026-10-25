@@ -77,7 +77,7 @@ def stage_decode_tokens(
     staged_slots[:, staged_rows] = slot_mappings[:, :n]
     slot_mappings[:, :num_padded].copy_(staged_slots)
     input_batch.is_padding[:num_padded].fill_(True)
-    input_batch.is_padding[staged_rows] = False
+    input_batch.is_padding.index_fill_(0, staged_rows, False)
     return staged_rows
 
 
