@@ -211,6 +211,9 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
+    STEP5_TRTLLM_APPROXIMATE_SWIGLU: bool = False
+    STEP5_FP8_TAIL: str = ""
+    STEP5_FA4_HD192: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -1632,6 +1635,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
         int(os.getenv("VLLM_STEP5_SHARD_SP_SHARED_EXPERT", "0"))
     ),
+    # Experimental Step5 TRT-LLM approximation: clamp before SiLU instead of
+    # after it. This changes model numerics and requires explicit opt-in.
+    "STEP5_TRTLLM_APPROXIMATE_SWIGLU": lambda: os.getenv(
+        "STEP5_TRTLLM_APPROXIMATE_SWIGLU", "0"
+    )
+    == "1",
+    # Set to "trtllm" to convert Step5 routed experts in layers 88-90 to
+    # online block-FP8 with clamped SiLU. Changes model numerics.
+    "STEP5_FP8_TAIL": lambda: os.getenv("STEP5_FP8_TAIL", ""),
+    # Opt into the SM100 FA4 HD192 launcher for Step5 sliding-window prefill.
+    "STEP5_FA4_HD192": lambda: os.getenv("STEP5_FA4_HD192", "0") == "1",
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
