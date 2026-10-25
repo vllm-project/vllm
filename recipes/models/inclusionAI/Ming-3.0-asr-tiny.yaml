@@ -1,0 +1,195 @@
+meta:
+  title: "Ming3-ASR-tiny"
+  slug: "ming-3-0-asr-tiny"
+  provider: "inclusionAI"
+  description: "Chinese, English, and dialect speech recognition with topic, hotword, and dialogue context."
+  date_added: 2026-10-25
+  date_updated: 2026-10-25
+  tasks:
+    - multimodal
+  performance_headline: "Context-aware Chinese, English, and dialect ASR; single-GPU serving"
+
+model:
+  model_id: "inclusionAI/Ming-3.0-asr-tiny"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  install:
+    pip:
+      note: "Source preview: run from a vLLM checkout containing Ming ASR support (tested commit 083cf78465eafb5686655749acade8a7ca91b2a3)."
+      command: |
+        uv venv --python 3.12
+        source .venv/bin/activate
+        VLLM_USE_PRECOMPILED=1 \
+        VLLM_PRECOMPILED_WHEEL_COMMIT=e38af8bdc9029b47f86a4e9b9dd98d55957bf4cd \
+          uv pip install -e ".[audio]" --torch-backend=auto
+    docker: false
+  architecture: moe
+  parameter_count: "8.55B"
+  active_parameters: "1.3B"
+  context_length: 8192
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Ming uses torchaudio's sinc resampler; install a build compatible with PyTorch."
+    command: "uv pip install torchaudio --torch-backend=auto"
+
+features:
+  no_repeat_ngram:
+    description: "Load the Model Runner V2 plugin for request-level full-history n-gram blocking."
+    args:
+      - "--logits-processors"
+      - "vllm.model_executor.models.ming_v3_asr_logits_processor:NoRepeatNGramLogitsProcessor"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "BF16 checkpoint; the capacity estimate includes the audio tower and is not a measured minimum."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [Ming-3.0-asr-tiny](https://huggingface.co/inclusionAI/Ming-3.0-asr-tiny) supports Chinese, English, and dialect transcription with optional topic, hotword, and dialogue context. 
+  This guide covers single-GPU serving, transcription, streaming, Context ASR, and offline inference with vLLM.
+
+  ## Public example audio
+
+  Download the three clips from the official inference repository:
+
+  ```bash
+  MING_AUDIO_BASE=https://raw.githubusercontent.com/inclusionAI/Ming-3.0-asr/6141e8c552815db724d8df0f72c9d865c547a1ea/examples/cases/audio
+  curl -fL "$MING_AUDIO_BASE/english_common_voice.wav" -o english.wav
+  curl -fL "$MING_AUDIO_BASE/chinese_common_voice.wav" -o chinese.wav
+  curl -fL "$MING_AUDIO_BASE/context_same_sentence_pcm16.wav" -o context.wav
+  ```
+
+  | Clip | Observed transcription |
+  | --- | --- |
+  | English | `same way you did` |
+  | Mandarin | `漓江和湘江有秦代开凿的灵渠沟通` |
+  | Context clip with the hints below | Contains the film title `同囚` |
+
+  The Context clip illustrates correction of `铜球` to `同囚` with a relevant topic and hotwords. These are sample-specific observations, not a general Context ASR accuracy claim. Audio provenance and licenses are documented in the [official examples](https://github.com/inclusionAI/Ming-3.0-asr/blob/6141e8c552815db724d8df0f72c9d865c547a1ea/examples/cases/README.md).
+
+  For accuracy comparisons, keep batch settings and attention backends consistent; greedy transcription outputs can differ across these configurations.
+
+  ## Transcription API
+
+  Use the audio requests below to verify speech recognition. The catalog's generic text-only cURL and benchmark shortcuts do not exercise ASR.
+
+  ```bash
+  curl http://localhost:8000/v1/audio/transcriptions \
+    -F model=inclusionAI/Ming-3.0-asr-tiny \
+    -F file=@chinese.wav \
+    -F temperature=0 \
+    -F max_completion_tokens=256 \
+    -F 'vllm_xargs={"no_repeat_ngram_size":10}'
+  ```
+
+  Omit `language` for automatic recognition, or use `language=zh` / `language=en` to seed the known language. These are the supported language-hint codes; dialect transcription does not introduce additional hint codes. The response contains the transcript without the generated language label. `response_format=json` and `response_format=text` are supported.
+
+  ### OpenAI Python client
+
+  ```python
+  import json
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  with open("english.wav", "rb") as audio:
+      result = client.audio.transcriptions.create(
+          model="inclusionAI/Ming-3.0-asr-tiny",
+          file=audio,
+          temperature=0,
+          extra_body={
+              "max_completion_tokens": 256,
+              "vllm_xargs": json.dumps({"no_repeat_ngram_size": 10}),
+          },
+      )
+  print(result.text)
+  ```
+
+  `vllm_xargs` is JSON-encoded for the multipart request, as in the cURL examples.
+
+  ### Context ASR
+
+  ```bash
+  curl http://localhost:8000/v1/audio/transcriptions \
+    -F model=inclusionAI/Ming-3.0-asr-tiny \
+    -F file=@context.wav \
+    -F language=zh \
+    -F temperature=0 \
+    -F max_completion_tokens=256 \
+    -F 'prompt=This is an audio about 同囚.' \
+    -F 'hotwords=同囚,黄国权,游学修,关楚耀,赵永洪,赵咏瑶,狱警,长镜头,吞玻璃戏,糖化玻璃,真实案例数据.' \
+    -F 'vllm_xargs={"no_repeat_ngram_size":10,"context_chunks":true}'
+  ```
+
+  `prompt` accepts topic or preceding dialogue appended to the official ASR instruction, or the full official instruction followed by context. Context and hotwords must be single-line text without audio placeholders. To reproduce the vendor's full prompt exactly, put its hotword text in `prompt` and omit the separate `hotwords` field.
+
+  ### Streaming
+
+  ```bash
+  curl -N http://localhost:8000/v1/audio/transcriptions \
+    -F model=inclusionAI/Ming-3.0-asr-tiny \
+    -F file=@english.wav \
+    -F language=en \
+    -F temperature=0 \
+    -F stream=true \
+    -F max_completion_tokens=256 \
+    -F 'vllm_xargs={"no_repeat_ngram_size":10}'
+  ```
+
+  Streaming sends transcript deltas after the complete audio upload. It is not live microphone input. The English clip produces `same way you did` without leaking the language prefix into the transcript.
+
+  ## Chunking and repetition control
+
+  Audio is downmixed and resampled to 16 kHz using torchaudio. The processor extracts the entire clip's log-mel features before splitting encoder chunks. Chunk settings are request-local and are included in multimodal cache keys.
+
+  | Option in `vllm_xargs` | Behavior |
+  | --- | --- |
+  | No chunk option | Use 3,000-mel-frame encoder chunks, approximately 30 seconds each. |
+  | `"context_chunks": true` | Use 3,000 frames up to 30 seconds and 6,000 frames for 30–60 seconds; reject longer clips. |
+  | `"audio_chunk_frames": 6000` | Explicit chunk size; any integer from 1 through 6,000 is accepted. |
+  | `"no_repeat_ngram_size": 10` | Block repeated 10-grams over prompt plus generated tokens. |
+
+  `context_chunks` and an explicit `audio_chunk_frames` are mutually exclusive. Ordinary chunking can handle clips beyond 60 seconds within the shared 8,192-token input/output budget and audio-upload size limit. Internal encoder chunking does not create separate transcription requests.
+
+  The no-repeat feature loads a plugin; each request must still set a nonzero `no_repeat_ngram_size` to enable blocking. Omitted values and `0` leave ordinary sampling in effect. Blocking uses the full prompt/output history, and requires Model Runner V2. Speculative decoding and MTP are unsupported with this plugin.
+
+  ## Offline inference
+
+  From the same vLLM source checkout, use the [Ming ASR example](https://github.com/vllm-project/vllm/blob/main/examples/speech_to_text/ming_v3_asr.py):
+
+  ```bash
+  .venv/bin/python examples/speech_to_text/ming_v3_asr.py --audio english.wav
+  .venv/bin/python examples/speech_to_text/ming_v3_asr.py \
+    --audio context.wav --language zh --context-chunks \
+    --prompt 'This is an audio about 同囚.' \
+    --hotwords '同囚,黄国权,游学修,关楚耀,赵永洪,赵咏瑶,狱警,长镜头,吞玻璃戏,糖化玻璃,真实案例数据.'
+  ```
+
+  This example uses the same native request construction and audio processing, BF16 eager execution, greedy decoding, and request-level 10-gram blocking.
+
+  ## Limitations
+
+  The [official model card](https://huggingface.co/inclusionAI/Ming-3.0-asr-tiny#usage-notes) describes transcription text output without word-level timestamps or speaker diarization.
+
+  The current vLLM integration does not support translation, segment timestamps, or live audio input. Translation and timestamp requests are rejected. The `context_chunks=true` policy accepts clips up to 60 seconds; ordinary chunking, including requests with context prompts, can accept longer clips subject to the model context and upload limits.
+
+  ## References
+
+  - [model card](https://huggingface.co/inclusionAI/Ming-3.0-asr-tiny)
+  - [Official inference repository](https://github.com/inclusionAI/Ming-3.0-asr)
+  - [vLLM speech-to-text API](https://docs.vllm.ai/en/latest/serving/online_serving/speech_to_text.html)
