@@ -913,9 +913,18 @@ presets:
     env:
       OMP_NUM_THREADS: "1"
     points:
-      tp2:
-        label: "1–8, 64 clients · TP2"
-        description: "Concurrency 1, 2, 4, 8 and 64."
+      tp2_c1:
+        label: "1 client · TP2"
+        concurrency: 1
+      tp2_c2:
+        label: "2 clients · TP2"
+        concurrency: 2
+      tp2_c4:
+        label: "4 clients · TP2"
+        concurrency: 4
+      tp2_c8:
+        label: "8 clients · TP2"
+        concurrency: 8
         default: true
       tp2_c16:
         label: "16 clients · TP2"
@@ -933,9 +942,21 @@ presets:
           - "8192"
           - "--max-num-seqs"
           - "8"
-      tp4:
-        label: "1–2 clients · TP4"
-        description: "Concurrency 1 and 2; the Engram tables stay in HBM."
+      tp2_c64:
+        label: "64 clients · TP2"
+        concurrency: 64
+      tp4_c1:
+        label: "1 client · TP4"
+        concurrency: 1
+        description: "The Engram tables stay in HBM at TP4."
+        tp: 4
+        args:
+          - "--engram-config"
+          - '{"cpu_offload":false}'
+      tp4_c2:
+        label: "2 clients · TP4"
+        concurrency: 2
+        description: "The Engram tables stay in HBM at TP4."
         tp: 4
         args:
           - "--engram-config"
