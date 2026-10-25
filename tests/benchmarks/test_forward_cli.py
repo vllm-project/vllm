@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,60 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="The pipeline benchmark needs two CUDA devices.",
+)
+def test_bench_forward_pipeline(tmp_path):
+    """PP measures matching microbatches across stages with real transfers."""
+    output = tmp_path / "pipeline.json"
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "forward",
+        "--model",
+        MODEL_NAME,
+        "--pipeline-parallel-size",
+        "2",
+        "--max-model-len",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.3",
+        "--case",
+        "prefill=8*128",
+        "--iters",
+        "4",
+        "--samples",
+        "2",
+        "--output-json",
+        str(output),
+        "--profile-dir",
+        str(tmp_path / "profile"),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    (row,) = json.loads(output.read_text())
+    assert row["median_us"] > 0
+    assert [r["pp_rank"] for r in row["ranks"]] == [0, 1]
+    for rank in row["ranks"]:
+        assert rank["finite"]
+        summary = json.loads(Path(rank["profile"]["summary"]).read_text())
+        assert Path(summary["trace"]).exists()
+        assert any("nccl" in k["name"].lower() for k in summary["kernels"])
+        assert all(c["relative_rms"] == 0 for c in rank["pipeline_vs_eager"].values())
+        assert rank["latency_us"]["count"] == 8
+    first, last = [r["pipeline_timeline"] for r in row["ranks"]]
+    margin = row["ranks"][0]["pipeline_warmup_microbatches"]
+    expected = np.array(last["ends_us"]) - np.array(first["starts_us"])
+    assert np.median(expected[margin:-margin]) == pytest.approx(row["median_us"])
 
 
 @pytest.mark.parametrize("rank", [0, 1])
