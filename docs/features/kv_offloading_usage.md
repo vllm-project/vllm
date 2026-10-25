@@ -214,6 +214,19 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 `config.json` records the run (block size, number of KV groups, etc.) and is written on first start. Each rank writes blocks under its own `_r<rank>` sibling directory, so multiple ranks can safely share the same `root_dir`.
 
+#### Canonical Cache Upgrades
+
+With `canonical_layout: true`, persisted KV uses a versioned storage namespace.
+Canonical format v2 deduplicates replicated GQA heads in storage sizing and is
+isolated from v1 for every tensor-parallel size. Compatible v2 TP1/TP2 instances
+can still share caches; the NHD/HND layout families remain separate.
+
+During rolling upgrades, old and new instances use different cache files, so
+an old reader cannot treat a compact v2 file as truncated and delete it. Expect
+cold cache misses and cache regeneration after upgrading. Old files are not
+migrated or automatically removed; reclaim them only after old instances stop
+using them. Noncanonical storage namespaces are unchanged.
+
 #### Cross-Process Sharing
 
 KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
