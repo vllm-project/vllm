@@ -2374,3 +2374,41 @@ Minimax reset: a warm boot with the user present beats a marginally quieter wind
   fs reads 82.7 GB, fs chunk hits 3,152, prompt tokens 325.0 M, preemptions 28.
   First-hour measurement at the 23:41Z cycle: fs write rate (was 33-47 GB/h) and
   disk-served share (acceptance: >= 80 % of the 2.2 % baseline share).
+
+## 25/10 23:41Z — first 1h50 under the fs filter: −68 % new files, gate PASSED; re-writes identified
+
+Engine generation 21:48:52Z, RC=0, health 200, 0 OOM, 0 tiering assert, probes OK.
+Security: 0 new external IP, 0 window+1, 21×401 dead keys. shm 24G, G: OK,
+nbaudit ok:true, commit 88.6 %.
+
+**Acceptance gate PASSED**: disk-served prompt tokens 1.51 M of 32.76 M = **4.6 %**
+of the prompt (baseline 2.2 %; gate was >= 80 % of it). fs chunk hits 870;
+preemptions 5 (new generation); 4 WEDGE `fail 1/2` under long prefills, never 2/2.
+The post-restart replays were served from the pre-existing fs content as designed:
+fs reads 22.8 GB in 1h50.
+
+**Write reduction (M1, new files created in the window)** — 19:13Z baseline vs 23:44Z:
+
+| group | before (148 min) | after (123 min) | reduction |
+|---|---|---|---|
+| GDN created | 1,810 / 44.2 GiB | **300 / 7.3 GiB** | **−75 %** |
+| attention created | 1,507 / 36.8 GiB | **775 / 18.9 GiB** | **−48 %** |
+| total | 3,317 / 81.1 GiB | 1,075 / 26.3 GiB | **−68 %** |
+
+The GDN target is hit: snapshots that used to be written every request and read
+back 1-2 % of the time now mostly stay off the SSD.
+
+**Honest gap vs the ≥5× counter target**: the fs write counter reads 38.1 GB since
+boot (≈20.6 GB/h, was 33-47 GB/h) while only 26.3 GB of *new* files appeared in
+1h50 (and 7 min of that window predate the boot). The difference is **re-writes of
+already-admitted keys**: `_fs_admitted_keys` passes a key unconditionally at
+`complete_store`, so every hot socle re-stored from RAM (after a prune, an
+eviction-and-recompute cycle, or a restart re-crossing) rewrites identical bytes.
+This is the next lever, not a correctness problem — content-addressed files, and
+the filter's read-back still pays. Candidate v2: skip the re-cascade when the fs
+file already exists (async fs lookup result cache, or the file-existence check in
+the tier's store path) instead of relying on the idempotent write.
+
+**Watch**: VRAM GPU 0 22,942 (margin 58 MiB under 23,000). If it crosses:
+`GPU_UTIL_SWIFT15=0.70` at next restart — not tonight, and not without a fresh
+measurement first.
