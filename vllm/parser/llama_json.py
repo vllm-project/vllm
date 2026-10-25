@@ -8,7 +8,6 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -19,18 +18,32 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.utils import extract_json_member_object
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 TOOL_START = "<|python_tag|>"
+LLAMA_OUTPUT_END_TOKENS = (
+    "<|eom_id|>", # end of message
+    "<|eot_id|>", # end of turn
+    "<|end_of_text|>",  # end of text
+)
 
 
-def _is_complete_tool_sequence(text: str) -> bool:
-    """Validate a complete ``{...}; {...}`` Llama tool-call body."""
+def _has_only_output_end_token(text: str, position: int) -> bool:
+    return any(
+        text.startswith(token, position)
+        and not text[position + len(token) :].strip()
+        for token in LLAMA_OUTPUT_END_TOKENS
+    )
+
+
+def _validate_complete_tool_output(text: str) -> bool | None:
+    """Validate complete Llama tool-call output"""
+    if text.startswith(TOOL_START):
+        text = text[len(TOOL_START) :]
+    elif not text.startswith("{"):
+        return None
+
     decoder = json.JSONDecoder()
     position = 0
     found = False
@@ -54,6 +67,8 @@ def _is_complete_tool_sequence(text: str) -> bool:
         while position < len(text) and text[position].isspace():
             position += 1
         if position == len(text):
+            return True
+        if _has_only_output_end_token(text, position):
             return True
         if text[position] != ";":
             return False
@@ -87,6 +102,7 @@ def llama_json_config() -> ParserEngineConfig:
             ),
         },
         arg_converter=_llama_arg_converter,
+        complete_tool_call_validator=_validate_complete_tool_output,
         stream_arg_deltas=False,
         tool_args_json=True,
         tool_call_body_collection=ToolCallBodyCollection.SEMICOLON_SEQUENCE,
@@ -118,38 +134,17 @@ class LlamaJsonParser(ParserEngine):
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> tuple[str, Sequence[int]]:
-        if not delta_text:
+        if not delta_text or not self._at_output_start:
             return delta_text, delta_token_ids
-        if self._at_output_start:
-            self._at_output_start = False
-            if delta_text.startswith("{"):
-                delta_text = TOOL_START + delta_text
-                if delta_token_ids:
-                    if self._tool_start_token_id is None:
-                        delta_token_ids = []
-                    else:
-                        delta_token_ids = [
-                            self._tool_start_token_id,
-                            *delta_token_ids,
-                        ]
-        return delta_text, delta_token_ids
 
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ExtractedToolCallInformation:
-        if model_output.startswith(TOOL_START):
-            candidate = model_output[len(TOOL_START) :]
-        elif model_output.startswith("{"):
-            candidate = model_output
-        else:
-            return super().extract_tool_calls(model_output, request)
+        self._at_output_start = False
+        if not delta_text.startswith("{"):
+            return delta_text, delta_token_ids
 
-        if not _is_complete_tool_sequence(candidate):
-            return ExtractedToolCallInformation(
-                tools_called=False,
-                tool_calls=[],
-                content=model_output,
-            )
-        return super().extract_tool_calls(model_output, request)
+        delta_text = TOOL_START + delta_text
+        if not delta_token_ids:
+            return delta_text, delta_token_ids
+        if self._tool_start_token_id is None:
+            return delta_text, []
+
+        return delta_text, [self._tool_start_token_id, *delta_token_ids]

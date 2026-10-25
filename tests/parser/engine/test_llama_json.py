@@ -64,6 +64,25 @@ def test_extract_tool_calls_invalid_json(parser):
     assert result.content == model_output
 
 
+def test_parse_invalid_json_falls_back_to_content(parser, mock_request):
+    model_output = '{"name": "invalidTool", "parameters": {invalid json}'
+    _, content, tools = parser.parse(model_output, mock_request)
+
+    assert content == model_output
+    assert tools is None
+
+
+def test_adapter_invalid_json_falls_back_to_content(mock_tokenizer, mock_request):
+    parser_class = ToolParserManager.get_tool_parser("llama3_json")
+    parser = parser_class(mock_tokenizer)
+    model_output = '{"name": "invalidTool", "parameters": {invalid json}'
+    result = parser.extract_tool_calls(model_output, mock_request)
+
+    assert result.tools_called is False
+    assert result.tool_calls == []
+    assert result.content == model_output
+
+
 def test_extract_tool_calls_with_arguments_key(parser):
     model_output = '{"name": "searchTool", "arguments": {"query": "test"}}'
     result = parser.extract_tool_calls(model_output, None)
@@ -72,6 +91,18 @@ def test_extract_tool_calls_with_arguments_key(parser):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].function.name == "searchTool"
     assert '"query": "test"' in result.tool_calls[0].function.arguments
+
+
+def test_extract_tool_calls_with_output_end_token(parser):
+    model_output = (
+        f'{TOOL_START}{{"name": "searchTool", '
+        '"arguments": {"query": "test"}}}<|eom_id|>'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "searchTool"
 
 
 def test_extract_tool_calls_multiple_json(parser):

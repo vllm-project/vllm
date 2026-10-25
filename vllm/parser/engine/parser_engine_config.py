@@ -28,6 +28,11 @@ from vllm.parser.engine.events import EventType
 # value, or returns None when the delta may change anything else.
 ArgValueExtender = Callable[[str], str | None]
 
+# Validates a complete non-streaming output. True means a valid tool-call
+# candidate, False means a malformed candidate that must fall back to content,
+# and None means the output is not a tool-call candidate.
+CompleteToolCallValidator = Callable[[str], bool | None]
+
 
 class ParserState(Enum):
     CONTENT = auto()
@@ -86,6 +91,8 @@ class ParserEngineConfig:
     wait_for_reasoning: bool | None = None
 
     arg_converter: Callable[[str, bool], str] | None = None
+
+    complete_tool_call_validator: CompleteToolCallValidator | None = None
 
     stream_arg_deltas: bool = True
 
