@@ -2148,3 +2148,42 @@ clé morte, toujours aucun accès).
 **Hôte** : commit **89,3 %** (353,2/395,3 Go, marge 42,1 Go) — **à 0,7 point de la barre CRIT
 90 %**, montée diurne vmmemWSL documentée ; aucun travail lourd lancé ce cycle (règle §3).
 G: écriture OK ; nbaudit `ok:true` (vague 2 Image/, 0 échec).
+
+## 25/10 16:50Z — capacité : ce que font VRAIMENT les tiers à l'éviction + état #4334
+
+**Question user : « le tier fs ne prend pas la main pour ces évictions ? »** — **SI**, et voici les
+chiffres depuis le boot (09:07→16:45Z, même génération) :
+
+| flux | volume | temps | débit |
+|---|---|---|---|
+| GPU→CPU (store) | **352 GiB** | 162 s | **2,2 GB/s** |
+| CPU→GPU (load) | **1 099 GiB** | 299 s | **3,7 GB/s** |
+| RAM tier → fs (write) | **352 GiB** | — | — |
+| fs → RAM (read) | **29,9 GiB** | — | — |
+
+Replays : **51 089 blocs** rechargés depuis le tier RAM, **1 222 blocs depuis le fs**
+(1 222 × 26 247 168 B = 32,07 GB = exactement `tiering_read_bytes`, cohérence vérifiée).
+Taux de hit par *lookup* : RAM **15,5 %** (51 089/330 431), fs **6,1 %** (1 222/20 109) — le
+complément = des préfixes jamais vus (miss attendu), pas une perte.
+
+**Correction de ma formulation** (« chaque éviction = un re-prefill ») : **faux**, l'éviction est
+**capturée**. Ce qui coûte un re-prefill c'est un préfixe **plus vieux que la rétention** du tier fs.
+**Pruneur à 16:50:04Z** : tier à **299 GB pour un cap de 250 GiB** → 1 166 fichiers / **30,6 GB
+supprimés** en 2,03 s, **0 erreur**, 11 393 fichiers. À ~44,6 GiB/h écrits (352 GiB/7,9 h) la
+rétention réelle est **≈ 5,5-6 h** — au-delà, le préfixe est vraiment perdu.
+**Asymétrie à noter** : on écrit **12×** plus sur le fs qu'on n'en relit (352 vs 29,9 GiB) → le tier
+RAM est le vrai cheval de trait, le fs est la longue traîne (~85 MB/s d'écriture continue, sans erreur).
+
+**Question user : « du neuf sur les préfixes qui forkent à l'octet 143 ? »** — **oui, et le chiffre
+bouge** : le worker po-2024 a localisé la cause dans `zoo-code/src/core/prompts/system.ts` — le
+`roleDefinition` (phrase d'identité du mode) est l'**élément n°1** du system prompt, donc les 10 modes
+de la flotte ne partageaient que **18 octets** (pas 143 : 143 était le point de divergence observé
+côté Claude Code, 18 est la mesure sur le prompt de mode). **PR #4354 MERGÉE aujourd'hui 09:30Z** :
+`roleDefinition` unique de 568 o pour la flotte, identité du mode déplacée *verbatim* dans
+`customInstructions` → **LCP 18 B → 568 B**, la divergence passant de la tête à la queue (tout ce qui
+est entre — outils, capacités, règles, instructions globales — entre dans le préfixe partagé).
+**Deuxième point de fork trouvé indépendamment** : `sections/skills.ts` filtre les skills **par mode**,
+en amont des règles → re-forke tôt pour des lanes aux jeux de skills différents.
+**⚠️ PAS DÉPLOYÉ** : `--deploy-global` réécrit le `custom_modes.yaml` de **chaque** lane → décision
+owner/coordinateur ; tant qu'il n'est pas passé, **#4334 n'a aucun effet en production**.
+`claudish#640` (mesure côté hub) : **0 commentaire, aucune activité depuis sa création il y a 32 h**.
