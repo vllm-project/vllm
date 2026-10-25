@@ -551,6 +551,29 @@ class KVCacheManager:
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len
         )
+        num_processed_tokens = max(
+            0, total_computed_tokens - request.num_in_flight_tokens
+        )
+
+        if (
+            request.status == RequestStatus.RUNNING
+            and new_computed_blocks is None
+            and num_new_computed_tokens == 0
+            and num_external_computed_tokens == 0
+            and num_encoder_tokens == 0
+            and reserved_blocks == 0
+            and not delay_cache_blocks
+            and not full_sequence_must_fit
+            and not self.coordinator.has_running_step_work(
+                request,
+                num_tokens_need_slot,
+                num_processed_tokens,
+                min(num_tokens_main_model, request.num_tokens),
+            )
+        ):
+            # Most decode steps stay inside the request's blocks: none of the
+            # passes below would change state.
+            return self.empty_kv_cache_blocks
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -563,7 +586,7 @@ class KVCacheManager:
         # tokens can roll it back.
         self.coordinator.remove_skipped_blocks(
             request.request_id,
-            max(0, total_computed_tokens - request.num_in_flight_tokens),
+            num_processed_tokens,
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
