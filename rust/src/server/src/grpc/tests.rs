@@ -2273,29 +2273,40 @@ async fn control_forwards_weight_update_without_pause_guard() {
             None,
             |dealer, push| {
                 boxed_test_future(async move {
-                    let frames = recv_engine_message(dealer).await;
-                    assert_eq!(frames[0].as_ref(), &[0x03]);
-                    let payload = decode_value(&frames[1]).expect("decode utility payload");
-                    let fields = payload.as_array().expect("utility payload array");
-                    let call_id = fields[1].as_u64().expect("utility call id");
-                    assert_eq!(fields[2].as_str(), Some("collective_rpc"));
-                    let args = fields[3].as_array().expect("collective_rpc arguments");
-                    assert_eq!(args[0].as_str(), Some("update_weights"));
-                    send_outputs(
-                        push,
-                        UtilityCallOutput {
-                            output: UtilityOutput {
-                                call_id: call_id.into(),
-                                failure_message: None,
-                                result: Some(UtilityResultEnvelope::without_type_info(
-                                    Value::Array(vec![Value::Nil]),
-                                )),
-                            },
-                            ..Default::default()
-                        }
-                        .into(),
-                    )
-                    .await;
+                    for expected_update_info in [
+                        serde_json::json!({"names": ["model.weight"]}),
+                        serde_json::json!([
+                            {"names": ["model.weight"]},
+                            {"names": ["model.bias"]}
+                        ]),
+                    ] {
+                        let frames = recv_engine_message(dealer).await;
+                        assert_eq!(frames[0].as_ref(), &[0x03]);
+                        let payload = decode_value(&frames[1]).expect("decode utility payload");
+                        let fields = payload.as_array().expect("utility payload array");
+                        let call_id = fields[1].as_u64().expect("utility call id");
+                        assert_eq!(fields[2].as_str(), Some("collective_rpc"));
+                        let args = fields[3].as_array().expect("collective_rpc arguments");
+                        assert_eq!(args[0].as_str(), Some("update_weights"));
+                        let kwargs: serde_json::Value = rmpv::ext::from_value(args[3].clone())
+                            .expect("decode weight update kwargs");
+                        assert_eq!(kwargs["update_info"], expected_update_info);
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: Some(UtilityResultEnvelope::without_type_info(
+                                        Value::Array(vec![Value::Nil]),
+                                    )),
+                                },
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
                 })
             },
         )
@@ -2309,12 +2320,17 @@ async fn control_forwards_weight_update_without_pause_guard() {
     .await;
     let mut client = ControlClient::new(channel);
 
-    client
-        .update_weights(pb::UpdateWeightsRequest {
-            update_info_json: br#"{"names":["model.weight"]}"#.to_vec(),
-        })
-        .await
-        .expect("forward weight update without a pause probe");
+    for update_info in [
+        br#"{"names":["model.weight"]}"#.as_slice(),
+        br#"[{"names":["model.weight"]},{"names":["model.bias"]}]"#.as_slice(),
+    ] {
+        client
+            .update_weights(pb::UpdateWeightsRequest {
+                update_info_json: update_info.to_vec(),
+            })
+            .await
+            .expect("forward weight update without a pause probe");
+    }
 
     engine_task.await.expect("mock engine task");
     server_task.abort();

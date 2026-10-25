@@ -125,19 +125,13 @@ fn pause_mode(mode: i32) -> Result<EnginePauseMode, Status> {
     }
 }
 
-fn json_object(bytes: &[u8], field: &'static str) -> Result<JsonValue, Status> {
-    let value = serde_json::from_slice::<JsonValue>(bytes).map_err(|error| {
+fn json_value(bytes: &[u8], field: &'static str) -> Result<JsonValue, Status> {
+    serde_json::from_slice(bytes).map_err(|error| {
         Status::invalid_argument(format!(
             "{field} must contain valid JSON: {}",
             error.to_report_string()
         ))
-    })?;
-    if !value.is_object() {
-        return Err(Status::invalid_argument(format!(
-            "{field} must contain a JSON object"
-        )));
-    }
-    Ok(value)
+    })
 }
 
 fn weight_version(value: String) -> Result<String, Status> {
@@ -418,7 +412,12 @@ impl pb::control_server::Control for ControlServiceImpl {
         request: Request<pb::InitWeightTransferEngineRequest>,
     ) -> Result<Response<pb::InitWeightTransferEngineResponse>, Status> {
         self.require_weight_transfer()?;
-        let init_info = json_object(&request.into_inner().init_info_json, "init_info_json")?;
+        let init_info = json_value(&request.into_inner().init_info_json, "init_info_json")?;
+        if !init_info.is_object() {
+            return Err(Status::invalid_argument(
+                "init_info_json must contain a JSON object",
+            ));
+        }
         let _guard = self.rl_lock.lock().await;
         self.client()
             .init_weight_transfer_engine(init_info)
@@ -463,7 +462,16 @@ impl pb::control_server::Control for ControlServiceImpl {
         request: Request<pb::UpdateWeightsRequest>,
     ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
         self.require_weight_transfer()?;
-        let update_info = json_object(&request.into_inner().update_info_json, "update_info_json")?;
+        let update_info = json_value(&request.into_inner().update_info_json, "update_info_json")?;
+        if !update_info.is_object()
+            && !update_info
+                .as_array()
+                .is_some_and(|items| items.iter().all(JsonValue::is_object))
+        {
+            return Err(Status::invalid_argument(
+                "update_info_json must contain a JSON object or a list of per-worker JSON objects",
+            ));
+        }
         let _guard = self.rl_lock.lock().await;
         self.client()
             .update_weights(update_info)
