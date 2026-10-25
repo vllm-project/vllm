@@ -2188,7 +2188,7 @@ en amont des règles → re-forke tôt pour des lanes aux jeux de skills différ
 owner/coordinateur ; tant qu'il n'est pas passé, **#4334 n'a aucun effet en production**.
 `claudish#640` (mesure côté hub) : **0 commentaire, aucune activité depuis sa création il y a 32 h**.
 
-## 25/10 ~17:45Z — what the fs tier actually writes, and where prefixes fork
+## 25/10 ~17:30Z — what the fs tier actually writes, and where prefixes fork
 
 Triggered by the user's challenge: "the only way to justify that many file writes is that the
 whole conversation's KV is saved at each assistant message".
@@ -2232,3 +2232,26 @@ already exists. Default policy is `CHUNK_LEVEL` (prefix-hit chunks skipped).
   block: visible to the hub (full bodies), not to us.
 - claudish artefact: the system text starts with its preamble followed by a literal JSON-encoded
   empty block `{"type":"text","text":""}` (identical in every request, not a fork).
+
+## 25/10 17:40Z — routine cycle: healthy, one #431 400, CoursIA answered
+
+- Engine: health 200 (5 ms), same generation since 09:04:20Z, 0 assert, 0 OOM. VRAM under load
+  GPU 0 **22,733** / GPU 1 21,408 MiB (alert line 23,000, margin 267 MiB). KV usage 62 %.
+  Preemptions 10 -> **12** in 2 h. `/dev/shm` 24G/63G.
+- Since 09:04Z: 245.9 M prompt tokens, **4.7 % computed**, 66.2 % GPU prefix hits, 29.0 % loaded
+  from the RAM/fs tiers; 2.52 M generated.
+- **#431**: one 400 in 3 h, 16:31:33Z, 894,555 B body, hub (Bun via the site hairpin), "at least
+  262145 input tokens" = client auto-compact one token past the window. Single attempt, no local
+  retry. claudish #674/#685 (`/tokenize` pre-check) would route it before the 400. Sent to claudish.
+- Security: 200s from known IPs only; `koara.live` keeps probing (~10/h, all 401).
+- Condensation breaker opened a 6th time today: client-side, structural (status turn longer than
+  the 90 s slice), tracked by po-2028 on #3962. Engine not involved.
+- Host commit 88.8 % (CRIT 90): no heavy work. nbaudit ok. G: ok.
+- CoursIA po-2027 (notebook 11b, PR #22462) asked which model fits 8 GB and which measured settings
+  they may cite: answered with dated figures and their NOTES paths (4B GGUF Q4_K_M for a Windows
+  laptop, checkpoint question redirected to po-2025's FrogNano-4B seat; cost per Mtok and watts
+  flagged as not measured).
+- claudish froze the identity header (#686): seats send `x-claudish-workspace`, the hub composes
+  `x-claudish-client: <machine>:<workspace>` (fallback `<machine>:unknown`). RSM condensation
+  calls :5002 directly, so roo-extensions was asked to set the same header via `defaultHeaders`.
+  Our middleware logs it from the next engine boot.
