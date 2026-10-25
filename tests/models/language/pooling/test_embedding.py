@@ -88,6 +88,7 @@ def test_models(
             st_model[1] = Pooling(
                 st_model.get_sentence_embedding_dimension(), pooling_mode="mean"
             )
+            del st_model
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(
