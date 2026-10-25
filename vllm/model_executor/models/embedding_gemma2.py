@@ -1012,6 +1012,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
+    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input
     _process_audio_input = Gemma4ForConditionalGeneration._process_audio_input
