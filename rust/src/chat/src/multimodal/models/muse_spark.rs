@@ -26,14 +26,15 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use llm_multimodal::registry::{
     ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult,
 };
 use llm_multimodal::{
-    AudioPreProcessor, EncoderFieldLayouts, FieldLayout, Modality, ModelSpecificValue,
-    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TokenId, VisionPreProcessor,
+    AudioPreProcessor, EncoderFieldLayouts, FieldLayout, FrameSampling, Modality,
+    ModelSpecificValue, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TokenId,
+    VisionPreProcessor,
 };
 
 use self::audio::MuseSparkAudioProcessor;
@@ -261,13 +262,19 @@ impl ModelProcessorSpec for MuseSparkSpec {
         Ok(limits)
     }
 
-    fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
-        Ok(json!({}))
+    fn audio_processor(
+        &self,
+        _model_config: &Value,
+        preprocessor_config: &PreProcessorConfig,
+    ) -> RegistryResult<Option<Box<dyn AudioPreProcessor>>> {
+        Ok(Some(Box::new(MuseSparkAudioProcessor::from_config(
+            preprocessor_config,
+        ))))
     }
 
     fn vision_processor(
         &self,
-        _metadata: &ModelMetadata,
+        _model_config: &Value,
         preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
@@ -281,14 +288,42 @@ impl ModelProcessorSpec for MuseSparkSpec {
         }
     }
 
-    fn audio_processor(
-        &self,
-        _metadata: &ModelMetadata,
-        preprocessor_config: &PreProcessorConfig,
-    ) -> Option<Box<dyn AudioPreProcessor>> {
-        Some(Box::new(MuseSparkAudioProcessor::from_config(
-            preprocessor_config,
-        )))
+    /// The reference video processor's `fps`: clips arrive pre-sampled by the
+    /// media connector at this rate.
+    fn default_video_sample_fps(&self) -> Option<f32> {
+        Some(processor::DEFAULT_SAMPLING_FPS as f32)
+    }
+
+    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f32> {
+        Some(
+            config
+                .and_then(|config| config.get_extra::<f32>("fps"))
+                .filter(|fps| fps.is_finite() && *fps > 0.0)
+                .unwrap_or(processor::DEFAULT_SAMPLING_FPS as f32),
+        )
+    }
+
+    /// The reference video processor's `sample_frames`: `trunc(duration x
+    /// fps)` frames, at most `num_frames`, in temporal groups, at torch's
+    /// linspace positions.
+    fn video_frame_sampling(&self) -> FrameSampling {
+        FrameSampling::TemporalGroups {
+            frame_factor: processor::DEFAULT_PATCH_TEMPORAL,
+            max_frames: processor::DEFAULT_NUM_FRAMES_PER_VIDEO,
+        }
+    }
+
+    fn video_frame_sampling_with(&self, config: Option<&PreProcessorConfig>) -> FrameSampling {
+        FrameSampling::TemporalGroups {
+            frame_factor: config
+                .and_then(|config| config.temporal_patch_size)
+                .unwrap_or(processor::DEFAULT_PATCH_TEMPORAL)
+                .max(1),
+            max_frames: config
+                .and_then(|config| config.get_extra::<usize>("num_frames"))
+                .filter(|frames| *frames > 0)
+                .unwrap_or(processor::DEFAULT_NUM_FRAMES_PER_VIDEO),
+        }
     }
 
     /// The MuseSpark engine reads its primary tensors under model-specific
@@ -578,6 +613,36 @@ mod tests {
     }
 
     #[test]
+    fn video_sampling_follows_the_reference_processor_and_its_config() {
+        assert_eq!(MuseSparkSpec.default_video_sample_fps(), Some(2.0));
+        assert_eq!(
+            MuseSparkSpec.video_frame_sampling(),
+            FrameSampling::TemporalGroups {
+                frame_factor: 2,
+                max_frames: 600
+            }
+        );
+
+        let config = PreProcessorConfig::from_value(json!({
+            "temporal_patch_size": 4,
+            "num_frames": 64,
+            "fps": 1.0
+        }))
+        .unwrap();
+        assert_eq!(
+            MuseSparkSpec.default_video_sample_fps_with(Some(&config)),
+            Some(1.0)
+        );
+        assert_eq!(
+            MuseSparkSpec.video_frame_sampling_with(Some(&config)),
+            FrameSampling::TemporalGroups {
+                frame_factor: 4,
+                max_frames: 64
+            }
+        );
+    }
+
+    #[test]
     fn muse_spark_spec_builds_vision_and_audio_processors() {
         let tokenizer = muse_spark_tokenizer();
         let config = omni_config();
@@ -586,12 +651,12 @@ mod tests {
 
         for modality in [Modality::Image, Modality::Video] {
             let processor = spec
-                .vision_processor(&metadata, &PreProcessorConfig::default(), modality)
+                .vision_processor(&config, &PreProcessorConfig::default(), modality)
                 .unwrap();
             assert_eq!(processor.model_name(), "muse_spark");
         }
         assert!(matches!(
-            spec.vision_processor(&metadata, &PreProcessorConfig::default(), Modality::Audio),
+            spec.vision_processor(&config, &PreProcessorConfig::default(), Modality::Audio),
             Err(ModelRegistryError::UnsupportedModality {
                 spec: "muse_spark",
                 modality: Modality::Audio,
@@ -599,7 +664,8 @@ mod tests {
         ));
 
         let processor = spec
-            .audio_processor(&metadata, &PreProcessorConfig::default())
+            .audio_processor(&config, &PreProcessorConfig::default())
+            .expect("muse_spark audio config is servable")
             .expect("muse_spark spec must provide an audio processor");
 
         use std::sync::Arc;
