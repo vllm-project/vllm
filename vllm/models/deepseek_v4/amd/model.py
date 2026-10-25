@@ -139,7 +139,7 @@ class DeepseekV4MLP(nn.Module):
             self.act_fn = SiluAndMul()
 
         # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
-        self._gateup = rocm_aiter_ops.is_enabled()
+        self._gateup = rocm_aiter_ops.is_enabled() and envs.VLLM_ROCM_DSV4_BPRESHUFFLE
         # Block scale for the preshuffled gate_up weight; None = not preshuffled.
         self._gateup_scale: torch.Tensor | None = None
 

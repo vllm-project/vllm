@@ -117,6 +117,7 @@ steps:
       - tests/models/test_deepseek_v41_amd_replay_forward.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
+      - tests/models/test_deepseek_v4_rocm_bpreshuffle.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
       - tests/models/test_muse_spark_rocm_loading.py
@@ -140,6 +141,7 @@ steps:
         models/test_deepseek_v41_amd_replay_forward.py
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py
+        models/test_deepseek_v4_rocm_bpreshuffle.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
         models/test_dsv41_mono_decode.py
         models/test_muse_spark_rocm_loading.py

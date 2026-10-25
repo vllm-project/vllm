@@ -1103,8 +1103,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        if envs.VLLM_ROCM_DSV4_BPRESHUFFLE:
+            self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
+            self._wo_b_scale = _prep(self.wo_b)
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 

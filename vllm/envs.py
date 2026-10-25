@@ -152,6 +152,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+    VLLM_ROCM_DSV4_BPRESHUFFLE: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
@@ -1372,6 +1373,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # regardless of the precision the checkpoint asked for.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "False").lower() in ("true", "1")
+    ),
+    # Whether DeepSeek-V4 on ROCm B-preshuffles the attention (fused_wqa_wkv,
+    # wo_b) and shared-expert gate_up FP8 weights for aiter's blockscale GEMM
+    # after loading. The preshuffle runs once and a weight reload does not redo
+    # it, so engines that update weights at runtime (e.g. RL weight sync) must
+    # turn it off; those layers then run aiter's non-preshuffled blockscale GEMM.
+    "VLLM_ROCM_DSV4_BPRESHUFFLE": lambda: (
+        os.getenv("VLLM_ROCM_DSV4_BPRESHUFFLE", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp4 bmm kernel for MLA kv_b_proj.
     # By default is disabled, for the same reason as the fp8 variant above.
