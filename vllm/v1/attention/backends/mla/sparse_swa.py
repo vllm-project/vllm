@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.gpu.buffer_utils import _load_ptr
 
 # DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct
 # (topk, extra_topk, extra_page_block_size) config, so they cannot share a
@@ -1559,26 +1560,29 @@ def _compute_swa_indices_and_lens_batched_kernel(
     g = tl.program_id(1)
     token_idx = pid
     params = group_params_ptr + g * 8
-    swa_indices_ptr = tl.cast(tl.load(params + 0), tl.pointer_type(tl.int32))
-    swa_lens_ptr = tl.cast(tl.load(params + 1), tl.pointer_type(tl.int32))
-    is_valid_token_ptr = tl.cast(tl.load(params + 2), tl.pointer_type(tl.int8))
-    slot_mapping_ptr = tl.cast(tl.load(params + 3), tl.pointer_type(tl.int64))
-    block_table_ptr = tl.cast(tl.load(params + 4), tl.pointer_type(tl.int32))
-    replay_start_ptr = tl.cast(tl.load(params + 5), tl.pointer_type(tl.int32))
+    swa_indices_ptr = _load_ptr(params + 0, tl.int32)
+    swa_lens_ptr = _load_ptr(params + 1, tl.int32)
+    is_valid_token_ptr = _load_ptr(params + 2, tl.int8)
+    slot_mapping_ptr = _load_ptr(params + 3, tl.int64)
+    block_table_ptr = _load_ptr(params + 4, tl.int32)
+    replay_start_ptr = _load_ptr(params + 5, tl.int32)
     swa_indices_stride = tl.load(params + 6)
     block_table_stride = tl.load(params + 7)
 
     is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
     tl.store(is_valid_token_ptr + token_idx, is_valid.to(tl.int8))
+    # Same tail bound as the per-group kernel: lens zero to the buffer end,
+    # index row-clears only within num_valid_tokens.
     if not is_valid or pid >= num_valid_tokens:
         tl.store(swa_lens_ptr + pid, 0)
-        for i in range(0, index_width, TRITON_BLOCK_SIZE):
-            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-            tl.store(
-                swa_indices_ptr + pid * swa_indices_stride + offset,
-                -1,
-                mask=offset < index_width,
-            )
+        if pid < num_valid_tokens:
+            for i in range(0, index_width, TRITON_BLOCK_SIZE):
+                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+                tl.store(
+                    swa_indices_ptr + pid * swa_indices_stride + offset,
+                    -1,
+                    mask=offset < index_width,
+                )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
