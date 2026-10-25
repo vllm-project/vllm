@@ -114,6 +114,29 @@ run_tests_for_model() {
   echo "Running tests for $model_name"
   PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python3 -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
 
+  # Restart the decode instance with spec decode and a KV cache of 5 blocks
+  # (1 null + 4 usable) for the async KV load admission test; its block size,
+  # block count and spec token count must match test_spec_decode_admission.py.
+  pkill -f "vllm serve.*--port $DECODE_PORT" || true
+  sleep 2
+
+  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
+  --port $DECODE_PORT \
+  --enforce-eager \
+  --gpu-memory-utilization 0.2 \
+  --max-model-len 128 \
+  --block-size 32 \
+  --num-gpu-blocks-override 5 \
+  --speculative-config '{\"method\":\"ngram\",\"num_speculative_tokens\":1,\"prompt_lookup_max\":4,\"prompt_lookup_min\":2}' \
+  --kv-transfer-config '$KV_CONFIG'"
+
+  eval "$BASE_CMD &"
+
+  echo "Waiting for spec decode instance on port $DECODE_PORT to start..."
+  wait_for_server "$DECODE_PORT"
+
+  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT python3 -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_spec_decode_admission.py
+
   # Clean up before running next model
   cleanup_instances
   sleep 3
