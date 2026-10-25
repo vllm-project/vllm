@@ -275,9 +275,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self._prepare_eplb_forward(num_tokens)
 
-        if not self.can_reuse_target_attn_metadata and not skip_attn_for_dummy_run:
-            attn_metadata, slot_mappings = self._build_target_batch_attn_metadata(
+        if not skip_attn_for_dummy_run:
+            attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
                 input_batch,
+                attn_metadata,
+                slot_mappings,
                 prefill_batch_desc.cg_mode,
                 for_capture=dummy_run
                 and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,

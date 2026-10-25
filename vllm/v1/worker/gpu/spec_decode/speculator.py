@@ -313,34 +313,39 @@ class DraftModelSpeculator(BaseSpeculator):
         self.target_attn_groups = target_attn_groups
         self._configure_decode_metadata_update()
 
-    def _build_target_batch_attn_metadata(
+    def _build_drafter_attn_metadata(
         self,
         input_batch: InputBatch,
-        cg_mode: CUDAGraphMode,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         for_capture: bool = False,
     ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-        """Build the target batch's attention metadata on the draft builders,
-        from the block tables and slot mappings the target prepared. Must run
-        before draft decode steps overwrite the slot mappings.
+        """Attention metadata and slot mappings for draft prefill on the target
+        batch: the target forward's when reusable, else rebuilt on the draft
+        builders from the block tables and slot mappings the target prepared.
+        Must run before draft decode steps overwrite the slot mappings.
         """
+        if self.can_reuse_target_attn_metadata:
+            return attn_metadata, slot_mappings
         block_tables = tuple(
             block_table[: input_batch.num_reqs_after_padding]
             for block_table in self.block_tables.input_block_tables
         )
-        slot_mappings = self.block_tables.slot_mappings[
+        target_slot_mappings = self.block_tables.slot_mappings[
             :, : input_batch.num_tokens_after_padding
         ]
         attn_metadata = self.model_state.prepare_attn(
             input_batch,
             cg_mode,
             block_tables,
-            slot_mappings,
+            target_slot_mappings,
             self.attn_groups,
             self.kv_cache_config,
             for_capture=for_capture,
         )
         return attn_metadata, build_slot_mappings_by_layer(
-            slot_mappings, self.kv_cache_config
+            target_slot_mappings, self.kv_cache_config
         )
 
     def _configure_decode_metadata_update(self) -> None:

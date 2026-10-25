@@ -134,10 +134,9 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         num_tokens = stacked_hidden_states.shape[0]
         self.hidden_states[:num_tokens].copy_(stacked_hidden_states)
 
-        if not self.can_reuse_target_attn_metadata:
-            attn_metadata, slot_mappings = self._build_target_batch_attn_metadata(
-                input_batch, CUDAGraphMode.NONE
-            )
+        attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+            input_batch, attn_metadata, slot_mappings
+        )
 
         draft_attn_metadata = {
             name: attn_metadata[name] for name in self.draft_attn_layer_names

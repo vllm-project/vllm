@@ -673,6 +673,10 @@ def test_rebuilt_prefill_metadata_uses_target_batch_slots():
     # Under DBO the target builds only per-microbatch metadata, so the drafter
     # rebuilds the full batch's on its own builders from the target's slots.
     speculator = object.__new__(_TestSpeculator)
+    target = ({"draft": "target metadata"}, {"draft": torch.zeros(6)})
+    assert speculator._build_drafter_attn_metadata(None, *target) == target
+
+    speculator.can_reuse_target_attn_metadata = False
     speculator.attn_groups = [[object()]]
     speculator.model_state = Mock()
     speculator.model_state.prepare_attn.return_value = {"draft": "metadata"}
@@ -685,8 +689,8 @@ def test_rebuilt_prefill_metadata_uses_target_batch_slots():
     )
     input_batch = SimpleNamespace(num_reqs_after_padding=2, num_tokens_after_padding=6)
 
-    attn_metadata, slot_mappings = speculator._build_target_batch_attn_metadata(
-        input_batch, CUDAGraphMode.FULL
+    attn_metadata, slot_mappings = speculator._build_drafter_attn_metadata(
+        input_batch, *target, CUDAGraphMode.FULL
     )
 
     assert attn_metadata == {"draft": "metadata"}
