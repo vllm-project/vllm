@@ -1030,7 +1030,11 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
 )
 def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_mode):
     """A resumed prefill replaces the SSM state, so decode must ignore old rings."""
-    from vllm.v1.worker.replayssm_utils import _ReplaySSMGroupContext
+    from vllm.v1.worker.replayssm_utils import (
+        ReplaySSMModelContext,
+        _postprocess_replayssm_kernel,
+        _ReplaySSMGroupContext,
+    )
 
     device = torch.device("cuda")
     heads, dim, dstate = 2, 4, 8
@@ -1051,6 +1055,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         _replayssm_ring_start=starts,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
+        mamba_config=MambaConfig(),
     )
     group = _ReplaySSMGroupContext.create(
         [mixer],
@@ -1059,6 +1064,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         128,
         1,
     )
+    replay = ReplaySSMModelContext(groups=[group])
     metadata = _build_staging_metadata([64], [8], [64], [0], num_spec)
     ctx = _make_staging_ctx(1, device)
     stage_postprocess_inputs_to_gpu(
@@ -1071,16 +1077,32 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         _make_requests(["req"], [64], [[1]], [64]),
         num_decodes=metadata.num_decodes,
     )
-    group.postprocess(
-        idx_mapping=None,
-        query_metadata=ctx.num_scheduled_tokens_buf.gpu,
-        query_metadata_is_cumulative=False,
-        num_computed_tokens=ctx.num_computed_tokens_buf.gpu,
-        num_computed_is_post_step=False,
-        num_accepted_tokens=torch.ones(1, dtype=torch.int32, device=device),
-        is_prefilling=ctx.is_prefilling_buf.gpu,
-        live_cols=None,
-        num_reqs=1,
+    _postprocess_replayssm_kernel[(1, 1)](
+        None,
+        ctx.num_scheduled_tokens_buf.gpu,
+        ctx.num_computed_tokens_buf.gpu,
+        torch.ones(1, dtype=torch.int32, device=device),
+        ctx.is_prefilling_buf.gpu,
+        None,
+        replay.block_table_ptrs,
+        replay.ring_start_ptrs,
+        replay.num_committed_ptrs,
+        replay.src_slots_ptrs,
+        replay.dst_slots_ptrs,
+        replay.plan_ring_start_ptrs,
+        replay.plan_flush_count_ptrs,
+        replay.block_table_strides,
+        replay.num_layers,
+        MAX_NUM_REQS=1,
+        MAMBA_BLOCK_SIZE=128,
+        LOGICAL_WINDOW=16,
+        RING_BUFFER_LEN=ring_len,
+        PAD_SLOT_ID=0,
+        QUERY_METADATA_IS_CUMULATIVE=False,
+        NUM_COMPUTED_IS_POST_STEP=False,
+        HAS_IDX_MAPPING=False,
+        MATERIALIZE_PREFIXES=cache_mode == "align",
+        LIVE_COL_IS_ZERO=True,
     )
     assert starts.tolist() == [7, 0, 7]
     assert committed.tolist() == [3, 0, 3]

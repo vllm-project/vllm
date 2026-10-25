@@ -75,10 +75,10 @@ def _reset_new_replayssm_slots_kernel(
     idx_mapping,
     src_cols,
     dst_cols,
-    block_table,
-    tracker_start,
-    tracker_committed,
-    block_table_stride_req: tl.int64,
+    block_table_ptrs,
+    tracker_start_ptrs,
+    tracker_committed_ptrs,
+    block_table_strides,
     PAD_SLOT_ID: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
 ) -> None:
@@ -88,6 +88,15 @@ def _reset_new_replayssm_slots_kernel(
     distinguish a missing group-local source from a continuation.
     """
     batch_idx = tl.program_id(0)
+    group_idx = tl.program_id(1)
+    block_table = tl.load(block_table_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+    tracker_start = tl.load(tracker_start_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    tracker_committed = tl.load(tracker_committed_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    block_table_stride_req = tl.load(block_table_strides + group_idx)
     req_idx = batch_idx
     if HAS_IDX_MAPPING:
         req_idx = tl.load(idx_mapping + batch_idx)
@@ -126,19 +135,19 @@ def _postprocess_replayssm_kernel(
     num_accepted_tokens,
     is_prefilling,
     live_cols,
-    block_table,
-    tracker_start,
-    tracker_committed,
-    src_slots,
-    dst_slots,
-    plan_ring_start,
-    plan_flush_count,
-    block_table_stride_req: tl.int64,
-    slot_table_stride_layer: tl.int64,
+    block_table_ptrs,
+    tracker_start_ptrs,
+    tracker_committed_ptrs,
+    src_slots_ptrs,
+    dst_slots_ptrs,
+    plan_ring_start_ptrs,
+    plan_flush_count_ptrs,
+    block_table_strides,
+    num_layers,
+    MAX_NUM_REQS: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
     LOGICAL_WINDOW: tl.constexpr,
     RING_BUFFER_LEN: tl.constexpr,
-    NUM_LAYERS: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     QUERY_METADATA_IS_CUMULATIVE: tl.constexpr,
     NUM_COMPUTED_IS_POST_STEP: tl.constexpr,
@@ -148,6 +157,23 @@ def _postprocess_replayssm_kernel(
 ) -> None:
     """Commit a completed step and prepare an optional prefix snapshot."""
     batch_idx = tl.program_id(0)
+    group_idx = tl.program_id(1)
+    block_table = tl.load(block_table_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+    tracker_start = tl.load(tracker_start_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    tracker_committed = tl.load(tracker_committed_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    src_slots = tl.load(src_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+    dst_slots = tl.load(dst_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+    plan_ring_start = tl.load(plan_ring_start_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    plan_flush_count = tl.load(plan_flush_count_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    block_table_stride_req = tl.load(block_table_strides + group_idx)
 
     tl.store(plan_ring_start + batch_idx, 0)
     tl.store(plan_flush_count + batch_idx, -1)
@@ -207,8 +233,8 @@ def _postprocess_replayssm_kernel(
     if MATERIALIZE_PREFIXES:
         # FlashInfer's ABI requires packed [layer, batch] tables even though all
         # layers in this cache group share the same physical slot namespace.
-        for layer_idx in tl.static_range(0, NUM_LAYERS):
-            slot_offset = layer_idx * slot_table_stride_layer + batch_idx
+        for layer_idx in range(tl.load(num_layers + group_idx)):
+            slot_offset = layer_idx * MAX_NUM_REQS + batch_idx
             tl.store(
                 src_slots + slot_offset,
                 tl.where(materialize, live_slot, PAD_SLOT_ID),
@@ -269,13 +295,20 @@ def _postprocess_replayssm_kernel(
 
 @triton.jit(do_not_specialize=["num_reqs"])
 def _compact_replayssm_requests_kernel(
-    plan_flush_count,
-    active_request_indices,
+    plan_flush_count_ptrs,
+    active_request_indices_ptrs,
     num_reqs,
     MAX_NUM_REQS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
-    """Build FlashInfer's active-prefix request list in one parallel program."""
+    """Build one FlashInfer active-request list per cache group."""
+    group_idx = tl.program_id(0)
+    plan_flush_count = tl.load(plan_flush_count_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
+    active_request_indices = tl.load(active_request_indices_ptrs + group_idx).to(
+        tl.pointer_type(tl.int32)
+    )
     offsets = tl.arange(0, BLOCK_SIZE)
     in_capacity = offsets < MAX_NUM_REQS
     active = (offsets < num_reqs) & (
@@ -397,91 +430,13 @@ class _ReplaySSMGroupContext:
             materialize_prefixes=cache_mode == "align",
         )
 
-    def reset_new_slots(
-        self,
-        *,
-        idx_mapping: torch.Tensor | None,
-        src_cols: torch.Tensor,
-        dst_cols: torch.Tensor,
-        num_reqs: int,
-    ) -> None:
-        """Migrate live cursors and reset fresh physical slots."""
-        if num_reqs == 0:
-            return
-        _reset_new_replayssm_slots_kernel[(num_reqs,)](
-            idx_mapping,
-            src_cols,
-            dst_cols,
-            self.block_table,
-            self.ring_start,
-            self.num_committed,
-            self.block_table.stride(0),
-            PAD_SLOT_ID=NULL_BLOCK_ID,
-            HAS_IDX_MAPPING=idx_mapping is not None,
-        )
-
-    def postprocess(
-        self,
-        *,
-        idx_mapping: torch.Tensor | None,
-        query_metadata: torch.Tensor,
-        query_metadata_is_cumulative: bool,
-        num_computed_tokens: torch.Tensor,
-        num_computed_is_post_step: bool,
-        num_accepted_tokens: torch.Tensor,
-        is_prefilling: torch.Tensor,
-        live_cols: torch.Tensor | None,
-        num_reqs: int,
-    ) -> None:
-        """Commit a completed step and prepare an optional prefix snapshot."""
-        if num_reqs == 0:
-            return
-        _postprocess_replayssm_kernel[(num_reqs,)](
-            idx_mapping,
-            query_metadata,
-            num_computed_tokens,
-            num_accepted_tokens,
-            is_prefilling,
-            live_cols,
-            self.block_table,
-            self.ring_start,
-            self.num_committed,
-            self.src_slots,
-            self.dst_slots,
-            self.plan_ring_start,
-            self.plan_flush_count,
-            self.block_table.stride(0),
-            self.src_slots.stride(0),
-            MAMBA_BLOCK_SIZE=self.mamba_block_size,
-            LOGICAL_WINDOW=self.logical_window,
-            RING_BUFFER_LEN=self.ring_buffer_len,
-            NUM_LAYERS=len(self.mixers),
-            PAD_SLOT_ID=NULL_BLOCK_ID,
-            QUERY_METADATA_IS_CUMULATIVE=query_metadata_is_cumulative,
-            NUM_COMPUTED_IS_POST_STEP=num_computed_is_post_step,
-            HAS_IDX_MAPPING=idx_mapping is not None,
-            MATERIALIZE_PREFIXES=self.materialize_prefixes,
-            LIVE_COL_IS_ZERO=live_cols is None,
-        )
-        if self.materialize_prefixes:
-            _compact_replayssm_requests_kernel[(1,)](
-                self.plan_flush_count,
-                self.active_request_indices,
-                num_reqs,
-                MAX_NUM_REQS=self.max_num_reqs,
-                BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
-            )
-
-    def materialize(self) -> None:
+    def materialize(self, rand_seed: torch.Tensor | None = None) -> None:
         """Publish the canonical prefix snapshots prepared by ``postprocess``."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
-        rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
-            rand_seed = torch.randint(
-                0, 2**32, (1,), device=self.src_slots.device, dtype=torch.int64
-            )
+            assert rand_seed is not None
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
         _load_replayssm_materialize()(
             *self.materialize_tables,
@@ -506,9 +461,71 @@ class _ReplaySSMGroupContext:
 
 @dataclass
 class ReplaySSMModelContext:
-    """ReplaySSM lifecycle split by physical cache-slot namespace."""
+    """Batch lifecycle metadata while keeping each cache group's plan separate."""
 
     groups: list[_ReplaySSMGroupContext]
+
+    def __post_init__(self) -> None:
+        first = self.groups[0]
+        # These values specialize the shared metadata kernel. Materialization
+        # remains per group and does not require matching state tensor geometry.
+        assert all(
+            (
+                group.max_num_reqs,
+                group.mamba_block_size,
+                group.logical_window,
+                group.ring_buffer_len,
+                group.materialize_prefixes,
+            )
+            == (
+                first.max_num_reqs,
+                first.mamba_block_size,
+                first.logical_window,
+                first.ring_buffer_len,
+                first.materialize_prefixes,
+            )
+            for group in self.groups
+        ), "ReplaySSM groups must share lifecycle metadata geometry"
+        self.block_table_ptrs = _cuda_i64_ptrs([g.block_table for g in self.groups])
+        self.block_table_strides = _cuda_i64_slot_strides(
+            [g.block_table for g in self.groups]
+        )
+        self.ring_start_ptrs = _cuda_i64_ptrs([g.ring_start for g in self.groups])
+        self.num_committed_ptrs = _cuda_i64_ptrs([g.num_committed for g in self.groups])
+        self.src_slots_ptrs = _cuda_i64_ptrs([g.src_slots for g in self.groups])
+        self.dst_slots_ptrs = _cuda_i64_ptrs([g.dst_slots for g in self.groups])
+        self.plan_ring_start_ptrs = _cuda_i64_ptrs(
+            [g.plan_ring_start for g in self.groups]
+        )
+        self.plan_flush_count_ptrs = _cuda_i64_ptrs(
+            [g.plan_flush_count for g in self.groups]
+        )
+        self.active_request_indices_ptrs = _cuda_i64_ptrs(
+            [g.active_request_indices for g in self.groups]
+        )
+        self.num_layers = torch.tensor(
+            [len(g.mixers) for g in self.groups],
+            dtype=torch.int32,
+            device=first.src_slots.device,
+        )
+        self.rand_seeds: torch.Tensor | None = None
+        self.group_seeds: list[torch.Tensor | None] = [None] * len(self.groups)
+        if first.materialize_prefixes:
+            stochastic_groups = [
+                i
+                for i, group in enumerate(self.groups)
+                if group.mixers[0].mamba_config.enable_stochastic_rounding
+            ]
+            if stochastic_groups:
+                self.rand_seeds = torch.empty(
+                    len(stochastic_groups),
+                    dtype=torch.int64,
+                    device=first.src_slots.device,
+                )
+                for seed_idx, group_idx in enumerate(stochastic_groups):
+                    self.group_seeds[group_idx] = self.rand_seeds[
+                        seed_idx : seed_idx + 1
+                    ]
 
     @classmethod
     def create(
@@ -529,18 +546,86 @@ class ReplaySSMModelContext:
             ]
         )
 
-    def reset_new_slots(self, **kwargs: Any) -> None:
-        for group in self.groups:
-            group.reset_new_slots(**kwargs)
-
-    def postprocess(self, **kwargs: Any) -> None:
-        """Commit all groups before publishing their canonical prefix states."""
-        for group in self.groups:
-            group.postprocess(**kwargs)
-        if not self.groups[0].materialize_prefixes:
+    def reset_new_slots(
+        self,
+        *,
+        idx_mapping: torch.Tensor | None,
+        src_cols: torch.Tensor,
+        dst_cols: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        """Migrate live cursors and reset fresh physical slots in all groups."""
+        if num_reqs == 0:
             return
-        for group in self.groups:
-            group.materialize()
+        _reset_new_replayssm_slots_kernel[(num_reqs, len(self.groups))](
+            idx_mapping,
+            src_cols,
+            dst_cols,
+            self.block_table_ptrs,
+            self.ring_start_ptrs,
+            self.num_committed_ptrs,
+            self.block_table_strides,
+            PAD_SLOT_ID=NULL_BLOCK_ID,
+            HAS_IDX_MAPPING=idx_mapping is not None,
+        )
+
+    def postprocess(
+        self,
+        *,
+        idx_mapping: torch.Tensor | None,
+        query_metadata: torch.Tensor,
+        query_metadata_is_cumulative: bool,
+        num_computed_tokens: torch.Tensor,
+        num_computed_is_post_step: bool,
+        num_accepted_tokens: torch.Tensor,
+        is_prefilling: torch.Tensor,
+        live_cols: torch.Tensor | None,
+        num_reqs: int,
+    ) -> None:
+        """Commit all groups before publishing their canonical prefix states."""
+        if num_reqs == 0:
+            return
+        first = self.groups[0]
+        _postprocess_replayssm_kernel[(num_reqs, len(self.groups))](
+            idx_mapping,
+            query_metadata,
+            num_computed_tokens,
+            num_accepted_tokens,
+            is_prefilling,
+            live_cols,
+            self.block_table_ptrs,
+            self.ring_start_ptrs,
+            self.num_committed_ptrs,
+            self.src_slots_ptrs,
+            self.dst_slots_ptrs,
+            self.plan_ring_start_ptrs,
+            self.plan_flush_count_ptrs,
+            self.block_table_strides,
+            self.num_layers,
+            MAX_NUM_REQS=first.max_num_reqs,
+            MAMBA_BLOCK_SIZE=first.mamba_block_size,
+            LOGICAL_WINDOW=first.logical_window,
+            RING_BUFFER_LEN=first.ring_buffer_len,
+            PAD_SLOT_ID=NULL_BLOCK_ID,
+            QUERY_METADATA_IS_CUMULATIVE=query_metadata_is_cumulative,
+            NUM_COMPUTED_IS_POST_STEP=num_computed_is_post_step,
+            HAS_IDX_MAPPING=idx_mapping is not None,
+            MATERIALIZE_PREFIXES=first.materialize_prefixes,
+            LIVE_COL_IS_ZERO=live_cols is None,
+        )
+        if not first.materialize_prefixes:
+            return
+        _compact_replayssm_requests_kernel[(len(self.groups),)](
+            self.plan_flush_count_ptrs,
+            self.active_request_indices_ptrs,
+            num_reqs,
+            MAX_NUM_REQS=first.max_num_reqs,
+            BLOCK_SIZE=triton.next_power_of_2(first.max_num_reqs),
+        )
+        if self.rand_seeds is not None:
+            self.rand_seeds.random_(0, 2**32)
+        for group, rand_seed in zip(self.groups, self.group_seeds):
+            group.materialize(rand_seed)
 
 
 def _cuda_i64_ptrs(tensors: list[torch.Tensor]) -> torch.Tensor:

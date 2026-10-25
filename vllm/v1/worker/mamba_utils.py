@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
@@ -1046,8 +1047,9 @@ class MambaSpecDecodeGPUContext:
                 state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                is_flashinfer_replayssm = getattr(
-                    attention, "use_flashinfer_replayssm", False
+                is_flashinfer_replayssm = (
+                    isinstance(attention, MambaBase)
+                    and attention.use_flashinfer_replayssm
                 )
                 has_baseline_layer |= not is_flashinfer_replayssm
                 if is_flashinfer_replayssm:
