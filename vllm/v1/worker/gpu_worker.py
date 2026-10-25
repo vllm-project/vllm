@@ -221,6 +221,9 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        # Track external weight memory charges; initialize here for CPU/XPU
+        # workers that inherit load_model but override init_device.
+        self._external_weights = ExternalWeightMemory()
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
