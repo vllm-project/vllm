@@ -112,6 +112,7 @@ def _make_reader(
     consumer: Rank,
     producers: list[Rank],
     backend: str,
+    monkeypatch: pytest.MonkeyPatch,
     fail: bool = False,
     prewarmed: dict[str, int] | None = None,
 ) -> list:
@@ -162,7 +163,7 @@ def _make_reader(
     worker.moriio_config = SimpleNamespace(
         backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
     )
-    worker._get_built_session = get_built_session
+    monkeypatch.setattr(worker, "_get_built_session", get_built_session)
     worker.moriio_wrapper = SimpleNamespace(
         lock=threading.Lock(),
         read_remote_data=read_remote_data,
@@ -176,7 +177,6 @@ def _make_reader(
     worker._recving_transfers_callback_addr = {}
     worker._recving_local_blocks = {}
     worker._reads_issued_this_step = []
-    worker._mamba_reads_this_step = []
     worker._invalid_block_ids = set()
     consumer.sent = read_from
     return released
@@ -209,7 +209,7 @@ def _prewarm(consumer: Rank, meta: ReqMeta, monkeypatch) -> dict[str, int]:
         )
         return set()
 
-    worker._moriio_handshake = handshake
+    monkeypatch.setattr(worker, "_moriio_handshake", handshake)
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_lock = threading.Lock()
     worker._eager_handshaked_engines = set()
@@ -238,7 +238,14 @@ def _ranks(model, producer_tp, consumer_tp, hma, layouts, state):
 
 
 def _read_all(
-    model, producer_tp, consumer_tp, hma, layouts, backend="xgmi", advertised_tp=None
+    model,
+    producer_tp,
+    consumer_tp,
+    hma,
+    layouts,
+    monkeypatch,
+    backend="xgmi",
+    advertised_tp=None,
 ):
     """Run every decode rank's READ; return the releases per prefill rank.
 
@@ -253,7 +260,7 @@ def _read_all(
     producers, consumers = _ranks(model, producer_tp, consumer_tp, hma, layouts, state)
     releases: dict[int, list] = defaultdict(list)
     for consumer in consumers:
-        released = _make_reader(consumer, producers, backend)
+        released = _make_reader(consumer, producers, backend, monkeypatch)
         consumer.worker._read_blocks_for_req("req", _meta(groups, advertised_tp))
         assert consumer.worker._pop_done_transfers() == {"t"}
         for p, message_type, fields in released:
@@ -313,17 +320,21 @@ def _conv_dim_first(monkeypatch):
         if hma or "hybrid" not in model
     ],
 )
-def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts):
+def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts, monkeypatch):
     """Prefill and decode may lay heads and tokens out differently."""
-    _assert_released(_read_all(model, tp, tp, hma, layouts), tp)
+    _assert_released(_read_all(model, tp, tp, hma, layouts, monkeypatch), tp)
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
 @pytest.mark.parametrize("tp", [1, 2])
 @pytest.mark.parametrize("model", list(MODELS))
-def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
+def test_read_without_advertised_prefill_tp_is_homogeneous(
+    model, tp, layouts, monkeypatch
+):
     """A request without the prefill TP size (0) reads as equal TP."""
-    _assert_released(_read_all(model, tp, tp, True, layouts, advertised_tp=0), tp)
+    _assert_released(
+        _read_all(model, tp, tp, True, layouts, monkeypatch, advertised_tp=0), tp
+    )
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
@@ -337,10 +348,10 @@ def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
     ],
 )
 def test_replicated_read_releases_every_holder(
-    model, producer_tp, consumer_tp, layouts
+    model, producer_tp, consumer_tp, layouts, monkeypatch
 ):
     """In fan-in each decode rank reads one copy and releases every holder."""
-    releases = _read_all(model, producer_tp, consumer_tp, True, layouts)
+    releases = _read_all(model, producer_tp, consumer_tp, True, layouts, monkeypatch)
     _assert_released(releases, producer_tp)
 
 
@@ -353,7 +364,9 @@ def test_flexible_mirror_spreads_reads_and_releases_every_holder(monkeypatch):
     consumer.worker.moriio_config = SimpleNamespace(backend="rdma")
     prewarmed = _prewarm(consumer, _meta(["full"], 4), monkeypatch)
     assert sorted(prewarmed.values()) == [0, 1, 2, 3]
-    released = _make_reader(consumer, producers, "rdma", prewarmed=prewarmed)
+    released = _make_reader(
+        consumer, producers, "rdma", monkeypatch, prewarmed=prewarmed
+    )
     picked = []
     for _ in range(4):
         consumer.sent.clear()
@@ -375,7 +388,9 @@ def test_xgmi_mirror_reads_the_fixed_source(monkeypatch):
     consumer.worker.moriio_config = SimpleNamespace(backend="xgmi")
     prewarmed = _prewarm(consumer, _meta(["full"], 4), monkeypatch)
     assert len(prewarmed) == 1
-    released = _make_reader(consumer, producers, "xgmi", prewarmed=prewarmed)
+    released = _make_reader(
+        consumer, producers, "xgmi", monkeypatch, prewarmed=prewarmed
+    )
     for _ in range(3):
         consumer.sent.clear()
         released.clear()
@@ -389,14 +404,16 @@ def test_xgmi_mirror_reads_the_fixed_source(monkeypatch):
     ("producer_tp", "consumer_tp", "advertised_tp"),
     [(4, 2, 4), (2, 4, 2), (2, 2, 0)],
 )
-def test_aborted_read_releases_every_holder(producer_tp, consumer_tp, advertised_tp):
+def test_aborted_read_releases_every_holder(
+    producer_tp, consumer_tp, advertised_tp, monkeypatch
+):
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, consumers = _ranks(
         "mla", producer_tp, consumer_tp, True, LAYOUTS[0], state
     )
     for consumer in consumers:
-        released = _make_reader(consumer, producers, "xgmi")
+        released = _make_reader(consumer, producers, "xgmi", monkeypatch)
         consumer.worker._read_blocks(
             local_block_ids=[],
             remote_block_ids=[PREFILL_BLOCKS["full"]],
@@ -414,11 +431,11 @@ def test_aborted_read_releases_every_holder(producer_tp, consumer_tp, advertised
         assert consumer.sent == []
 
 
-def test_failed_read_releases_every_holder():
+def test_failed_read_releases_every_holder(monkeypatch):
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
-    released = _make_reader(consumer, producers, "xgmi", fail=True)
+    released = _make_reader(consumer, producers, "xgmi", monkeypatch, fail=True)
     consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
     # A failed read is a load error, not a completion.
     assert consumer.worker._pop_done_transfers() == set()
