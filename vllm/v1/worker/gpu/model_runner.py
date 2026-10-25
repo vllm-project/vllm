@@ -20,7 +20,7 @@ import functools
 import gc
 import time
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -36,6 +36,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -435,9 +436,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Initialize the components that require the model.
-        self.model_state = init_model_state(
-            self.vllm_config, self.model, self.encoder_cache, self.device
+        # The model state's device tensors are built once here and are not model
+        # parameters or buffers, so keep them out of the weights pool, which
+        # level-2 sleep discards (e.g. Qwen4Exp's ngram_context_offsets).
+        pool = (
+            get_mem_allocator_instance().use_memory_pool(tag="runtime")
+            if self.vllm_config.model_config.enable_sleep_mode
+            and current_platform.is_cuda_alike()
+            else nullcontext()
         )
+        with pool:
+            self.model_state = init_model_state(
+                self.vllm_config, self.model, self.encoder_cache, self.device
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps

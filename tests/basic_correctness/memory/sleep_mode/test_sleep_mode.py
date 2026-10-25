@@ -210,6 +210,60 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
+def _model_state_tensors(worker) -> dict[str, tuple[str, torch.Tensor]]:
+    """Device tensors of the MRV2 model state, with the cuMem pool tag of each."""
+    from vllm.device_allocator.cumem import CuMemAllocator
+
+    spans = [
+        (d.handle[2], d.handle[2] + d.handle[1], d.tag)
+        for d in CuMemAllocator.get_instance().pointer_to_data.values()
+    ]
+    tensors = {}
+    for name, value in vars(worker.model_runner.model_state).items():
+        if isinstance(value, torch.Tensor) and value.is_cuda and value.numel():
+            ptr = value.data_ptr()
+            tag = next((t for lo, hi, t in spans if lo <= ptr < hi), "none")
+            tensors[name] = (tag, value.cpu().clone())
+    return tensors
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Model state is kept in the runtime pool only on CUDA/ROCm",
+)
+def test_deep_sleep_model_state(monkeypatch):
+    """Level-2 sleep keeps the MRV2 model state (built once at load).
+
+    Model-state tensors are not model parameters or buffers, so if they were
+    allocated in the weights pool, level-2 sleep would discard them and nothing
+    would restore them. The hybrid model's state includes a constant
+    (``num_accepted_tokens_gpu``, all ones).
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Needed for collective_rpc to return tensors from the worker.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    llm = LLM(
+        "yujiepan/mamba2-codestral-v0.1-tiny-random",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        max_model_len=256,
+    )
+    before = llm.collective_rpc(_model_state_tensors)[0]
+    assert before, "model state has no device tensors to check"
+    assert all(tag == "runtime" for tag, _ in before.values()), {
+        name: tag for name, (tag, _) in before.items()
+    }
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    after = llm.collective_rpc(_model_state_tensors)[0]
+    assert after.keys() == before.keys()
+    for name, (_, value) in before.items():
+        assert torch.equal(after[name][1], value), name
+
+
 def _cudagraph_bytes(worker) -> int:
     data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
     return sum(d.handle[1] for d in data if d.tag == "cudagraph")
