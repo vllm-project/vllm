@@ -14,6 +14,19 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: label-recipe
+  description: Automatically apply recipe label
+  conditions:
+    - label != stale
+    - -closed
+    - files~=^recipes/
+  actions:
+    label:
+      add:
+        - recipe
+    comment:
+      message: "Recipe preview: https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
+
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:

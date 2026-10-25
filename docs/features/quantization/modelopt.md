@@ -20,6 +20,15 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+- `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
+  (use `quantization="modelopt_mixed"`).
+
+For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
+when required by the GPU, for example on AMD MI300.
+
+For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
+use the exported checkpoint's module names. vLLM maps these names to the draft's
+module prefix and decoder layer indices before constructing quantized layers.
 
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load

@@ -63,7 +63,20 @@ def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
     with pytest.raises(ProfilerAlreadyActiveError):
         engine.start_profile("duplicate")
 
-    engine.engine_core.profile.assert_called_once_with(True, "first", None, None)
+    engine.engine_core.profile.assert_called_once_with(
+        True, "first", None, None, profiler_kwargs=None
+    )
+
+
+def test_profiler_kwargs_passed_to_engine_core():
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    engine.start_profile("prefix", profiler_kwargs={"record_shapes": True})
+    engine.engine_core.profile.assert_called_once_with(
+        True, "prefix", None, None, profiler_kwargs={"record_shapes": True}
+    )
 
 
 @pytest.mark.parametrize(

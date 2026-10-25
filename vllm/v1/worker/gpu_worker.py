@@ -1425,6 +1425,7 @@ class Worker(WorkerBase):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1455,9 +1456,11 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
 
             self.profiler.set_output_name(trace_name)
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(
                 delay_iterations=delay_iterations,
                 max_iterations=max_iterations,
