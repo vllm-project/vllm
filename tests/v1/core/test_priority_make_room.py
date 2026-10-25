@@ -30,6 +30,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
@@ -1651,6 +1652,50 @@ def test_with_every_running_slot_taken_a_completed_load_holds_nothing_back(
     assert len(scheduler.running) == 2
     assert _step(scheduler).num_scheduled_tokens == {"decode": 1, "prefill": 256}
     assert hi.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_with_the_budget_cap_a_lower_priority_waiting_needs_the_requests_fit(
+    monkeypatch,
+):
+    """With the budget cap, a request of a lower priority waiting behind is held
+    back once the waiting request fits, so its fit, and its prefix, are looked up
+    then; with nothing of a lower priority running or waiting, they are not."""
+    scheduler = _create_scheduler(
+        priority_prefill_budget_cap=True, enable_prefix_caching=True
+    )
+    _run_until_decoding(
+        scheduler,
+        _request("a", _num_tokens(15), priority=1, arrival_time=0, prompt_token=1),
+        _request("b", _num_tokens(15), priority=1, arrival_time=1, prompt_token=2),
+    )
+    local_prefix_hit = scheduler._local_prefix_hit
+    looked_up: list[str] = []
+
+    def counting(request: Request):
+        looked_up.append(request.request_id)
+        return local_prefix_hit(request)
+
+    monkeypatch.setattr(scheduler, "_local_prefix_hit", counting)
+    scheduler.add_request(
+        _request("c", _num_tokens(8), priority=1, arrival_time=2, prompt_token=3)
+    )
+    _step(scheduler)
+    assert looked_up == []
+    scheduler.add_request(
+        _request("d", _num_tokens(8), priority=2, arrival_time=3, prompt_token=4)
+    )
+    _step(scheduler)
+    assert looked_up == ["c"]
+
+
+@pytest.mark.parametrize("policy", [SchedulingPolicy.PRIORITY, SchedulingPolicy.FCFS])
+def test_a_queue_tells_whether_it_holds_a_lower_priority(policy):
+    queue = create_request_queue(policy)
+    assert not queue.has_lower_priority_than(0)
+    for i, priority in enumerate([1, 0, 2, 1, 0, 1, 2, 0]):
+        queue.add_request(_request(f"r{i}", BLOCK_SIZE, priority, arrival_time=i))
+    assert queue.has_lower_priority_than(1)
+    assert not queue.has_lower_priority_than(2)
 
 
 # Metrics

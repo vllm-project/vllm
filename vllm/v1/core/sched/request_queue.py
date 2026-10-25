@@ -71,6 +71,11 @@ class RequestQueue(ABC):
         """Iterate over the queue according to the policy."""
         pass
 
+    def has_lower_priority_than(self, priority: int) -> bool:
+        """Whether a request in the queue has a lower priority, a larger value,
+        than `priority`."""
+        return any(request.priority > priority for request in self)
+
 
 class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
@@ -195,6 +200,13 @@ class PriorityRequestQueue(RequestQueue):
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
+
+    def has_lower_priority_than(self, priority: int) -> bool:
+        """Whether a request in the queue has a lower priority, a larger value,
+        than `priority`: a heap's largest requests are among its leaves, its
+        second half."""
+        heap = self._heap
+        return any(request.priority > priority for request in heap[len(heap) // 2 :])
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:

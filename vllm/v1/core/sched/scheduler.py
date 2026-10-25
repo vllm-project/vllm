@@ -3392,8 +3392,9 @@ class Scheduler(SchedulerInterface):
 
     def _peek_make_room_request(self, defer_prefills: bool) -> Request | None:
         """The waiting request of the highest priority that the waiting loop can
-        schedule in this step, if a running request has a lower priority or the
-        budget cap is on, unless prefills are deferred or new requests paused."""
+        schedule in this step, if a request of a lower priority runs or, with
+        the budget cap, waits, unless prefills are deferred or new requests
+        paused."""
         if (
             not (
                 self.max_priority_preemptions_per_step
@@ -3423,10 +3424,17 @@ class Scheduler(SchedulerInterface):
         )
         request = min((req for req in heads if req is not None), default=None)
         if request is None or not (
-            self.priority_prefill_budget_cap
-            or any(req.priority > request.priority for req in self.running)
+            any(req.priority > request.priority for req in self.running)
+            or (
+                self.priority_prefill_budget_cap
+                and any(
+                    queue.has_lower_priority_than(request.priority)
+                    for queue in (self.kv_holding_waiting, self.waiting)
+                )
+            )
         ):
-            # No room could be made for it: spare its prefix cache lookup.
+            # No room could be made for it, nor prefill held back for its first
+            # tokens: spare its prefix cache lookup.
             return None
         return request
 
