@@ -4,11 +4,11 @@
 DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
 ``--monokernel`` on and off on the same random weights: every decoder layer's
 outputs at every decode step must match. Unlike
-``test_dsv41_mono_numerics.py``, which checks the kernels against vLLM's ops
-one stage at a time, this runs ``DeepseekV4DecoderLayer.forward`` as the engine
-does -- the model's hooks, the per-step path choice, the weights taken off the
-layer, the metadata and the indexer's top-k -- so a change to the decoder layer
-that the kernels do not follow fails here.
+``test_dsv41_mono_numerics.py``, which checks the kernels against float64
+references one stage at a time, this runs ``DeepseekV4DecoderLayer.forward``
+as the engine does -- the model's hooks, the per-step path choice, the weights
+taken off the layer, the metadata and the indexer's top-k -- so a change to the
+decoder layer that the kernels do not follow fails here.
 
 On gfx942 the indexer is vLLM's FP8 indexer, because the MXFP4 indexer cache
 needs CDNA4, and the kernels read the copies of the weights that the model

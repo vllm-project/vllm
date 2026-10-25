@@ -1,2 +1,0 @@
-MiniMax-M3-MXFP4-Mono-TP4-MI355.yaml
-MiniMax-M3-MXFP4-Mono-EAGLE3-TP4-MI355.yaml

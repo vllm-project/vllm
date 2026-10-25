@@ -8,6 +8,8 @@ num_questions: 1319
 num_fewshot: 5
 # One request x (1 + 7 drafts) = 8 rows, the monokernel's limit.
 max_concurrency: 1
+# The eval takes ~15 min and queued requests count against this timeout.
+request_timeout_seconds: 3600
 startup_max_wait_seconds: 3600
 startup_rpc_checks:
   - start_monokernel_count
@@ -16,6 +18,8 @@ final_rpc_checks:
 server_args: >-
   --language-model-only
   --tensor-parallel-size 8
+  --decode-context-parallel-size 8
+  --dcp-comm-backend a2a
   --max-model-len 8192
   --max-num-seqs 1
   --kv-cache-dtype fp8

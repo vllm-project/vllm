@@ -102,12 +102,12 @@ When adding tests:
   `benchmarks/kernels/`; prove correctness in existing pytest suites.
 - **Run model evals for model-affecting changes.** Search `tests/evals/` or use
   `vllm bench` and include results in the PR — do not wait for reviewers to ask.
-- **AMD monokernels need a dedicated CI group.** A PR adding a ROCm monokernel
-  (a persistent kernel running most of a decoder layer or decode step in one
-  launch, e.g. behind `--monokernel` or a model `decode_backend`) must add a
-  non-optional group for it in `.buildkite/test_areas/monokernels.yaml`, following
-  that file's header. If the model already has a group there, extend its tests
-  and `source_file_dependencies` instead of adding a new group.
+- **AMD monokernels get exactly two CI steps** in
+  `.buildkite/test_areas/monokernels.yaml`: a blocking `Mono I/O` step checking
+  every fused stage against a slow float64 plain-torch reference with bounded
+  error (never another vLLM, AITER or Triton kernel), plus one engine parity
+  smoke; and an optional `[Nightly] Mono E2E` step running the real checkpoint's
+  gsm8k with an engagement check. A model that already has steps extends them.
 
 For model-specific requirements, see
 [`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).

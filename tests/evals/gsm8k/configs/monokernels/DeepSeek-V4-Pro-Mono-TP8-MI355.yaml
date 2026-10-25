@@ -1,0 +1,28 @@
+model_name: "deepseek-ai/DeepSeek-V4-Pro"
+# Not calibrated yet: one mono-on run scored 0.9492 on MI355, no mono-off run.
+accuracy_threshold: 0.94
+tolerance: 0.05
+num_questions: 1319
+num_fewshot: 5
+# Decode steps of at most 64 rows run the monokernel (mono.dims.MAX_TOKENS).
+max_concurrency: 64
+startup_max_wait_seconds: 3600
+startup_rpc_checks:
+  - start_monokernel_count
+final_rpc_checks:
+  - check_monokernel_ran
+server_args: >-
+  --tokenizer-mode deepseek_v4
+  --tensor-parallel-size 8
+  --max-model-len 8192
+  --max-num-seqs 64
+  --kv-cache-dtype fp8
+  --block-size 256
+  --moe-backend aiter
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --monokernel
+  --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
+env:
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_MOE: "1"

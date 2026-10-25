@@ -46,6 +46,10 @@ class MonokernelCheckExtension:
         layers = [m.mono for m in self._modules() if getattr(m, "mono", None)]
         if not layers:
             return "no monokernel is enabled on this rank"
+        from vllm.models.deepseek_v4.amd import mono_decode as dsv4
+
+        if isinstance(layers[0], dsv4.MonoDecodeLayer):
+            return {"dsv4": 0 if dsv4._runner is None else int(dsv4._runner.epoch[0])}
         from vllm.models.deepseek_v41.amd import mono_decode
 
         runners = {"dsv41": mono_decode._runner}

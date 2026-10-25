@@ -1,2 +1,0 @@
-DeepSeek-V4.1-Flash-Mono-TP4-MI355.yaml
-DeepSeek-V4.1-Flash-Mono-DSpark-TP4-MI355.yaml

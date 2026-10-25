@@ -1,13 +1,14 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
-# Not yet measured on MI355: DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml's
-# threshold, with the run-to-run spread of MiniMax-M3-MXFP4-Mono-TP4-MI355.
-accuracy_threshold: 0.88
-tolerance: 0.05
+# Mono off: 0.9045, 0.9030 (mean 0.904); on: 0.9045, 0.9105. The runs vary by
+# up to 0.0075, the mono-on mean is 0.004 above the mono-off one. Tolerance: twice
+# the largest distance of a run from the mono-off mean (0.0068).
+accuracy_threshold: 0.904
+tolerance: 0.015
 num_questions: 1319
 num_fewshot: 5
 # Decode steps of at most 48 rows run the monokernel (mono_decode.MAX_ROWS).
 max_concurrency: 48
-startup_max_wait_seconds: 2400
+startup_max_wait_seconds: 3600
 startup_rpc_checks:
   - start_monokernel_count
 final_rpc_checks:

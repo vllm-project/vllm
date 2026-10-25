@@ -231,6 +231,20 @@ def _topk_case(
     )
 
 
+def _topk_pack_reference(topk, t2r, block_table, block_size, is_valid):
+    """Each valid token's count of non-negative top-k entries, and its first
+    that many entries as global slots through its request's block table (-1
+    kept), concatenated."""
+    lens = torch.where(is_valid, (topk >= 0).sum(1), 0).to(torch.int32)
+    local = topk.long().clamp(min=0)
+    blocks = block_table[t2r.long()[:, None], local // block_size]
+    slots = torch.where(topk >= 0, blocks * block_size + local % block_size, -1)
+    first = torch.arange(topk.shape[1], device=topk.device) < lens[:, None]
+    indptr = torch.zeros(topk.shape[0] + 1, dtype=torch.int32, device=topk.device)
+    indptr[1:] = lens.cumsum(0)
+    return slots[first].to(torch.int32), indptr, lens
+
+
 def test_topk_pack_matches_vllm():
     from vllm.models.deepseek_v41.amd import rocm
     from vllm.models.deepseek_v41.amd.ops import topk_pack
@@ -242,12 +256,16 @@ def test_topk_pack_matches_vllm():
         ref = rocm._compute_global_topk_ragged_indices_and_indptr_old(*case)
         out = topk_pack.launch(*case, poison=True)
         nnz = int(ref[1][-1])
+        torch_ref = _topk_pack_reference(*case)
         bad = [
             name
             for name, a, b in (
                 ("topk_lens", out[2], ref[2]),
                 ("topk_indptr", out[1], ref[1]),
                 ("global_topk_ragged", out[0][:nnz], ref[0][:nnz]),
+                ("torch topk_lens", out[2], torch_ref[2]),
+                ("torch topk_indptr", out[1], torch_ref[1]),
+                ("torch global_topk_ragged", out[0][:nnz], torch_ref[0]),
             )
             if a.shape != b.shape or not torch.equal(a, b)
         ]

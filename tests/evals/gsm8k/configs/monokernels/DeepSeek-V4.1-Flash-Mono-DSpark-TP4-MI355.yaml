@@ -1,6 +1,7 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
-# Not yet measured on MI355: DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml's
-# thresholds, with the run-to-run spread of MiniMax-M3-MXFP4-Mono-TP4-MI355.
+# Not calibrated yet (one mono-off run on MI355: 0.9045, acceptance length
+# 3.63): DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml's thresholds, with the
+# run-to-run spread of MiniMax-M3-MXFP4-Mono-TP4-MI355.
 accuracy_threshold: 0.88
 tolerance: 0.05
 min_acceptance_length: 2.5
@@ -8,7 +9,7 @@ num_questions: 1319
 num_fewshot: 5
 # 8 requests x (1 + 5 drafts) = 48 rows, the monokernel's limit.
 max_concurrency: 8
-startup_max_wait_seconds: 2400
+startup_max_wait_seconds: 3600
 startup_rpc_checks:
   - start_monokernel_count
 final_rpc_checks:
