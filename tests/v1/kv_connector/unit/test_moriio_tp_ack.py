@@ -608,8 +608,8 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
         "b": {"layer0": [pending_b]},
     }
     worker._recving_transfers_callback_addr = {
-        "a": ("127.0.0.1", "7000", "tx-a"),
-        "b": ("127.0.0.1", "7000", "tx-b"),
+        "a": ("127.0.0.1", ("7000",), "tx-a"),
+        "b": ("127.0.0.1", ("7000",), "tx-b"),
     }
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
