@@ -785,7 +785,9 @@ def split_decodes_prefills_and_extends(
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
-    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    # Host-tensor math through the numpy views: these run once per metadata
+    # builder per step, where each torch dispatch costs more than the math.
+    query_start_loc = common_attn_metadata.query_start_loc_cpu.numpy()
 
     if max_query_len <= decode_threshold:
         return num_reqs, 0, 0, num_tokens, 0, 0
@@ -794,21 +796,21 @@ def split_decodes_prefills_and_extends(
     # seq_len > query_len under the optimistic bound, so `seq_lens ==
     # query_lens` identifies prefills correctly either way.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound.numpy()
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_prefill_or_extend = query_lens > decode_threshold
     is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
-    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    first_extend = int(is_prefill_or_extend.argmax())
+    first_prefill = int(is_prefill.argmax())
     num_decodes = first_extend
-    num_decode_tokens = query_start_loc[first_extend].item()
-    if not torch.any(is_prefill_or_extend):
+    num_decode_tokens = int(query_start_loc[first_extend])
+    if not is_prefill_or_extend.any():
         return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
 
     num_prefills_or_extends = num_reqs - num_decodes
     num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
-    if not torch.any(is_prefill):
+    if not is_prefill.any():
         return (
             num_decodes,
             num_prefills_or_extends,
@@ -821,7 +823,7 @@ def split_decodes_prefills_and_extends(
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
 
-    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
+    num_prefill_tokens = num_tokens - int(query_start_loc[first_prefill])
     num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
     return (
         num_decodes,
@@ -866,7 +868,9 @@ def split_decodes_and_prefills(
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
-    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    # Host-tensor math through the numpy view; see
+    # split_decodes_prefills_and_extends.
+    query_start_loc = common_attn_metadata.query_start_loc_cpu.numpy()
 
     if (
         max_query_len <= decode_threshold
@@ -876,7 +880,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if query_lens[0].item() > decode_threshold:
+    if int(query_lens[0]) > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
@@ -884,8 +888,8 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
-        if treat_short_extends_as_decodes and torch.all(
-            (query_lens == query_lens[0]) | (query_lens == 0)
+        if treat_short_extends_as_decodes and bool(
+            ((query_lens == query_lens[0]) | (query_lens == 0)).all()
         ):
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = (query_lens != query_lens[0]) & (query_lens != 0)
@@ -894,15 +898,15 @@ def split_decodes_and_prefills(
 
     if not treat_short_extends_as_decodes:
         assert common_attn_metadata.is_prefilling is not None
-        is_prefill |= common_attn_metadata.is_prefilling
+        is_prefill = is_prefill | common_attn_metadata.is_prefilling.numpy()
 
-    if not torch.any(is_prefill):
+    if not is_prefill.any():
         return num_reqs, 0, num_tokens, 0
 
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    first_prefill = int(is_prefill.argmax())
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
-    num_decode_tokens = query_start_loc[first_prefill].item()
+    num_decode_tokens = int(query_start_loc[first_prefill])
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
