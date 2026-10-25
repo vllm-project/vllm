@@ -1378,6 +1378,8 @@ class Scheduler(SchedulerInterface):
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks
                     )
+                    # No forward pass runs until the load finishes; the gate
+                    # counts the decode step when the request comes back.
                     num_decode_step_tokens = 0
 
                 # Replayed tokens are already counted in the adopted hit; a
