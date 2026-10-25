@@ -44,6 +44,21 @@ différence, il relance le seul shard en cause (ou bascule ce shard en grep) —
 (set-diff + existence), pas un échantillonnage. C'est la classe d'usage qui satisfait le
 critère du mandat : vérification ≪ exécution.
 
+### Validation full-corpus (horde en arrière-plan, 25/10 soir)
+
+Le motif complet « lâcher une horde et faire autre chose » exécuté pour de vrai : un sous-agent
+Claude Code a traité les lignes 201-673 (473 lignes, 10 shards de ≤50) **pendant que la session
+poursuivait le reste du mandat**. Résultat : **124/124 WARN (100 % rappel 1er passage),
+0 fabrication, 0 altération, 11 appels** ; livrable final prouvé byte-identique à la vérité
+grep (**diff, ordre d'apparition inclus**) par une vérification **indépendante** de l'horde
+(producteur ≠ vérificateur). Cumul corpus 1-673 : **197/197 WARN restitués** après retry
+ciblé (196/197 = 99,5 % au 1er passage).
+
+Détails opérationnels : (1) un shard à vérité vide rend le sentinel « AUCUNE », que le `comm`
+brut compte comme écart — traiter le sentinel explicitement dans le vérificateur ; (2) caveat
+d'honnêteté : ce corpus est 100 % « RAM basse/CRITIQUE » au format très régulier, favorable au
+modèle — le 98,6 % du pilote reste la référence pour un corpus moins régulier.
+
 ## 3. Recette prête à l'emploi (à copier)
 
 ```text
