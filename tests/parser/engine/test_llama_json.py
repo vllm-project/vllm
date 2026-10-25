@@ -107,9 +107,7 @@ def test_extract_tool_calls_with_output_end_token(parser):
 
 @pytest.mark.parametrize("suffix", [";", "; "])
 def test_extract_tool_calls_with_trailing_semicolon(parser, suffix):
-    model_output = (
-        f'{{"name": "searchTool", "arguments": {{"query": "test"}}}}{suffix}'
-    )
+    model_output = f'{{"name": "searchTool", "arguments": {{"query": "test"}}}}{suffix}'
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True

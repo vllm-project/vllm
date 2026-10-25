@@ -23,16 +23,15 @@ if TYPE_CHECKING:
 
 TOOL_START = "<|python_tag|>"
 LLAMA_OUTPUT_END_TOKENS = (
-    "<|eom_id|>", # end of message
-    "<|eot_id|>", # end of turn
+    "<|eom_id|>",  # end of message
+    "<|eot_id|>",  # end of turn
     "<|end_of_text|>",  # end of text
 )
 
 
 def _has_only_output_end_token(text: str, position: int) -> bool:
     return any(
-        text.startswith(token, position)
-        and not text[position + len(token) :].strip()
+        text.startswith(token, position) and not text[position + len(token) :].strip()
         for token in LLAMA_OUTPUT_END_TOKENS
     )
 
