@@ -70,6 +70,8 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             assert comm.scores.shape == (comm.max_decode_tokens, 4, 32)
             for page_size in (128, 256):
                 config.cache_config.block_size = page_size
+                comm = msa.get_comm(config, 4)
+                assert comm is not None
                 _check_indexer_forwards(config, device, rank, comm)
             config.cache_config.block_size = 128
             _check_sharding_policy(config, comm)
@@ -135,7 +137,6 @@ def _check_indexer_forwards(config, device, rank, comm):
     local_heads = 4 // world
     # Five layers exercise all three receive slot sets, including wrap across
     # steps. Keep the actual production communication objects and dispatch.
-    # Each page size is a separate mini-model; preserve buffers and generations.
     comm.num_layers = 0
     layers = []
     for sharded in (False, True):
@@ -162,6 +163,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             ]
         )
     assert [impl.index_k_ordinal for impl in layers[1]] == list(range(5))
+    assert all(impl.index_k_comm is comm for impl in layers[1])
     builders = []
     for impls, prefill_mode in (
         (layers[0], "gather"),
