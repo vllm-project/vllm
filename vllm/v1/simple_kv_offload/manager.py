@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -384,6 +385,15 @@ class SimpleCPUOffloadScheduler:
                 self.block_size,
             )
             return 0, False
+
+        # Suffix-relative chunk boundaries must match absolute token positions.
+        for group_id in self.prefix_cacheable_group_ids:
+            spec = self.cpu_kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if (
+                isinstance(spec, ChunkedLocalAttentionSpec)
+                and num_computed_tokens % spec.attention_chunk_size
+            ):
+                return 0, False
 
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
