@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import importlib
 import importlib.machinery
 import inspect
 import sys
@@ -249,6 +250,29 @@ def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
         assert torch.equal(kernel_sink, expected)
         assert model.sink.data_ptr() == kernel_sink.data_ptr()
         assert torch.equal(model.proj, torch.full((16,), offset))
+
+
+def test_reload_drops_unpaired_pending_load_state(monkeypatch):
+    """A half-pair left by an aborted streamed reload (e.g. an FP8 indexer wk
+    weight whose scale never arrived) must not pair with the other half of the
+    next, unrelated reload; one left at the end of a load is reported."""
+    model = torch.nn.Module()
+    model.inner = torch.nn.Linear(2, 2, bias=False)
+    model.inner._pending_indexer_wk_fp8 = {"layers.0.indexer": {"weight": 1}}
+    record_metadata_for_reloading(model)
+
+    initialize_layerwise_reload(model)
+    assert model.inner._pending_indexer_wk_fp8 == {}
+
+    warnings = Mock()
+    monkeypatch.setattr(reload_layerwise.logger, "warning", warnings)
+    model.inner._pending_indexer_wk_fp8["layers.1.indexer"] = {"scale": 2}
+    weight = model.inner.weight
+    weight.weight_loader(weight, torch.ones(2, 2))
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    assert model.inner._pending_indexer_wk_fp8 == {}
+    warnings.assert_called_once()
+    assert ["layers.1.indexer"] in warnings.call_args.args
 
 
 def _fp8_reload_unsupported() -> bool:
@@ -1522,3 +1546,110 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+@requires_cuda
+def test_flashinfer_bmm_scales_refresh_in_place(monkeypatch):
+    """FlashInfer's trtllm-gen decode reads bmm1/bmm2 scales from device
+    tensors allocated once and refilled by refresh(), so FULL CUDA graphs see
+    q/k/v scales changed by a reload. Values match the host-float path: the
+    launcher computes float(double(bmm1) * log2(e))."""
+    import math
+
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    impl = object.__new__(fi.FlashInferImpl)
+    impl.scale = 0.125
+    impl.kv_cache_dtype = "fp8"
+    impl.bmm1_scale = impl.bmm2_scale = impl.o_sf_scale = None
+    impl._bmm_scale_tensors = None
+    impl._xqa_bmm1_tensors = None
+    impl.float_scales_in_decode = False
+    impl._compilation_config = None
+    layer = SimpleNamespace(
+        _q_scale_float=1.0,
+        _k_scale_float=0.3,
+        _v_scale_float=0.7,
+        _o_scale_float=0.5,
+        _k_scale=torch.ones(1, device="cuda"),
+    )
+
+    impl.refresh(layer)
+    assert impl._bmm_scale_tensors is not None
+    bmm1_log2, bmm2 = impl._bmm_scale_tensors
+    ptrs = (bmm1_log2.data_ptr(), bmm2.data_ptr())
+    assert layer._o_scale_float is None  # re-read at the next eager forward
+    assert impl._trtllm_decode_bmm_scales(None) == (bmm1_log2, bmm2)
+    assert not impl.float_scales_in_decode
+
+    layer._k_scale_float, layer._v_scale_float = 0.9, 0.2
+    impl.refresh(layer)
+    assert (bmm1_log2.data_ptr(), bmm2.data_ptr()) == ptrs
+    assert impl.bmm1_scale == 0.125 * 0.9
+    expected_log2 = torch.tensor([0.125 * 0.9 * math.log2(math.e)], dtype=torch.float32)
+    assert torch.equal(bmm1_log2.cpu(), expected_log2)
+    assert torch.equal(bmm2.cpu(), torch.tensor([0.2], dtype=torch.float32))
+
+    # XQA (SM90) reads bmm1 per query dtype (q_scale only for an FP8 query)
+    xqa = impl._xqa_bmm1_tensors
+    assert xqa is not None
+    assert xqa[True].item() == pytest.approx(0.125 * 1.0 * 0.9)
+    assert xqa[False].item() == pytest.approx(0.125 * 0.9)
+
+    # output-quant fusion folds the o-scale into bmm2: host floats (flagged)
+    assert impl._trtllm_decode_bmm_scales(torch.ones(1)) == (None, impl.bmm2_scale)
+    assert impl.float_scales_in_decode
+
+    # a reload under FULL CUDA graphs after such a decode is reported, with
+    # the mode read at reload time (the runner resolves it after model init)
+    from vllm.config.compilation import CUDAGraphMode
+
+    warnings = Mock()
+    monkeypatch.setattr(fi.logger, "warning_once", warnings)
+    impl._compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
+    impl.refresh(layer)
+    warnings.assert_not_called()  # not under FULL graphs
+    impl._compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    impl.refresh(layer)
+    warnings.assert_called_once()
+
+    # an unquantized KV cache without output-quant fusion has constant scales
+    warnings.reset_mock()
+    impl.kv_cache_dtype = "auto"
+    impl.float_scales_in_decode = True
+    impl.refresh(layer)
+    warnings.assert_not_called()
+    layer._o_scale_float = 0.5  # read by an output-fused forward
+    impl.float_scales_in_decode = True
+    impl.refresh(layer)
+    warnings.assert_called_once()
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_reload_attention_scales_use_model_dtype(monkeypatch, dtype):
+    """KV-cache scale params are 0-dim tensors of the default dtype, which is
+    the model dtype at model init. Reload recreates them under the same dtype,
+    so an fp32 checkpoint scale is rounded the same way as on a fresh load."""
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+
+    layer = torch.nn.Module()
+    method = object.__new__(BaseKVCacheMethod)
+    layer.quant_method = method
+    info = SimpleNamespace(loaded_weights=[], restore_device=torch.device("cpu"))
+    seen = {}
+
+    def create_weights(layer):
+        BaseKVCacheMethod.create_weights(method, layer)
+        seen["dtype"] = layer.k_scale.dtype
+
+    method.create_weights = create_weights
+    method.process_weights_after_loading = lambda layer: None
+    monkeypatch.setattr(
+        reload_layerwise, "_copy_and_restore_kernel_tensors", lambda layer, info: None
+    )
+    reload_layerwise._reload_attention_scales(layer, info, SimpleNamespace(dtype=dtype))
+    assert seen["dtype"] == dtype
