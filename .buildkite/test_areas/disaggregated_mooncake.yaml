@@ -6,7 +6,7 @@ steps:
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
-  timeout_in_minutes: 10
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
   # transfers: its pods are the only ones granted IPC_LOCK, which RDMA needs to
@@ -21,6 +21,7 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
+    - MC_FORCE_TCP=1 pytest -v -s v1/kv_connector/mooncake_integration/test_pcp.py
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
