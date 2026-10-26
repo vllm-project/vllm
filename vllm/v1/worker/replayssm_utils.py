@@ -482,6 +482,7 @@ class ReplaySSMModelContext:
             heads_per_group=(first.kv_cache[1].size(1) // first.kv_cache[4].size(1)),
             max_window=self.logical_window,
             ring_buffer_len=self.ring_buffer_len,
+            pad_slot_id=NULL_BLOCK_ID,
             rand_seed=rand_seed,
             philox_rounds=philox_rounds,
         )
