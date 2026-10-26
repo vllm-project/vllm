@@ -14,8 +14,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.test_prefix_caching import make_request
+from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -84,6 +87,7 @@ def test_mamba_prefill_checkpoint_valid(
 
 def _make_hybrid_kv_cache_manager(
     num_prefill_checkpoint_blocks: int = 0,
+    num_hash_lookahead_tokens: int = 0,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=10000,
@@ -120,7 +124,9 @@ def _make_hybrid_kv_cache_manager(
         scheduler_block_size=MAMBA_BLOCK_SIZE,
         hash_block_size=ATTN_BLOCK_SIZE,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=not num_hash_lookahead_tokens,
+        num_prefill_lookahead=num_hash_lookahead_tokens,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -132,6 +138,7 @@ def _split(
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
+    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -140,7 +147,7 @@ def _split(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle_block_drop=use_eagle_block_drop,
-        num_hash_lookahead_tokens=0,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -225,7 +232,7 @@ def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
 
 
 def _run_chunked_prefill(
-    manager: KVCacheManager, request: Request, budgets: list[int]
+    manager: KVCacheManager, request: Request, budgets: list[int], **split_kwargs
 ) -> dict[int, int]:
     """Prefill `request`, one step per entry in `budgets`.
 
@@ -244,7 +251,9 @@ def _run_chunked_prefill(
         if computed >= request.num_tokens:
             break
         budget = budgets[step] if step < len(budgets) else request.num_tokens
-        num_new = _split(request, min(request.num_tokens - computed, budget))
+        num_new = _split(
+            request, min(request.num_tokens - computed, budget), **split_kwargs
+        )
         if num_new == 0:
             continue
         assert (
@@ -308,6 +317,42 @@ def test_fragmented_tail_chunk_does_not_poison_mamba_prefix_cache() -> None:
     after it crossed 3200, publishing slot 1 as state@3200.
     """
     assert _prefill(3602, budgets=[1600, 1000, 3602]) > 0
+
+
+@pytest.mark.parametrize("lookahead", [1, 2])
+def test_lookahead_split_caches_partial_tail_boundary(lookahead: int) -> None:
+    """Chunks stop where lookahead hashes put the prompt's partial tail, so the
+    manager caches that boundary and a resend hits it."""
+    init_none_hash(sha256)
+    prompt_len = 3601
+    boundary = (prompt_len - lookahead) // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    manager = _make_hybrid_kv_cache_manager(num_hash_lookahead_tokens=lookahead)
+
+    def make(request_id: str) -> Request:
+        return make_request(
+            request_id,
+            list(range(prompt_len)),
+            ATTN_BLOCK_SIZE,
+            sha256,
+            num_hash_lookahead_tokens=lookahead,
+        )
+
+    producer = make("producer")
+    state_at = _run_chunked_prefill(
+        manager,
+        producer,
+        budgets=[],
+        use_eagle_block_drop=False,
+        partial_hit=True,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    assert producer.num_computed_tokens == prompt_len
+    _count_cached_boundary_states(manager, producer, state_at)
+    manager.free(producer)
+    manager.new_step_starts()
+
+    _, num_computed, _ = manager.get_computed_blocks(make("resend"))
+    assert num_computed == boundary
 
 
 @pytest.mark.parametrize("first_chunk", [800, 900, 1599, 1601, 2000])
