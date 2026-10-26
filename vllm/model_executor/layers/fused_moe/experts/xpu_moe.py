@@ -175,6 +175,11 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
+        if self.moe_config.ep_size > 1:
+            # Avoid topk_ids = -1, remap them to an
+            # expert not owned by this rank so they are skipped.
+            sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
+            topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,

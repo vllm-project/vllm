@@ -77,7 +77,7 @@ def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None, **kw):
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend=kw.pop("backend", "fused" if use_fused else "triton"),
         out=out,
         **kw,
     )
@@ -110,6 +110,27 @@ def test_fused_chunk_matches_triton(seqlens: list[int]) -> None:
 
     torch.testing.assert_close(o_fused.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(state_fused, state_ref, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "seqlens",
+    [[1], [64], [1024], [4096], [513, 64, 1, 1200], [512] * 6],
+)
+def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
+    """AITER's Gluon chunk_kda must match the Triton chunk path too."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_kda_gluon_prefill_available():
+        pytest.skip("AITER Gluon chunk_kda is not available here")
+
+    inp = _inputs(seqlens, seed=len(seqlens))
+    o_ref, state_ref = _run(inp, use_fused=False)
+    o_gluon, state_gluon = _run(inp, use_fused=False, backend="gluon")
+
+    torch.testing.assert_close(o_gluon.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_gluon, state_ref, rtol=5e-3, atol=5e-3)
+    state_rel = (state_gluon - state_ref).norm() / state_ref.norm()
+    assert state_rel < 5e-3, f"final state relative L2 error {state_rel:.2e}"
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
@@ -426,13 +447,13 @@ def test_accepts_chunk_metadata_from_the_attention_builder(
     torch.testing.assert_close(state_got, state_ref, rtol=1e-3, atol=1e-3)
 
 
-def _checkpoint_buffer(rows: int) -> torch.Tensor:
+def _checkpoint_buffer(rows: int, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """A destination filled with NaN, so an unwritten row is unmistakable."""
     return torch.full(
         (rows, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         float("nan"),
         device="cuda",
-        dtype=torch.float32,
+        dtype=dtype,
     )
 
 
@@ -449,9 +470,13 @@ def _prefix_inputs(inp: dict, seq: int, num_tokens: int) -> dict:
 
 
 def _run_with_checkpoints(
-    inp: dict, offsets: list[int], rows: int | None = None, **kw
+    inp: dict,
+    offsets: list[int],
+    rows: int | None = None,
+    dtype: torch.dtype = torch.float32,
+    **kw,
 ) -> tuple[torch.Tensor, tuple]:
-    ckpt = _checkpoint_buffer(len(offsets) if rows is None else rows)
+    ckpt = _checkpoint_buffer(len(offsets) if rows is None else rows, dtype)
     result = _run(
         inp,
         use_fused=True,
@@ -513,7 +538,10 @@ def test_checkpoint_leaves_the_output_and_final_state_alone() -> None:
 
 
 @pytest.mark.parametrize("offset", [100, 63, 65, 1024])
-def test_unusable_checkpoint_offsets_write_nothing(offset: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_unusable_checkpoint_offsets_write_nothing(
+    offset: int, dtype: torch.dtype
+) -> None:
     """Offsets the walk never reaches must leave the destination untouched.
 
     The recurrent state only exists at chunk boundaries, so an offset that is
@@ -529,12 +557,13 @@ def test_unusable_checkpoint_offsets_write_nothing(offset: int) -> None:
 
     assert offset % KDA_CHECKPOINT_ALIGNMENT != 0 or offset > 512
     inp = _inputs([512], seed=31)
-    ckpt, _ = _run_with_checkpoints(inp, [offset])
+    ckpt, _ = _run_with_checkpoints(inp, [offset], dtype=dtype)
 
     assert ckpt.isnan().all()
 
 
-def test_checkpoint_state_indices_pick_the_destination_row() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_checkpoint_state_indices_pick_the_destination_row(dtype: torch.dtype) -> None:
     """With indices the export lands straight in the paged state cache.
 
     FlashKDA writes one row per sequence into a staging buffer that the caller
@@ -553,6 +582,7 @@ def test_checkpoint_state_indices_pick_the_destination_row() -> None:
         inp,
         [64, 64, 128],
         rows=rows,
+        dtype=dtype,
         checkpoint_state_indices=torch.tensor(
             indices, device="cuda", dtype=torch.int32
         ),
@@ -565,7 +595,7 @@ def test_checkpoint_state_indices_pick_the_destination_row() -> None:
             continue
         seq, offset = written[row]
         _, truncated = _run(_prefix_inputs(inp, seq, offset), use_fused=True)
-        torch.testing.assert_close(ckpt[row], truncated[0], rtol=0, atol=0)
+        torch.testing.assert_close(ckpt[row], truncated[0].to(dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("groups", [2, 4])
@@ -615,13 +645,15 @@ def test_triton_fallback_refuses_a_checkpoint_export() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _paged_cache(inp: dict, warm: list[bool], rows: list[int], slots: int):
+def _paged_cache(
+    inp: dict, warm: list[bool], rows: list[int], slots: int, dtype=torch.float32
+):
     """A cache holding each sequence's h0 at its row, a fill pattern elsewhere."""
     cache = torch.full(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         -7.0,
         device="cuda",
-        dtype=torch.float32,
+        dtype=dtype,
     )
     idx = torch.tensor(rows, device="cuda", dtype=torch.int32)
     for n, row in enumerate(rows):
@@ -648,22 +680,26 @@ def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
         has_initial_state=warm,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend="fused" if use_fused else "triton",
         **kw,
     )
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
 @pytest.mark.parametrize("seqlens", [[512], [2048], [320, 64], [513, 64, 1]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_paged_state_matches_the_dense_pair(
-    use_fused: bool, seqlens: list[int]
+    use_fused: bool, seqlens: list[int], dtype: torch.dtype
 ) -> None:
     """A paged cache must give the same result as the dense pair."""
     _requires_kernel()
     inp = _inputs(seqlens, seed=11)
+    inp["h0"] = inp["h0"].to(dtype).float()
     n = len(seqlens)
     rows = [3 * i + 5 for i in range(n)]
-    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    cache, idx, warm = _paged_cache(
+        inp, [True] * n, rows, slots=3 * n + 12, dtype=dtype
+    )
     before = cache.clone()
 
     o_ref, ht_ref = _run(inp, use_fused=use_fused)
@@ -671,7 +707,9 @@ def test_paged_state_matches_the_dense_pair(
 
     assert ht_got is None, "the final state is in the cache, not returned"
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[idx.long()], ht_ref.to(dtype), rtol=5e-3, atol=5e-3
+    )
 
     untouched = torch.ones(cache.shape[0], dtype=torch.bool, device="cuda")
     untouched[idx.long()] = False
@@ -681,14 +719,18 @@ def test_paged_state_matches_the_dense_pair(
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_cold_rows_start_from_zero_not_from_cache_junk(
+    use_fused: bool, dtype: torch.dtype
+) -> None:
     """`has_initial_state=False` must ignore whatever the row already holds."""
     _requires_kernel()
     seqlens = [256, 256, 256]
     inp = _inputs(seqlens, seed=12)
+    inp["h0"] = inp["h0"].to(dtype).float()
     warm = [True, False, True]
     rows = [4, 9, 1]
-    cache, idx, warm_t = _paged_cache(inp, warm, rows, slots=16)
+    cache, idx, warm_t = _paged_cache(inp, warm, rows, slots=16, dtype=dtype)
 
     # The dense reference zeroes exactly the cold sequences' initial states.
     ref = dict(inp)
@@ -698,11 +740,14 @@ def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
     o_got, _ = _run_paged(inp, cache, idx, warm_t, use_fused=use_fused)
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_state_indices_accept_a_block_table_column(
+    use_fused: bool, dtype: torch.dtype
+) -> None:
     # The layer passes block_table[:, 0], which is contiguous only while the
     # table has one column. Speculative decoding reserves a state page per
     # draft token, so the table widens and that column becomes strided.
@@ -711,7 +756,9 @@ def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
     inp = _inputs(seqlens, seed=43)
     n = len(seqlens)
     rows = [3 * i + 5 for i in range(n)]
-    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    cache, idx, warm = _paged_cache(
+        inp, [True] * n, rows, slots=3 * n + 12, dtype=dtype
+    )
     ref_cache = cache.clone()
 
     table = torch.zeros(n, 9, dtype=torch.int32, device="cuda")
@@ -727,7 +774,10 @@ def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_zero_length_sequence_is_inert(
+    use_fused: bool, dtype: torch.dtype, monkeypatch
+) -> None:
     # A batch carrying speculative decodes pads its non-spec group with
     # zero-length sequences whose cache row still belongs to a request, so
     # consuming no tokens has to mean writing nothing and perturbing nobody.
@@ -738,11 +788,21 @@ def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
     padded, unpadded = _inputs([*live, 0], seed=41), _inputs(live, seed=41)
     rows = [3 * i + 5 for i in range(4)]
 
-    cache, idx, warm = _paged_cache(padded, [True] * 4, rows, slots=24)
+    cache, idx, warm = _paged_cache(padded, [True] * 4, rows, slots=24, dtype=dtype)
     before = cache.clone()
-    _run_paged(padded, cache, idx, warm, use_fused=use_fused)
+    # Poison unwritten outputs rather than relying on allocator contents.
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    monkeypatch.setattr(torch.utils.deterministic, "fill_uninitialized_memory", True)
+    try:
+        torch.use_deterministic_algorithms(True)
+        _run_paged(padded, cache, idx, warm, use_fused=use_fused)
+    finally:
+        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
 
-    ref_cache, ref_idx, ref_warm = _paged_cache(unpadded, [True] * 3, rows[:3], 24)
+    ref_cache, ref_idx, ref_warm = _paged_cache(
+        unpadded, [True] * 3, rows[:3], 24, dtype=dtype
+    )
     _run_paged(unpadded, ref_cache, ref_idx, ref_warm, use_fused=use_fused)
 
     assert torch.equal(cache[rows[3]], before[rows[3]]), (
@@ -752,26 +812,33 @@ def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
 
 
 @pytest.mark.parametrize("groups", [2, 4])
-def test_paged_state_survives_the_group_split(groups: int, monkeypatch) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_paged_state_survives_the_group_split(
+    groups: int, dtype: torch.dtype, monkeypatch
+) -> None:
     """At G>1 the read and the write are different blocks of one launch."""
     _requires_kernel()
     _force_groups(monkeypatch, groups)
     inp = _inputs([1024, 512], seed=13)
+    inp["h0"] = inp["h0"].to(dtype).float()
     rows = [6, 2]
-    cache, idx, warm = _paged_cache(inp, [True, True], rows, slots=12)
+    cache, idx, warm = _paged_cache(inp, [True, True], rows, slots=12, dtype=dtype)
 
     o_ref, ht_ref = _run(inp, use_fused=True)
     o_got, _ = _run_paged(inp, cache, idx, warm, use_fused=True)
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
 
-def test_paged_state_and_checkpoint_export_together() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_paged_state_and_checkpoint_export_together(dtype: torch.dtype) -> None:
     """The checkpoint lands in its own row while the walk owns the state row."""
     _requires_kernel()
     inp = _inputs([1024], seed=14)
+    inp["h0"] = inp["h0"].to(dtype).float()
     cache, idx, warm = _paged_cache(inp, [True], [3], slots=12)
+    cache = cache.to(dtype)
     ckidx = torch.tensor([8], device="cuda", dtype=torch.int32)
 
     o_ref, ht_ref = _run(inp, use_fused=True)
@@ -789,8 +856,10 @@ def test_paged_state_and_checkpoint_export_together() -> None:
         checkpoint_state_indices=ckidx,
     )
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[ckidx.long()], ck_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[ckidx.long()].float(), ck_ref, rtol=5e-3, atol=5e-3
+    )
 
 
 def test_paged_state_rejects_a_dense_initial_state() -> None:
@@ -809,8 +878,64 @@ def test_paged_state_rejects_a_dense_initial_state() -> None:
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("groups", [1, 2, 4])
+def test_paged_checkpoint_can_resume_with_graph_replay(
+    dtype: torch.dtype, groups: int, monkeypatch
+) -> None:
+    """Resume from a stored checkpoint, including cold zero-token padding."""
+    _requires_kernel()
+    _force_groups(monkeypatch, groups)
+    inp = _inputs([1024], seed=47)
+    cache, idx, warm = _paged_cache(inp, [True], [3], slots=12, dtype=dtype)
+    ckidx = torch.tensor([8], device="cuda", dtype=torch.int32)
+    _run_paged(
+        inp,
+        cache,
+        idx,
+        warm,
+        use_fused=True,
+        checkpoint_state=cache,
+        checkpoint_offsets=torch.tensor([512], device="cuda", dtype=torch.int32),
+        checkpoint_state_indices=ckidx,
+    )
+
+    # Compare against the same rounded checkpoint, not an uninterrupted FP32 walk.
+    tail = dict(inp)
+    for key in ("q", "k", "v", "raw_g", "raw_beta"):
+        tail[key] = inp[key][:, 512:].contiguous()
+    tail["cu"] = torch.tensor([0, 512], device="cuda", dtype=torch.int32)
+    tail["h0"] = cache[ckidx.long()].float()
+    o_ref, ht_ref = _run(tail, use_fused=True)
+
+    tail["cu"] = torch.tensor([0, 512, 512], device="cuda", dtype=torch.int32)
+    resume_idx = torch.tensor([8, 10], device="cuda", dtype=torch.int32)
+    resume_warm = torch.tensor([True, False], device="cuda", dtype=torch.bool)
+    before = cache.clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _run_paged(tail, cache, resume_idx, resume_warm, use_fused=True)
+    torch.cuda.current_stream().wait_stream(stream)
+    cache.copy_(before)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        o_got, ht_got = _run_paged(tail, cache, resume_idx, resume_warm, use_fused=True)
+    for _ in range(2):
+        cache.copy_(before)
+        graph.replay()
+        assert ht_got is None
+        torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(
+            cache[ckidx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3
+        )
+        untouched = torch.arange(cache.shape[0], device="cuda") != 8
+        assert torch.equal(cache[untouched], before[untouched])
+
+
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_cache_stride_is_honoured(use_fused: bool, dtype: torch.dtype) -> None:
     """A mamba page may pad stride(0); only each state row is dense.
 
     The real `recurrent_state` is not a contiguous tensor, so a kernel that
@@ -821,10 +946,12 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
     _requires_kernel()
     seqlens = [1024, 512]
     inp = _inputs(seqlens, seed=21)
+    inp["h0"] = inp["h0"].to(dtype).float()
     n = len(seqlens)
     row = NUM_HEADS * HEAD_DIM * HEAD_DIM
-    slots, pad = 16, 512
-    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    # An odd BF16 row stride exercises unaligned vector loads and stores.
+    slots, pad = 16, 513 if dtype == torch.bfloat16 else 512
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=dtype)
     cache = raw.as_strided(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
@@ -843,7 +970,7 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
 
     assert ht_got is None
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
     # The padding between rows, and every unowned row, must be untouched.
     untouched = torch.ones(slots, dtype=torch.bool, device="cuda")
@@ -854,7 +981,8 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
     )
 
 
-def test_padded_checkpoint_stride_is_honoured() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_checkpoint_stride_is_honoured(dtype: torch.dtype) -> None:
     """The checkpoint destination is the paged cache, which pads stride(0).
 
     Every other checkpoint case here builds a contiguous buffer, so none of
@@ -864,9 +992,10 @@ def test_padded_checkpoint_stride_is_honoured() -> None:
     _requires_kernel()
     seqlens = [1024]
     inp = _inputs(seqlens, seed=31)
+    inp["h0"] = inp["h0"].to(dtype).float()
     row = NUM_HEADS * HEAD_DIM * HEAD_DIM
     slots, pad = 16, 512
-    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=dtype)
     cache = raw.as_strided(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
@@ -898,8 +1027,10 @@ def test_padded_checkpoint_stride_is_honoured() -> None:
     )
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[ck_rows[0]], ck_ref[0], rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[ck_rows[0]].float(), ck_ref[0], rtol=5e-3, atol=5e-3
+    )
 
     touched = torch.zeros(slots, dtype=torch.bool, device="cuda")
     touched[state_rows + ck_rows] = True

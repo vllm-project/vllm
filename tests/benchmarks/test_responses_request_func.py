@@ -123,7 +123,7 @@ async def _serve(
     async def handler(request: web.Request) -> web.StreamResponse:
         if seen is not None:
             seen["payload"] = await request.json()
-            seen["headers"] = dict(request.headers)
+            seen["headers"] = request.headers.copy()
         if status != 200:
             return web.Response(status=status, reason="Bad Request")
 
@@ -183,6 +183,7 @@ def test_request_payload_is_accepted_by_the_server_schema():
         "temperature": 0.7,
         "top_p": 0.9,
         "top_k": 20,
+        "min_p": 0.05,
         "frequency_penalty": 0.2,
         "presence_penalty": 0.1,
         "repetition_penalty": 1.05,
@@ -216,9 +217,6 @@ def test_request_payload_is_accepted_by_the_server_schema():
     }
     assert set(seen["payload"]) <= set(ResponsesRequest.model_fields)
     ResponsesRequest.model_validate(seen["payload"])
-
-    # `vllm bench serve` rejects --min-p for this backend for the same reason.
-    assert "min_p" not in ResponsesRequest.model_fields
 
 
 def test_latency_accounting_matches_the_other_endpoints():
