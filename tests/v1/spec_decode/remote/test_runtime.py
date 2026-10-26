@@ -3,6 +3,7 @@
 """Standalone own-KV runtime: draft KV pool, step planning, and the
 target-conditioned adapter driven end to end through the server."""
 
+import threading
 from dataclasses import replace
 
 import numpy as np
@@ -472,6 +473,60 @@ def test_buffered_final_chunks_fit_executor_budget_and_commit_each_row(runtime):
         digest_row([1, 2, 3, 4, 9], 12),
     ]
     assert executor.plans[-1].num_tokens == 4
+
+
+def test_buffered_final_chunks_stop_launching_after_round_timeout():
+    class BlockingExecutor(KVDigestExecutor):
+        def __init__(self, pool):
+            super().__init__(pool, max_num_tokens=4)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, plan, features, *, num_speculative_tokens=None):
+            self.entered.set()
+            assert self.release.wait(5), "external executor was not released"
+            return super().execute(
+                plan, features, num_speculative_tokens=num_speculative_tokens
+            )
+
+    planner = make_planner()
+    executor = BlockingExecutor(planner.block_pool)
+    adapter = TargetConditionedDraftAdapter(
+        executor,
+        planner,
+        capabilities=CAPABILITIES,
+        feature_schema=SCHEMA,
+        methods={"mtp"},
+    )
+    server = RemoteDraftServer(adapter)
+    server.start("tcp://127.0.0.1:0")
+    session = RemoteDraftSession(server.endpoint, IDENTITY, request_timeout_ms=500)
+    try:
+        session.connect()
+        a, b = session.open_sequences((1, 2))
+        session.prefill_many(
+            [(a, chunk([1, 2, 3, 4]), True), (b, chunk([5, 6, 7, 8]), True)]
+        )
+        handle = session.dispatch(
+            RemoteProposalBatch(
+                batch_id=0,
+                keys=(a, b),
+                accepted_counts=torch.tensor([0, 0], dtype=torch.int32),
+                recovery_tokens=torch.tensor([9, 10], dtype=torch.int64),
+                features=chunk([]),
+                query_lens=torch.tensor([0, 0], dtype=torch.int32),
+            )
+        )
+        assert executor.entered.wait(2)
+        result = session.collect(handle)
+        assert result.row_statuses == (SpeculatorStatusCode.TIMEOUT,) * 2
+        assert result.output.valid_lengths.tolist() == [0, 0]
+    finally:
+        executor.release.set()
+        session.close()
+        server.stop()
+    assert [plan.rows[0].key for plan in executor.plans] == [a]
+    assert planner.num_open == 0
 
 
 @pytest.mark.parametrize("runtime", [(4, 8)], indirect=True)

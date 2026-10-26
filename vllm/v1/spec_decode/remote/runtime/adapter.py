@@ -20,6 +20,7 @@ delegated to a DraftStepExecutor.
 """
 
 import itertools
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Sequence
 
@@ -235,6 +236,13 @@ class TargetConditionedDraftAdapter(StandaloneDraftAdapter):
             num_rows, batch.num_speculative_tokens, dtype=torch.int64
         )
         for group in groups:
+            if (
+                batch.execution_deadline is not None
+                and time.monotonic() >= batch.execution_deadline
+            ):
+                for index in group:
+                    statuses[batch_rows[index]] = SpeculatorStatusCode.TIMEOUT
+                continue
             plan, failures = self.planner.plan(
                 [rows[i] for i in group], num_speculative_tokens=effective_k
             )
@@ -247,9 +255,17 @@ class TargetConditionedDraftAdapter(StandaloneDraftAdapter):
             ]
             if not planned:
                 continue
+            step_features = self._step_features(features, planned)
+            if (
+                batch.execution_deadline is not None
+                and time.monotonic() >= batch.execution_deadline
+            ):
+                for index, _ in planned:
+                    statuses[index] = SpeculatorStatusCode.TIMEOUT
+                continue
             drafts = self.executor.execute(
                 plan,
-                self._step_features(features, planned),
+                step_features,
                 num_speculative_tokens=effective_k,
             )
             self.planner.commit(plan)

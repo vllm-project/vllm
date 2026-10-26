@@ -155,6 +155,8 @@ class StandaloneProposalBatch:
     query_lens: tuple[int, ...]
     effective_num_speculative_tokens: int | None = None
     """This round's budget; num_speculative_tokens remains the result width."""
+    execution_deadline: float | None = None
+    """Absolute server monotonic deadline shared by every internal draft step."""
 
 
 @dataclass(frozen=True)
@@ -1498,6 +1500,7 @@ class _ServerSession:
                             features=tuple(frames),
                             query_lens=tuple(query_lens),
                             effective_num_speculative_tokens=effective_k,
+                            execution_deadline=deadline,
                         )
                     )
                 except Exception as e:
