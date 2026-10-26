@@ -36,6 +36,9 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class _TestSpeculator(TargetDependentARSpeculator):
+    # Set by each test to the draft model `load_draft_model` should hand back.
+    test_draft_model: torch.nn.Module
+
     def load_draft_model(self, target_model, target_attn_layer_names):
         return self.test_draft_model
 
@@ -95,7 +98,10 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
 
     speculator = object.__new__(_TestSpeculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32)
+    )
+    speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(4, dtype=torch.int64),
@@ -111,7 +117,8 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            # Stand-in group: build_attn_metadata only reads these two members.
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 get_metadata_builder=lambda _: SimpleNamespace(
                     build=build, supports_update_block_table=False
                 ),
@@ -128,6 +135,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         seq_lens_cpu_upper_bound=torch.tensor([10, 20], dtype=torch.int32),
         step=1,
     )
+    assert metadata is not None
     assert metadata["draft"] == (num_reqs_padded, 0, num_reqs_padded, 0)
 
 
@@ -481,6 +489,7 @@ def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
+    monkeypatch,
     method_name,
     cg_mode,
     num_speculative_steps,
@@ -490,8 +499,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
-    speculator.slot_mapping_observer = None
-    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),
@@ -500,7 +507,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
     generate_draft = Mock()
-    speculator._generate_draft = generate_draft
+    # Stub the bound method on a hand-built speculator to count eager draft calls.
+    monkeypatch.setattr(speculator, "_generate_draft", generate_draft)
     run_fullgraph = Mock()
     speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
     batch_desc = BatchExecutionDescriptor(
@@ -527,13 +535,14 @@ def test_fused_full_graph_maps_split_group_block_tables():
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=128, dtype=torch.uint8
     )
+    kernel_block_table = torch.zeros(1, 4, 32, dtype=torch.int32)
     group = AttentionGroup(
         SimpleNamespace(),
         ["layer.0"],
         spec,
         0,
         kernel_block_size=256,
-        kernel_block_table=torch.zeros(1, 4, 32, dtype=torch.int32),
+        kernel_block_table=kernel_block_table,
         kernel_block_offsets=torch.arange(4, dtype=torch.int32),
     )
     speculator = object.__new__(_TestSpeculator)
@@ -548,7 +557,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
     replayed_tables = []
     speculator.decode_cudagraph_manager = SimpleNamespace(
         run_fullgraph=lambda _: replayed_tables.append(
-            group.kernel_block_table[0, :2, :8].tolist()
+            kernel_block_table[0, :2, :8].tolist()
         )
     )
 
@@ -676,7 +685,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.num_speculative_steps = num_speculative_steps
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )
@@ -692,34 +701,72 @@ def test_decode_metadata_update_needs_draft_decode_steps(
 @pytest.mark.parametrize("start_step", [0, 1])
 @pytest.mark.parametrize("requires_hidden_states", [True, False])
 def test_fused_drafts_replay_with_optional_hidden_feedback(
-    start_step, requires_hidden_states
+    start_step, requires_hidden_states, tmp_path
 ):
     """Fused graphs preserve tokens when hidden-state feedback is disabled."""
-    from vllm.v1.worker.gpu.input_batch import InputBuffers
+    from transformers import LlamaConfig
 
-    speculator = object.__new__(_TestSpeculator)
-    speculator.requires_hidden_states = requires_hidden_states
-    speculator.input_buffers = InputBuffers(2, 2, torch.device("cuda"))
-    speculator.idx_mapping = torch.arange(2, device="cuda")
-    speculator.current_draft_step = torch.zeros((), device="cuda", dtype=torch.int64)
-    speculator.sample_src_positions = torch.zeros(2, device="cuda", dtype=torch.int64)
-    speculator.hidden_states = torch.zeros(
-        2, 4 if requires_hidden_states else 0, device="cuda"
+    from vllm.config import (
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        SpeculativeConfig,
+        VllmConfig,
+        set_current_vllm_config,
     )
-    speculator.draft_tokens = torch.full((2, 3), -1, device="cuda", dtype=torch.int64)
-    speculator.temperature = speculator.seeds = torch.ones(2, device="cuda")
-    speculator.draft_logits = speculator.acceptance_estimator = None
-    speculator.use_local_argmax_reduction = False
-    speculator.max_model_len = 32
-    speculator.model = SimpleNamespace(compute_logits=lambda x: x)
-    speculator._prepare_eplb_forward = lambda _: None
 
-    def run_model(*args):
-        tokens = (speculator.input_buffers.input_ids.long() + 1) % 4
-        logits = torch.nn.functional.one_hot(tokens, num_classes=4).float()
-        return logits, logits
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        vocab_size=4,
+        hidden_size=4,
+        intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float32",
+        max_model_len=32,
+        enforce_eager=True,
+    )
+    parallel = ParallelConfig()
+    config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel,
+        scheduler_config=SchedulerConfig(
+            max_model_len=32,
+            max_num_seqs=2,
+            max_num_batched_tokens=32,
+            is_encoder_decoder=False,
+        ),
+        speculative_config=SpeculativeConfig(
+            method="looped_self_draft",
+            num_speculative_tokens=3,
+            target_model_config=model_config,
+            target_parallel_config=parallel,
+        ),
+    )
 
-    speculator._run_model = run_model
+    class ReplaySpeculator(_TestSpeculator):
+        def __init__(self):
+            self.requires_hidden_states = requires_hidden_states
+            super().__init__(config, torch.device("cuda"))
+
+    class CyclingDraftModel(torch.nn.Module):
+        def forward(self, input_ids, **kwargs):
+            tokens = (input_ids.long() + 1) % 4
+            return torch.nn.functional.one_hot(tokens, num_classes=4).float()
+
+        def compute_logits(self, hidden_states):
+            return hidden_states
+
+    speculator = ReplaySpeculator()
+    speculator.test_draft_model = CyclingDraftModel()
+    with set_current_vllm_config(config):
+        speculator.load_model(torch.nn.Identity())
+    speculator.idx_mapping.copy_(torch.arange(2, device="cuda"))
 
     def generate():
         speculator._generate_fused_drafts(
@@ -731,7 +778,7 @@ def test_fused_drafts_replay_with_optional_hidden_feedback(
     torch.accelerator.synchronize()
     with torch.cuda.graph(graph):
         generate()
-    speculator.input_buffers.input_ids.copy_(torch.tensor([1, 2], device="cuda"))
+    speculator.input_buffers.input_ids[:2].copy_(torch.tensor([1, 2], device="cuda"))
     speculator.input_buffers.positions.fill_(7)
     speculator.input_buffers.seq_lens.fill_(8)
     speculator.sample_src_positions.fill_(7)
@@ -743,6 +790,6 @@ def test_fused_drafts_replay_with_optional_hidden_feedback(
         + torch.arange(1, 4 - start_step, device="cuda")
     ) % 4
     torch.testing.assert_close(speculator.draft_tokens, expected)
-    assert speculator.input_buffers.positions.tolist() == [9 - start_step] * 2
+    assert speculator.input_buffers.positions[:2].tolist() == [9 - start_step] * 2
     assert speculator.input_buffers.seq_lens.tolist() == [10 - start_step] * 2
     assert speculator.sample_src_positions.tolist() == [9 - start_step] * 2

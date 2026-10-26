@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 """CPU checks of Dory math and loading, with a reference attention backend."""
 
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import parallel_state
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.models import dory
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.transformers_utils.configs.dory import DoryConfig
@@ -134,6 +136,14 @@ def model_factory(monkeypatch):
         yield build
 
 
+def _prepare_for_inference(model):
+    # CPU kernels may pack or replace weights, so run after all weight updates.
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            quant_method.process_weights_after_loading(module)
+
+
 def test_invalid_loop_override_is_rejected_before_model_creation(model_factory):
     with pytest.raises(StrictDataclassClassValidationError, match="n_recurrent_loops"):
         model_factory(hf_overrides={"n_recurrent_loops": 0})
@@ -146,6 +156,7 @@ def test_chunked_prefill_and_decode_keep_loop_caches_separate(model_factory, num
     torch.manual_seed(0)
     for param in model.parameters():
         param.normal_(std=0.02)
+    _prepare_for_inference(model)
     tokens, positions = torch.arange(7), torch.arange(7)
     expected = model(tokens, positions)
     caches = [m for m in model.modules() if isinstance(m, ReferenceAttention)]
@@ -187,6 +198,8 @@ def test_last_loop_kv_matches_final_loop_history(model_factory, num_loops):
     for param in shared.parameters():
         param.normal_(std=0.02)
     reference.load_state_dict(shared.state_dict())
+    _prepare_for_inference(shared)
+    _prepare_for_inference(reference)
     assert sum(isinstance(m, ReferenceAttention) for m in shared.modules()) == 4
     tokens = positions = torch.arange(7)
     # Include prefill chunks, decode, and history beyond the sliding window.
@@ -244,6 +257,7 @@ def test_logits_apply_vocab_scale_after_projection(model_factory, monkeypatch, d
     scale = torch.linspace(0.01, 0.03, 32).to(dtype)
     hidden = torch.randn(3, 16, dtype=dtype)
     model.load_weights([("lm_head.weight", head), ("lm_head.logit_scale", scale)])
+    _prepare_for_inference(model)
     expected = torch.nn.functional.linear(hidden, head).float() * (
         scale.float() / model.config.initializer_range
     )
@@ -411,6 +425,8 @@ def test_self_speculation_reuses_prefix_and_preserves_kv_after_rejection(
     reference.load_state_dict(model.state_dict())
     target_reference.load_state_dict(model.state_dict())
     draft_reference.load_state_dict(model.state_dict())
+    for target in (model, reference, target_reference, draft_reference):
+        _prepare_for_inference(target)
     from vllm.model_executor.models.interfaces import SupportsLoopedSelfDraft
 
     assert isinstance(model, SupportsLoopedSelfDraft)
@@ -539,6 +555,7 @@ def test_self_draft_tensor_stages_trace_without_python_cache_control(model_facto
     model = model_factory(num_draft_loops=2, num_shared_loops=1)
     for param in model.parameters():
         param.normal_(std=0.02)
+    _prepare_for_inference(model)
     tokens = positions = torch.arange(3)
     model(tokens, positions)
     graphs = []

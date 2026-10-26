@@ -89,6 +89,10 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 `ModelArchConfigConvertorBase` reads a scalar from these; a caller that needs the
 raw value (a per-layer `list`, say) passes the aliases to `getattr_iter` itself."""
 
+_ST_TRANSFORMER_MODULE_TYPES = {
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.base.modules.transformer.Transformer",
+}
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
@@ -116,15 +120,15 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
+    alpamayo2_super="Alpamayo2SuperConfig",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
+    beam="BeamConfig",
     chatglm="ChatGLMConfig",
-    modernvbert="ColModernVBertConfig",
-    colpali="ColPaliConfig",
+    ultravbert="ColUltraVBertConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     dory="DoryConfig",
@@ -138,10 +142,12 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
-    muse_glimmer="MuseGlimmerConfig",
-    muse_glimmer_text="MuseGlimmerTextConfig",
-    muse_glimmer_vision="MuseGlimmerVisionConfig",
-    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
+    muse_spark_dspark="MuseSparkDSparkConfig",
+    musespark1x_text="MuseSpark1xTextConfig",
+    muse_spark_text="MuseSparkTextConfig",
+    muse_spark_vision="MuseSparkVisionConfig",
+    muse_spark_audio="MuseSparkAudioConfig",
+    muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
@@ -157,12 +163,14 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
-    step3p5="Step3p5Config",
-    qianfan_ocr="QianfanOCRConfig",
+    step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
+    step5="Step5Config",
+    step5_vl="Step5VLConfig",
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
+    flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
@@ -815,6 +823,10 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
 
     """
+    # A single local file (e.g. a .gguf checkpoint) has no speculators config.
+    if os.path.isfile(model):
+        return model, tokenizer, vllm_speculative_config
+
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PreTrainedConfig.get_config_dict(
         model,
@@ -1353,6 +1365,88 @@ def try_get_dense_modules(
         return layer_configs
     except Exception:
         return None
+
+
+@cache
+def get_sentence_transformers_chat_template_kwargs(
+    model: str | Path,
+    revision: str | None = None,
+) -> dict[str, Any] | None:
+    """Get the saved chat template settings of a Sentence Transformers
+    CrossEncoder whose single Transformer module declares the `message`
+    modality.
+
+    Sentence Transformers formats the pairs of such checkpoints as
+    `query`/`document` messages with the saved chat template.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+
+    Returns:
+        The saved `processing_kwargs.chat_template` (possibly empty), or
+        `None` if the checkpoint does not declare the `message` modality.
+
+    Raises:
+        ValueError: If the saved chat template settings are unsupported.
+
+    """
+    try:
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+        transformer_config = get_hf_file_to_dict(
+            "sentence_bert_config.json", model, revision
+        )
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if isinstance(modules, dict):
+        modules = modules.get("modules")
+    if not (
+        isinstance(modules, list)
+        and len(modules) == 1
+        and isinstance(modules[0], dict)
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and not modules[0].get("path")
+        and isinstance(transformer_config, dict)
+        and transformer_config.get("transformer_task") == "sequence-classification"
+        and isinstance(
+            modality_config := transformer_config.get("modality_config"), dict
+        )
+        and "message" in modality_config
+    ):
+        return None
+
+    processing_kwargs = transformer_config.get("processing_kwargs") or {}
+    chat_template_kwargs = (
+        processing_kwargs.get("chat_template") or {}
+        if isinstance(processing_kwargs, dict)
+        else None
+    )
+    if not isinstance(chat_template_kwargs, dict):
+        raise ValueError(
+            "The Sentence Transformers processing_kwargs.chat_template must be "
+            "a JSON object."
+        )
+    chat_template_kwargs = dict(chat_template_kwargs)
+    # vLLM does not restore the template suffix after truncation.
+    chat_template_kwargs.pop("restore_suffix", None)
+    if not isinstance(chat_template_kwargs.get("chat_template", ""), str):
+        raise ValueError(
+            "The Sentence Transformers chat template name must be a string."
+        )
+    if reserved := {"tokenize", "tools"} & chat_template_kwargs.keys():
+        raise ValueError(
+            f"Unsupported Sentence Transformers chat template settings: {reserved}"
+        )
+    return chat_template_kwargs
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
