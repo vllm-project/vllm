@@ -10,7 +10,6 @@ steps:
   source_file_dependencies: &v1-sample-logits-deps
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/logger.py

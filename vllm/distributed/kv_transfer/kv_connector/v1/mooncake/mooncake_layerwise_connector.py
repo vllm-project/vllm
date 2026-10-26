@@ -2,18 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mooncake layerwise: background address planning and device transfers.
 
-One full-attention group, PP1, no CP; KV writes use a single compute stream.
+Group-aware layerwise transfer with PP and explicitly replicated PCP caches.
+KV writes use a single compute stream; DCP is not supported.
 Model hooks snapshot sends; the executor builds addresses, waits and performs WRITE.
 The listener loop owns D sockets and ACKs. Requests retain KV through delay_free.
 """
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from queue import Empty, SimpleQueue
-from threading import Lock
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -26,7 +27,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.layerwise_mapping import (
+    plan_append_blocks,
+    plan_final_state,
+    plan_final_window,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    _MAX_PEER_LAYOUTS,
     MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
@@ -40,11 +47,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _align_transfer_regions,
     _validate_asymmetric_region_lengths,
 )
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
+    SlidingWindowSpec,
     iter_layer_specs,
 )
 
@@ -56,10 +68,32 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+WorkerKey = tuple[str, int, int, int]
+
 
 class MooncakeLayerwiseXferMetadata(MooncakeXferMetadata):
+    remote_engine_id: str = ""
+    remote_pp_rank: int = 0
+    remote_pcp_rank: int = 0
+    remote_pcp_size: int = 1
+    pcp_cache_mode: str = "replicated"
+    cache_specs: dict[str, str] = msgspec.field(default_factory=dict)
     logical_block_size: int = 0
     kernel_block_size: int = 0
+    recv_timeout_s: float = 0.0
+
+    @property
+    def worker_key(self) -> WorkerKey:
+        return (
+            self.remote_engine_id,
+            self.remote_tp_rank,
+            self.remote_pp_rank,
+            self.remote_pcp_rank,
+        )
+
+
+class LayerwiseXferResponse(MooncakeXferResponse):
+    covered_layers: list[str] = msgspec.field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -67,10 +101,17 @@ class LayerwisePushReqMeta:
     req_id: str
     transfer_id: str
     block_ids: tuple[tuple[int, ...], ...]
-    num_computed_tokens: int
-    num_scheduled_tokens: int
-    is_final_chunk: bool
+    scheduled_end_tokens: int
     num_prompt_tokens: int
+
+
+@dataclass(frozen=True)
+class Destination:
+    remote_req_id: str
+    meta: MooncakeLayerwiseXferMetadata
+    layout: "LayerwisePeerLayout"
+    send_deadline: float
+    required_layers: tuple[str, ...]
 
 
 @dataclass
@@ -80,44 +121,56 @@ class RequestState:
     transfer_id: str
     req_id: str | None = None
     block_ids: tuple[tuple[int, ...], ...] = ()
-    num_computed_tokens: int = 0
-    num_scheduled_tokens: int = 0
+    scheduled_end_tokens: int = 0
     num_prompt_tokens: int = 0
-    is_final_chunk: bool = False
     inference_finished: bool = False
     preempted: bool = False
-    sent_tokens: dict[tuple[int, int], int] = field(default_factory=dict)
+    sent_tokens: dict[tuple[WorkerKey, str], int] = field(default_factory=dict)
     available_tokens: dict[int, int] = field(default_factory=dict)
     sealed: bool = False
     error: str | None = None
-    completed_ranks: set[int] = field(default_factory=set)
+    ack_scheduled_workers: set[WorkerKey] = field(default_factory=set)
     deadline: float = float("inf")
-    destinations: dict[int, tuple[str, MooncakeLayerwiseXferMetadata]] = field(
-        default_factory=dict
-    )
+    destinations: dict[WorkerKey, Destination] = field(default_factory=dict)
 
     @property
-    def scheduled_end_tokens(self) -> int:
-        return self.num_computed_tokens + self.num_scheduled_tokens
+    def is_final_chunk(self) -> bool:
+        return self.scheduled_end_tokens >= self.num_prompt_tokens
+
+    def mark_preempted(self) -> None:
+        self.preempted = True
+        self.sent_tokens.clear()
+        self.available_tokens.clear()
+        self.sealed = False
+
+    def update_from_metadata(self, metadata: LayerwisePushReqMeta) -> None:
+        """Apply the current prefill step's request metadata."""
+        self.req_id = metadata.req_id
+        self.block_ids = metadata.block_ids
+        self.scheduled_end_tokens = metadata.scheduled_end_tokens
+        self.num_prompt_tokens = metadata.num_prompt_tokens
+        self.preempted = False
+        self.inference_finished = False
+        # The send timeout starts when the scheduler publishes finished prefill.
+        self.deadline = float("inf")
 
 
 @dataclass(frozen=True)
 class LayerwiseSendTask:
-    """One request/destination snapshot; contains no transfer regions."""
+    """Block snapshot retaining the destination's registered layout."""
 
     transfer_id: str
     req_id: str
-    remote_req_id: str
-    meta: MooncakeLayerwiseXferMetadata
-    block_ids: tuple[int, ...]
-    remote_block_offset: int
-    # (transformer layer index, first block, exclusive last block).
-    layers: tuple[tuple[int, int, int], ...]
+    destination: Destination
+    kv_cache_name: str
+    block_ids: tuple[tuple[int, ...], ...]
+    remote_block_ids: tuple[tuple[int, ...], ...]
+    end_tokens: int
 
 
 @dataclass
 class LayerwiseSendResult:
-    progress: list[tuple[str, int, int, int]] = field(default_factory=list)
+    progress: list[tuple[str, WorkerKey, str, int]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -133,6 +186,46 @@ class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._prefills: dict[str, Request] = {}
+        for index, group in enumerate(self.kv_cache_config.transfer_groups):
+            specs = list(iter_layer_specs(group.kv_cache_spec))
+            windows = {getattr(spec, "sliding_window", None) for spec in specs}
+            if len(windows) != 1:
+                raise ValueError("Mixed window semantics within a transfer group")
+            # A windowed FullAttentionSpec still uses the full-attention
+            # manager. Its whole allocated suffix must be populated before D
+            # can publish prefix-cache hashes for those blocks.
+            if next(iter(windows)) is not None and all(
+                isinstance(spec, SlidingWindowSpec) for spec in specs
+            ):
+                self._is_hma_required = True
+                self.blocks_per_sw[index] = max(
+                    (
+                        getattr(
+                            spec,
+                            "num_retained_tokens",
+                            spec.sliding_window - 1 + spec.extra_retained_tokens,
+                        )
+                        + spec.block_size
+                        - 1
+                    )
+                    // spec.block_size
+                    + 1
+                    for spec in specs
+                )
+
+    def request_finished(self, request, block_ids):
+        delayed, params = super().request_finished(request, block_ids)
+        if delayed and self.is_kv_producer:
+            # Final allocation state is authoritative, but retain logical null
+            # positions for windows and align-mode state slots.
+            self._reqs_need_send[request.request_id] = (
+                request,
+                [
+                    list(g)
+                    for g in self.kv_cache_config.select_transfer_block_ids(block_ids)
+                ],
+            )
+        return delayed, params
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -177,10 +270,13 @@ class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
                 LayerwisePushReqMeta(
                     req_id,
                     request.kv_transfer_params["transfer_id"],
-                    tuple(tuple(group) for group in self.get_sw_clipped_blocks(blocks)),
-                    computed,
-                    scheduled,
-                    computed + scheduled >= request.num_prompt_tokens,
+                    tuple(
+                        tuple(group)
+                        for group in self.kv_cache_config.select_transfer_block_ids(
+                            blocks
+                        )
+                    ),
+                    computed + scheduled,
                     request.num_prompt_tokens,
                 )
             )
@@ -191,75 +287,65 @@ class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
         return meta
 
 
+@dataclass(frozen=True)
+class LayerwisePeerLayout:
+    regions_by_layer: dict[str, tuple[list[TransferRegion], list[TransferRegion]]]
+    remote_group_by_layer: dict[str, int]
+    remote_kv_cache_names: dict[int, list[str]]
+    covered_layers: list[str]
+    expected_workers: frozenset[WorkerKey]
+
+
 @dataclass
 class DecodeBatch:
-    """Sender-loop ACK context, retaining immutable regions for executor readers."""
+    """Sender-loop-owned socket and pending ACKs for one ready message."""
 
     identity: bytes
     sock: zmq.asyncio.Socket
     pending: dict[str, str]
     layout_id: int
-    regions_by_layer: dict[int, tuple[list[TransferRegion], list[TransferRegion]]]
+    layout: LayerwisePeerLayout
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-class LayerwiseControler:
+class LayerwiseController:
     """Bridge model-thread transfer decisions and sender-loop control messages.
 
-    Sender-loop owns sockets and the layout LRU. The executor borrows region
-    references under a short lock; address planning and I/O run outside it.
-    Model-thread ready notifications contain metadata only.
+    Sender-loop owns sockets, ACK contexts and the layout LRU. The queue
+    publishes destinations whose layouts remain alive through task references.
     """
 
     def __init__(self, worker: "MooncakeLayerwiseWorker") -> None:
         self._worker = worker
-        self._ack_contexts: dict[str, dict[int, DecodeBatch]] = {}
-        self._contexts_lock = Lock()
-        self.send_ready_queue: SimpleQueue[MooncakeLayerwiseXferMetadata] = (
-            SimpleQueue()
-        )
-        # Only the model thread submits ACKs and collects these Futures.
-        self._ack_send_futures: list[Future[None]] = []
+        self._ack_contexts: dict[tuple[str, WorkerKey], DecodeBatch] = {}
+        self._layouts: OrderedDict[tuple, LayerwisePeerLayout] = OrderedDict()
+        self.send_ready_queue: SimpleQueue[Destination] = SimpleQueue()
 
-    def drain_decode_ready(self) -> Iterator[MooncakeLayerwiseXferMetadata]:
-        """Model thread: consume ready metadata published by the listener."""
+    def get_decode_ready_requests(self) -> Iterator[Destination]:
+        """Yield and remove queued D-ready metadata without waiting for new messages."""
         while True:
             try:
                 yield self.send_ready_queue.get_nowait()
             except Empty:
                 return
 
-    def get_transfer_regions(
-        self, transfer_id: str, rank: int
-    ) -> dict[int, tuple[list[TransferRegion], list[TransferRegion]]]:
-        """Executor only: borrow regions pinned until this destination is ACKed."""
-        with self._contexts_lock:
-            batch = self._ack_contexts[transfer_id][rank]
-            return batch.regions_by_layer
-
     def schedule_completion_ack(
-        self, transfer_id: str, rank: int, error: str | None
+        self, transfer_id: str, worker_key: WorkerKey, error: str | None
     ) -> None:
         """Model thread: schedule an ACK without touching the ZMQ socket."""
-        self._ack_send_futures.append(
-            asyncio.run_coroutine_threadsafe(
-                self._send_completion_ack(transfer_id, rank, error),
-                self._worker.sender_loop,
-            )
+        future = asyncio.run_coroutine_threadsafe(
+            self._send_completion_ack(transfer_id, worker_key, error),
+            self._worker.sender_loop,
         )
+        future.add_done_callback(self._log_ack_result)
 
-    def collect_ack_results(self) -> None:
-        """Model thread: report completed ACK failures without blocking."""
-        pending = []
-        for future in self._ack_send_futures:
-            if not future.done():
-                pending.append(future)
-                continue
-            try:
-                future.result()
-            except Exception:
-                logger.exception("Failed to deliver layerwise completion ACK")
-        self._ack_send_futures = pending
+    @staticmethod
+    def _log_ack_result(future: Future[None]) -> None:
+        """Completion callback: log failures without accessing request state."""
+        try:
+            future.result()
+        except Exception:
+            logger.exception("Failed to deliver layerwise completion ACK")
 
     async def receive_decode_ready(
         self,
@@ -269,20 +355,29 @@ class LayerwiseControler:
     ) -> None:
         """Register D-ready and release the listener worker immediately."""
         worker = self._worker
+        # The send margin covers ready's network/listener delay. Start before
+        # layout processing so it and the model-thread queue consume this budget.
+        send_deadline = time.monotonic() + meta.recv_timeout_s
         if (
-            meta.remote_pp_size != 1
-            or meta.logical_block_size != worker._logical_block_size
+            meta.remote_pcp_size < 1
+            or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size
+            or meta.pcp_cache_mode != "replicated"
+        ):
+            raise ValueError("Layerwise PCP requires complete cache replicas")
+        if (
+            meta.logical_block_size != worker.logical_block_size
             or meta.kernel_block_size != worker.block_size
         ):
             raise ValueError(
-                "Layerwise peers require PP1 and equal logical and kernel block sizes"
+                "Layerwise peers require equal logical and kernel block sizes"
             )
         if meta.remote_tp_rank not in worker.transfer_topo.handshake_target_ranks(
             meta.remote_tp_size
         ):
             raise ValueError("D TP rank does not pair with this P worker")
-        stored = worker._lookup_peer_layout(meta)
-        if stored is None:
+        key = (meta.worker_key, worker._peer_layout_key(meta), meta.remote_pcp_size)
+        layout = self._layouts.get(key) if meta.layout_id else None
+        if layout is None:
             if not meta.kv_caches_base_addr:
                 response = MooncakeXferResponse(
                     status=MooncakeXferResponseStatus.LAYOUT_MISS
@@ -291,16 +386,49 @@ class LayerwiseControler:
                     (identity, self._worker._encoder.encode(response))
                 )
                 return
-            local, remote, error = self._prepare_transfer_regions(meta)
-            if error is not None:
-                raise ValueError(error)
+            local, remote = self._prepare_transfer_regions(meta)
+            regions_by_layer: dict[
+                str, tuple[list[TransferRegion], list[TransferRegion]]
+            ] = {}
+            for p, d in zip(local, remote):
+                pair = regions_by_layer.setdefault(p.layer_name, ([], []))
+                pair[0].append(p)
+                pair[1].append(d)
+            remote_groups: dict[str, int] = {}
+            for name, group in zip(
+                meta.registered_layer_names, meta.registered_group_indices
+            ):
+                if group < 0 or remote_groups.setdefault(name, group) != group:
+                    raise ValueError(f"Ambiguous remote group for {name}")
+            remote_kv_cache_names: dict[int, list[str]] = {}
+            for name in regions_by_layer:
+                remote_kv_cache_names.setdefault(
+                    worker._layer_index_by_name[name], []
+                ).append(name)
+            layout = LayerwisePeerLayout(
+                regions_by_layer,
+                remote_groups,
+                remote_kv_cache_names,
+                sorted(regions_by_layer),
+                frozenset(
+                    (meta.remote_engine_id, tp, pp, pcp)
+                    for tp in worker.transfer_topo.handshake_target_ranks(
+                        meta.remote_tp_size
+                    )
+                    for pp in range(meta.remote_pp_size)
+                    for pcp in range(meta.remote_pcp_size)
+                ),
+            )
+            if meta.layout_id:
+                self._layouts[key] = layout
+                while len(self._layouts) > _MAX_PEER_LAYOUTS:
+                    self._layouts.popitem(last=False)
         else:
-            local, remote = stored
+            self._layouts.move_to_end(key)
         pending: dict[str, str] = {}
         for req_id, (transfer_id, _) in meta.req_blocks.items():
-            peers = self._ack_contexts.get(transfer_id, {})
-            if meta.remote_tp_rank in peers:
-                raise ValueError("Duplicate D-ready for this transfer and TP rank")
+            if (transfer_id, meta.worker_key) in self._ack_contexts:
+                raise ValueError("Duplicate D-ready for this transfer and worker")
             pending[transfer_id] = req_id
         if not pending:
             response = MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
@@ -308,35 +436,29 @@ class LayerwiseControler:
                 (identity, self._worker._encoder.encode(response))
             )
             return
-        regions_by_layer: dict[
-            int, tuple[list[TransferRegion], list[TransferRegion]]
-        ] = {}
-        # P/D regions have already been aligned by their full cache names.
-        for p, d in zip(local, remote):
-            pair = regions_by_layer.setdefault(p.layer_index, ([], []))
-            pair[0].append(p)
-            pair[1].append(d)
-        batch = DecodeBatch(identity, sock, pending, meta.layout_id, regions_by_layer)
-        with self._contexts_lock:
-            for transfer_id in pending:
-                self._ack_contexts.setdefault(transfer_id, {})[meta.remote_tp_rank] = (
-                    batch
-                )
-        self.send_ready_queue.put(meta)
+        batch = DecodeBatch(identity, sock, pending, meta.layout_id, layout)
+        for transfer_id, req_id in pending.items():
+            blocks = meta.req_blocks[req_id][1]
+            required_layers = tuple(
+                name
+                for name in layout.regions_by_layer
+                if blocks and blocks[layout.remote_group_by_layer[name]]
+            )
+            self._ack_contexts[transfer_id, meta.worker_key] = batch
+            self.send_ready_queue.put(
+                Destination(req_id, meta, layout, send_deadline, required_layers)
+            )
 
     async def _send_completion_ack(
-        self, transfer_id: str, rank: int, error: str | None
+        self, transfer_id: str, worker_key: WorkerKey, error: str | None
     ) -> None:
-        with self._contexts_lock:
-            peers = self._ack_contexts.get(transfer_id)
-            if peers is None or rank not in peers:
-                return
-            batch = peers.pop(rank)
-            if not peers:
-                del self._ack_contexts[transfer_id]
+        batch = self._ack_contexts.pop((transfer_id, worker_key), None)
+        if batch is None:
+            return
         async with batch.lock:
             req_id = batch.pending.pop(transfer_id)
-            response = MooncakeXferResponse(
+            response = LayerwiseXferResponse(
+                covered_layers=batch.layout.covered_layers,
                 status=(
                     MooncakeXferResponseStatus.CONTINUE
                     if batch.pending
@@ -352,21 +474,12 @@ class LayerwiseControler:
             )
 
     def _prepare_transfer_regions(
-        self, meta: MooncakeXferMetadata
-    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+        self, meta: MooncakeLayerwiseXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion]]:
         worker = self._worker
         # The base implementation coalesces across layers, losing the layer
         # identities needed for readiness. Keep its alignment and TP validation.
-        local = worker._get_transfer_regions(
-            worker.kv_caches_base_addr,
-            worker.block_len_per_layer,
-            worker.kv_block_len_per_layer,
-            worker.registered_layer_names,
-            worker.registered_layer_indices,
-            worker.registered_group_indices,
-            worker.region_shared_groups,
-            worker.region_row_offsets,
-        )
+        local = worker._local_transfer_regions
         remote = worker._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
@@ -377,49 +490,136 @@ class LayerwiseControler:
             [tuple(groups) for groups in meta.registered_shared_group_ids] or None,
             meta.registered_row_offsets or None,
         )
-        local, remote, error = _align_transfer_regions(local, remote)
-        if error is None:
-            error = worker._validate_head_resharding_layout(meta.remote_tp_size, local)
-        if error is None:
-            error = _validate_asymmetric_region_lengths(
-                local_regions=local,
-                remote_regions=remote,
-                local_tp_size=worker.tp_size,
-                remote_tp_size=meta.remote_tp_size,
-                producer_cache_replicated=worker._producer_cache_is_replicated(),
-                total_num_kv_heads=(
-                    None if worker.use_mla else worker.transfer_topo.total_num_kv_heads
-                ),
+        if any(r.group_index < 0 for r in (*local, *remote)):
+            raise ValueError(
+                "Layerwise requires individually attributable cache regions"
             )
-        worker._remember_peer_layout(meta, (local, remote, error))
-        return local, remote, error
+        for index, region in enumerate(remote):
+            if region.layer_name in worker._layer_specs:
+                group = worker.get_group_from_layer_name(region.layer_name)
+                remote[index] = replace(
+                    region, group_index=group, shared_group_ids=(group,)
+                )
+        for kv_cache_name in set(worker._layer_specs) & set(
+            meta.registered_layer_names
+        ):
+            if isinstance(
+                worker._layer_specs[kv_cache_name], (MambaSpec, CircularBufferSpec)
+            ) and (meta.remote_tp_size != worker.tp_size):
+                raise ValueError("Recurrent states currently require equal TP sizes")
+            if (
+                meta.cache_specs.get(kv_cache_name)
+                != worker._cache_specs[kv_cache_name]
+            ):
+                raise ValueError(f"Incompatible cache semantics for {kv_cache_name}")
+        local, remote, error = _align_transfer_regions(
+            local, remote, allow_partial_layers=True
+        )
+        if error:
+            raise ValueError(error)
+        if (worker.tp_size == meta.remote_tp_size or worker.use_mla) and any(
+            p.kv_block_len != d.kv_block_len for p, d in zip(local, remote)
+        ):
+            raise ValueError("Peer cache component payload lengths differ")
+        error = worker._validate_head_resharding_layout(
+            meta.remote_tp_size, local
+        ) or _validate_asymmetric_region_lengths(
+            local_regions=local,
+            remote_regions=remote,
+            local_tp_size=worker.tp_size,
+            remote_tp_size=meta.remote_tp_size,
+            producer_cache_replicated=worker._producer_cache_is_replicated(),
+            total_num_kv_heads=(
+                None if worker.use_mla else worker.transfer_topo.total_num_kv_heads
+            ),
+        )
+        if error:
+            raise ValueError(error)
+        return local, remote
 
 
 class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        kv_config = self.vllm_config.kv_transfer_config
+        assert kv_config is not None
+        self.send_timeout_margin_s = float(
+            kv_config.get_from_extra_config("layerwise_send_timeout_margin_s", 10)
+        )
+        if not 0 <= self.send_timeout_margin_s < float("inf"):
+            raise ValueError("layerwise_send_timeout_margin_s must be finite and >= 0")
         self.requests_to_send: dict[str, RequestState] = {}
-        self._step_transfer_ids: tuple[str, ...] = ()
-        self._logical_block_size = self.vllm_config.cache_config.block_size
+        # Transfer IDs of requests prefilling in the current scheduler step.
+        self.prefilling_transfer_ids: tuple[str, ...] = ()
+        self.logical_block_size = self.vllm_config.cache_config.block_size
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeLayerwiseXferMetadata)
-        self._control_channel = LayerwiseControler(self)
-        self._send_future: Future[LayerwiseSendResult] | None = None
+        self._xfer_resp_decoder = msgspec.msgpack.Decoder(LayerwiseXferResponse)
+        self._received_layers: dict[str, set[str]] = {}
+        self._control_channel = LayerwiseController(self)
+        self._pending_sends: list[
+            tuple[tuple[LayerwiseSendTask, ...], Future[LayerwiseSendResult]]
+        ] = []
         self._ready_event: torch.Event | None = None
-        self._ready_layer_index: int | None = None
-        self._retired: dict[str, float] = {}
+        self.retired_transfer_expiry_times: dict[str, float] = {}
         self._layer_index_by_name: dict[str, int] = {}
-        self._layer_indices: tuple[int, ...] = ()
+        self._cache_specs: dict[str, str] = {}
+        self._local_transfer_regions: list[TransferRegion] = []
+        self._kernel_block_ratios: tuple[int, ...] = ()
+
+    @property
+    def pcp_rank(self) -> int:
+        if self.vllm_config.parallel_config.prefill_context_parallel_size == 1:
+            return 0
+        return get_pcp_group().rank_in_group
+
+    def _should_launch_bootstrap_server(self) -> bool:
+        return self.pcp_rank == 0 and super()._should_launch_bootstrap_server()
+
+    async def register_worker_with_bootstrap(self):
+        # The base listener publishes this worker before register_kv_caches returns.
+        self._init_layerwise_layout()
+        # Only replica zero is an advertised source. The remaining ranks still
+        # take part in model execution and worker completion aggregation.
+        if self.pcp_rank == 0:
+            await super().register_worker_with_bootstrap()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self._kv_layout_id:
             raise RuntimeError("Layerwise does not support replacing KV storage")
         super().register_kv_caches(kv_caches)
+        if self.is_kv_consumer:
+            self._init_layerwise_layout()
+
+    def _init_layerwise_layout(self) -> None:
         if self.opaque_packed_storages:
             raise ValueError("Layerwise requires individually addressable layers")
         self._layer_index_by_name = dict(
             zip(self.registered_layer_names, self.registered_layer_indices)
         )
-        self._layer_indices = tuple(dict.fromkeys(self.registered_layer_indices))
+        if self._layer_index_by_name.keys() != self._layer_specs.keys():
+            raise ValueError("Registration collapsed cache writer identities")
+        self._cache_specs = {
+            name: self._spec_signature(name) for name in self._layer_specs
+        }
+        self._kernel_block_ratios = tuple(
+            self._physical_blocks_for_spec(
+                next(iter(iter_layer_specs(group.kv_cache_spec)))
+            )
+            for group in self.kv_cache_config.transfer_groups
+        )
+        self._local_transfer_regions = [
+            replace(region, shared_group_ids=(region.group_index,))
+            for region in self._get_transfer_regions(
+                self.kv_caches_base_addr,
+                self.block_len_per_layer,
+                self.kv_block_len_per_layer,
+                self.registered_layer_names,
+                self.registered_layer_indices,
+                self.registered_group_indices,
+                self.region_shared_groups,
+                self.region_row_offsets,
+            )
+        ]
 
     def shutdown(self) -> None:
         # Drain device readers before the base worker tears down the transport.
@@ -436,27 +636,132 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
             identity, sock, cast(MooncakeLayerwiseXferMetadata, meta)
         )
 
-    def _drain_decode_ready(self) -> None:
-        for meta in self._control_channel.drain_decode_ready():
-            for req_id, (transfer_id, _) in meta.req_blocks.items():
-                if transfer_id in self._retired:
-                    self._control_channel.schedule_completion_ack(
-                        transfer_id, meta.remote_tp_rank, "P transfer already retired"
-                    )
-                    continue
-                state = self.requests_to_send.setdefault(
-                    transfer_id, RequestState(transfer_id)
+    def process_decode_ready_requests(self) -> None:
+        for destination in self._control_channel.get_decode_ready_requests():
+            meta = destination.meta
+            transfer_id, _ = meta.req_blocks[destination.remote_req_id]
+            if transfer_id in self.retired_transfer_expiry_times:
+                self._control_channel.schedule_completion_ack(
+                    transfer_id, meta.worker_key, "P transfer already retired"
                 )
-                if state.req_id is None and not state.destinations:
-                    state.deadline = (
-                        time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-                    )
-                if meta.remote_tp_rank in state.destinations:
-                    self._control_channel.schedule_completion_ack(
-                        transfer_id, meta.remote_tp_rank, "Duplicate D-ready"
-                    )
-                    continue
-                state.destinations[meta.remote_tp_rank] = req_id, meta
+                continue
+            state = self.requests_to_send.get(transfer_id)
+            if state is None:
+                state = RequestState(transfer_id)
+                self.requests_to_send[transfer_id] = state
+            if state.req_id is None and not state.destinations:
+                state.deadline = (
+                    time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+                )
+            if meta.worker_key in state.destinations:
+                self._control_channel.schedule_completion_ack(
+                    transfer_id, meta.worker_key, "Duplicate D-ready"
+                )
+                continue
+            state.destinations[meta.worker_key] = destination
+
+    def get_group_from_layer_name(self, kv_cache_name: str) -> int:
+        return self.kv_cache_config.transfer_group_index_by_layer[kv_cache_name]
+
+    def _spec_signature(self, kv_cache_name: str) -> str:
+        spec = self._layer_specs[kv_cache_name]
+        if isinstance(spec, CircularBufferSpec):
+            return repr(
+                (
+                    type(spec).__name__,
+                    spec.block_size,
+                    spec.page_size_bytes,
+                    spec.head_size,
+                    str(spec.dtype),
+                    spec.tokens_per_state,
+                )
+            )
+        if isinstance(spec, MambaSpec):
+            return repr(
+                (
+                    type(spec).__name__,
+                    spec.block_size,
+                    spec.shapes,
+                    tuple(str(dtype) for dtype in spec.dtypes),
+                    spec.mamba_type,
+                    spec.mamba_cache_mode,
+                    spec.num_speculative_blocks,
+                    spec.num_prefill_checkpoint_blocks,
+                    spec.tokens_per_state,
+                    spec.tp_replicated,
+                )
+            )
+        return repr(
+            (
+                type(spec).__name__,
+                spec.block_size,
+                str(spec.dtype),
+                spec.head_size,
+                getattr(spec, "head_size_v", None),
+                str(spec.tokens_per_state),
+                getattr(spec, "cache_dtype_str", None),
+                str(spec.kv_quant_mode),
+                getattr(spec, "model_version", None),
+                getattr(spec, "sliding_window", None),
+                getattr(spec, "extra_retained_tokens", 0),
+                getattr(spec, "bounded_replay", False),
+            )
+        )
+
+    def _logical_to_kernel_block_ids(self, block_ids):
+        return [
+            [block * ratio + offset for block in ids for offset in range(ratio)]
+            for ratio, ids in zip(self._kernel_block_ratios, block_ids)
+        ]
+
+    def _preserve_cache_region_identity(self) -> bool:
+        return True
+
+    def _physical_blocks_for_spec(self, spec):
+        if isinstance(spec, (MambaSpec, CircularBufferSpec)):
+            return 1
+        if spec.block_size % self.block_size:
+            raise ValueError("Group block size must divide into kernel blocks")
+        return spec.block_size // self.block_size
+
+    def receive_kv(self, remote_engine_id, pull_metas):
+        # Query all P stages even for equal PP sizes: layer partitions can differ.
+        ranks = self.transfer_topo.handshake_target_ranks(
+            self._tp_size[remote_engine_id]
+        )
+        addresses = {
+            address
+            for rank in ranks
+            for address in self._remote_agents[remote_engine_id][rank].values()
+        }
+        if not addresses:
+            self._handle_failed_recv(pull_metas, list(pull_metas), "No source stages")
+            return
+        for pull in pull_metas.values():
+            pull.pull_tasks_count = len(addresses)
+            self._received_layers[pull.d_req_id] = set()
+        for address in addresses:
+            asyncio.create_task(self.receive_kv_from_single_worker(address, pull_metas))
+
+    def process_pulling_result(self, response, pull_metas):
+        for req_id in response.ok_reqs or ():
+            pull = pull_metas.get(req_id)
+            if pull is None:
+                continue
+            covered = self._received_layers[pull.d_req_id]
+            covered.update(response.covered_layers)
+            if (
+                pull.pull_tasks_count == 1
+                and not pull.failed
+                and not self._layer_index_by_name.keys() <= covered
+            ):
+                raise RuntimeError("Producer stages omitted required cache layers")
+        super().process_pulling_result(response, pull_metas)
+
+    def _complete_pull_task(self, pull_meta):
+        super()._complete_pull_task(pull_meta)
+        if pull_meta.pull_tasks_count == 0:
+            self._received_layers.pop(pull_meta.d_req_id, None)
 
     def _build_pull_metadata(
         self, pull_metas: dict[str, PullReqMeta], *, include_layout: bool
@@ -464,8 +769,15 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
         base = super()._build_pull_metadata(pull_metas, include_layout=include_layout)
         return MooncakeLayerwiseXferMetadata(
             **{name: getattr(base, name) for name in base.__struct_fields__},
-            logical_block_size=self._logical_block_size,
+            cache_specs=self._cache_specs if include_layout else {},
+            remote_engine_id=self.engine_id,
+            remote_pp_rank=self.pp_rank,
+            remote_pcp_rank=self.pcp_rank,
+            remote_pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
+            logical_block_size=self.logical_block_size,
             kernel_block_size=self.block_size,
+            # Match D's base receiver RCVTIMEO without exchanging clock values.
+            recv_timeout_s=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60,
         )
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
@@ -473,37 +785,29 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
             super().start_load_kv(metadata)
             return
         assert isinstance(metadata, MooncakeLayerwiseMetadata)
-        self._collect_send_results(wait=True)
-        self._drain_decode_ready()
+        # wait_for_save must drain device readers before replacing block tables.
+        assert not self._pending_sends
+        self.process_decode_ready_requests()
         ids = tuple(request.transfer_id for request in metadata.requests)
+        # Reset preempted progress before applying this step's prefill metadata.
         for state in self.requests_to_send.values():
             if state.req_id in metadata.preempted_req_ids:
-                state.preempted = True
-                state.sent_tokens.clear()
-                state.available_tokens.clear()
-                state.sealed = False
+                state.mark_preempted()
         for request in metadata.requests:
             state = self.requests_to_send.get(request.transfer_id)
             if state is None:
                 state = RequestState(request.transfer_id)
                 self.requests_to_send[request.transfer_id] = state
-            state.req_id = request.req_id
-            state.block_ids = request.block_ids
-            state.num_computed_tokens = request.num_computed_tokens
-            state.num_scheduled_tokens = request.num_scheduled_tokens
-            state.num_prompt_tokens = request.num_prompt_tokens
-            state.is_final_chunk = request.is_final_chunk
-            state.preempted = False
-            state.inference_finished = False
-            # Scheduled requests are still computing. The send timeout starts
-            # only when the scheduler publishes their finished prefill below.
-            state.deadline = float("inf")
+            state.update_from_metadata(request)
+        # Mooncake uses empty blocks for initialization, final blocks for handoff.
         for transfer_id, blocks in metadata.reqs_to_send.values():
             if not any(blocks):
                 continue
             state = self.requests_to_send[transfer_id]
+            state.block_ids = tuple(tuple(group) for group in blocks)
             state.inference_finished = True
             state.deadline = time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        # Finished requests without a normal handoff are treated as aborted.
         aborted = metadata.reqs_not_processed | {
             transfer_id
             for transfer_id, state in self.requests_to_send.items()
@@ -515,203 +819,285 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
             if state is not None:
                 state.error = "P request ended without a transferable prefill"
                 self._finish_destinations(state)
-            # The base scheduler already freed aborted requests' blocks.
+            # Retire worker state; KV block release belongs to the scheduler.
             self._retire_request(transfer_id)
-        self._step_transfer_ids = ids
+        self.prefilling_transfer_ids = ids
+        # No-forward steps skip wait_for_save; drain transfers here instead.
+        if not ids:
+            self._process_pending_transfers(wait=True)
 
     def _send_batch(
-        self, tasks: tuple[LayerwiseSendTask, ...], event: torch.Event
+        self, session: str, tasks: tuple[LayerwiseSendTask, ...], event: torch.Event
     ) -> LayerwiseSendResult:
-        """Executor: build and aggregate addresses, fence device writes, then WRITE."""
+        """Executor: prepare and send one destination's batch."""
         result = LayerwiseSendResult()
-        writes: dict[str, tuple[list[int], list[int], list[int]]] = {}
-        try:
-            for task in tasks:
-                meta = task.meta
-                rank = meta.remote_tp_rank
-                regions_by_layer = self._control_channel.get_transfer_regions(
-                    task.transfer_id, rank
+        planned_transfers = []
+        for layer_transfer_task in tasks:
+            destination = layer_transfer_task.destination
+            meta = destination.meta
+            regions_by_layer = destination.layout.regions_by_layer
+            local, remote = regions_by_layer[layer_transfer_task.kv_cache_name]
+            send_meta = SendBlockMeta(
+                layer_transfer_task.req_id,
+                layer_transfer_task.transfer_id,
+                [list(g) for g in layer_transfer_task.block_ids],
+                asyncio.Event(),
+            )
+            task_meta = msgspec.structs.replace(
+                meta,
+                req_blocks={
+                    destination.remote_req_id: (
+                        layer_transfer_task.transfer_id,
+                        [list(g) for g in layer_transfer_task.remote_block_ids],
+                    )
+                },
+            )
+            src, dst, sizes, errors, error = self._build_transfer_params_sync(
+                [(destination.remote_req_id, send_meta)],
+                task_meta,
+                local,
+                remote,
+            )
+            if errors:
+                result.errors[layer_transfer_task.transfer_id] = (
+                    error or "Address planning failed"
                 )
-                remote_blocks = meta.req_blocks[task.remote_req_id][1][0]
-                for layer_index, start, end in task.layers:
-                    local, remote = regions_by_layer[layer_index]
-                    send = SendBlockMeta(
-                        task.req_id,
-                        task.transfer_id,
-                        [list(task.block_ids[start:end])],
-                        asyncio.Event(),
-                    )
-                    destination_blocks = [
-                        remote_blocks[
-                            start - task.remote_block_offset : end
-                            - task.remote_block_offset
-                        ]
-                    ]
-                    sliced = msgspec.structs.replace(
-                        meta,
-                        req_blocks={
-                            task.remote_req_id: (task.transfer_id, destination_blocks)
-                        },
-                    )
-                    src, dst, sizes, errors, error = self._build_transfer_params_sync(
-                        [(task.remote_req_id, send)],
-                        sliced,
-                        local,
-                        remote,
-                    )
-                    if errors:
-                        result.errors[task.transfer_id] = (
-                            error or "Failed to plan layer transfer"
-                        )
-                        break
-                    session = f"{meta.remote_hostname}:{meta.remote_port}"
-                    batch = writes.setdefault(session, ([], [], []))
-                    batch[0].extend(src)
-                    batch[1].extend(dst)
-                    batch[2].extend(sizes)
-                    result.progress.append(
-                        (
-                            task.transfer_id,
-                            rank,
-                            layer_index,
-                            end * self._logical_block_size,
-                        )
-                    )
-            event.synchronize()
-            for session, (src, dst, sizes) in writes.items():
-                if src:
-                    ret = self._send_blocks(session, src, dst, sizes)
-                    if ret != 0:
-                        raise RuntimeError(f"Mooncake WRITE returned {ret}")
-        except Exception as exc:
-            # Preserve the existing batch-wide failure policy. No partial
-            # success is published after an event or transport failure.
-            logger.exception("Layerwise send batch failed")
-            result.errors.update((task.transfer_id, str(exc)) for task in tasks)
-            result.progress.clear()
+                continue
+            planned_transfers.append((layer_transfer_task, src, dst, sizes))
+        event.synchronize()
+        now = time.monotonic()
+        for layer_transfer_task in tasks:
+            if (
+                now + self.send_timeout_margin_s
+                >= layer_transfer_task.destination.send_deadline
+            ):
+                result.errors[layer_transfer_task.transfer_id] = (
+                    "D receive deadline too close for WRITE"
+                )
+        batch_src: list[int] = []
+        batch_dst: list[int] = []
+        batch_sizes: list[int] = []
+        for layer_transfer_task, src, dst, sizes in planned_transfers:
+            # Drop every layer of a failed request, retaining healthy requests
+            # in the same WRITE batch.
+            if layer_transfer_task.transfer_id in result.errors:
+                continue
+            batch_src.extend(src)
+            batch_dst.extend(dst)
+            batch_sizes.extend(sizes)
+            result.progress.append(
+                (
+                    layer_transfer_task.transfer_id,
+                    layer_transfer_task.destination.meta.worker_key,
+                    layer_transfer_task.kv_cache_name,
+                    layer_transfer_task.end_tokens,
+                )
+            )
+        if batch_src:
+            ret = self._send_blocks(session, batch_src, batch_dst, batch_sizes)
+            if ret != 0:
+                raise RuntimeError(f"Mooncake WRITE returned {ret}")
         return result
 
-    def _collect_send_results(self, *, wait: bool = False) -> None:
-        future = self._send_future
-        if future is None or (not wait and not future.done()):
+    def _finish_pending_send(self, *, wait: bool = False) -> None:
+        if not self._pending_sends:
             return
-        result = future.result()
-        for transfer_id, rank, layer_index, end in result.progress:
-            self.requests_to_send[transfer_id].sent_tokens[rank, layer_index] = end
-        for transfer_id, error in result.errors.items():
-            self.requests_to_send[transfer_id].error = error
-        self._send_future = None
+        if not wait and any(not future.done() for _, future in self._pending_sends):
+            return
+        # Drain every batch before allowing completion or block release.
+        for tasks, future in self._pending_sends:
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.exception("Layerwise send batch failed")
+                error = str(exc)
+                for layer_transfer_task in tasks:
+                    self.requests_to_send[layer_transfer_task.transfer_id].error = error
+            else:
+                for transfer_id, worker_key, layer_name, end in result.progress:
+                    self.requests_to_send[transfer_id].sent_tokens[
+                        worker_key, layer_name
+                    ] = end
+                for transfer_id, error in result.errors.items():
+                    self.requests_to_send[transfer_id].error = error
+        self._pending_sends.clear()
+
+    def _build_layer_transfer_task(self, state, destination, kv_cache_name):
+        meta = destination.meta
+        local_group_index = self.get_group_from_layer_name(kv_cache_name)
+        remote_group_index = destination.layout.remote_group_by_layer[kv_cache_name]
+        _, remote_block_ids = meta.req_blocks[destination.remote_req_id]
+        remote_group_block_ids = remote_block_ids[remote_group_index]
+        if not remote_group_block_ids:
+            return None
+        spec = self._layer_specs[kv_cache_name]
+        block_size = spec.block_size
+        layer_index = self._layer_index_by_name[kv_cache_name]
+        available_tokens = state.available_tokens[layer_index]
+        final_layer_ready = state.sealed or (
+            state.is_final_chunk and available_tokens == state.scheduled_end_tokens
+        )
+        sent_tokens = state.sent_tokens.get((meta.worker_key, kv_cache_name))
+        is_state = isinstance(spec, (MambaSpec, CircularBufferSpec))
+        is_window = getattr(spec, "sliding_window", None) is not None
+        # State and window caches are sent once, when this layer's final KV is ready.
+        if (is_state or is_window) and (
+            not final_layer_ready or sent_tokens is not None
+        ):
+            return None
+        if is_state:
+            plan = plan_final_state(
+                state.block_ids[local_group_index],
+                remote_group_block_ids,
+                token_end=state.num_prompt_tokens,
+                null_block=NULL_BLOCK_ID,
+            )
+        elif is_window:
+            plan = plan_final_window(
+                state.block_ids[local_group_index],
+                remote_group_block_ids,
+                token_end=state.num_prompt_tokens,
+                block_size=block_size,
+                null_block=NULL_BLOCK_ID,
+            )
+        else:
+            plan = plan_append_blocks(
+                state.block_ids[local_group_index],
+                remote_group_block_ids,
+                token_end=state.num_prompt_tokens,
+                available=available_tokens,
+                sent=sent_tokens,
+                block_size=block_size,
+                final=final_layer_ready,
+            )
+        if plan is None:
+            return None
+        local_groups = [()] * len(state.block_ids)
+        remote_groups = [()] * len(state.block_ids)
+        local_groups[local_group_index] = plan.source
+        remote_groups[local_group_index] = plan.destination
+        return LayerwiseSendTask(
+            transfer_id=state.transfer_id,
+            req_id=cast(str, state.req_id),
+            destination=destination,
+            kv_cache_name=kv_cache_name,
+            block_ids=tuple(local_groups),
+            remote_block_ids=tuple(remote_groups),
+            end_tokens=plan.end_tokens,
+        )
 
     def _submit_available_layers(self) -> None:
-        """Model thread: snapshot block ranges without accessing regions."""
-        if self._send_future is not None:
+        """Model thread: snapshot block ranges and retain their destination layouts."""
+        if self._pending_sends:
             return
-        tasks = []
-        block_size = self._logical_block_size
+        session_tasks: dict[str, list[LayerwiseSendTask]] = {}
         now = time.monotonic()
         for state in self.requests_to_send.values():
             if now >= state.deadline:
                 state.error = "Layerwise transfer expired before submission"
+            if any(
+                worker_key not in state.ack_scheduled_workers
+                and destination.required_layers
+                and now + self.send_timeout_margin_s >= destination.send_deadline
+                for worker_key, destination in state.destinations.items()
+            ):
+                state.error = "D receive deadline too close for WRITE"
             if state.preempted or state.error or not state.block_ids:
                 continue
-            for rank, (req_id, meta) in state.destinations.items():
-                if rank in state.completed_ranks:
+            for worker_key, destination in state.destinations.items():
+                meta = destination.meta
+                if (
+                    worker_key in state.ack_scheduled_workers
+                    or not destination.required_layers
+                ):
                     continue
-                remote_blocks = meta.req_blocks[req_id][1]
-                if not any(remote_blocks):
-                    continue
-                target_end = (state.num_prompt_tokens + block_size - 1) // block_size
-                # D requests the uncached suffix of the full prompt.
-                offset = target_end - len(remote_blocks[0])
-                if offset < 0:
-                    state.error = "D requests more blocks than P's prompt contains"
+                remote_kv_cache_names = destination.layout.remote_kv_cache_names
+                session = f"{meta.remote_hostname}:{meta.remote_port}"
+                try:
+                    for layer_index in state.available_tokens:
+                        for kv_cache_name in remote_kv_cache_names.get(layer_index, ()):
+                            layer_transfer_task = self._build_layer_transfer_task(
+                                state, destination, kv_cache_name
+                            )
+                            if layer_transfer_task is not None:
+                                session_tasks.setdefault(session, []).append(
+                                    layer_transfer_task
+                                )
+                except ValueError as exc:
+                    state.error = str(exc)
                     break
-                layers = []
-                for layer_index in self._layer_indices:
-                    if (
-                        self._ready_layer_index is not None
-                        and layer_index > self._ready_layer_index
-                    ):
-                        continue
-                    available = state.available_tokens.get(layer_index, 0)
-                    end = available // block_size
-                    if state.sealed or (
-                        state.is_final_chunk and available == state.scheduled_end_tokens
-                    ):
-                        end = (available + block_size - 1) // block_size
-                    end = min(end, target_end)
-                    start = (
-                        state.sent_tokens.get((rank, layer_index), offset * block_size)
-                        // block_size
-                    )
-                    if end > start:
-                        layers.append((layer_index, start, end))
-                if layers:
-                    tasks.append(
-                        LayerwiseSendTask(
-                            state.transfer_id,
-                            state.req_id or "",
-                            req_id,
-                            meta,
-                            state.block_ids[0],
-                            offset,
-                            tuple(layers),
-                        )
-                    )
-        if tasks and self._ready_event is not None:
-            self._send_future = self._sender_executor.submit(
-                self._send_batch, tuple(tasks), self._ready_event
-            )
+        if session_tasks and self._ready_event is not None:
+            for session, tasks in session_tasks.items():
+                task_snapshot = tuple(
+                    layer_transfer_task
+                    for layer_transfer_task in tasks
+                    if self.requests_to_send[layer_transfer_task.transfer_id].error
+                    is None
+                )
+                if not task_snapshot:
+                    continue
+                future = self._sender_executor.submit(
+                    self._send_batch, session, task_snapshot, self._ready_event
+                )
+                self._pending_sends.append((task_snapshot, future))
 
-    def _progress_sends(self, *, wait: bool = False) -> None:
-        self._drain_decode_ready()
-        self._collect_send_results(wait=wait)
+    def _process_pending_transfers(self, wait: bool = False) -> None:
+        self.process_decode_ready_requests()
+        self._finish_pending_send(wait=wait)
         self._submit_available_layers()
         if wait:
-            # At most one executor batch is outstanding. Drain before the next
-            # scheduler step can reuse blocks or write the next partial block.
-            self._collect_send_results(wait=True)
+            # Finish all destination batches before advancing transfer state.
+            self._finish_pending_send(wait=True)
 
     def _finish_destinations(self, state: RequestState) -> bool:
         """ACK each D only after every required region reached its target."""
-        for rank, (req_id, meta) in state.destinations.items():
-            if rank in state.completed_ranks:
+        for worker_key, destination in state.destinations.items():
+            if worker_key in state.ack_scheduled_workers:
                 continue
-            blocks = meta.req_blocks[req_id][1]
-            if state.error is None and any(blocks):
-                if not state.sealed:
-                    continue
-                block_size = self._logical_block_size
-                target = (
-                    (state.num_prompt_tokens + block_size - 1) // block_size
-                ) * block_size
-                if any(
-                    state.sent_tokens.get((rank, layer_index), 0) < target
-                    for layer_index in self._layer_indices
-                ):
-                    continue
+            required_layers = destination.required_layers
+            if (
+                state.error is None
+                and required_layers
+                and (
+                    not state.sealed
+                    or any(
+                        state.sent_tokens.get((worker_key, name), -1)
+                        < state.num_prompt_tokens
+                        for name in required_layers
+                    )
+                )
+            ):
+                continue
             self._control_channel.schedule_completion_ack(
-                state.transfer_id, rank, state.error
+                state.transfer_id, worker_key, state.error
             )
-            state.completed_ranks.add(rank)
+            state.ack_scheduled_workers.add(worker_key)
         if not state.destinations:
             return False
-        meta = next(iter(state.destinations.values()))[1]
-        expected = set(self.transfer_topo.handshake_target_ranks(meta.remote_tp_size))
-        return expected <= state.completed_ranks
+        layout = next(iter(state.destinations.values())).layout
+        return layout.expected_workers <= state.ack_scheduled_workers
 
     def _retire_request(self, transfer_id: str) -> None:
         self.requests_to_send.pop(transfer_id, None)
-        self._retired[transfer_id] = (
-            time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-        )
+        if self.pcp_rank == 0:
+            self.retired_transfer_expiry_times[transfer_id] = (
+                time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+            )
 
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
         if not self.is_kv_producer:
             return super().get_finished()
-        # Also runs on empty scheduler steps held alive by delay_free. Late
-        # D-ready therefore flushes the sealed KV without another forward.
-        self._progress_sends(wait=True)
+        if self.pcp_rank != 0:
+            finished = set()
+            for transfer_id, state in list(self.requests_to_send.items()):
+                if state.inference_finished and state.req_id is not None:
+                    finished.add(state.req_id)
+                    self.requests_to_send.pop(transfer_id)
+            return finished or None, None
+        # Speculative runners may collect output before wait_for_save. Completion
+        # must not release blocks until that step's send barrier has run.
+        if self._pending_sends:
+            return None, None
         now = time.monotonic()
         finished: set[str] = set()
         for transfer_id, state in list(self.requests_to_send.items()):
@@ -725,10 +1111,11 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
                 # Keep active P requests, and ready-only requests awaiting P.
                 continue
             self._retire_request(transfer_id)
-        self._retired = {
-            tid: deadline for tid, deadline in self._retired.items() if deadline > now
+        self.retired_transfer_expiry_times = {
+            transfer_id: deadline
+            for transfer_id, deadline in self.retired_transfer_expiry_times.items()
+            if deadline > now
         }
-        self._control_channel.collect_ack_results()
         return finished or None, None
 
     @staticmethod
@@ -738,40 +1125,39 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
         event.record(stream)
         return event
 
-    def save_layer(self, layer_name: str) -> None:
-        if not self.is_kv_producer or not self._step_transfer_ids:
+    def save_kv_layer(self, layer_name: str) -> None:
+        if not self.is_kv_producer or not self.prefilling_transfer_ids:
             return
         layer_index = self._layer_index_by_name.get(layer_name)
         if layer_index is None:
             return
         # The attention save hook must follow all KV writes for this transformer
-        # layer, including an independent indexer. Its event fences the group.
+        # layer across groups, including an independent indexer.
         # All KV writes use one stream; this event fences earlier layers too.
         self._ready_event = self._record_event()
-        self._ready_layer_index = layer_index
-        for transfer_id in self._step_transfer_ids:
+        for transfer_id in self.prefilling_transfer_ids:
             state = self.requests_to_send[transfer_id]
             state.available_tokens[layer_index] = state.scheduled_end_tokens
-        self._progress_sends()
+        self._process_pending_transfers()
 
     def wait_for_save(self) -> None:
         if not self.is_kv_producer:
             return
-        if not self._step_transfer_ids:
-            self._progress_sends(wait=True)
+        if not self.prefilling_transfer_ids:
+            self._process_pending_transfers(wait=True)
             return
         # Retain the final fence for D-ready arriving without another forward.
         self._ready_event = self._record_event()
-        self._ready_layer_index = None
-        for transfer_id in self._step_transfer_ids:
+        layer_indices = set(self._layer_index_by_name.values())
+        for transfer_id in self.prefilling_transfer_ids:
             state = self.requests_to_send[transfer_id]
             if state.is_final_chunk:
                 state.sealed = True
                 # End-of-forward fallback for regions without a per-layer hook.
-                for layer_index in self._layer_indices:
+                for layer_index in layer_indices:
                     state.available_tokens[layer_index] = state.scheduled_end_tokens
-        self._progress_sends(wait=True)
-        self._step_transfer_ids = ()
+        self._process_pending_transfers(wait=True)
+        self.prefilling_transfer_ids = ()
 
 
 class MooncakeLayerwiseConnector(MooncakeConnector):
@@ -798,20 +1184,34 @@ class MooncakeLayerwiseConnector(MooncakeConnector):
             )
         assert transfer.engine_id is not None
         parallel = vllm_config.parallel_config
-        if (
-            parallel.pipeline_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-        ):
-            raise ValueError("Layerwise requires PP1 without context parallelism")
+        if parallel.decode_context_parallel_size != 1:
+            raise ValueError("Layerwise requires DCP1")
+        if parallel.prefill_context_parallel_size > 1:
+            if transfer.get_from_extra_config("pcp_cache_mode", None) != "replicated":
+                raise ValueError("PCP requires explicit pcp_cache_mode=replicated")
+            if any(
+                spec.dcp_sharded
+                for group in kv_cache_config.transfer_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            ):
+                raise ValueError("PCP-sharded cache cannot be sent as a replica")
+            if role == KVConnectorRole.WORKER:
+                transfer.engine_id = get_pcp_group().broadcast_object(
+                    transfer.engine_id, src=0
+                )
         groups = kv_cache_config.transfer_groups
-        if len(groups) != 1:
-            raise ValueError("Layerwise requires one full-attention KV group")
-        for spec in iter_layer_specs(groups[0].kv_cache_spec):
-            if not isinstance(spec, FullAttentionSpec):
+        if not groups:
+            raise ValueError("Layerwise requires transfer groups")
+        for spec in (
+            spec for group in groups for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            if not isinstance(
+                spec,
+                (FullAttentionSpec, SlidingWindowSpec, MambaSpec, CircularBufferSpec),
+            ):
                 raise ValueError("Layerwise requires full-attention KV specs")
-            if spec.sliding_window is not None or spec.attention_chunk_size is not None:
-                raise ValueError("Layerwise does not support windowed attention")
+            if getattr(spec, "attention_chunk_size", None) is not None:
+                raise ValueError("Chunked-local attention is not yet supported")
         KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
         self.engine_id = transfer.engine_id
         self.connector_scheduler = None
@@ -837,7 +1237,7 @@ class MooncakeLayerwiseConnector(MooncakeConnector):
         **kwargs: Any,
     ) -> None:
         assert isinstance(self.connector_worker, MooncakeLayerwiseWorker)
-        self.connector_worker.save_layer(layer_name)
+        self.connector_worker.save_kv_layer(layer_name)
 
     def wait_for_save(self) -> None:
         assert isinstance(self.connector_worker, MooncakeLayerwiseWorker)

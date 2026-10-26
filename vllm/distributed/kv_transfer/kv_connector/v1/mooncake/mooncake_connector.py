@@ -1347,7 +1347,7 @@ class MooncakeConnectorWorker:
             self._sender_listener_t.start()
 
             # Start bootstrap server on global rank 0.
-            if should_launch_bootstrap_server(vllm_config):
+            if self._should_launch_bootstrap_server():
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
                 self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
                 self.bootstrap_server.start()
@@ -1444,13 +1444,16 @@ class MooncakeConnectorWorker:
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
+            if self._should_launch_bootstrap_server() and hasattr(
                 self, "bootstrap_server"
             ):
                 self.bootstrap_server.shutdown()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
+
+    def _should_launch_bootstrap_server(self) -> bool:
+        return should_launch_bootstrap_server(self.vllm_config)
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -1797,6 +1800,12 @@ class MooncakeConnectorWorker:
             send_meta.need_send,
             remote_tp_ranks,
         )
+
+    def _preserve_cache_region_identity(self) -> bool:
+        return False
+
+    def _physical_blocks_for_spec(self, spec: KVCacheSpec) -> int:
+        return self._physical_blocks_per_logical_kv_block
 
     def _logical_to_kernel_block_ids(
         self, block_ids: list[list[int]]
@@ -2193,7 +2202,10 @@ class MooncakeConnectorWorker:
                 # peer's PP size is known.
                 dedupe_key = (view_addr, block_stride, kv_block_len)
                 region_idx = packed_view_to_region.get(dedupe_key)
-                if region_idx is not None:
+                if (
+                    region_idx is not None
+                    and not self._preserve_cache_region_identity()
+                ):
                     collapsed_views += 1
                     # -1 means these groups share the view. Flatten only them.
                     groups = list(self.region_shared_groups[region_idx])
@@ -2239,12 +2251,12 @@ class MooncakeConnectorWorker:
                 if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
-                        % self._physical_blocks_per_logical_kv_block
+                        % self._physical_blocks_for_spec(layer_spec)
                         == 0
                     )
                     kv_block_len = (
                         layer_spec.page_size_bytes
-                        // self._physical_blocks_per_logical_kv_block
+                        // self._physical_blocks_for_spec(layer_spec)
                     )
                 elif isinstance(layer_spec, MambaSpec) and block_is_contiguous:
                     kv_block_len = layer_spec.page_size_bytes
