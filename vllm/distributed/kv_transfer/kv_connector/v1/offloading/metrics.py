@@ -53,6 +53,14 @@ class _ConnectorMetricName:
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_lookup_async_delay_seconds"
     ALLOCATION_FAILURE = "vllm:kv_offload_allocation_failure"
+    RETENTION_STATES = "vllm:kv_offload_retention_states"
+    RETENTION_FINISHED_REQUESTS = "vllm:kv_offload_retention_finished_requests"
+    RETENTION_RESTORED_CHUNKS = "vllm:kv_offload_retention_restored_chunks"
+
+
+# Label of RETENTION_FINISHED_REQUESTS: how much of its prompt-boundary
+# recurrent state a request retained when it finished.
+RETAINED_LABEL = "retained"
 
 
 class _TransferType:
@@ -141,6 +149,30 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
             documentation=(
                 "Number of KV offload store allocation attempts that failed."
+            ),
+        ),
+        _ConnectorMetricName.RETENTION_STATES: OffloadingCounterMetadata(
+            documentation=(
+                "Number of prompt-boundary recurrent states that running "
+                "requests retained in the offload tier "
+                "(retain_running_prefixes). A deeper state that replaces a "
+                "shallower one counts again."
+            ),
+        ),
+        _ConnectorMetricName.RETENTION_FINISHED_REQUESTS: OffloadingCounterMetadata(
+            documentation=(
+                "Number of finished requests whose prompt reached a "
+                "recurrent-state boundary, by how much of that state they "
+                "retained in the offload tier: full, partial or none "
+                "(retain_running_prefixes)."
+            ),
+            labelnames=(RETAINED_LABEL,),
+        ),
+        _ConnectorMetricName.RETENTION_RESTORED_CHUNKS: OffloadingCounterMetadata(
+            documentation=(
+                "Number of prompt chunks that finished requests stored again "
+                "because they were evicted from the offload tier while the "
+                "request ran (retain_running_prefixes)."
             ),
         ),
     }

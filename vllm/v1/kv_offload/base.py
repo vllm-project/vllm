@@ -397,6 +397,32 @@ class OffloadingManager(ABC):
         """
         return
 
+    def retain(self, keys: Collection[OffloadKey], req_context: ReqContext) -> bool:
+        """Protect the given offloaded blocks from eviction until release().
+        Unlike prepare_load, no transfer follows. A retained block counts as
+        used by the request.
+
+        Args:
+            keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
+
+        Returns:
+            True if every block was offloaded and ready and is now retained;
+            False if any was not, in which case none is retained.
+
+        """
+        return False
+
+    def release(self, keys: Collection[OffloadKey], req_context: ReqContext):
+        """Ends a successful retain() of the given blocks.
+
+        Args:
+            keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
+
+        """
+        return
+
     @abstractmethod
     def prepare_store(
         self,
@@ -753,6 +779,15 @@ class OffloadingSpec(ABC):
         # reasoning models that strip thinking).
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
+        )
+
+        # When True, a running request keeps the recurrent state its prompt
+        # ends on resident in the offload tier, and when it finishes, stores
+        # again the prompt chunks evicted while it ran. A turn that runs
+        # longer than the tier takes to turn over then still leaves the next
+        # turn of its conversation a prefix to resume from.
+        self.retain_running_prefixes: bool = bool(
+            self.extra_config.get("retain_running_prefixes", False)
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)

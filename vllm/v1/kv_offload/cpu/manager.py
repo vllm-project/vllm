@@ -245,6 +245,20 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy.touch(keys, req_context)
 
     @override
+    def retain(self, keys: Collection[OffloadKey], req_context: ReqContext) -> bool:
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is None or not chunk.is_ready:
+                return False
+        # A load pin with no transfer.
+        self._prepare_load(keys, req_context, record_access=True)
+        return True
+
+    @override
+    def release(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self.complete_load(keys, req_context)
+
+    @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:

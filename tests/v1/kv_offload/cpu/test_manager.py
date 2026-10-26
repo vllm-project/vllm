@@ -564,6 +564,44 @@ def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
     assert [evicted_key for evicted_key, _ in evicted] == [key]
 
 
+def test_retain_is_all_or_nothing():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="lru")
+    ready, pending = to_keys([1, 2])
+    assert manager.prepare_store([ready, pending], _EMPTY_REQ_CTX) is not None
+    manager.complete_store([ready], _EMPTY_REQ_CTX)
+
+    # One chunk is still being written and one was never stored.
+    assert not manager.retain([ready, pending], _EMPTY_REQ_CTX)
+    assert not manager.retain([ready, to_key(3)], _EMPTY_REQ_CTX)
+    chunk = manager._policy.get(ready)
+    assert chunk is not None and chunk.ref_cnt == 0
+
+    manager.complete_store([pending], _EMPTY_REQ_CTX)
+    assert manager.retain([ready, pending], _EMPTY_REQ_CTX)
+
+
+def test_retained_chunk_is_not_evicted_until_released():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="lru")
+    retained, other = to_keys([1, 2])
+    assert manager.prepare_store([retained, other], _EMPTY_REQ_CTX) is not None
+    manager.complete_store([retained, other], _EMPTY_REQ_CTX)
+    ctx = make_req_context("running")
+    assert manager.retain([retained], ctx)
+
+    output = manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    assert output is not None
+    assert output.evicted_keys == [other]
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    # Once released, it is evictable again. Retaining counts as a use by the
+    # request, so when the request finishes it ranks as newer than chunk 3.
+    manager.release([retained], ctx)
+    manager.on_request_finished(ctx)
+    output = manager.prepare_store(to_keys([4, 5]), make_req_context("evict"))
+    assert output is not None
+    assert output.evicted_keys == [to_key(3), retained]
+
+
 def test_reset_discards_stale_request_access_classification():
     manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
     policy = manager._policy
