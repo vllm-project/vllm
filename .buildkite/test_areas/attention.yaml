@@ -33,7 +33,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
       commands:
-      - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py
+      - pytest -v -s v1/attention --ignore=v1/attention/backends --ignore=v1/attention/test_sparse_mla_backends.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (B200) V1 Attention"
@@ -67,7 +67,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
       commands:
-      - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
+      - pytest -v -s v1/attention --ignore=v1/attention/backends --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
@@ -83,3 +83,111 @@ steps:
   - tests/v1/attention/test_attention_backends.py
   commands:
   - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness
+
+- label: ":amd: (MI355) ROCM_AITER_FA Backend %N"
+  key: amd-rocm-aiter-fa-backend-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  parallelism: 2
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/attention/ops/merge_attn_states.py
+  - vllm/model_executor/layers/attention
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends
+  - tests/v1/attention/model_shapes.py
+  - tests/v1/attention/utils.py
+  commands:
+  - pytest -v -s -m 'not slow_test' v1/attention/backends/rocm_aiter_fa --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_AITER_FA Engine Runtime %N"
+  key: amd-rocm-aiter-fa-runtime-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  parallelism: 4
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/attention/ops/merge_attn_states.py
+  - vllm/model_executor/layers/attention
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - vllm/v1/worker
+  - vllm/v1/core/sched
+  - vllm/compilation
+  - vllm/models/muse_spark/amd
+  - tests/v1/e2e/attention
+  commands:
+  - pytest -v -s -m 'not slow_test' v1/e2e/attention/test_rocm_aiter_fa_runtime.py -k 'not context_parallel' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) ROCM_AITER_FA DCP Rejection"
+  key: amd-rocm-aiter-fa-dcp-mi355
+  dind: false
+  device: mi355_2
+  num_devices: 2
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/attention/ops/merge_attn_states.py
+  - vllm/model_executor/layers/attention
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - vllm/v1/worker
+  - vllm/v1/core/sched
+  - vllm/compilation
+  - vllm/models/muse_spark/amd
+  - tests/v1/e2e/attention
+  commands:
+  - pytest -v -s v1/e2e/attention/test_rocm_aiter_fa_runtime.py -k context_parallel
+
+- label: ":amd: (MI355) [Nightly] ROCM_AITER_FA Full Matrix %N"
+  key: amd-rocm-aiter-fa-full-matrix-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  parallelism: 4
+  timeout_in_minutes: 90
+  optional: true
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/attention/ops/merge_attn_states.py
+  - vllm/model_executor/layers/attention
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - docker/Dockerfile.rocm_base
+  - tests/v1/attention/backends
+  - tests/v1/e2e/attention
+  commands:
+  - pytest -v -s -m slow_test v1/attention/backends/rocm_aiter_fa v1/e2e/attention/test_rocm_aiter_fa_runtime.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
