@@ -2410,6 +2410,21 @@ class TestIncrementalArgRewrite:
         cache = _StreamingArgs('{"a": 1}', properties, string_keys)
         assert cache.delta('{"a": 2}') is None
 
+    @pytest.mark.parametrize("size", [1, 2, 3, 5])
+    def test_non_delimited_nonfinite_literal_streams_as_final(self, size):
+        """A non-finite token followed by malformed text is quoted by the
+        final pass too, so streaming must not emit it bare: the streamed
+        prefix would stop being a prefix of the final arguments.
+        """
+        schema = {"s": {"type": "string"}, "n": {"type": "string"}}
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        doc = '{"s": "hello", "n": -Infinity: "x"}'
+        chunks = [doc[i : i + size] for i in range(0, len(doc), size)]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == self._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
 
 class TestIncrementalArgRewriteAfterGiveUp:
     """Text after a structural give-up is corrected verbatim.
@@ -2460,6 +2475,23 @@ class TestIncrementalArgRewriteAfterGiveUp:
         self._assert_stream_matches_final(
             '{"n": NaN, "t": -Infin:ity, "x": 1e999, "t": NaN}',
             {},
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [1, 3, 4])
+    def test_text_after_closed_object_is_not_rewritten(self, size):
+        """Text past the closed top-level object is copied verbatim, so the
+        resume boundary must not move into it and coerce values the final
+        pass leaves alone.
+        """
+        self._assert_stream_matches_final(
+            '{"a": 1} {"c": "2", "e": "5", "z": 9}',
+            {
+                "a": {"type": "integer"},
+                "c": {"type": "string"},
+                "e": {"type": "integer"},
+                "z": {"type": "integer"},
+            },
             size,
         )
 

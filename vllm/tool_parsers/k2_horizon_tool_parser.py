@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
+    canonical_schema_types,
     coerce_to_schema_type,
     coerce_typed_value,
     extract_types_from_schema,
@@ -176,7 +177,9 @@ class K2HorizonToolParser(ToolParser):
             if explicit_base in target_types and len(target_types) > 1:
                 target_types = [explicit_base]
 
-        raw_value = value if "string" in target_types else value.strip()
+        raw_value = (
+            value if "string" in canonical_schema_types(target_types) else value.strip()
+        )
         return coerce_to_schema_type(raw_value, target_types)
 
     @staticmethod

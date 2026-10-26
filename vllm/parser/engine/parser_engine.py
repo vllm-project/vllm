@@ -220,6 +220,10 @@ class _ArgsRewriter:
             return text
         j = self._object(i, self._props, 0)
         if j < len(text):
+            # Text past the closed top-level object is copied verbatim; a
+            # tail scan must not resume inside it and correct it differently.
+            if self.stop is None:
+                self.stop = j
             self._out.append(text[j:])
         return "".join(self._out)
 
@@ -367,8 +371,11 @@ class _ArgsRewriter:
         literal = text[i:j]
         if not literal:
             return self._truncated(i)
-        if literal in _NON_FINITE_LITERALS and (self._final or self._delimited(j)):
+        if literal in _NON_FINITE_LITERALS and (self._final or j < len(text)):
             # Not valid JSON as a bare literal; the quoted string form is.
+            # A token at the end of the text may still grow, so wait for one
+            # more character; once it cannot, quote it even when the text
+            # that follows is malformed, since the final pass will too.
             out.append(f'"{literal}"')
             return j
         if isinstance(schema, dict) and self._delimited(j):

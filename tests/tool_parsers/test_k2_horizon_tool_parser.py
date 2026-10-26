@@ -272,6 +272,45 @@ def test_xml_untyped_param_keeps_emitted_type(tokenizer):
     }
 
 
+def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
+    # ``str`` aliases ``string``; the whitespace rule must canonicalise the
+    # explicit ``<arg_type>``, or an untyped property loses its spaces.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "note": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "xml_typed"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+    call = (
+        "<ifm|tool_call>lookup"
+        "<ifm|arg_key>note</ifm|arg_key>"
+        "<ifm|arg_type>str</ifm|arg_type>"
+        "<ifm|arg_value>  hi  </ifm|arg_value>"
+        "</ifm|tool_call>"
+    )
+
+    result = parser.extract_tool_calls(_group(call), request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"note": "  hi  "}
+
+
 def test_json_untyped_param_keeps_containers_structured(tokenizer):
     # Dict/list values for an untyped property stay structured JSON, not
     # double-encoded JSON text a client would have to re-parse.
