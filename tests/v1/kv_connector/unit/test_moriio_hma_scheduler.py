@@ -420,7 +420,7 @@ def test_read_blocks_routes_each_hybrid_layer_to_its_group():
     worker._region_session_indices = lambda layer_name: [0, 1]
     worker._is_mamba_layer = lambda layer_name: layer_name.startswith("kda")
 
-    def _offsets(layer_name, local, remote, meta, **kwargs):
+    def _offsets(layer_name, local, remote, meta, *args):
         offsets[layer_name] = (local, remote)
         return [], [], []
 
@@ -428,7 +428,7 @@ def test_read_blocks_routes_each_hybrid_layer_to_its_group():
         offsets[layer_name] = (local, remote)
         return []
 
-    worker._compute_block_transfer_offsets = _offsets
+    worker._compute_read_attention_offsets = _offsets
     worker._post_read_with_backoff = lambda *args: None
     worker._post_mamba_reads = _mamba_reads
 
