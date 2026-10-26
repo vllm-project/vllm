@@ -17,6 +17,7 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.multimodal.processing import BaseMultiModalProcessor, PromptReplacement
 
 
 @pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
@@ -256,3 +257,125 @@ def test_extract_audio_from_videos_rejects_oversized_audio():
 
     assert audio_items == []
     assert has_audio == [False]
+
+
+class _MergingTokenizer:
+    """Greedy longest-match tokenizer that reproduces the two BPE merges behind
+    the Nemotron VL video-placeholder failure: ``<video>`` is not a vocabulary
+    token, so ``".<"`` merges across the placeholder boundary, and ``".Frame"``
+    merges across the boundary between prompt text and the replacement.
+    """
+
+    _MERGES = {
+        "<image>": (18,),
+        "<img>": (19,),
+        "</img>": (20,),
+        "<": (60,),
+        "video": (61,),
+        ">": (62,),
+        ".<": (1001,),
+        "Frame": (70,),
+        ".Frame": (1002,),
+    }
+    _INVERSE = {ids[0]: text for text, ids in _MERGES.items()}
+    _LENGTHS = sorted({len(text) for text in _MERGES}, reverse=True)
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        token_ids = list[int]()
+        pos = 0
+        while pos < len(text):
+            for length in self._LENGTHS:
+                word = text[pos : pos + length]
+                if word in self._MERGES:
+                    token_ids.extend(self._MERGES[word])
+                    pos += length
+                    break
+            else:
+                token_ids.append(ord(text[pos]))
+                pos += 1
+        return token_ids
+
+    def decode(self, token_ids: list[int], **kwargs) -> str:
+        return "".join(self._INVERSE.get(t, chr(t)) for t in token_ids)
+
+
+class _TokenizerOnlyInfo:
+    def __init__(self, tokenizer) -> None:
+        self._tokenizer = tokenizer
+
+    def get_tokenizer(self):
+        return self._tokenizer
+
+
+def _video_placeholder_processor() -> NanoNemotronVLMultiModalProcessor:
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    processor.info = _TokenizerOnlyInfo(_MergingTokenizer())
+    return processor
+
+
+def _video_prompt_updates(tokenizer: _MergingTokenizer, replacement: list[int]):
+    video_target = tokenizer.encode("<video>")
+    assert video_target == [60, 61, 62]
+    return {
+        "video": [[PromptReplacement("video", video_target, replacement).resolve(0)]]
+    }
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # Text directly followed by the placeholder: ".<" merges, so the
+        # token-level match fails and the text fallback is taken.
+        "Describe this clip.<video>",
+        "What is happening in this video? Describe briefly.<video>",
+        # Already-delimited prompt: the token-level match succeeds directly.
+        "Describe this clip.\n<video>",
+    ],
+)
+def test_video_placeholder_adjacent_to_text_is_replaced(prompt: str):
+    processor = _video_placeholder_processor()
+    tokenizer = processor.info.get_tokenizer()
+
+    # Shape of NanoNemotronVLProcessor.get_video_repl: a frame separator that
+    # starts with ordinary text, then <img> <image>... </img>.
+    replacement = tokenizer.encode("Frame 1 sampled at 0.00 seconds: ") + [
+        19,
+        18,
+        18,
+        20,
+    ]
+    prefix, _, suffix = prompt.partition("<video>")
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        tokenizer.encode(prompt),
+        _video_prompt_updates(tokenizer, replacement),
+    )
+
+    expected_prefix = tokenizer.encode(prefix)
+    assert new_token_ids == expected_prefix + replacement + tokenizer.encode(suffix)
+    assert [p.tokens for p in placeholders["video"]] == [replacement]
+    assert [p.to_range().offset for p in placeholders["video"]] == [
+        len(expected_prefix)
+    ]
+
+
+def test_video_placeholder_adjacent_to_text_needs_segment_encoding():
+    """The generic fallback re-encodes the joined text, where ".Frame" merges
+    and hides the replacement; this is the failure the override fixes.
+    """
+    processor = _video_placeholder_processor()
+    tokenizer = processor.info.get_tokenizer()
+    replacement = tokenizer.encode("Frame 1 sampled at 0.00 seconds: ") + [
+        19,
+        18,
+        18,
+        20,
+    ]
+
+    _, placeholders = BaseMultiModalProcessor._apply_prompt_updates(
+        processor,
+        tokenizer.encode("Describe this clip.<video>"),
+        _video_prompt_updates(tokenizer, replacement),
+    )
+
+    assert "video" not in placeholders
