@@ -70,13 +70,17 @@ pub(super) fn build_output_grammar(
     let answer = ctx.answer;
 
     let mut elements = match mode {
-        KimiK3Mode::Reasoning => vec![think_body(), after_reasoning(calls, answer)],
+        KimiK3Mode::PrefilledReasoning => vec![think_body(), after_reasoning(calls, answer)],
         KimiK3Mode::Response => rest_of_response(calls, answer),
         KimiK3Mode::Idle => vec![
             Format::optional(Format::tag(THINK_OPEN, think_text(), THINK_CLOSE)),
             after_reasoning(calls, answer),
         ],
-        KimiK3Mode::Epilogue | KimiK3Mode::Tools | KimiK3Mode::Call { .. } | KimiK3Mode::Done => {
+        KimiK3Mode::Reasoning
+        | KimiK3Mode::Epilogue
+        | KimiK3Mode::Tools
+        | KimiK3Mode::Call { .. }
+        | KimiK3Mode::Done => {
             unreachable!("initialization leaves the parser idle or inside `think` or `response`")
         }
     };
@@ -150,8 +154,16 @@ fn response_content(answer: Option<&Format>) -> Format {
 }
 
 /// The rest of the `think` channel the prompt opened.
+///
+/// The parser also ends this channel at a `response` open, so keep that marker
+/// out of the text: the `think` close stays the only boundary the grammar and
+/// the parser agree on.
 fn think_body() -> Format {
-    Format::tag("", think_text(), THINK_CLOSE)
+    Format::tag(
+        "",
+        Format::any_text_excluding(&[THINK_CLOSE, RESPONSE_OPEN, END_OF_MSG]),
+        THINK_CLOSE,
+    )
 }
 
 fn think_text() -> Format {
@@ -259,12 +271,12 @@ mod tests {
     #[test]
     fn prompt_opened_think_channel() {
         check(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             ToolChoice::auto(),
             true,
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   or
                     sequence
                       tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
@@ -281,12 +293,12 @@ mod tests {
             "#]],
         );
         check(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             ToolChoice::required(),
             true,
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   sequence
                     optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
                     tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
@@ -297,12 +309,12 @@ mod tests {
             "#]],
         );
         check(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             ToolChoice::function("add"),
             true,
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   sequence
                     optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
                     tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
@@ -388,12 +400,12 @@ mod tests {
     #[test]
     fn serial_tool_calls_stop_after_one_call() {
         check(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             ToolChoice::required(),
             false,
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   sequence
                     optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
                     tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
@@ -409,7 +421,7 @@ mod tests {
     fn non_strict_auto_builds_no_grammar() {
         let tools = tools();
         let grammar = build_output_grammar(
-            &KimiK3Mode::Reasoning,
+            &KimiK3Mode::PrefilledReasoning,
             &OutputGrammarContext {
                 tools: &tools,
                 tool_choice: &ToolChoice::auto(),
@@ -428,12 +440,12 @@ mod tests {
         // Calls may follow the empty `response` channel the chat template
         // writes before them.
         check_answer(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             &tools(),
             ToolChoice::auto(),
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   or
                     sequence
                       tag `<|open|>response<|sep|>` json(object) `<|close|>response<|sep|>`
@@ -453,12 +465,12 @@ mod tests {
         );
         // A required call may follow a constrained answer.
         check_answer(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             &tools(),
             ToolChoice::required(),
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   sequence
                     optional
                       or
@@ -510,12 +522,12 @@ mod tests {
             "#]],
         );
         check_answer(
-            KimiK3Mode::Reasoning,
+            KimiK3Mode::PrefilledReasoning,
             &[],
             ToolChoice::auto(),
             expect![[r#"
                 sequence
-                  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+                  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
                   tag `<|open|>response<|sep|>` json(object) `<|close|>response<|sep|>`
                   optional `<|close|>message<|sep|>`
             "#]],

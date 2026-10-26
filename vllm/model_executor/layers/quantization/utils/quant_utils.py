@@ -297,6 +297,8 @@ kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True
 kInt8DynamicTokenAsym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=False)
 kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False)
 kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
+kDynamic32Scale = ScaleDesc(torch.float32, False, GroupShape(1, 32))
+kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
 
 # LUT-B: 3-bit indices into an E4M3 codebook per 8x64 weight tile (Rubin).
 kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
