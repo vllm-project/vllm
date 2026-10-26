@@ -99,12 +99,10 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            # MTP shares the target's KV cache layout; a separate draft model
-            # must not inherit a default it was never validated with.
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method != "mtp"
+                and spec_config.method not in ("mtp", "dspark")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
