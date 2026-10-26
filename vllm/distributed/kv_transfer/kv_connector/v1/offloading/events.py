@@ -95,7 +95,6 @@ class _OffloadEventMetadata:
     # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
-    chunk_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: set[tuple[Medium, str | None]]
 
@@ -245,7 +244,6 @@ class OffloadingEventsTracker:
             lora_name=lora_name,
             extra_keys=None,
             group_idx=group_config.group_idx,
-            chunk_idx=chunk_start // group_config.tokens_per_chunk,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={_PRIMARY_RESIDENCY},
         )
@@ -347,7 +345,6 @@ class OffloadingEventsTracker:
             lora_name=lora_name,
             extra_keys=None,
             group_idx=group_config.group_idx,
-            chunk_idx=chunk_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={_PRIMARY_RESIDENCY},
         )
@@ -387,15 +384,9 @@ class OffloadingEventsTracker:
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Metadata is read, NOT popped: the entry must survive until the
         # eviction event so BlockRemoved can fan out to the same hashes.
+        # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
-
-        def key_order(key: OffloadKey) -> tuple[bool, int, int]:
-            meta = self._pending_event_metadata.get(key)
-            if meta is None:
-                return True, 0, 0
-            return False, meta.group_idx, meta.chunk_idx
-
-        for key in sorted(event.keys, key=key_order):
+        for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
                 if self.self_describing_enabled:
