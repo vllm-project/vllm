@@ -208,14 +208,13 @@ def get_fused_mqa_topk_workspace(
 
 
 def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
-    """Per-key fp32 scales from the indexer K cache.
+    """Per-key fp32 scales from the gathered indexer K-cache scales.
 
-    SM100 caches store each power-of-two scale as four equal UE8M0 bytes in an
-    int32; the fp32 value 2**(e - 127) has bit pattern ``e << 23``.
+    scales: [keys, 4] uint8. SM100 caches store each power-of-two scale as four
+    equal UE8M0 bytes; the fp32 value 2**(e - 127) has bit pattern ``e << 23``.
     """
-    if scales.dtype == torch.int32:
-        return ((scales & 0xFF) << 23).view(torch.float32)
-    return scales
+    exponents = scales.view(torch.int32).squeeze(-1) & 0xFF
+    return (exponents << 23).view(torch.float32)
 
 
 def fused_mqa_topk_prefill(

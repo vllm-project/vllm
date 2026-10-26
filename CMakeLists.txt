@@ -1705,7 +1705,6 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
       cuda_archs_loose_intersection(FUSED_MQA_ARCHS "10.0f" "${CUDA_ARCHS}")
       if(FUSED_MQA_ARCHS)
-        # Single-launch fused MQA-logits + top-k prefill kernel.
         set(FUSED_MQA_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
         set_gencode_flags_for_srcs(SRCS "${FUSED_MQA_SRC}" CUDA_ARCHS "${FUSED_MQA_ARCHS}")
         set_property(SOURCE ${FUSED_MQA_SRC} APPEND PROPERTY INCLUDE_DIRECTORIES
