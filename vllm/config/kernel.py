@@ -302,6 +302,16 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X). A deployment that cannot run it is refused at startup."""
 
+    mhc_overlap_max_tokens: int = Field(default=16, gt=0)
+    """Largest step, in tokens, that DeepSeek-V4.1 runs on the fused all-reduce
+    + mHC overlap path (TP4 on SM100, whose kernel also folds the MoE top-k
+    finalize into the all-reduce). Larger steps use the unfused path.
+    Speculative decoding verifies ``num_speculative_tokens + 1`` tokens per
+    sequence, so 16 covers two DSpark k=5 sequences. The default is the value
+    validated on GB200. The cap sizes the Lamport all-reduce buffer
+    (3 generations x TP x tokens x hidden, BF16: 15 MiB at 128 tokens on TP4)
+    and the kernels compiled for it."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 

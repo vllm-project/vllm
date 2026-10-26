@@ -550,9 +550,8 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
 ):
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
-    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
-
-    num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
+    max_tokens = default_vllm_config.kernel_config.mhc_overlap_max_tokens
+    num_tokens = max_tokens + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -564,6 +563,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.use_sequence_parallel = False
     decoder.fuse_mhc_all_reduce = False
     decoder.mhc_stream = None
+    decoder.mhc_overlap_max_tokens = max_tokens
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
 

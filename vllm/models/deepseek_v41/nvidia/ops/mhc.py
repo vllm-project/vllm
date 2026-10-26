@@ -33,11 +33,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or regress.
-MHC_OVERLAP_MAX_TOKENS = 16
-
 # The fused all-reduce + mHC kernel of the overlap path, built once by
-# init_mhc_all_reduce.
+# init_mhc_all_reduce with kernel_config.mhc_overlap_max_tokens slots.
 _all_reduce_mhc: "AllReduceMHC | None" = None
 
 
@@ -82,16 +79,17 @@ def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
     from .cute_dsl import AllReduceMHC
 
     config = vllm_config.model_config.hf_config
+    max_tokens = vllm_config.kernel_config.mhc_overlap_max_tokens
     _all_reduce_mhc = AllReduceMHC(
         hidden_size=config.hidden_size,
         hc_mult=config.hc_mult,
-        max_num_tokens=MHC_OVERLAP_MAX_TOKENS,
+        max_num_tokens=max_tokens,
         top_k=config.num_experts_per_tok,
         device=current_platform.current_device(),
     )
     logger.info_once(
         "DSV4.1 mHC: CuTe DSL Lamport all-reduce fused with mHC for up to %d tokens.",
-        MHC_OVERLAP_MAX_TOKENS,
+        max_tokens,
     )
 
 
@@ -239,8 +237,10 @@ def mhc_shifted_post_pre(
             # Outside FULL graphs, compute the next mixes inline.
             stream = torch.cuda.current_stream()
     elif reduce_results:
-        if stream is not None and 0 < x.shape[0] <= MHC_OVERLAP_MAX_TOKENS:
-            assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
+        assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
+        # The kernel was built for the configured cap; larger steps fall back
+        # to the plain all-reduce below.
+        if stream is not None and 0 < x.shape[0] <= _all_reduce_mhc.capacity:
             assert pre_mix is not None and norm_weight is not None
             residual, layer_input = _all_reduce_mhc(
                 x,

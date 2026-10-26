@@ -59,8 +59,9 @@ def _unfused_all_reduce_mhc(peers, residual, post, comb, pre, weight, eps):
     return output, (prenorm * inv_rms * weight.float()).bfloat16()
 
 
-@ray.remote(num_gpus=1, max_calls=1)
-def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+def _all_reduce_mhc_worker(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port, max_tokens, sizes
+):
     from vllm.models.deepseek_v41.nvidia.ops.cute_dsl import AllReduceMHC
 
     with monkeypatch.context() as m:
@@ -70,7 +71,11 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         op = AllReduceMHC(
-            hidden_size=5120, hc_mult=4, max_num_tokens=16, top_k=6, device=device
+            hidden_size=5120,
+            hc_mult=4,
+            max_num_tokens=max_tokens,
+            top_k=6,
+            device=device,
         )
 
         def check_eager_and_replayed(fused, check, halved, doubled):
@@ -168,18 +173,52 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             check_eager_and_replayed(fused, check, gemm2, shared)
 
         # Changing shapes cover shrinking and growing batches in one mailbox.
-        for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
+        for n in sizes:
             run(n)
             run_finalize(n)
+
+
+# The default cap, and a cap of 128 with sizes on both sides of 16 and at the cap.
+_MHC_DEFAULT_CAP_SIZES = (1, 6, 12, 8, 16, 3, 5, 2, 4, 1)
+_MHC_CAP_128_SIZES = (1, 6, 12, 16, 17, 20, 24, 32, 48, 64, 96, 128, 33, 5, 128, 1)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _all_reduce_mhc_worker(
+        monkeypatch,
+        tp_size,
+        pp_size,
+        rank,
+        distributed_init_port,
+        16,
+        _MHC_DEFAULT_CAP_SIZES,
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _all_reduce_mhc_cap_128(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _all_reduce_mhc_worker(
+        monkeypatch,
+        tp_size,
+        pp_size,
+        rank,
+        distributed_init_port,
+        128,
+        _MHC_CAP_128_SIZES,
+    )
 
 
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
+@pytest.mark.parametrize(
+    "target", [_all_reduce_mhc, _all_reduce_mhc_cap_128], ids=["cap16", "cap128"]
+)
+def test_all_reduce_mhc_matches_unfused_path(monkeypatch, target):
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs with NVLink multicast")
-    multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
+    multi_process_parallel(monkeypatch, 4, 1, target)
 
 
 @pytest.mark.parametrize(
