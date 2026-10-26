@@ -196,7 +196,8 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
-    def get_hisparse_backend_cls(self) -> str | None:
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
         """Return the device implementation for the common HiSparse runtime."""
         return None
 

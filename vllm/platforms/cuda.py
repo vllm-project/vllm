@@ -235,7 +235,8 @@ class CudaPlatformBase(Platform):
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
 
-    def get_hisparse_backend_cls(self) -> str | None:
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
         return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
 
     @classmethod
