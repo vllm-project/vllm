@@ -4,24 +4,18 @@
 import numpy as np
 import torch
 
-from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.structured_outputs import (
-    StructuredOutputsWorker,
-    _build_grammar_mapping,
-)
+from vllm.v1.worker.cpu.input_batch import InputBatch
 
 
-class CPUStructuredOutputsWorker(StructuredOutputsWorker):
+class CPUStructuredOutputsWorker:
     def __init__(
         self,
         max_num_logits: int,
         vocab_size: int,
         device: torch.device,
         mask_stride: int,
-        num_bonus_tokens: int,
     ) -> None:
         self.mask_stride = mask_stride
-        self.num_bonus_tokens = num_bonus_tokens
 
     def apply_grammar_bitmask(
         self,
@@ -33,17 +27,17 @@ class CPUStructuredOutputsWorker(StructuredOutputsWorker):
         if not grammar_req_ids:
             return
 
-        mapping = _build_grammar_mapping(
-            input_batch.req_ids,
-            grammar_req_ids,
-            input_batch.cu_num_logits_np,
-            input_batch.num_draft_tokens_per_req,
-            self.num_bonus_tokens,
-            self.mask_stride,
-        )
+        # Each grammar request owns `mask_stride` bitmask rows. Key them by
+        # (request, position); positions beyond cu_num_logits are skipped.
+        req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+        mapping = [
+            req_id_to_idx[req_id] * self.mask_stride + position
+            for req_id in grammar_req_ids
+            for position in range(self.mask_stride)
+        ]
         assert grammar_bitmask.shape[0] == len(mapping)
 
-        mapping_tensor = torch.tensor(mapping, dtype=torch.int64)
+        mapping_tensor = torch.tensor(mapping, dtype=torch.int64, device=logits.device)
         req_indices = mapping_tensor // self.mask_stride
         positions = mapping_tensor % self.mask_stride
         starts = input_batch.cu_num_logits[req_indices].long()
@@ -53,8 +47,10 @@ class CPUStructuredOutputsWorker(StructuredOutputsWorker):
             return
 
         logit_rows = starts[active] + positions[active]
-        packed = torch.from_numpy(grammar_bitmask)[active]
-        token_ids = torch.arange(logits.shape[1], dtype=torch.int64)
+        packed = torch.from_numpy(grammar_bitmask).to(logits.device)[active]
+        token_ids = torch.arange(
+            logits.shape[1], dtype=torch.int64, device=logits.device
+        )
         words = packed[:, token_ids // 32]
         allowed = ((words >> (token_ids % 32)) & 1).bool()
 
