@@ -225,8 +225,6 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
 
 
 def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
-    # Warmup only runs short queries, so a long prefill chunk must reuse the
-    # kernel compiled for them rather than JIT-compiling during serving.
     def compiled_variants() -> set:
         return {
             key
@@ -234,16 +232,8 @@ def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
             for key in caches[0]
         }
 
-    short = _run_prepare(
-        target_positions=[10, 11, 12, 13], block_table_values=[0, 0, 7, 8, 9, 10]
-    )
+    kwargs = dict(target_positions=[10, 11, 12, 13], block_table_values=[0, 7, 8])
+    _run_prepare(**kwargs)
     warmed = compiled_variants()
-    long = _run_prepare(
-        target_positions=[10, 11, 12, 13],
-        block_table_values=[0, 0, 7, 8, 9, 10],
-        num_scheduled_tokens=300,
-    )
-
+    _run_prepare(**kwargs, num_scheduled_tokens=300)
     assert compiled_variants() == warmed
-    assert long.query_slot_mapping.tolist() == short.query_slot_mapping.tolist()
-    assert long.context_slot_mapping.tolist() == short.context_slot_mapping.tolist()

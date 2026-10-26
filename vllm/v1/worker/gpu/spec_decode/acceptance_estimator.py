@@ -347,8 +347,6 @@ class OnlineAcceptanceEstimator:
         self.device = device
         self._steps_since_refit = 0
         self._refits = 0
-        # Sized for the largest batch rather than the current one, so a single
-        # compiled variant of _accumulate_kernel covers every batch size.
         self._accumulate_block_r = max(256, triton.next_power_of_2(max_num_reqs))
 
         # The learned coefficients used for predicting acceptance.
@@ -440,9 +438,8 @@ class OnlineAcceptanceEstimator:
         self._refits += 1
 
     def warmup(self) -> None:
-        """Drop statistics from warmup steps and JIT-compile the refit kernel,
-        which otherwise first runs REFIT_INTERVAL steps into serving. A refit
-        on zeroed statistics leaves the coefficients unchanged."""
+        """Drop warmup statistics and compile the refit kernel. A refit on
+        zeroed statistics leaves the coefficients unchanged."""
         self.info.zero_()
         self.grad.zero_()
         self.counts.zero_()

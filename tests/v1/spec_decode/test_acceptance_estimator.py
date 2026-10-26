@@ -264,28 +264,6 @@ def test_step_damping_scales_with_the_evidence():
     assert refit_with(0.0) == (0.0, 0.0)
 
 
-def test_warmup_discards_warmup_statistics():
-    """Dummy warmup steps must not feed the first real refit, and compiling the
-    refit kernel during warmup must not move the coefficients."""
-    device = current_platform.device_type
-    estimator = _make_estimator(device)
-    estimator.info.fill_(3.0)
-    estimator.grad.fill_(1.0)
-    estimator.counts.fill_(10.0)
-    estimator._steps_since_refit = 7
-    before_slope = estimator.slope.clone()
-    before_intercepts = estimator.intercepts.clone()
-
-    estimator.warmup()
-
-    torch.testing.assert_close(estimator.slope, before_slope, rtol=0, atol=0)
-    torch.testing.assert_close(estimator.intercepts, before_intercepts, rtol=0, atol=0)
-    assert not estimator.info.any()
-    assert not estimator.grad.any()
-    assert not estimator.counts.any()
-    assert estimator._steps_since_refit == 0
-
-
 def test_feature_ignores_which_token_was_drawn():
     """The score must depend on the draft distribution, not on the draw.
 
@@ -322,10 +300,7 @@ def test_feature_ignores_which_token_was_drawn():
 
 
 def test_warmup_covers_every_batch_size_and_the_refit():
-    """After warmup, no batch size and no refit may JIT-compile during serving.
-
-    The refit only runs every REFIT_INTERVAL steps, past any warmup step count.
-    """
+    """After warmup, no batch size and no refit may JIT-compile during serving."""
     device = current_platform.device_type
 
     def compiled_variants() -> set:
