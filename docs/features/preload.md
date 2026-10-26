@@ -260,6 +260,13 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   The engine reuses the quantized weights and scales without running online
   quantization again. This does not enable online MoE quantization or
   conversion from an already quantized checkpoint.
+  Serialized `compressed-tensors` W8A8 FP8 dense linear layers support
+  per-tensor and per-channel weights with static per-tensor or dynamic
+  per-token activations when both processes select the CUTLASS linear
+  backend. Engines retain the processed tensor layout and scales and rebuild
+  attention scale metadata from the cached scale buffers. Other
+  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
+  not enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

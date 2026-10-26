@@ -1162,3 +1162,176 @@ def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
     )
 
     assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="Requires CUDA CUTLASS FP8 kernels",
+)
+@pytest.mark.parametrize("strategy", ["tensor", "channel"])
+@pytest.mark.parametrize("static_input", [False, True])
+@pytest.mark.parametrize("output_sizes", [[32, 32], [17, 32]])
+@torch.inference_mode()
+def test_compressed_fp8_preprocessed_shared_weights(
+    strategy, static_input, output_sizes, dist_init, workspace_init, monkeypatch
+):
+    """Two attachments preserve fused/padded FP8 tensors and their outputs."""
+    from vllm.config import ModelConfig
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import replace_parameter, weights_already_processed
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        kernel_config=KernelConfig(linear_backend="cutlass"),
+    )
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "float-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 8,
+                        "type": "float",
+                        "strategy": strategy,
+                        "symmetric": True,
+                        "dynamic": False,
+                    },
+                    "input_activations": {
+                        "num_bits": 8,
+                        "type": "float",
+                        "strategy": "tensor" if static_input else "token",
+                        "symmetric": True,
+                        "dynamic": not static_input,
+                    },
+                }
+            },
+        }
+    )
+
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        source = MergedColumnParallelLinear(
+            64,
+            output_sizes,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+        )
+        torch.manual_seed(0)
+        source.weight.copy_(torch.randn(source.weight.shape).to(source.weight.dtype))
+        source.weight_scale.copy_(
+            torch.linspace(0.01, 0.03, source.weight_scale.numel()).reshape(
+                source.weight_scale.shape
+            )
+        )
+        if static_input:
+            source.input_scale.copy_(torch.tensor([0.01, 0.02]))
+        process_weights_after_loading(source, config.model_config, torch.device("cuda"))
+        x = torch.randn(3, 64, dtype=torch.bfloat16)
+        expected, _ = source(x)
+        shared = dict(source.named_parameters())
+        snapshots = {name: param.detach().clone() for name, param in shared.items()}
+        for _ in range(2):
+            with torch.device("meta"):
+                attached = MergedColumnParallelLinear(
+                    64,
+                    output_sizes,
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=quant_config,
+                )
+            for name, param in shared.items():
+                replace_parameter(attached, name, param)
+            with weights_already_processed():
+                process_weights_after_loading(
+                    attached, config.model_config, torch.device("cuda")
+                )
+            actual, _ = attached(x)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert actual.shape == (3, sum(output_sizes))
+            for name, param in attached.named_parameters():
+                assert param.data_ptr() == shared[name].data_ptr()
+                torch.testing.assert_close(
+                    param.float(), snapshots[name].float(), rtol=0, atol=0
+                )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
+    reason="Requires FlashAttention 3+ for per-head scale metadata",
+)
+@pytest.mark.parametrize("strategy", ["tensor", "attn_head"])
+@torch.inference_mode()
+def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
+    """Restore scalar/head scales without reading consumed meta placeholders."""
+    from vllm.config import AttentionConfig, CacheConfig, ModelConfig
+    from vllm.model_executor.utils import weights_already_processed
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        attention_config=AttentionConfig(backend="FLASH_ATTN"),
+    )
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "config_groups": {},
+            "kv_cache_scheme": {
+                "num_bits": 8,
+                "type": "float",
+                "strategy": strategy,
+                "dynamic": False,
+                "symmetric": True,
+            },
+        }
+    )
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        source = Attention(
+            num_heads=4,
+            head_size=64,
+            scale=0.125,
+            num_kv_heads=2,
+            cache_config=CacheConfig(),
+            quant_config=quant_config,
+            prefix="source",
+        )
+        for offset, name in enumerate(("k_scale", "v_scale", "q_scale"), 1):
+            param = getattr(source, name)
+            param.copy_(
+                torch.arange(1, param.numel() + 1).reshape(param.shape) * offset * 0.1
+            )
+        source.quant_method.process_weights_after_loading(source)
+        with torch.device("meta"):
+            attached = Attention(
+                num_heads=4,
+                head_size=64,
+                scale=0.125,
+                num_kv_heads=2,
+                cache_config=CacheConfig(),
+                quant_config=quant_config,
+                prefix="attached",
+            )
+        for name in ("_k_scale", "_v_scale", "_q_scale"):
+            attached.register_buffer(name, getattr(source, name))
+        with weights_already_processed():
+            attached.quant_method.process_weights_after_loading(attached)
+        for name in ("k", "v", "q"):
+            scale = getattr(attached, f"_{name}_scale")
+            assert scale.data_ptr() == getattr(source, f"_{name}_scale").data_ptr()
+            assert getattr(attached, f"_{name}_scale_float") == scale.max().item()
+            assert not hasattr(attached, f"{name}_scale")
+            assert not hasattr(attached, f"{name}_zero_point")
+        for name in ("k", "v"):
+            host = getattr(attached, f"_{name}_scale_cpu")
+            assert host.device.type == "cpu"
+            assert host.item() == getattr(source, f"_{name}_scale_float")
