@@ -16,12 +16,13 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+import inspect
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, get_args
 
 import torch
 from torch import nn
@@ -39,6 +40,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
+    from vllm.compilation.decorators import DynamicArgDims
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
@@ -384,6 +386,26 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
         return True
     # Layer types using longrope still sync, even once dynamic rope is disabled
     return "longrope" not in rope_types and dynamic_rope_update_is_noop(vllm_config)
+
+
+def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+    """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
+
+    The 0-th dimension is dynamic for every argument which is either unannotated
+    or annotated with a `torch` tensor type, including legacy ones such as
+    `torch.BoolTensor` which `support_torch_compile` does not recognise.
+    """
+    dims: DynamicArgDims = {}
+    for name, param in inspect.signature(cls.forward).parameters.items():
+        if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        members = get_args(param.annotation) or (param.annotation,)
+        if param.annotation is param.empty or any(
+            getattr(m, "__module__", None) == "torch" and m.__name__.endswith("Tensor")
+            for m in members
+        ):
+            dims[name] = 0
+    return dims
 
 
 def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
