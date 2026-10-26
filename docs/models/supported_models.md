@@ -411,7 +411,7 @@ th {
 | `Glm4ForCausalLM` | GLM-4-0414 | `zai-org/GLM-4-32B-0414`, etc. | ✅︎ | ✅︎ |
 | `Glm4MoeForCausalLM` | GLM-4.5, GLM-4.6, GLM-4.7 | `zai-org/GLM-4.5`, etc. | ✅︎ | ✅︎ |
 | `Glm4MoeLiteForCausalLM` | GLM-4.7-Flash | `zai-org/GLM-4.7-Flash`, etc. | ✅︎ | ✅︎ |
-| `GlmMoeDsaForCausalLM` | GLM-5, GLM-5.1, GLM-5.2 | `zai-org/GLM-5`, etc. | ✅︎ | ✅︎ |
+| `GlmMoeDsaForCausalLM` | GLM-5, GLM-5.1, GLM-5.2, GLM-5.3 | `zai-org/GLM-5`, `zai-org/GLM-5.3`, etc. | ✅︎ | ✅︎ |
 | `GPT2LMHeadModel` | GPT-2 | `openai-community/gpt2`, `openai-community/gpt2-xl`, etc. | | ✅︎ |
 | `GPTJForCausalLM` | GPT-J | `EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc. | | ✅︎ |
 | `GptOssForCausalLM` | GPT-OSS | `openai/gpt-oss-120b`, `openai/gpt-oss-20b` | ✅︎ | ✅︎ |
@@ -505,6 +505,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
+!!! note
+    GLM-5.3 has an optional latency-specialized decode path for low-batch serving on
+    8xB200 or 8xB300 (TP8, `--attention-backend FLASHINFER_MLA_SPARSE --kv-cache-dtype fp8`,
+    Model Runner V2): `--additional-config '{"decode_backend": "latency_specialized"}'`.
+    It runs uniform decode steps of up to 16 rows with CuTe DSL kernels and leaves every
+    other step to the stock forward. See `vllm/models/glm53/nvidia/README.md` for the
+    requirements, the batch shapes it serves and its startup cost.
 
 ## List of Multimodal Language Models
 

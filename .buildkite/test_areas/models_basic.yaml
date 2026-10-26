@@ -244,6 +244,21 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
+- label: ":nvidia: (B200) GLM-5.3 Specialized Decode"
+  key: glm53-unit-tests-b200
+  timeout_in_minutes: 40
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/glm53/
+  - vllm/models/deepseek_v32/
+  - vllm/v1/worker/gpu/model_states/
+  - vllm/model_executor/models/registry.py
+  - tests/models/glm53/
+  commands:
+    # CuTe DSL kernels for the SM100 family; no AMD mirror (no CuTe DSL on ROCm).
+    # The served TP8 path needs eight GPUs and is validated outside CI.
+    - pytest -v -s models/glm53
+
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
 #   key: kimi-k3-prefix-cache-4xb200

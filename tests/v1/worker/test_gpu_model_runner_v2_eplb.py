@@ -130,7 +130,9 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
-        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+        lambda *args: SimpleNamespace(
+            num_new_sampled_tokens_per_step=1, low_latency_decode=False
+        ),
     )
     monkeypatch.setattr(
         eplb,
@@ -164,7 +166,9 @@ def test_v2_load_model_with_dummy_weights_defers_eplb_async_loop(monkeypatch):
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
-        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+        lambda *args: SimpleNamespace(
+            num_new_sampled_tokens_per_step=1, low_latency_decode=False
+        ),
     )
     monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
@@ -220,7 +224,9 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
-        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+        lambda *args: SimpleNamespace(
+            num_new_sampled_tokens_per_step=1, low_latency_decode=False
+        ),
     )
     monkeypatch.setattr(
         eplb,
@@ -264,6 +270,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         routed_experts=None,
         cudagraph_stats=None,
         num_spec_tokens_to_schedule=0,
+        full_cudagraph=False,
     )
     runner.req_states = SimpleNamespace()
 

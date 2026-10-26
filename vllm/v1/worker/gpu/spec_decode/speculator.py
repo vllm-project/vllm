@@ -28,7 +28,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, copy_small
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -62,6 +62,9 @@ class BaseSpeculator(ABC):
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    # Whether the last propose stored its drafts into the runner's draft-token
+    # table itself (low-latency decode).
+    drafts_stored: bool = False
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -104,6 +107,9 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # ModelState.low_latency_decode (enable_low_latency_decode).
+    low_latency_decode: bool = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -521,6 +527,11 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler.req_states.total_len.gpu,
         )
 
+    def enable_low_latency_decode(self, draft_tokens: torch.Tensor) -> None:
+        """Turn on the low-latency decode paths (``ModelState.low_latency_decode``);
+        ``draft_tokens`` is the runner's draft-token table."""
+        self.low_latency_decode = True
+
     def _copy_request_inputs(
         self,
         num_reqs: int,
@@ -538,8 +549,13 @@ class DraftModelSpeculator(BaseSpeculator):
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        self.temperature.copy_(temperature)
-        self.seeds.copy_(seeds)
+        if self.low_latency_decode:
+            # Captured into the post-forward graph: kernel copies, not memcpy nodes.
+            copy_small(self.temperature, temperature)
+            copy_small(self.seeds, seeds)
+        else:
+            self.temperature.copy_(temperature)
+            self.seeds.copy_(seeds)
         # idx_mapping == -1 marks a row the drafter must not act on: sampling
         # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
         # always get it; a dummy batch gets it for every row, since its arange
@@ -547,7 +563,10 @@ class DraftModelSpeculator(BaseSpeculator):
         if dummy_run:
             self.idx_mapping.fill_(-1)
         else:
-            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            if self.low_latency_decode:
+                copy_small(self.idx_mapping[:num_reqs], idx_mapping)
+            else:
+                self.idx_mapping[:num_reqs].copy_(idx_mapping)
             self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
