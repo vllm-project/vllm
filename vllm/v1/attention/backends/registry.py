@@ -144,7 +144,6 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "MiniMaxM3SparseTritonBackend"
     )
     STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
-    # Kimi K3 KV-balanced FP8 MLA decode (opt-in; never auto-selected).
     KIMI_K3_KV_BALANCED_MLA = (
         "vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend.KimiK3KvBalancedMLABackend"
     )
