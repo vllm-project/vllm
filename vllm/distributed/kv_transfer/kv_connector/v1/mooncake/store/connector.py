@@ -269,6 +269,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.client.discard(request.request_id)
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         return False, None
