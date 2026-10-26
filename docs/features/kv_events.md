@@ -61,8 +61,8 @@ Without `snapshot_endpoint`, nothing changes. With it:
 - The whole snapshot comes back as one multipart reply. The publisher ignores
   any request other than `snapshot`.
 - Chunks use the live encoding and data-parallel rank. Their stores carry each
-  block's tokens, extra keys, LoRA, group, locality and ownership, and no
-  `session_id`.
+  block's tokens, extra keys, lookahead tokens, LoRA, group, locality and
+  ownership, and no `session_id`.
 
 ## Load a snapshot and follow live events
 
@@ -115,8 +115,8 @@ KV cache groups with the same block size share one record per hash. Groups
 that skip null or masked blocks, such as sliding-window or Mamba groups, list
 fewer hashes than their token span. Their stores only add residency to blocks
 another store taught, and a snapshot restores that residency with token-less
-stores. Offload stores can omit `extra_keys`; the recorder compares keys once a
-store states them.
+stores. Offload stores can omit `extra_keys` and `lookahead_token_ids`; the
+recorder compares them once a store states them.
 
 ## Limits, cost and failures
 

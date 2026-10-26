@@ -89,6 +89,9 @@ class _Record(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     extra_key: Any = None
     # Offload stores can omit extra keys; they are compared once stated.
     extra_known: bool = False
+    # Tokens after the block that its hash covers, when lookahead hashing is
+    # on. Offload stores omit them; they are compared once stated.
+    lookahead: tuple[int, ...] | None = None
     lora_id: int | None = None
     lora_name: str | None = None
     # Live residency references across all scopes.
@@ -200,31 +203,45 @@ class KVCacheSnapshot:
         width = size * packed.itemsize
         data = packed.tobytes()
         extra = event.extra_keys
+        lookahead = event.lookahead_token_ids
         for i, h in enumerate(hashes):
             tokens = data[i * width : (i + 1) * width]
             extra_key = extra[i] if extra else None
+            ahead = None if lookahead is None else tuple(lookahead[i])
             record = self._records.get(h)
             if record is None:
                 record = self._new_record(h, event.group_idx)
-                self._fill(record, parent, tokens, event, extra_key)
+                self._fill(record, parent, tokens, event, extra_key, ahead)
             elif not record.tokens:
-                self._fill(record, parent, tokens, event, extra_key)
+                self._fill(record, parent, tokens, event, extra_key, ahead)
             elif (
-                record.parent,
-                record.tokens,
-                record.block_size,
-                record.lora_id,
-                record.lora_name,
-            ) != (parent, tokens, size, event.lora_id, event.lora_name) or (
-                extra is not None
-                and record.extra_known
-                and record.extra_key != extra_key
+                (
+                    record.parent,
+                    record.tokens,
+                    record.block_size,
+                    record.lora_id,
+                    record.lora_name,
+                )
+                != (parent, tokens, size, event.lora_id, event.lora_name)
+                or (
+                    extra is not None
+                    and record.extra_known
+                    and record.extra_key != extra_key
+                )
+                or (
+                    ahead is not None
+                    and record.lookahead is not None
+                    and record.lookahead != ahead
+                )
             ):
                 # One record per hash cannot hold two sets of inputs.
                 record.conflict = True
-            elif extra is not None and not record.extra_known:
-                record.extra_key = extra_key
-                record.extra_known = True
+            else:
+                if extra is not None and not record.extra_known:
+                    record.extra_key = extra_key
+                    record.extra_known = True
+                if ahead is not None and record.lookahead is None:
+                    record.lookahead = ahead
             self._add_live((scope, h))
             parent = h
 
@@ -241,12 +258,14 @@ class KVCacheSnapshot:
         tokens: bytes,
         event: BlockStored,
         extra_key: Any,
+        ahead: tuple[int, ...] | None,
     ) -> None:
         record.parent = parent
         record.tokens = tokens
         record.block_size = event.block_size
         record.extra_key = extra_key
         record.extra_known = event.extra_keys is not None
+        record.lookahead = ahead
         record.lora_id = event.lora_id
         record.lora_name = event.lora_name
         record.group = event.group_idx
@@ -353,7 +372,13 @@ class KVCacheSnapshot:
 
         def attrs(h: ExternalBlockHash) -> tuple:
             record = self._records[h]
-            return (scope(h), record.block_size, record.lora_id, record.lora_name)
+            return (
+                scope(h),
+                record.block_size,
+                record.lora_id,
+                record.lora_name,
+                record.lookahead is None,
+            )
 
         def segment(blocks: list[ExternalBlockHash]) -> BlockStored:
             first = self._records[blocks[0]]
@@ -361,10 +386,13 @@ class KVCacheSnapshot:
             kind, window = self._groups.get(group, (None, None))
             tokens = array("I")
             extra: list[Any] = []
+            lookahead: list[list[int]] | None = None if first.lookahead is None else []
             for h in blocks:
                 record = self._records[h]
                 tokens.frombytes(record.tokens)
                 extra.append(record.extra_key)
+                if lookahead is not None:
+                    lookahead.append(list(record.lookahead or ()))
             return BlockStored(
                 block_hashes=blocks,
                 parent_block_hash=first.parent,
@@ -379,6 +407,7 @@ class KVCacheSnapshot:
                 kv_cache_spec_sliding_window=window,
                 locality=locality,
                 ownership=ownership,
+                lookahead_token_ids=lookahead,
             )
 
         def removals(hashes: Iterator[ExternalBlockHash]) -> Iterator[BlockRemoved]:

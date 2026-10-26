@@ -41,6 +41,7 @@ def stored(
     extra_keys=None,
     locality=None,
     ownership=None,
+    lookahead=None,
 ):
     if tokens is None:
         tokens = medium == "GPU"
@@ -56,6 +57,7 @@ def stored(
         group_idx=group,
         locality=locality,
         ownership=ownership,
+        lookahead_token_ids=lookahead,
     )
 
 
@@ -311,6 +313,20 @@ def test_omitted_extra_keys_do_not_conflict():
     assert wire(snap.export())[0].extra_keys == [("salt",)]
     snap.apply([stored([1], extra_keys=[("other",)])])
     assert counts(wire(snap.export())) == Counter()
+
+
+def test_lookahead_tokens_are_kept_and_compared():
+    """Lookahead tokens are hash inputs, and offload stores omit them. The
+    recorder learns them from a later store and compares them once known."""
+    offloaded = stored([1, 2], medium="CPU", tokens=True)
+    snap = KVCacheSnapshot()
+    snap.apply([offloaded])
+    snap.apply([stored([1, 2], lookahead=[[9], [10]])])
+    assert wire(snap.export())[0].lookahead_token_ids == [[9], [10]]
+    snap.apply([stored([1, 2], lookahead=[[9], [11]])])
+    assert counts(wire(snap.export())) == Counter(
+        {("GPU", None, 1): 2, ("CPU", None, 1): 1}
+    )
 
 
 def test_records_are_not_tracked_by_the_garbage_collector():
