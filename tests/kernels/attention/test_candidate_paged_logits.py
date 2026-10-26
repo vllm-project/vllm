@@ -40,7 +40,7 @@ NUM_HEADS = 32
 TOPK = 512
 
 requires_sm90 = pytest.mark.skipif(
-    not torch.cuda.is_available()
+    not torch.accelerator.is_available()
     or not current_platform.is_device_capability_family(90),
     reason="SM90 CUDA device required",
 )
@@ -50,7 +50,7 @@ requires_sm90 = pytest.mark.skipif(
 def ws():
     """A workspace manager isolated from the process-wide one."""
     with patch.object(workspace, "_manager", None):
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device("cuda", torch.accelerator.current_device_index())
         workspace.init_workspace_manager(device)
         yield workspace.current_workspace_manager()
         workspace.reset_workspace_manager()
@@ -164,9 +164,12 @@ def _setup(
     num_blocks = causal_len // cache_block_size + 2
     cache = Cache(num_blocks, cache_block_size, device, pad_bytes, seed)
     # A shuffled page table: a kernel that assumed identity mapping fails.
-    block_table = torch.randperm(num_blocks, device=device, generator=gen).to(
-        torch.int32
-    )[None].expand(rows, -1).contiguous()
+    block_table = (
+        torch.randperm(num_blocks, device=device, generator=gen)
+        .to(torch.int32)[None]
+        .expand(rows, -1)
+        .contiguous()
+    )
     total_blocks = causal_len // block_size
     cands = torch.stack(
         [
@@ -174,9 +177,9 @@ def _setup(
             for _ in range(rows)
         ]
     ).to(torch.int32)
-    q = torch.randn(
-        (rows, NUM_HEADS, HEAD_DIM), device=device, generator=gen
-    ).to(cache.fp8)
+    q = torch.randn((rows, NUM_HEADS, HEAD_DIM), device=device, generator=gen).to(
+        cache.fp8
+    )
     weights = torch.rand((rows, NUM_HEADS), device=device, generator=gen)
     seq_lens = torch.full((rows, 1), causal_len, dtype=torch.int32, device=device)
     out = torch.full((rows, topk), -7, dtype=torch.int32, device=device)
@@ -310,7 +313,7 @@ def test_availability_does_not_depend_on_runtime_shapes():
 def test_logits_match_dense_reference_on_candidate_columns(ws):
     """The compact logits equal the dense scores at the positions they map to,
     and are -inf everywhere else."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=4, num_candidates=128, causal_len=2048, topk=TOPK)
     _reserve(ws, s)
 
@@ -332,7 +335,7 @@ def test_logits_match_dense_reference_on_candidate_columns(ws):
         HEAD_DIM,
         logits,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ref = _reference_scores(
         s["q"],
@@ -349,9 +352,7 @@ def test_logits_match_dense_reference_on_candidate_columns(ws):
             expected = ref[r, pos]
             # fp8 inputs on tensor cores vs an fp32 reference on the same
             # dequantized values: compare with a relative tolerance.
-            torch.testing.assert_close(
-                logits[r, c], expected, rtol=2e-2, atol=1e-2
-            )
+            torch.testing.assert_close(logits[r, c], expected, rtol=2e-2, atol=1e-2)
 
 
 @requires_sm90
@@ -359,11 +360,11 @@ def test_logits_match_dense_reference_on_candidate_columns(ws):
 @pytest.mark.parametrize("backend", ["persistent", "auto"])
 def test_selected_topk_matches_dense_mask_path(ws, backend):
     """The end-to-end selection equals the dense score-then-mask selection."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=6, num_candidates=128, causal_len=4096, topk=TOPK, seed=3)
     _reserve(ws, s)
     _run(s, backend=backend)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ref_scores = _reference_scores(
         s["q"], s["weights"], s["cache"], s["block_table"], s["causal_len"], device
@@ -382,14 +383,14 @@ def test_selected_topk_matches_dense_mask_path(ws, backend):
 @torch.inference_mode()
 def test_selection_stays_inside_the_candidate_blocks(ws):
     """Every selected position must belong to one of the row's candidates."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=4, num_candidates=64, causal_len=4096, topk=TOPK, seed=5)
     _reserve(ws, s)
     _run(s)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     for r in range(s["rows"]):
-        allowed = set()
+        allowed: set[int] = set()
         for blk in s["candidate_blocks"][r].tolist():
             allowed.update(range(blk * s["block_size"], (blk + 1) * s["block_size"]))
         picked = {int(v) for v in s["topk_indices"][r].tolist() if v >= 0}
@@ -406,7 +407,7 @@ def test_shared_plan_matches_fresh_plan(ws):
     reused plan must select the same set as scoring with a freshly computed
     one. Selection is a set: fp8 scores tie often and the top-k backends do
     not promise a stable order across buffer layouts."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=6, num_candidates=128, causal_len=4096, topk=TOPK, seed=5)
     _reserve(ws, s)
 
@@ -422,7 +423,7 @@ def test_shared_plan_matches_fresh_plan(ws):
     )
 
     _run(s)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     fresh = s["topk_indices"].clone()
 
     s["topk_indices"].fill_(-7)
@@ -441,7 +442,7 @@ def test_shared_plan_matches_fresh_plan(ws):
         HEAD_DIM,
         plan=plan,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert _as_sets(fresh) == _as_sets(s["topk_indices"])
 
 
@@ -457,7 +458,7 @@ def test_shared_plan_matches_fresh_plan(ws):
 def test_strided_and_gapped_cache_layouts(ws, pad_bytes, cache_block_size):
     """Gapped pages (the real allocation) and several page sizes all decode
     to the same selection as the dense reference."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(
         device,
         rows=4,
@@ -470,7 +471,7 @@ def test_strided_and_gapped_cache_layouts(ws, pad_bytes, cache_block_size):
     )
     _reserve(ws, s)
     _run(s)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ref_scores = _reference_scores(
         s["q"], s["weights"], s["cache"], s["block_table"], s["causal_len"], device
@@ -489,7 +490,7 @@ def test_strided_and_gapped_cache_layouts(ws, pad_bytes, cache_block_size):
 @torch.inference_mode()
 def test_wrong_entry_width_is_rejected(ws):
     """A cache whose entry is not head_dim+4 must assert, not read garbage."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=2, causal_len=2048, topk=TOPK)
     _reserve(ws, s)
     bad = s["cache"].tensor[:, :, :-1]
@@ -521,7 +522,7 @@ def test_wrong_entry_width_is_rejected(ws):
 @torch.inference_mode()
 def test_causal_bound_and_empty_and_padded_rows(ws):
     """Rows with zero context, a short context, and -1 padded candidates."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=4, num_candidates=128, causal_len=4096, topk=TOPK, seed=11)
     _reserve(ws, s)
 
@@ -534,7 +535,7 @@ def test_causal_bound_and_empty_and_padded_rows(ws):
     s["candidate_blocks"][3, 4:] = -1
     s["candidate_blocks"][3, 0] = s["causal_len"] // s["block_size"] + 5
     _run(s)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     picked = _as_sets(s["topk_indices"])
     assert picked[0] == set(), "no context must select nothing"
@@ -542,12 +543,10 @@ def test_causal_bound_and_empty_and_padded_rows(ws):
     assert all(p < s["block_size"] for p in picked[1]), (
         f"row 1 selected past its causal length: {picked[1]}"
     )
-    allowed_3 = set()
+    allowed_3: set[int] = set()
     for blk in s["candidate_blocks"][3].tolist():
         if blk >= 0:
-            allowed_3.update(
-                range(blk * s["block_size"], (blk + 1) * s["block_size"])
-            )
+            allowed_3.update(range(blk * s["block_size"], (blk + 1) * s["block_size"]))
     assert picked[3] <= allowed_3
     assert all(p < s["causal_len"] for p in picked[3])
     # Unselected slots are -1, never the sentinel the buffer was filled with.
@@ -559,7 +558,7 @@ def test_causal_bound_and_empty_and_padded_rows(ws):
 def test_speculative_rows_get_descending_causal_bounds(ws):
     """With one length per request, speculative row s of a request sees
     ``next_n - 1 - s`` fewer positions than the request's newest row."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     next_n = 3
     requests = 2
     rows = requests * next_n
@@ -579,7 +578,7 @@ def test_speculative_rows_get_descending_causal_bounds(ws):
     s["candidate_blocks"][:, 0] = 0
     s["candidate_blocks"][:, 1] = 1
     _run(s, next_n=next_n)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     picked = _as_sets(s["topk_indices"])
     bounds = [max(request_len - next_n + 1 + step, 0) for step in range(next_n)]
@@ -593,8 +592,7 @@ def test_speculative_rows_get_descending_causal_bounds(ws):
             # The two candidate blocks cover [0, 2 * block_size), so each row
             # sees exactly its own causal prefix of them.
             assert len(picked[row]) == bounds[step], (
-                f"row {row} saw {len(picked[row])} positions, expected "
-                f"{bounds[step]}"
+                f"row {row} saw {len(picked[row])} positions, expected {bounds[step]}"
             )
 
 
@@ -612,7 +610,7 @@ def test_graph_captured_short_replays_long(ws):
     This is the property that fails if any context-dependent value reaches the
     host: capture would bake the warmup batch's bound.
     """
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=6, num_candidates=128, causal_len=4096, topk=TOPK, seed=17)
     _reserve(ws, s)
 
@@ -626,7 +624,7 @@ def test_graph_captured_short_replays_long(ws):
         for _ in range(3):
             _run(s)
     torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ws.lock()
     graph = torch.cuda.CUDAGraph()
@@ -647,13 +645,13 @@ def test_graph_captured_short_replays_long(ws):
                 ).to(torch.int32)
             )
             graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             replayed = s["topk_indices"].clone()
 
             # The same inputs run eagerly must select the same positions.
             s["topk_indices"].fill_(-7)
             _run(s)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             assert _as_sets(replayed) == _as_sets(s["topk_indices"]), (
                 f"replay diverged from eager at causal={causal}"
             )
@@ -661,14 +659,14 @@ def test_graph_captured_short_replays_long(ws):
                 assert _as_sets(replayed) == [set()] * s["rows"]
     finally:
         del graph
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
 
 @requires_sm90
 @torch.inference_mode()
 def test_graph_replay_is_stable_across_page_table_changes(ws):
     """Replays must follow the current page table, not the captured one."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     s = _setup(device, rows=4, num_candidates=128, causal_len=2048, topk=TOPK, seed=19)
     _reserve(ws, s)
 
@@ -678,7 +676,7 @@ def test_graph_replay_is_stable_across_page_table_changes(ws):
         for _ in range(3):
             _run(s)
     torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ws.lock()
     graph = torch.cuda.CUDAGraph()
@@ -693,7 +691,7 @@ def test_graph_replay_is_stable_across_page_table_changes(ws):
             .expand(s["rows"], -1)
         )
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         replayed = s["topk_indices"].clone()
 
         ref_scores = _reference_scores(
@@ -709,7 +707,7 @@ def test_graph_replay_is_stable_across_page_table_changes(ws):
         assert _as_sets(replayed) == _as_sets(ref)
     finally:
         del graph
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
 
 @requires_sm90
@@ -724,7 +722,7 @@ def test_candidate_gather_is_bandwidth_efficient(ws):
     every correctness test green, so pin a floor well below what a correctly
     vectorized kernel achieves.
     """
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     # Production candidate width, so the K stream dominates the measurement
     # rather than the per-step costs of the expansion and top-k stages.
     rows, num_candidates, block_size = 24, 2048, 8
@@ -756,7 +754,7 @@ def test_candidate_gather_is_bandwidth_efficient(ws):
             )
         for _ in range(5):
             _run(s, plan=plan)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         iters = 20
         start, stop = torch.cuda.Event(True), torch.cuda.Event(True)
@@ -764,7 +762,7 @@ def test_candidate_gather_is_bandwidth_efficient(ws):
         for _ in range(iters):
             _run(s, plan=plan)
         stop.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         micros = start.elapsed_time(stop) * 1e3 / iters
 
         bytes_moved = (
@@ -783,7 +781,7 @@ def test_candidate_gather_is_bandwidth_efficient(ws):
 def test_workspace_reservation_covers_the_hot_path(ws):
     """Reserving for the largest row count must let smaller steps run after
     the workspace is locked, which is what the real profiling run does."""
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     big = _setup(device, rows=16, num_candidates=128, causal_len=2048, topk=TOPK)
     _reserve(ws, big)
     ws.lock()
@@ -792,4 +790,4 @@ def test_workspace_reservation_covers_the_hot_path(ws):
             device, rows=rows, num_candidates=128, causal_len=2048, topk=TOPK, seed=rows
         )
         _run(s)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
