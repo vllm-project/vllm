@@ -926,7 +926,7 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 @pytest.mark.parametrize("soft_cap", [None, 30.0])
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
-def test_triton_unified_attn_fp8_kv_scales_on_scores(
+def test_triton_unified_attn_fp8_kv_dequantization(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
@@ -934,11 +934,12 @@ def test_triton_unified_attn_fp8_kv_scales_on_scores(
     soft_cap: float | None,
     seq_threshold_3D: int,
 ) -> None:
-    """bf16 Q with an FP8 per-tensor KV cache: k_scale / v_scale are applied to
-    the scores and the output rather than to every K/V element. Compare with an
-    fp32 reference over the exactly dequantized cache, using scales that are not
-    powers of two (so a missing or doubled scale shows up), head size 512, a
-    sliding window and softcap, on the 2D and 3D paths."""
+    """Dequantize per-tensor FP8 KV for bf16 queries using runtime scales.
+
+    Compare with an fp32 reference over the dequantized cache. Non-power-of-two
+    scales catch missing or doubled scaling; cover large heads, sliding windows,
+    softcap, and both the 2D and 3D paths.
+    """
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
 
