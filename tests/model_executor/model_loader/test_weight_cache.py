@@ -8,6 +8,7 @@ identical outputs.
 """
 
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+import psutil
 import pytest
 import regex as re
 
@@ -72,7 +74,8 @@ class WeightCacheDaemon:
 
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
-        self._proc.stderr.read()
+        for line in self._proc.stderr:
+            sys.stderr.write(line)
 
     def check_health(self) -> None:
         url = f"http://127.0.0.1:{self.health_port}/health"
@@ -108,6 +111,50 @@ class WeightCacheDaemon:
             self._proc.kill()
             self._proc.wait()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "after_ready,stop_sibling",
+    [(False, False), (True, False), (True, True)],
+    ids=["startup", "serving", "unresponsive-sibling"],
+)
+def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibling):
+    """A failed later rank must not leave preload waiting on an earlier rank."""
+    children: list[psutil.Process] = []
+    with WeightCacheDaemon(
+        "facebook/opt-125m",
+        tp_size=2,
+        extra_args=["--disable-flashinfer-autotune"],
+    ) as daemon:
+        try:
+            assert daemon._proc is not None
+            parent = psutil.Process(daemon._proc.pid)
+            deadline = time.monotonic() + 120
+            while len(children) != 2:
+                assert daemon._proc.poll() is None, "preload exited before spawning"
+                children = [
+                    child
+                    for child in parent.children()
+                    if "spawn_main" in " ".join(child.cmdline())
+                ]
+                assert time.monotonic() < deadline, "daemon ranks did not spawn"
+                time.sleep(0.1)
+            if after_ready:
+                daemon.wait_until_ready()
+            if stop_sibling:
+                # A stopped process cannot handle SIGTERM; cleanup must escalate.
+                children[0].send_signal(signal.SIGSTOP)
+            children[-1].send_signal(signal.SIGKILL)
+            assert daemon._proc.wait(timeout=30) == 128 + signal.SIGKILL
+            _, alive = psutil.wait_procs(children, timeout=10)
+            assert not alive, "preload left sibling ranks running"
+        finally:
+            # Also clean up on the unfixed launcher, which waits indefinitely.
+            for child in children:
+                if child.is_running():
+                    child.kill()
+            psutil.wait_procs(children, timeout=10)
 
 
 @dataclass

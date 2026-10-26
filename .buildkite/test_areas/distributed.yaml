@@ -765,6 +765,7 @@ steps:
   device: l4
   num_devices: 2
   source_file_dependencies:
+  - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
@@ -780,6 +781,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
