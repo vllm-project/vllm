@@ -226,7 +226,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         causal = (
             False
-            if self.is_cross_attention or is_dynamic_casual
+            if self.is_cross_attention
+            or self.is_encoder_only_attention
+            or is_dynamic_casual
             else common_attn_metadata.causal
         )
 
