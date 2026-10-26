@@ -7,6 +7,8 @@ long request, and both have to come back with the right rows and the right
 block-table rows.
 """
 
+import types
+
 import pytest
 import torch
 
@@ -24,7 +26,10 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     plan_prefill_chunks,
     split_prefill_chunks,
 )
-from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import rocm_mxfp4_consumer_rows
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    _fill_topk_rows,
+    rocm_mxfp4_consumer_rows,
+)
 
 
 def _chunk(block_table, token_start, token_end, row_ends):
@@ -161,3 +166,22 @@ def test_decode_launches_native_on_uniform_steps():
     assert native_decode(rows[:5], row_block_table, [2, 1, 2], 2, context_lens) is None
     assert native_decode(rows, row_block_table, [2, 2, 2], 2, context_lens) is None
     assert native_decode(rows[:4], row_block_table, [1] * 4, 1, context_lens) is None
+
+
+@pytest.mark.parametrize(
+    "decode_rows, k, first_filled",
+    [(7, 512, 7), (128, 512, 0), (7, 2048, 0), (None, 512, 0)],
+)
+def test_topk_fill_skips_the_rows_vllms_topk_writes(decode_rows, k, first_filled):
+    num_tokens = 130
+    buffer = torch.full((num_tokens + 1, k), 7, dtype=torch.int32)
+    metadata = types.SimpleNamespace(decode=None, decode_row_lens=None)
+    if decode_rows is not None:
+        metadata.decode = object()
+        metadata.decode_row_lens = torch.zeros(decode_rows, dtype=torch.int32)
+    layer = types.SimpleNamespace(metadata=metadata, topk_buffer=buffer, topk_tokens=k)
+
+    _fill_topk_rows(layer, num_tokens)
+    assert bool((buffer[:first_filled] == 7).all())
+    assert bool((buffer[first_filled:num_tokens] == -1).all())
+    assert bool((buffer[num_tokens:] == 7).all())
