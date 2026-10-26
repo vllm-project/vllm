@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -43,11 +43,14 @@ from vllm.utils.import_utils import (
     has_nixl_ep,
 )
 
+if TYPE_CHECKING:
+    from flashinfer.fused_moe import QuantFormat
+
 
 @dataclass(frozen=True)
 class FlashInferOneSidedDispatchLayout:
-    x_bytes_per_token: int
-    x_sf_bytes_per_token: int
+    dispatch_format: "QuantFormat"
+    extra_payload_bytes_per_token: int = 0
 
 
 def flashinfer_one_sided_dispatch_layout(
@@ -56,25 +59,32 @@ def flashinfer_one_sided_dispatch_layout(
     input_dtype: torch.dtype | None = None,
 ) -> FlashInferOneSidedDispatchLayout:
     """Return the one-sided activation payload layout."""
+    if input_dtype is not None and input_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "flashinfer_nvlink_one_sided unpacked inputs must be float16 "
+            f"or bfloat16, got {input_dtype}"
+        )
+
+    from flashinfer.fused_moe import QuantFormat
+
     if input_dtype is not None:
-        if input_dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError(
-                "flashinfer_nvlink_one_sided unpacked inputs must be float16 "
-                f"or bfloat16, got {input_dtype}"
-            )
-        return FlashInferOneSidedDispatchLayout(hidden_dim * input_dtype.itemsize, 0)
+        return FlashInferOneSidedDispatchLayout(
+            QuantFormat.FP16 if input_dtype == torch.float16 else QuantFormat.BF16
+        )
     if quant_config.quant_dtype is None:
-        return FlashInferOneSidedDispatchLayout(hidden_dim * 2, 0)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.BF16)
     if quant_config.quant_dtype == "nvfp4":
-        scale_elems = hidden_dim // 16
-        return FlashInferOneSidedDispatchLayout(hidden_dim // 2, scale_elems)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.NVFP4)
     if quant_config.quant_dtype == "mxfp8":
         align = quant_config.mx_alignment
         padded_k = (
             ((hidden_dim + align - 1) // align) * align if align > 0 else hidden_dim
         )
-        scale_elems = padded_k // 32
-        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_elems)
+        # FI accounts for the logical row's scales; include vLLM's padding.
+        extra_scale_bytes = padded_k // 32 - (hidden_dim + 31) // 32
+        return FlashInferOneSidedDispatchLayout(
+            QuantFormat.MXFP8, max(0, extra_scale_bytes)
+        )
     if (
         quant_config.use_fp8_w8a8
         and quant_config.quant_dtype == current_platform.fp8_dtype()
@@ -85,9 +95,7 @@ def flashinfer_one_sided_dispatch_layout(
                 "flashinfer_nvlink_one_sided DeepSeek Blockwise FP8 dispatch "
                 f"requires hidden_dim divisible by 128; got {hidden_dim}"
             )
-        scale_elems = hidden_dim // 128
-        scale_bytes = scale_elems * torch.float32.itemsize
-        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.DeepSeekFp8)
     raise NotImplementedError(
         "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
         "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
@@ -430,8 +438,8 @@ def maybe_make_prepare_finalize(
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
-            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
-            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
+            dispatch_format=dispatch_layout.dispatch_format,
+            extra_payload_bytes_per_token=dispatch_layout.extra_payload_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:

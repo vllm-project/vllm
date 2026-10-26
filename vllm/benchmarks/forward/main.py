@@ -74,6 +74,13 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output-json", help="Write results to this file.")
+    parser.add_argument(
+        "--profile-dir",
+        help="After timing, trace a few replays of each case and write "
+        "`<case>.rank<r>.trace.json.gz` (Perfetto) and `<case>.rank<r>.kernels.json` "
+        "(GPU time per kernel per forward) here. Summarize or compare with "
+        "`python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.",
+    )
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(load_format="dummy", enable_prefix_caching=False)
 
@@ -102,6 +109,10 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
     engine_args = EngineArgs.from_cli_args(args)
     engine_args.distributed_executor_backend = "external_launcher"
+    if engine_args.pipeline_parallel_size > 1:
+        from vllm.benchmarks.forward.pipeline import ForwardPipelineExecutor
+
+        engine_args.distributed_executor_backend = ForwardPipelineExecutor
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE
     engine_args.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -120,9 +131,18 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
 
 def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any]:
+    required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
+    if required_drafts > runner.num_speculative_steps:
+        raise ValueError(
+            f"Case {case.name!r} needs {required_drafts} draft tokens per request, "
+            f"but the runner supports {runner.num_speculative_steps}. "
+            "Set --speculative-config with a sufficient num_speculative_tokens."
+        )
+
     from vllm.benchmarks.forward.batch import build_batch
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
+    from vllm.benchmarks.forward.pipeline import PipelineBench
     from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
@@ -138,7 +158,19 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         dcp_size,
     )
     zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
-    bench = ForwardBench(
+    profile_prefix = None
+    if args.profile_dir:
+        from vllm.distributed.parallel_state import get_world_group
+
+        os.makedirs(args.profile_dir, exist_ok=True)
+        rank = get_world_group().rank
+        profile_prefix = os.path.join(args.profile_dir, f"{case.name}.rank{rank}")
+    bench_cls = (
+        PipelineBench
+        if runner.parallel_config.pipeline_parallel_size > 1
+        else ForwardBench
+    )
+    bench = bench_cls(
         runner,
         batch,
         args.iters,
@@ -146,6 +178,8 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         touched_kv_views(
             context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
         ),
+        case.name,
+        profile_prefix,
     )
     routing, balanced = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
@@ -213,6 +247,14 @@ def main(args: argparse.Namespace) -> None:
                 f"eager rel rms {rank0['graph_vs_eager']['relative_rms']:.1e}",
                 flush=True,
             )
+            if profile := rank0.get("profile"):
+                from vllm.benchmarks.forward.profile import format_summary
+
+                print(
+                    f"[forward] {case.name} rank 0 kernels ({profile['summary']}):\n"
+                    + format_summary({**profile, "kernels": profile["top_kernels"]}),
+                    flush=True,
+                )
             if latency["sample_spread_pct"] > 0.5:
                 logger.warning(
                     "%s: unstable timing (sample medians spread %.2f%%).",

@@ -71,8 +71,7 @@ thought.
 
 Serve the model with a canvas that holds the answer template, for example:
   vllm serve google/diffusiongemma-26B-A4B-it \
-      --diffusion-config '{"canvas_length": 64}' --max-logprobs 32 \
-      --enable-prefix-caching
+      --diffusion-config '{"canvas_length": 64}' --enable-prefix-caching
 then run this in front of it:
   python structured_server.py --upstream http://127.0.0.1:8000 \
       --tokenizer google/diffusiongemma-26B-A4B-it --canvas 64 --port 8011

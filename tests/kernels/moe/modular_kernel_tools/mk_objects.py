@@ -53,6 +53,11 @@ class TestMoEQuantConfig:
     per_out_ch_quant: bool
     per_act_token_quant: bool
     block_shape: list[int] | None
+    # Weight dtype, when it differs from the activation quant_dtype (e.g.
+    # MXFP4 W4A16, where weights are mxfp4 but activations are unquantized).
+    # Defaults to quant_dtype, mirroring FusedMoEQuantConfig.make()'s own
+    # weight_dtype fallback.
+    weight_dtype: torch.dtype | str | None = None
 
 
 @dataclass
@@ -75,13 +80,17 @@ class ExpertInfo:
 
 
 PREPARE_FINALIZE_INFO: dict[
-    mk.FusedMoEPrepareAndFinalizeModular, PrepareFinalizeInfo
+    type[mk.FusedMoEPrepareAndFinalizeModular], PrepareFinalizeInfo
 ] = {}
-EXPERT_INFO: dict[mk.FusedMoEExpertsModular, ExpertInfo] = {}
-MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
+EXPERT_INFO: dict[type[mk.FusedMoEExpertsModular], ExpertInfo] = {}
+MK_ALL_PREPARE_FINALIZE_TYPES: list[type[mk.FusedMoEPrepareAndFinalizeModular]] = []
+MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[
+    type[mk.FusedMoEPrepareAndFinalizeModular]
+] = []
+MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[
+    type[mk.FusedMoEPrepareAndFinalizeModular]
+] = []
+MK_FUSED_EXPERT_TYPES: list[type[mk.FusedMoEExpertsModular]] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
@@ -92,8 +101,8 @@ common_float_types: list[torch.dtype | str] = [
     torch.float32,
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
+mxfp4_types: list[torch.dtype | str] = ["mxfp4"]
 nvfp4_types = ["nvfp4"]
-mxfp4_types = ["mxfp4"]
 fp8_types = [current_platform.fp8_dtype()]
 
 
@@ -166,7 +175,9 @@ def expert_info(kind) -> ExpertInfo:
 register_prepare_and_finalize(
     MoEPrepareAndFinalizeNoDPEPModular,
     standard_format,
-    common_float_types,
+    # mxfp4 is single-GPU (AiterExperts) only, so it is registered here
+    # rather than on any multi-gpu prepare/finalize type.
+    common_float_types + mxfp4_types,
     blocked_quantization_support=True,
     backend=None,
 )
@@ -285,8 +296,9 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         # Note: this is a hack to get it to run for now
     )
 else:
+    # None sentinels stand in for the class names when the backend is unavailable.
     FlashInferCutlassMoEPrepareAndFinalize = None
-    FlashInferExperts = None
+    FlashInferExperts = None  # type: ignore[misc]
 
 if (
     has_flashinfer_nvlink_one_sided()
@@ -358,11 +370,12 @@ if has_aiter():
             needs_aiter=True,
         )
 else:
-    AiterUnquantizedExperts = None
-    AiterFp8BlockExperts = None
-    AiterFp8TensorExperts = None
-    AiterFp8ChannelExperts = None
-    AiterMxfp4Experts = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    AiterUnquantizedExperts = None  # type: ignore[misc]
+    AiterFp8BlockExperts = None  # type: ignore[misc]
+    AiterFp8TensorExperts = None  # type: ignore[misc]
+    AiterFp8ChannelExperts = None  # type: ignore[misc]
+    AiterMxfp4Experts = None  # type: ignore[misc]
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -409,8 +422,9 @@ if cutlass_fp8_supported():
         blocked_quantization_support=False,
     )
 else:
-    CutlassBatchedExpertsFp8 = None
-    CutlassExpertsFp8 = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    CutlassBatchedExpertsFp8 = None  # type: ignore[misc]
+    CutlassExpertsFp8 = None  # type: ignore[misc]
 
 if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
@@ -424,7 +438,8 @@ if cutlass_fp4_supported():
         blocked_quantization_support=True,
     )
 else:
-    CutlassExpertsFp4 = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    CutlassExpertsFp4 = None  # type: ignore[misc]
 
 MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
@@ -478,9 +493,29 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
         ),
     ]
 
+if has_aiter():
+    MK_QUANT_CONFIGS += [
+        # W4A16: weights are mxfp4, activations are unquantized.
+        TestMoEQuantConfig(
+            quant_dtype=None,
+            weight_dtype="mxfp4",
+            per_out_ch_quant=False,
+            per_act_token_quant=False,
+            block_shape=None,
+        ),
+        # W4A4: weights and activations are both mxfp4 (weight_dtype
+        # defaults to quant_dtype).
+        TestMoEQuantConfig(
+            quant_dtype="mxfp4",
+            per_out_ch_quant=False,
+            per_act_token_quant=False,
+            block_shape=None,
+        ),
+    ]
+
 
 def make_fused_experts(
-    fused_experts_type: mk.FusedMoEExpertsModular,
+    fused_experts_type: type[mk.FusedMoEExpertsModular],
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
