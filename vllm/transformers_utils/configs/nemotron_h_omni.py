@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# NB: Required to avoid docstring errors
+# ruff: noqa
+
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,7 +33,9 @@ from transformers.utils import auto_docstring, logging
 @auto_docstring(checkpoint="nvidia/C-RADIOv4-H")
 @strict
 class NemotronHOmniRadioConfig(PreTrainedConfig):
-    r"""mlp_ratio (`float`, *optional*, defaults to 4.0):
+    # no-format
+    r"""
+    mlp_ratio (`float`, *optional*, defaults to 4.0):
         Ratio of the hidden size of the MLP relative to `hidden_size`.
     use_swiglu_ffn (`bool`, *optional*, defaults to `False`):
         Whether to use a SwiGLU feed-forward network in the encoder layers \
@@ -123,7 +128,9 @@ def _nemotron_h_compatible_config(config: dict) -> dict:
 @auto_docstring(checkpoint="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16")
 @strict
 class NemotronHOmniReasoningV3Config(PreTrainedConfig):
-    r"""vision_config (`dict` or `NemotronHOmniRadioConfig`, *optional*):
+    # no-format
+    r"""
+    vision_config (`dict` or `NemotronHOmniRadioConfig`, *optional*):
         Configuration for the RADIO vision encoder. Defaults to a default \
             [`NemotronHOmniRadioConfig`].
     llm_config (`dict` or `NemotronHConfig`, *optional*):
