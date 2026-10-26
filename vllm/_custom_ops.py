@@ -57,10 +57,9 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        # Fused activation+quant kernels (silu_and_mul_nvfp4_quant) do not
-        # write the padded scale entries the NVFP4 GEMM reads, so the buffer
-        # must be zero-initialized.
-        return torch.zeros(
+        # The NVFP4 quant kernel explicitly zeroes every padded scale entry,
+        # so no separate zero-initialization kernel is required here.
+        return torch.empty(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:

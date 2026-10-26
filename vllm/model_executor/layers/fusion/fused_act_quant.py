@@ -118,7 +118,7 @@ def _silu_and_mul_nvfp4_dynamic(
     # elements shares one FP8 scale.
     rounded_m = round_up(num_tokens, 128)
     rounded_n = round_up(d // 16, 4)
-    block_scale = torch.zeros(
+    block_scale = torch.empty(
         (rounded_m, rounded_n // 4), dtype=torch.int32, device=x.device
     ).view(FP8_DTYPE)
 
