@@ -445,9 +445,13 @@ def invoke_moe_batched_triton_kernel(
     config: dict[str, int],
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ):
     assert not use_int4_w4a16
+    if per_out_ch_quant is None:
+        # Legacy callers assumed per-channel weight scales when the activations
+        # were per-channel; keep that unless the weight layout is stated.
+        per_out_ch_quant = per_act_token_quant
     max_num_tokens = A.size(1)
     K = A.size(2)
     N = C.size(2)

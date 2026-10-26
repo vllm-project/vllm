@@ -109,6 +109,53 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+def test_triton_moe_launcher_defaults_weight_layout_to_activation_layout(
+    monkeypatch,
+) -> None:
+    """Callers that only set per_channel_quant keep their old weight layout.
+
+    Before the activation and weight scale layouts were split, per_channel_quant
+    selected per-channel weight scales too. Callers that do not pass
+    per_out_ch_quant must keep that behaviour instead of silently switching to
+    per-expert (per-tensor) weight scales.
+    """
+    captured: dict[str, bool] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["per_channel_quant"] = kwargs["per_channel_quant"]
+                captured["per_out_ch_quant"] = kwargs["per_out_ch_quant"]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=torch.tensor([0.5]),
+        B_scale=torch.ones((1, 1, 1)),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=True,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=True,
+    )
+
+    assert captured["per_channel_quant"] is True
+    assert captured["per_out_ch_quant"] is True
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

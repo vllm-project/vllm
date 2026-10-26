@@ -784,11 +784,17 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+
+    # Callers that predate the split of the activation and weight scale layouts
+    # got per-channel weight scales whenever the activations were per-channel.
+    # Keep that behaviour unless the caller states the weight layout explicitly.
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     if use_fp8_w8a8:
         SWAP_AB = enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -939,11 +945,14 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     M = A.size(0)
     num_tokens = M * top_k
@@ -1484,7 +1493,7 @@ def fused_experts_op(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1540,7 +1549,7 @@ def fused_experts_op_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1699,13 +1708,18 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
             f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
             "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
         )
+
+    if per_out_ch_quant is None:
+        # Legacy callers assumed per-channel weight scales when the activations
+        # were per-channel; keep that unless the weight layout is stated.
+        per_out_ch_quant = per_channel_quant
 
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
