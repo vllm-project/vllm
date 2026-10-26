@@ -730,7 +730,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
-_FP8_PREFILL_NUM_HEADS = (16, 32, 48, 64, 96, 128)
 
 _FUSED_PREFILL_LONG_CONTEXT = 8192
 _FUSED_PREFILL_SHORT_QUERY = 256
@@ -1078,12 +1077,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
+        # heads. It writes bf16 through a raw output pointer, so fp16 must use
+        # the standard prefill path. Head counts that are not a multiple of 16
+        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
+        # is the same head-count predicate the decode path uses.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim == 192
-            and self.mla_dims.v_head_dim == 128
-            and self.num_heads in _FP8_PREFILL_NUM_HEADS
+            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1110,8 +1112,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._fused_prefill_enabled = _fused_mla_prefill_supported() and (
             self.dcp_world_size == 1
             and self.q_data_type == torch.bfloat16
-            and self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim == 192
-            and self.mla_dims.v_head_dim == 128
             and self._prefill_backend.get_name() == "ROCM_AITER_FA"
         )
 
@@ -2245,9 +2245,13 @@ class AiterMLAHelper:
         sized with this same function, or the work/reduce maps describe a
         different head count than the kernel is handed.
 
-        This function itself has no upper bound; the builder gate admits only
-        ``_FP8_PREFILL_NUM_HEADS``, the 16-aligned head counts ``mla_reduce_v1``
-        has a 128-dim case for.
+        This function itself has no upper bound; the ceiling comes from the
+        ``is_valid_num_heads`` gate, which rejects counts above
+        ``_AITER_MAX_PADDED_MLA_HEADS`` (128) unless they are already
+        16-aligned. That bound was established for the asm *decode* padding, so
+        an architecture with, say, 136 heads per rank would be refused the
+        prefill here for a reason that was never measured against this kernel
+        pair. Revisit the constant rather than special-casing prefill.
         """
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         return -(-num_heads // m) * m
@@ -2458,8 +2462,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
-        # KV cache is FP8 and the builder admits the head count
-        # (_FP8_PREFILL_NUM_HEADS).
+        # KV cache is FP8. Head counts that are not a multiple of 16 are
+        # replicate-padded up to one (see _mla_fp8_prefill_attn).
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
