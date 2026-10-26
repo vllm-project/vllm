@@ -27,6 +27,10 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.warmup.triton_autotune import (
+    atomic_write_json,
+    get_autotune_cache_dir,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -921,41 +925,127 @@ def _w8a8_triton_block_scaled_mm(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
+_BLOCK_FP8_CONFIGS_DIR = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "configs"
+)
+
+
+def get_w8a8_block_fp8_config_file_name(
+    N: int, K: int, block_n: int, block_k: int
+) -> str:
+    device_name = get_device_name_as_file_name()
+    return (
+        f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,"
+        f"block_shape=[{block_n},{block_k}].json"
+    )
+
+
+def _block_fp8_config_paths(
+    N: int,
+    K: int,
+    block_n: int,
+    block_k: int,
+    *,
+    include_autotune: bool = True,
+) -> list[str]:
+    file_name = get_w8a8_block_fp8_config_file_name(N, K, block_n, block_k)
+    paths = []
+    if envs.VLLM_TUNED_CONFIG_FOLDER is not None:
+        paths.append(os.path.join(envs.VLLM_TUNED_CONFIG_FOLDER, file_name))
+    if include_autotune:
+        paths.append(get_block_fp8_autotune_config_file_path(N, K, block_n, block_k))
+    paths.append(os.path.join(_BLOCK_FP8_CONFIGS_DIR, file_name))
+    return paths
+
+
+def _load_block_fp8_configs(path: str) -> dict[int, Any] | None:
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        return None
+    return {int(k): value for k, value in raw.items() if k.isdigit()}
+
+
+def has_fixed_w8a8_block_fp8_config(N: int, K: int, block_n: int, block_k: int) -> bool:
+    """Whether a user or bundled config table exists for this shape."""
+    return any(
+        _load_block_fp8_configs(path) is not None
+        for path in _block_fp8_config_paths(
+            N, K, block_n, block_k, include_autotune=False
+        )
+    )
+
+
 @functools.lru_cache
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
-    """Return optimized configurations for the w8a8 block fp8 kernel.
-    The return value will be a dictionary that maps an irregular grid of
-    batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
-    kernel on a given batch size bs, the closest batch size in the grid should
-    be picked and the associated configuration chosen to invoke the kernel.
-    """
-    # First look up if an optimized configuration is available in the configs
-    # directory
-    device_name = get_device_name_as_file_name()
-    json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
-
-    config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
-    )
-    if os.path.exists(config_file_path):
-        with open(config_file_path) as f:
-            logger.info(
+    """Load the highest-priority launch-config table for this shape."""
+    paths = _block_fp8_config_paths(N, K, block_n, block_k)
+    for path in paths:
+        configs = _load_block_fp8_configs(path)
+        if configs is not None:
+            logger.info_once(
                 "Using configuration from %s for W8A8 Block FP8 kernel.",
-                config_file_path,
+                path,
+                scope="global",
             )
-            # If a configuration has been found, return it
-            return {int(key): val for key, val in json.load(f).items()}
+            return configs
 
-    # If no optimized configuration is available, we will use the default
-    # configuration
-    logger.warning(
+    logger.warning_once(
         "Using default W8A8 Block FP8 kernel config. Performance might "
         "be sub-optimal! Config file not found at %s",
-        config_file_path,
+        ", ".join(paths),
     )
     return None
+
+
+def get_block_fp8_autotune_config_file_path(
+    N: int, K: int, block_n: int, block_k: int
+) -> str:
+    return os.path.join(
+        get_autotune_cache_dir("block_fp8"),
+        get_w8a8_block_fp8_config_file_name(N, K, block_n, block_k),
+    )
+
+
+def load_block_fp8_autotune_configs(
+    N: int, K: int, block_n: int, block_k: int
+) -> dict[int, dict[str, int]]:
+    path = get_block_fp8_autotune_config_file_path(N, K, block_n, block_k)
+    return _load_block_fp8_configs(path) or {}
+
+
+def save_block_fp8_configs(
+    N: int,
+    K: int,
+    block_n: int,
+    block_k: int,
+    configs: dict[int, dict[str, int]],
+) -> str:
+    path = get_block_fp8_autotune_config_file_path(N, K, block_n, block_k)
+    atomic_write_json(
+        path,
+        {
+            "triton_version": getattr(triton, "__version__", "unknown"),
+            **{str(k): v for k, v in sorted(configs.items())},
+        },
+    )
+    get_w8a8_block_fp8_configs.cache_clear()
+    return path
+
+
+def _default_w8a8_block_fp8_config(block_size: list[int]) -> dict[str, int]:
+    return {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": block_size[0],
+        "BLOCK_SIZE_K": block_size[1],
+        "GROUP_SIZE_M": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
 
 
 def w8a8_triton_block_scaled_mm(
@@ -965,6 +1055,8 @@ def w8a8_triton_block_scaled_mm(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization.
@@ -979,6 +1071,7 @@ def w8a8_triton_block_scaled_mm(
         block_size: The block size for per-block quantization. It should
             be 2-dim, e.g., [128, 128].
         output_dtype: The dtype of the returned tensor.
+        config: Launch config to use instead of the tuned-table lookup.
 
     Returns:
         torch.Tensor: The result of matmul.
@@ -1041,25 +1134,16 @@ def w8a8_triton_block_scaled_mm(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    if envs.VLLM_BATCH_INVARIANT:
-        configs = None  # use the default config
-    else:
-        configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
-    if configs:
-        # Get the optimal config if there is one
-        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-    else:
-        # Default config
-        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
-        # BLOCK_SIZE_K must be divisible by block_size[1]
-        config = {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": block_size[0],
-            "BLOCK_SIZE_K": block_size[1],
-            "GROUP_SIZE_M": 32,
-            "num_warps": 4,
-            "num_stages": 2,
-        }
+    if config is None:
+        if envs.VLLM_BATCH_INVARIANT:
+            configs = None  # use the default config
+        else:
+            configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+        if configs:
+            # Get the optimal config if there is one
+            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        else:
+            config = _default_w8a8_block_fp8_config(block_size)
 
     def grid(META):
         return (
