@@ -21,16 +21,32 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
+    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.models.muse_spark.amd import model as muse_model
-from vllm.models.muse_spark.common.layers import materialize_residual_path_constants
+from vllm.models.muse_spark.common.layers import (
+    materialize_residual_path_constants,
+    norm_then_gated_residual,
+)
 from vllm.transformers_utils.configs.muse_spark import MuseSparkTextConfig
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 NUM_LAYERS = 2
 HIDDEN_SIZE = 256
+
+
+class _TokenMixingAttention(nn.Module):
+    """Mixes all tokens like attention does, without a KV cache."""
+
+    def __init__(self, *args, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+        self.layer_name = prefix
+
+    def forward(self, q, k, v):
+        return q + q.float().mean(0).to(q.dtype)
 
 
 def _make_config() -> VllmConfig:
@@ -113,7 +129,60 @@ def _check_moe_block(rank: int, config: VllmConfig) -> None:
         torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
 
 
-def _run(rank: int, port: int) -> None:
+def _make_layers(config: VllmConfig, rank: int) -> nn.ModuleList:
+    """Production layers with identical weights plus distinct rank shards."""
+    with (
+        set_current_vllm_config(config),
+        patch.object(muse_model, "Attention", _TokenMixingAttention),
+        patch.object(muse_model, "supports_fused_kv_insert", lambda attn: False),
+    ):
+        layers = nn.ModuleList(
+            muse_model.MuseSpark1xDecoderLayer(config, prefix=f"model.layers.{i}")
+            for i in range(NUM_LAYERS)
+        )
+    torch.manual_seed(7)
+    for param in layers.parameters():
+        param.normal_(std=0.08)
+    for layer in layers:
+        assert layer.token_sharded
+        # Distinct rank contributions expose missing or duplicate reductions.
+        layer.self_attn.o_proj.weight.add_(rank * 0.01)
+        experts = layer.feed_forward.experts.routed_experts
+        experts.w13_weight.add_(rank * 0.01)
+        experts.quant_method.process_weights_after_loading(experts)
+    materialize_residual_path_constants(layers)
+    return layers
+
+
+def _run_layers(layers, positions, x, token_sharded: bool) -> torch.Tensor:
+    num_tokens = positions.shape[0]
+    if token_sharded:
+        x = sequence_parallel_chunk(x)
+    for layer in layers:
+        x = layer(positions, x, token_sharded)
+    out = norm_then_gated_residual(x)
+    if token_sharded:
+        out = tensor_model_parallel_all_gather(out.contiguous(), 0)[:num_tokens]
+    return out.clone()
+
+
+def _check_token_sharded(rank: int, config: VllmConfig) -> None:
+    layers = _make_layers(config, rank)
+    # Token counts with and without padding to the TP size.
+    for num_tokens in (301, 512):
+        torch.manual_seed(num_tokens)
+        x = torch.randn(num_tokens, HIDDEN_SIZE, dtype=torch.float32)
+        positions = torch.arange(num_tokens)
+        with (
+            set_current_vllm_config(config),
+            set_forward_context(None, config, num_tokens=num_tokens),
+        ):
+            expected = _run_layers(layers, positions, x, token_sharded=False)
+            actual = _run_layers(layers, positions, x, token_sharded=True)
+        torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
+
+
+def _run(rank: int, port: int, check) -> None:
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
     config = _make_config()
@@ -129,7 +198,7 @@ def _run(rank: int, port: int) -> None:
             initialize_model_parallel(tensor_model_parallel_size=2)
             with torch.device(f"cuda:{rank}"), torch.inference_mode():
                 torch.set_default_dtype(torch.bfloat16)
-                _check_moe_block(rank, config)
+                check(rank, config)
     finally:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
@@ -138,4 +207,10 @@ def _run(rank: int, port: int) -> None:
 @multi_gpu_test(num_gpus=2)
 def test_token_sharded_moe_block_matches_all_reduce() -> None:
     """The token-sharded MoE block matches its all-reduce path."""
-    mp.spawn(_run, args=(get_open_port(),), nprocs=2)
+    mp.spawn(_run, args=(get_open_port(), _check_moe_block), nprocs=2)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_token_sharded_decoder_layers_match_full_tokens() -> None:
+    """The sharded residual stream and MoE block match the replicated path."""
+    mp.spawn(_run, args=(get_open_port(), _check_token_sharded), nprocs=2)
