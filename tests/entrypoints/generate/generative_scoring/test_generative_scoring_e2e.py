@@ -9,22 +9,27 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+BOS_MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request):
+    model_name = getattr(request, "param", MODEL_NAME)
     args = [
         "--dtype",
-        "bfloat16",
+        "float32" if model_name == BOS_MODEL_NAME else "bfloat16",
         "--max-model-len",
         "512",
         "--enforce-eager",
         "--max-num-seqs",
-        "32",
+        "1" if model_name == BOS_MODEL_NAME else "32",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    if model_name == BOS_MODEL_NAME:
+        args += ["--no-enable-prefix-caching", "--kv-cache-memory-bytes", "268435456"]
+    with RemoteOpenAIServer(model_name, args) as remote_server:
         yield remote_server
 
 
@@ -151,6 +156,77 @@ class TestGenerativeScoringAPI:
         r1_score = r1.json()["data"][0]["score"]
         r2_score = r2.json()["data"][0]["score"]
         assert abs(r1_score - r2_score) < 1e-6
+
+
+@pytest.mark.parametrize("server", [BOS_MODEL_NAME], indirect=True)
+class TestGenerativeScoringSpecialTokens:
+    @pytest.mark.parametrize("add_special_tokens", [False, True])
+    @pytest.mark.parametrize(
+        "query_as_tokens,item_as_tokens",
+        [(False, False), (True, False), (False, True), (True, True)],
+        ids=["text", "token_query", "token_item", "tokens"],
+    )
+    def test_item_first_matches_swapped_inputs(
+        self, server, add_special_tokens, query_as_tokens, item_as_tokens
+    ):
+        """Changing field order must not move or discard automatic special tokens."""
+        tokenizer = get_tokenizer(BOS_MODEL_NAME)
+        query = "\nQuestion: Is this city the capital of France?\nAnswer:"
+        item = "Document: Paris is the capital of France."
+        if query_as_tokens:
+            query = tokenizer.encode(query, add_special_tokens=True)
+        if item_as_tokens:
+            item = tokenizer.encode(item, add_special_tokens=True)
+        common = {
+            "model": BOS_MODEL_NAME,
+            "label_token_ids": [
+                tokenizer.encode(label, add_special_tokens=False)[0]
+                for label in (" Yes", " No")
+            ],
+            "add_special_tokens": add_special_tokens,
+        }
+        responses = [
+            requests.post(server.url_for("generative_scoring"), json=common | fields)
+            for fields in (
+                {"query": query, "items": [item], "item_first": True},
+                {"query": item, "items": [query], "item_first": False},
+            )
+        ]
+        for response in responses:
+            assert response.status_code == 200, response.text
+        actual, reference = [response.json() for response in responses]
+        assert actual["usage"] == reference["usage"]
+        assert actual["data"][0]["score"] == pytest.approx(
+            reference["data"][0]["score"], abs=1e-6
+        )
+
+    @pytest.mark.parametrize("add_special_tokens", [False, True])
+    def test_query_first_matches_pretokenized_prompt(self, server, add_special_tokens):
+        """Keep query-first tokenization and explicit token IDs unchanged."""
+        tokenizer = get_tokenizer(BOS_MODEL_NAME)
+        query = "Question: Is Paris the capital of France?"
+        item = "\nAnswer:"
+        prompt_ids = tokenizer.encode(query, add_special_tokens=add_special_tokens)
+        prompt_ids += tokenizer.encode(item, add_special_tokens=False)
+        common = {
+            "model": BOS_MODEL_NAME,
+            "label_token_ids": [3216, 440],  # OPT's " Yes" and " No" tokens.
+            "add_special_tokens": add_special_tokens,
+        }
+        responses = [
+            requests.post(server.url_for("generative_scoring"), json=common | fields)
+            for fields in (
+                {"query": query, "items": [item]},
+                {"query": prompt_ids, "items": [[]]},
+            )
+        ]
+        for response in responses:
+            assert response.status_code == 200, response.text
+        actual, reference = [response.json() for response in responses]
+        assert actual["usage"] == reference["usage"]
+        assert actual["data"][0]["score"] == pytest.approx(
+            reference["data"][0]["score"], abs=1e-6
+        )
 
 
 if __name__ == "__main__":

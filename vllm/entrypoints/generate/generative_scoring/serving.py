@@ -54,7 +54,8 @@ class GenerativeScoringRequest(OpenAIBaseModel):
             the label_token_ids (True) or return true model probabilities over
             the full vocab for those ids (False).
         item_first: If True, prepend items to query. Otherwise append items to query.
-        add_special_tokens: Whether to add special tokens when tokenizing.
+        add_special_tokens: Whether to add special tokens when tokenizing the
+            first component of each prompt. Token-ID inputs are used as provided.
         cache_salt: Optional salt for prefix caching.
 
     """
@@ -86,7 +87,10 @@ class GenerativeScoringRequest(OpenAIBaseModel):
     )
     add_special_tokens: bool = Field(
         default=True,
-        description="Whether to add special tokens when tokenizing.",
+        description=(
+            "Whether to add special tokens when tokenizing the first component "
+            "of each prompt. Token-ID inputs are used as provided."
+        ),
     )
     cache_salt: str | None = Field(
         default=None,
@@ -378,11 +382,12 @@ class ServingGenerativeScoring(BaseServing):
             Tuple of (list of EngineInput, list of prompt token counts).
 
         """
-        # Tokenize query if it's a string
+        # Only the first component receives tokenizer-added special tokens.
         if isinstance(request.query, str):
             query_token_ids = tokenizer.encode(
                 request.query,
-                add_special_tokens=request.add_special_tokens,
+                add_special_tokens=request.add_special_tokens
+                and not request.item_first,
             )
         else:
             query_token_ids = request.query
@@ -393,10 +398,10 @@ class ServingGenerativeScoring(BaseServing):
         for item in request.items:
             # Tokenize item if it's a string
             if isinstance(item, str):
-                # Don't add special tokens for items to avoid duplicate BOS/EOS
                 item_token_ids = tokenizer.encode(
                     item,
-                    add_special_tokens=False,
+                    add_special_tokens=request.add_special_tokens
+                    and request.item_first,
                 )
             else:
                 item_token_ids = item
