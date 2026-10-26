@@ -18,6 +18,7 @@ from transformers.models.embedding_gemma2.processing_embedding_gemma2 import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -334,6 +335,7 @@ class EmbeddingGemma2TextPLE(nn.Module):
         return self.per_layer_projection_norm(proj)
 
 
+@support_torch_compile
 class EmbeddingGemma2TextModel(nn.Module):
     """Text embedding backbone for EmbeddingGemma2 with bidirectional attention."""
 
@@ -1010,6 +1012,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
+    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input
     _process_audio_input = Gemma4ForConditionalGeneration._process_audio_input

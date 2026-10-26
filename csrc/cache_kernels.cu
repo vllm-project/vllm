@@ -273,7 +273,7 @@ __global__ void reshape_and_cache_kernel(
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
-    const float* k_scale, const float* v_scale) {
+    const float* k_scale, const float* v_scale, const bool interleaved_v) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -301,10 +301,20 @@ __global__ void reshape_and_cache_kernel(
       key_cache + block_idx * num_heads * h_block_count * block_size * x +
       head_idx * h_block_count * block_size * x + h_block * block_size * x +
       block_offset * x;
-  const int64_t tgt_value_start =
-      block_idx * num_heads * h_block_count * x * block_size +
-      head_idx * h_block_count * x * block_size + h_block * x * block_size +
-      block_offset;
+  // V cache target: standard [.., head_size, block_size], or the interleaved
+  // [.., block_size/x, head_size, x] the fused AITER writer/reader use.
+  const int64_t v_head_base = block_idx * num_heads * head_size * block_size +
+                              head_idx * head_size * block_size;
+  int64_t tgt_value_start;
+  int v_dim_stride;
+  if (interleaved_v) {
+    tgt_value_start = v_head_base + (block_offset / x) * (head_size * x) +
+                      (h_block * x) * x + (block_offset % x);
+    v_dim_stride = x;
+  } else {
+    tgt_value_start = v_head_base + h_block * x * block_size + block_offset;
+    v_dim_stride = block_size;
+  }
 
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
@@ -318,7 +328,7 @@ __global__ void reshape_and_cache_kernel(
   cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
 #pragma unroll
   for (int i = 0; i < x; i++) {
-    v_op(value_dst[i * block_size], value_src[i]);
+    v_op(value_dst[i * v_dim_stride], value_src[i]);
   }
 }
 
@@ -410,7 +420,8 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool skip_scale>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
@@ -443,6 +454,9 @@ __global__ void concat_and_cache_mla_kernel(
           block_idx * block_stride + block_offset * entry_stride + i + offset;
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst[dst_idx] = src[src_idx];
+      } else if constexpr (skip_scale) {
+        dst[dst_idx] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], 1.0f);
       } else {
         dst[dst_idx] =
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
@@ -630,7 +644,8 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int cache_block_size,                // cache block size
     const int64_t cache_block_stride,  // stride for each block in kv_cache
 
-    const bool use_ue8m0  // use ue8m0 scale format
+    const bool use_ue8m0,    // use ue8m0 scale format
+    const bool use_mx_scale  // store the ue8m0 scale as packed MX bytes
 ) {
   constexpr int VEC_SIZE = 4;
   const int64_t token_idx = blockIdx.x;
@@ -679,7 +694,13 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int64_t dst_scale_idx =
         block_idx * cache_block_stride + cache_block_size * head_dim +
         (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
-    reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+    if (use_mx_scale) {
+      // One UE8M0 byte per 32 elements, all equal to the shared scale's.
+      reinterpret_cast<uint32_t*>(kv_cache)[dst_scale_idx / 4] =
+          ((__float_as_uint(scale) >> 23) & 0xFF) * 0x01010101u;
+    } else {
+      reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+    }
   }
 }
 
@@ -768,7 +789,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
           slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
           num_heads, head_size, block_size, x,                              \
           reinterpret_cast<const float*>(k_scale.data_ptr()),               \
-          reinterpret_cast<const float*>(v_scale.data_ptr()));
+          reinterpret_cast<const float*>(v_scale.data_ptr()), interleaved_v);
 
 void reshape_and_cache(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -776,10 +797,12 @@ void reshape_and_cache(
     torch::stable::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::stable::Tensor&
-        value_cache,  // [num_blocks, num_heads, head_size, block_size]
+        value_cache,  // [num_blocks, num_heads, head_size, block_size], or the
+                      // interleaved [.., block_size/x, head_size, x] when
+                      // interleaved_v is set
     torch::stable::Tensor& slot_mapping,  // [num_tokens]
     const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale) {
+    torch::stable::Tensor& v_scale, bool interleaved_v) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -891,8 +914,8 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                    \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                  \
+#define LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, SKIP_SCALE)      \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, SKIP_SCALE>      \
       <<<grid, block, 0, stream>>>(                                           \
           reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
           reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
@@ -900,6 +923,13 @@ void reshape_and_cache_flash(
           slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
           reinterpret_cast<const float*>(scale.data_ptr()));
+
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)      \
+  if (skip_scale) {                                             \
+    LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, true)  \
+  } else {                                                      \
+    LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, false) \
+  }
 
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
@@ -919,7 +949,8 @@ void concat_and_cache_mla(
     torch::stable::Tensor& kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                       // + pe_dim)]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, torch::stable::Tensor& scale) {
+    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
+    bool skip_scale) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -1010,6 +1041,9 @@ void concat_and_cache_mla(
                                CALL_CONCAT_AND_CACHE_MLA);
   }
 }
+
+#undef CALL_CONCAT_AND_CACHE_MLA
+#undef LAUNCH_CONCAT_AND_CACHE_MLA
 
 void concat_and_cache_mla_grouped(
     torch::stable::Tensor& kv_c,  // [num_layers, num_tokens, kv_lora_rank]
@@ -1912,7 +1946,7 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
           reinterpret_cast<KV_T*>(k.data_ptr()),                              \
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), head_dim, quant_block_size, \
-          cache_block_size, cache_block_stride, use_ue8m0);
+          cache_block_size, cache_block_stride, use_ue8m0, use_mx_scale);
 
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,         // [num_tokens, head_dim]
@@ -1924,8 +1958,13 @@ void indexer_k_quant_and_cache(
   int head_dim = k.size(1);
   int cache_block_size = kv_cache.size(1);
   int64_t cache_block_stride = kv_cache.stride(0);
-  bool use_ue8m0 = scale_fmt == "ue8m0";
+  // "mxfp8" stores the ue8m0 scale as four packed UE8M0 bytes, the MX scales
+  // DeepGEMM's SM100 MQA logits kernels read.
+  bool use_mx_scale = scale_fmt == "mxfp8";
+  bool use_ue8m0 = use_mx_scale || scale_fmt == "ue8m0";
 
+  STD_TORCH_CHECK(!use_mx_scale || (head_dim == 128 && quant_block_size == 128),
+                  "mxfp8 scales require head_dim == quant_block_size == 128");
   STD_TORCH_CHECK(k.device() == kv_cache.device(),
                   "k and kv_cache must be on the same device");
   STD_TORCH_CHECK(k.device() == slot_mapping.device(),
