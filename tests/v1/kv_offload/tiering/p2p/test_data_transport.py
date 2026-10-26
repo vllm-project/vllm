@@ -24,6 +24,103 @@ def _remote_disconnect() -> Exception:
     return nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
 
 
+@pytest.fixture
+def registration_transport():
+    """Track native registrations while constructing the real transport."""
+    agent = MagicMock()
+    registered = set()
+
+    def add_remote_agent(metadata):
+        name = metadata.decode()
+        registered.add(name)
+        return name
+
+    agent.add_remote_agent.side_effect = add_remote_agent
+    agent.remove_remote_agent.side_effect = registered.remove
+    agent.check_xfer_state.return_value = "DONE"
+    with (
+        patch.object(nixl_module, "_NixlAgent", return_value=agent),
+        patch.object(nixl_module, "_NixlAgentConfig"),
+    ):
+        transport = NixlTransport(
+            "test:1", memoryview(np.zeros((8, 1024), dtype=np.uint8))
+        )
+    try:
+        yield transport, agent, registered
+    finally:
+        transport.close()
+
+
+class TestNixlRegistrationRollback:
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_registration_rolls_back_and_can_retry(
+        self, registration_transport, asynchronous, stage
+    ):
+        """Failed descriptor setup must not leak an agent or damage healthy peers."""
+        transport, agent, registered = registration_transport
+        transport.add_remote_peer("healthy:1", b"healthy", 0x2000, 8, 1024)
+        error = RuntimeError("descriptor setup failed")
+        getattr(agent, stage).side_effect = error
+        register = (
+            transport.add_remote_peer_async
+            if asynchronous
+            else transport.add_remote_peer
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            result = register("peer:1", b"peer", 0x1000, 8, 1024)
+            if asynchronous:
+                result.result(timeout=5)
+        assert exc_info.value is error
+        assert registered == {"healthy"}
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert transport.write_blocks("healthy:1", [0], [1]) is not None
+
+        getattr(agent, stage).side_effect = None
+        result = register("peer:1", b"peer", 0x1000, 8, 1024)
+        if asynchronous:
+            result.result(timeout=5)
+        transfer = transport.write_blocks("peer:1", [0], [1])
+        assert transfer is not None
+        assert transfer in transport.poll().done
+        transport.remove_remote_peer("peer:1")
+        assert registered == {"healthy"}
+
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_duplicate_registration_keeps_published_agent(
+        self, registration_transport, stage
+    ):
+        """Loading existing metadata does not transfer its cleanup ownership."""
+        transport, agent, registered = registration_transport
+        transport.add_remote_peer("peer:1", b"peer", 0x1000, 8, 1024)
+        getattr(agent, stage).side_effect = RuntimeError("descriptor setup failed")
+
+        with pytest.raises(RuntimeError, match="descriptor setup failed"):
+            transport.add_remote_peer("peer:1", b"peer", 0x1000, 8, 1024)
+
+        assert registered == {"peer"}
+        transfer = transport.write_blocks("peer:1", [0], [1])
+        assert transfer is not None
+        assert transfer in transport.poll().done
+
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_rollback_preserves_registration_error(
+        self, registration_transport, stage, caplog
+    ):
+        """A cleanup error must not replace the descriptor setup error."""
+        transport, agent, _ = registration_transport
+        error = RuntimeError("descriptor setup failed")
+        getattr(agent, stage).side_effect = error
+        agent.remove_remote_agent.side_effect = RuntimeError("rollback failed")
+
+        future = transport.add_remote_peer_async("peer:1", b"peer", 0x1000, 8, 1024)
+        with pytest.raises(RuntimeError) as exc_info:
+            future.result(timeout=5)
+        assert exc_info.value is error
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert "rollback failed" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # DataTransport base class tests
 # ---------------------------------------------------------------------------

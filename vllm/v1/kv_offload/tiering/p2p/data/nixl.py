@@ -223,7 +223,7 @@ class NixlTransport(DataTransport):
     ) -> None:
         gen = self._begin_registration(peer_id)
         nixl_name, remote_dlist = self._build_peer_handles(
-            agent_metadata, base_addr, num_blocks, block_len
+            peer_id, agent_metadata, base_addr, num_blocks, block_len
         )
         self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
 
@@ -239,7 +239,7 @@ class NixlTransport(DataTransport):
 
         def register() -> None:
             nixl_name, remote_dlist = self._build_peer_handles(
-                agent_metadata, base_addr, num_blocks, block_len
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
             )
             if not self._publish_peer(peer_id, gen, nixl_name, remote_dlist):
                 raise RuntimeError(
@@ -270,6 +270,7 @@ class NixlTransport(DataTransport):
 
     def _build_peer_handles(
         self,
+        peer_id: str,
         agent_metadata: bytes,
         base_addr: int,
         num_blocks: int,
@@ -277,16 +278,23 @@ class NixlTransport(DataTransport):
     ) -> tuple[str, Any]:
         """The expensive half: agent wireup plus one descriptor per block.
 
-        Touches no shared state, so it runs unlocked — holding the peer
-        lock across it would stall the scheduler thread for exactly as
-        long as the registration it is meant to move off that thread.
+        Holding the peer lock across native registration would stall the
+        scheduler thread for exactly as long as the registration it is
+        meant to move off that thread.
         """
         nixl_name = self._agent.add_remote_agent(agent_metadata)
-        block_descs = [
-            (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
-        ]
-        xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
-        remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        try:
+            block_descs = [
+                (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
+            ]
+            xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
+            remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        except Exception:
+            with self._peer_lock:
+                published = nixl_name in self._peer_nixl_names.values()
+            if not published:
+                self._release_remote_handles(peer_id, None, nixl_name)
+            raise
         return nixl_name, remote_dlist
 
     def _publish_peer(
