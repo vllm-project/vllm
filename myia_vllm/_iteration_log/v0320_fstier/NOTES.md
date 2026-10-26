@@ -2500,3 +2500,40 @@ file and on issue #198:
 
 Uniform block size, all groups: 26,214,144 B (25 MiB) per `.bin`. A GDN state is
 always a triplet of three such blocks (one per TP rank), i.e. ~75 MiB, not 79.
+
+### 26/10 01:41Z — cycle: first full night under the filter, steady
+
+Window = engine start 21:48:52Z to 01:15Z (3 h 26 min, real traffic). All
+counters cumulative since boot.
+
+| metric | value |
+|---|---|
+| fs writes | 57.56 GB = **16.7 GB/h** (was 18.7 GB/h at 2 h 15 — post-restart burst washing out) |
+| fs reads | 39.34 GB = 11.4 GB/h |
+| prompt tokens (total) | 58.45 M = **17.0 M tok/h sustained** — heavy night |
+| prompt tokens from cache | 49.21 M = **84.2 %** (device 24.8 % / host RAM 54.9 % / disk 4.46 %) |
+| computed prefill | 9.24 M = 15.8 % |
+| fs lookup hit rate | 1,268+ (12.2 % at 2 h 15) |
+| preemptions | 14 |
+| VRAM GPU 0 / GPU 1 | 22,932 / 21,508 MiB (68 MiB under the 23,000 line) |
+| KV usage | 34 % at probe time (92 % an hour earlier — the saturation comes and goes) |
+
+Bandwidth measured over the same window (counters, `/metrics`): RAM->GPU
+681.9 GB in 219.7 s = **3.10 GB/s** (1.8 % of wall-clock); GPU->RAM 2.52 GB/s;
+SSD->RAM 39.3 GB in 18.2 s = **2.16 GB/s**; RAM->SSD 0.06 GB/s on its dedicated
+pool (async, never blocks decode — by design).
+
+**Watchdog**: 12 x `WEDGE fail 1/2` between 23:42Z and 01:14Z, zero `2/2`, zero
+restarts — the documented long-prefill starvation under 17 M prompt tok/h. v6.2
+classified the BUSY cases correctly and did not restart. Frequency is up on the
+19:41Z cycle (5 in 2 h) but the regime is the same and preemptions stay low.
+
+**Host commit 88.6 %** (350.2/395.3 GB, margin 45.1 GB) — above the 85 % rule:
+no heavy work from this lane; reported, not acted on (first consumer is
+`vmmemWSL`, per the 09/10 finding).
+
+Security: no new IP with 200s (hairpin 783, internal 444, user-Paris 13, web2
+2). `#431` signature (400 + body > 100 KB): **0 occurrences**.
+
+nbaudit: ok, series 19451 now scoped to `Image/` (wave 2 armed). CoursIA
+#22462 answered with measured figures only (this file + PR #104/#123/#131/#195).
