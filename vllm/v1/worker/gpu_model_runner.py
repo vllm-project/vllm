@@ -99,6 +99,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import (
     copy_mm_embedding_modality,
+    evict_mismatched_mm_features,
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
@@ -585,6 +586,8 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        self._poisoned_mm_hashes: dict[str, int] = {}
+        self._mm_embed_mismatches: dict[str, tuple[list[str], str]] = {}
         self.late_interaction_runner = LateInteractionRunner()
 
         # Encoder CUDA graph manager (initialized after model load if enabled)
@@ -981,6 +984,8 @@ class GPUModelRunner(
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_cache.clear()
+        if hasattr(self, "_poisoned_mm_hashes"):
+            self._poisoned_mm_hashes.clear()
         self.late_interaction_runner.clear()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
@@ -1170,8 +1175,11 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
     ) -> None:
         """Apply scheduler-side encoder cache lifecycle updates."""
+        poisoned = getattr(self, "_poisoned_mm_hashes", None)
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
+            if poisoned is not None:
+                poisoned.pop(mm_hash, None)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
@@ -2738,17 +2746,31 @@ class GPUModelRunner(
             [mm_lora_refs[i] for i in order],
         )
 
+    def take_mm_embed_mismatches(
+        self,
+    ) -> dict[str, tuple[list[str], str]] | None:
+        mismatches = getattr(self, "_mm_embed_mismatches", None)
+        if not mismatches:
+            return None
+        self._mm_embed_mismatches = {}
+        return mismatches
+
     def _cache_encoder_output(
         self,
         mm_hash: str,
         output: torch.Tensor,
         ec_manager_metadata: "EncoderCacheManagerMetadata | None",
         free_encoder_mm_hashes: list[str],
+        expected_num_embeds: int | None = None,
     ) -> None:
         """Store an encoder output for later multimodal embedding gather."""
         del ec_manager_metadata, free_encoder_mm_hashes
+        poisoned = getattr(self, "_poisoned_mm_hashes", None)
+        if poisoned is not None:
+            poisoned.pop(mm_hash, None)
         self.encoder_cache[mm_hash] = output
-        self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
+        if expected_num_embeds is None or output.shape[0] == expected_num_embeds:
+            self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
     def _execute_mm_encoder(
         self, scheduler_output: "SchedulerOutput"
@@ -2780,6 +2802,7 @@ class GPUModelRunner(
                     async_tensor_h2d(pe_tensor, device=self.device),
                     scheduler_output.ec_manager_metadata,
                     scheduler_output.free_encoder_mm_hashes,
+                    expected_num_embeds=mm_lora_refs[i][1].get_num_embeds(),
                 )
             # Filter out `prompt_embeds` items from mm_kwargs/mm_hashes/mm_lora_refs
             # since they don't require further encoder processing.
@@ -2948,12 +2971,15 @@ class GPUModelRunner(
             current_item_idx += num_items
 
         # Cache the encoder outputs by mm_hash
-        for mm_hash, output in zip(mm_hashes, encoder_outputs):
+        for mm_hash, output, (_, pos_info) in zip(
+            mm_hashes, encoder_outputs, mm_lora_refs
+        ):
             self._cache_encoder_output(
                 mm_hash,
                 output,
                 scheduler_output.ec_manager_metadata,
                 scheduler_output.free_encoder_mm_hashes,
+                expected_num_embeds=pos_info.get_num_embeds(),
             )
             logger.debug("Finish execute for mm hash %s", mm_hash)
 
@@ -2995,6 +3021,7 @@ class GPUModelRunner(
                 start=num_computed_tokens,
                 end=num_computed_tokens + num_scheduled_tokens,
             )
+            mismatch: tuple[int, int] | None = None
             for i in range(lo, hi):
                 mm_feature = mm_features[i]
                 pos_info = mm_feature.mm_position
@@ -3018,6 +3045,10 @@ class GPUModelRunner(
                 mm_hash = mm_feature.identifier
                 encoder_output = self._get_encoder_output_from_cache(mm_hash)
                 if encoder_output is None:
+                    poisoned = getattr(self, "_poisoned_mm_hashes", None)
+                    if poisoned is not None and mm_hash in poisoned:
+                        mismatch = (poisoned[mm_hash], pos_info.get_num_embeds())
+                        break
                     # A feature starting at/after the processed boundary is only
                     # reached via the drafter's +1 look-ahead and might not be
                     # encoded yet; fall back to the token embedding for drafting.
@@ -3027,6 +3058,12 @@ class GPUModelRunner(
                     ):
                         continue
                     raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
+
+                expected_num_embeds = pos_info.get_num_embeds()
+                actual_num_embeds = int(encoder_output.shape[0])
+                if actual_num_embeds != expected_num_embeds:
+                    mismatch = (actual_num_embeds, expected_num_embeds)
+                    break
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -3046,6 +3083,37 @@ class GPUModelRunner(
                     ] |= is_embed
                 set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
                 mm_embeds_req.append(mm_embeds_item)
+
+            if mismatch is not None:
+                poisoned = getattr(self, "_poisoned_mm_hashes", None)
+                if poisoned is None:
+                    poisoned = {}
+                    self._poisoned_mm_hashes = poisoned
+                mismatches = getattr(self, "_mm_embed_mismatches", None)
+                if mismatches is None:
+                    mismatches = {}
+                    self._mm_embed_mismatches = mismatches
+                bad_ids, msg = evict_mismatched_mm_features(
+                    mm_features,
+                    self.encoder_cache,
+                    poisoned,
+                    mismatch,
+                    get_cached_output=self._get_encoder_output_from_cache,
+                )
+                logger.error(
+                    "Multimodal feature/placeholder mismatch for request %s "
+                    "(identifiers=%s): %s. Failing request and evicting cache.",
+                    req_id,
+                    bad_ids,
+                    msg,
+                )
+                mismatches[req_id] = (bad_ids, msg)
+                req_state.mm_features = []
+                is_mm_embed[req_start_idx : req_start_idx + num_scheduled_tokens] = (
+                    False
+                )
+                req_start_idx += num_scheduled_tokens
+                continue
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
@@ -3213,6 +3281,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
+            mm_embed_mismatches=self.take_mm_embed_mismatches(),
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -4494,6 +4563,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                mm_embed_mismatches=self.take_mm_embed_mismatches(),
             )
 
         if not self.use_async_scheduling:

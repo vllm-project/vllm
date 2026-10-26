@@ -4,7 +4,7 @@
 import bisect
 import mimetypes
 from collections import defaultdict
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
@@ -426,3 +426,37 @@ def get_mm_embedding_modalities(
             )
         modalities.append(modality)
     return modalities
+
+
+def evict_mismatched_mm_features(
+    mm_features: Sequence[MultiModalFeatureSpec],
+    encoder_cache: dict[str, "torch.Tensor"],
+    poisoned_mm_hashes: dict[str, int],
+    mismatch: tuple[int, int],
+    get_cached_output: Callable[[str], "torch.Tensor | None"] | None = None,
+) -> tuple[list[str], str]:
+    """Evict mismatched multimodal encoder outputs and format the error string."""
+    lookup = encoder_cache.get if get_cached_output is None else get_cached_output
+    bad_ids: list[str] = []
+    seen_bad: set[str] = set()
+    for feat in mm_features:
+        ident = feat.identifier
+        expected = feat.mm_position.get_num_embeds()
+        cached_out = lookup(ident)
+        if cached_out is not None:
+            actual = int(cached_out.shape[0])
+            if actual != expected:
+                encoder_cache.pop(ident, None)
+                poisoned_mm_hashes[ident] = actual
+                if ident not in seen_bad:
+                    seen_bad.add(ident)
+                    bad_ids.append(ident)
+        elif ident in poisoned_mm_hashes and ident not in seen_bad:
+            seen_bad.add(ident)
+            bad_ids.append(ident)
+    actual_embeds, expected_embeds = mismatch
+    msg = (
+        f"Attempted to assign {actual_embeds} = {actual_embeds} "
+        f"multimodal tokens to {expected_embeds} placeholders"
+    )
+    return bad_ids, msg

@@ -2329,8 +2329,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if defer_kv_finalize:
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
+        model_runner_output.mm_embed_mismatches = self.take_mm_embed_mismatches()
 
         return async_output
+
+    def take_mm_embed_mismatches(
+        self,
+    ) -> dict[str, tuple[list[str], str]] | None:
+        if not self.model_state.supports_mm_inputs:
+            return None
+        return self.model_state.encoder_runner.take_mm_embed_mismatches()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -2367,6 +2375,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            mm_embed_mismatches=self.take_mm_embed_mismatches(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

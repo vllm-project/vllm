@@ -11,6 +11,8 @@ class EncoderCache:
         self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         # MM hash -> encoder outputs
         self.encoder_outputs: dict[str, torch.Tensor] = {}
+        # MM hash -> actual embed count for evicted mismatched items
+        self.poisoned_mm_hashes: dict[str, int] = {}
 
     def __len__(self) -> int:
         return len(self.encoder_outputs)
@@ -37,6 +39,8 @@ class EncoderCache:
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_outputs.clear()
+        self.poisoned_mm_hashes.clear()
 
     def free_encoder_cache(self, mm_hash: str) -> None:
         self.encoder_outputs.pop(mm_hash, None)
+        self.poisoned_mm_hashes.pop(mm_hash, None)

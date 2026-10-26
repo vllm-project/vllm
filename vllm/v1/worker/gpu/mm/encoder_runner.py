@@ -14,6 +14,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_r
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import (
+    evict_mismatched_mm_features,
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
@@ -54,10 +55,20 @@ class EncoderRunner:
         self.enable_timing = enable_timing
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
         self._timing_lock = threading.Lock()
+        self._mm_embed_mismatches: dict[str, tuple[list[str], str]] = {}
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
+
+    def take_mm_embed_mismatches(
+        self,
+    ) -> dict[str, tuple[list[str], str]] | None:
+        if not self._mm_embed_mismatches:
+            return None
+        mismatches = self._mm_embed_mismatches
+        self._mm_embed_mismatches = {}
+        return mismatches
 
     def has_cudagraph(self) -> bool:
         return self.cudagraph_manager is not None
@@ -98,10 +109,14 @@ class EncoderRunner:
                     # standard is_mm_embed path.
                     embeds = mm_feature.data["embedding"].data
                     assert isinstance(embeds, torch.Tensor)
+                    self.encoder_cache.poisoned_mm_hashes.pop(
+                        mm_feature.identifier, None
+                    )
                     self.encoder_cache.encoder_outputs[mm_feature.identifier] = (
                         async_tensor_h2d(embeds, device=self.device)
                     )
                     continue
+                self.encoder_cache.poisoned_mm_hashes.pop(mm_feature.identifier, None)
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
 
@@ -249,6 +264,8 @@ class EncoderRunner:
             lo, hi = get_mm_features_in_window(
                 mm_features, start=cur_query_start, end=cur_query_end
             )
+            req_mm_embeds: list[torch.Tensor] = []
+            mismatch: tuple[int, int] | None = None
             for idx in range(lo, hi):
                 mm_feature = mm_features[idx]
                 pos_info = mm_feature.mm_position
@@ -269,12 +286,22 @@ class EncoderRunner:
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash, None)
                 if encoder_output is None:
+                    poisoned_actual = self.encoder_cache.poisoned_mm_hashes.get(mm_hash)
+                    if poisoned_actual is not None:
+                        mismatch = (poisoned_actual, pos_info.get_num_embeds())
+                        break
                     # A feature starting at/after the processed boundary is only
                     # reached via the drafter's +1 look-ahead and might not be
                     # encoded yet; fall back to the token embedding for drafting.
                     if start_pos + draft_lookahead >= cur_query_end:
                         continue
                     raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
+
+                expected_num_embeds = pos_info.get_num_embeds()
+                actual_num_embeds = int(encoder_output.shape[0])
+                if actual_num_embeds != expected_num_embeds:
+                    mismatch = (actual_num_embeds, expected_num_embeds)
+                    break
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -289,7 +316,30 @@ class EncoderRunner:
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )
-                mm_embeds.append(mm_embeds_item)
+                req_mm_embeds.append(mm_embeds_item)
+
+            if mismatch is not None:
+                bad_ids, msg = evict_mismatched_mm_features(
+                    mm_features,
+                    self.encoder_cache.encoder_outputs,
+                    self.encoder_cache.poisoned_mm_hashes,
+                    mismatch,
+                )
+                logger.error(
+                    "Multimodal feature/placeholder mismatch for request %s "
+                    "(identifiers=%s): %s. Failing request and evicting cache.",
+                    req_id,
+                    bad_ids,
+                    msg,
+                )
+                self._mm_embed_mismatches[req_id] = (bad_ids, msg)
+                self.encoder_cache.mm_features[req_id] = []
+                req_slice_start = int(query_start_loc[i])
+                req_slice_end = req_slice_start + int(num_scheduled_tokens[i])
+                is_mm_embed[req_slice_start:req_slice_end] = False
+                continue
+
+            mm_embeds.extend(req_mm_embeds)
 
         return mm_embeds, is_mm_embed
 

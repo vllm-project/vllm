@@ -431,6 +431,10 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
+    def invalidate(self, mm_hash: str) -> None:
+        self._cache.pop(mm_hash, None)
+
+    @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
 
@@ -447,6 +451,10 @@ class BaseMultiModalReceiverCache(
     BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
     """The required interface for caches on P1."""
+
+    def invalidate(self, mm_hash: str) -> None:
+        """Drop ``mm_hash`` from this P1 receiver cache if cached."""
+        pass
 
     def get_and_update_features(
         self,

@@ -683,10 +683,22 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._invalidate_mm_receiver_cache(engine_core_outputs)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _invalidate_mm_receiver_cache(
+        self, engine_core_outputs: dict[int, EngineCoreOutputs]
+    ) -> None:
+        if self.mm_receiver_cache is None:
+            return
+        for client_outputs in engine_core_outputs.values():
+            for eco in client_outputs.outputs:
+                if eco.mm_cache_miss_hashes:
+                    for mm_hash in eco.mm_cache_miss_hashes:
+                        self.mm_receiver_cache.invalidate(mm_hash)
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -785,6 +797,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._invalidate_mm_receiver_cache(engine_core_outputs)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 

@@ -7361,6 +7361,121 @@ def test_encoder_cache_rejects_mismatched_embed_count_within_request():
     output = outputs[request.client_index].outputs[0]
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
+    assert output.error is not None
+    assert output.error.code == "validation_error"
+
+
+def test_worker_mm_embed_mismatch_fails_only_bad_request_and_evicts_caches():
+    """Regression for #55546: worker-detected feature/placeholder mismatch fails
+    only the offending request with validation_error + mm_cache_miss_hashes,
+    evicts poisoned encoder & prefix-KV cache entries, and keeps co-batched
+    requests running."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        block_size=4,
+        enable_prefix_caching=True,
+    )
+    bad_identifier = "poisoned-video-id"
+    bad_mm_hash = "poisoned-video-mm-hash"
+    good_identifier = "healthy-image-id"
+
+    bad_req = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        block_size=4,
+        mm_hashes_list=[[bad_identifier]],
+        mm_positions=[[PlaceholderRange(offset=0, length=6)]],
+        req_ids=["bad-req"],
+    )[0]
+    bad_req.mm_features[0].mm_hash = bad_mm_hash
+
+    good_req = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        block_size=4,
+        mm_hashes_list=[[good_identifier]],
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+        req_ids=["good-req"],
+    )[0]
+
+    total_encoder_slots = scheduler.encoder_cache_manager.cache_size
+    scheduler.add_request(bad_req)
+    scheduler.add_request(good_req)
+
+    sched_out = scheduler.schedule()
+    assert set(sched_out.num_scheduled_tokens) == {"bad-req", "good-req"}
+    assert bad_identifier in scheduler.encoder_cache_manager.cached
+    probe_req = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        block_size=4,
+        mm_hashes_list=[[bad_identifier]],
+        mm_positions=[[PlaceholderRange(offset=0, length=6)]],
+        req_ids=["probe-req"],
+    )[0]
+    _, pre_evict_hits, _ = scheduler.kv_cache_manager.get_computed_blocks(probe_req)
+    assert pre_evict_hits == 4
+
+    mismatch_msg = "Attempted to assign 2 = 2 multimodal tokens to 6 placeholders"
+    model_output = ModelRunnerOutput(
+        req_ids=["bad-req", "good-req"],
+        req_id_to_index={"bad-req": 0, "good-req": 1},
+        sampled_token_ids=[[99], [42]],
+        mm_embed_mismatches={"bad-req": ([bad_identifier], mismatch_msg)},
+    )
+    outputs = scheduler.update_from_output(sched_out, model_output)
+
+    by_req = {o.request_id: o for o in outputs[0].outputs}
+    assert bad_req.status == RequestStatus.FINISHED_ERROR
+    assert bad_req.request_id not in scheduler.requests
+    assert by_req["bad-req"].finish_reason == FinishReason.ERROR
+    assert by_req["bad-req"].new_token_ids == []
+    assert by_req["bad-req"].mm_cache_miss_hashes == [bad_mm_hash]
+    assert by_req["bad-req"].error is not None
+    assert by_req["bad-req"].error.code == "validation_error"
+    assert by_req["bad-req"].error.message == mismatch_msg
+
+    # Healthy co-batched request continues uninterrupted.
+    assert good_req.status == RequestStatus.RUNNING
+    assert by_req["good-req"].finish_reason is None
+    assert by_req["good-req"].new_token_ids == [42]
+
+    # Poisoned encoder cache entry is evicted and queued for worker free.
+    assert bad_identifier not in scheduler.encoder_cache_manager.cached
+    assert bad_identifier not in scheduler.encoder_cache_manager.freeable
+    assert bad_identifier not in scheduler.encoder_cache_manager.num_embeds_by_hash
+    assert scheduler.encoder_cache_manager.num_free_slots == total_encoder_slots - 4
+    assert scheduler.encoder_cache_manager.num_freeable_slots == total_encoder_slots
+
+    next_sched_out = scheduler.schedule()
+    assert bad_identifier in next_sched_out.free_encoder_mm_hashes
+
+    # Tainted prefix-KV blocks written during the failed prefill are evicted so
+    # a retry with the same prompt tokens + identifier must re-compute cleanly,
+    # while healthy request's prefix blocks remain cached.
+    good_retry = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        block_size=4,
+        mm_hashes_list=[[good_identifier]],
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+        req_ids=["good-retry"],
+    )[0]
+    scheduler.add_request(good_retry)
+    _, good_prefix_hits, _ = scheduler.kv_cache_manager.get_computed_blocks(good_retry)
+    assert good_prefix_hits == 4
+
+    retry_req = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        block_size=4,
+        mm_hashes_list=[[bad_identifier]],
+        mm_positions=[[PlaceholderRange(offset=0, length=6)]],
+        req_ids=["retry-req"],
+    )[0]
+    scheduler.add_request(retry_req)
+    _, num_prefix_hits, _ = scheduler.kv_cache_manager.get_computed_blocks(retry_req)
+    assert num_prefix_hits == 0
 
 
 @pytest.mark.parametrize("prefill_lookahead", [1, 3])

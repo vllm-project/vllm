@@ -272,6 +272,100 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
     assert int(is_mm_embed.sum()) == (14 if draft_lookahead else 16)
 
 
+@pytest.mark.parametrize(
+    ("actual_embeds", "expected_embeds"),
+    [
+        (3, 6),  # actual < expected (issue #55546)
+        (6, 3),  # actual > expected
+    ],
+)
+def test_v2_gather_isolates_embed_count_mismatch_from_cobatched_request(
+    actual_embeds: int,
+    expected_embeds: int,
+):
+    """V2 EncoderRunner aborts only mismatched requests, evicts only poisoned
+    cache entries, and keeps co-batched requests and drafter lookahead safe."""
+    valid_co = _feature("valid_co", offset=0, length=2)
+    bad_item = _feature("bad_hash", offset=2, length=expected_embeds)
+    dup_item = _feature("bad_hash", offset=0, length=expected_embeds)
+    good_item = _feature("good_hash", offset=0, length=4)
+
+    cache = EncoderCache()
+    cache.mm_features["req_bad"] = [valid_co, bad_item]
+    cache.mm_features["req_dup"] = [dup_item]
+    cache.mm_features["req_good"] = [good_item]
+    cache.encoder_outputs["valid_co"] = torch.ones((2, HIDDEN), dtype=torch.float32)
+    cache.encoder_outputs["bad_hash"] = torch.full(
+        (actual_embeds, HIDDEN), 9.0, dtype=torch.float32
+    )
+    cache.encoder_outputs["good_hash"] = torch.full(
+        (4, HIDDEN), 5.0, dtype=torch.float32
+    )
+    runner = EncoderRunner(
+        model=None,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    bad_len = 2 + expected_embeds + 1
+    dup_len = expected_embeds
+    good_len = 5
+    total = bad_len + dup_len + good_len
+
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req_bad", "req_dup", "req_good"],
+        total_num_scheduled_tokens=total,
+        num_scheduled_tokens=np.array([bad_len, dup_len, good_len]),
+        query_start_loc=np.array([0, bad_len, bad_len + dup_len]),
+        prefill_lens=np.array([bad_len, dup_len, good_len]),
+        num_computed_tokens=np.array([0, 0, 0]),
+        draft_lookahead=0,
+    )
+
+    expected_msg = (
+        f"Attempted to assign {actual_embeds} = {actual_embeds} "
+        f"multimodal tokens to {expected_embeds} placeholders"
+    )
+    assert runner.take_mm_embed_mismatches() == {
+        "req_bad": (["bad_hash"], expected_msg),
+        "req_dup": (["bad_hash"], expected_msg),
+    }
+    assert runner.take_mm_embed_mismatches() is None
+    assert "valid_co" in cache.encoder_outputs
+    assert "bad_hash" not in cache.encoder_outputs
+    assert "good_hash" in cache.encoder_outputs
+    assert len(mm_embeds) == 1
+    assert torch.all(mm_embeds[0] == 5.0)
+    assert not bool(is_mm_embed[: bad_len + dup_len].any())
+    assert is_mm_embed[bad_len + dup_len :].tolist() == [
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+
+    # Follow-up drafter lookahead (+1) in the same step must not fail.
+    draft_embeds, draft_mask = runner.gather_mm_embeddings(
+        req_ids=["req_bad", "req_dup", "req_good"],
+        total_num_scheduled_tokens=total,
+        num_scheduled_tokens=np.array([bad_len, dup_len, good_len]),
+        query_start_loc=np.array([0, bad_len, bad_len + dup_len]),
+        prefill_lens=np.array([bad_len, dup_len, good_len]),
+        num_computed_tokens=np.array([0, 0, 0]),
+        draft_lookahead=1,
+    )
+    assert len(draft_embeds) == 1
+    assert not bool(draft_mask[: bad_len + dup_len].any())
+
+    # Scheduler free clears poisoned record so a corrected payload can be reused.
+    cache.free_encoder_cache("bad_hash")
+    assert not cache.poisoned_mm_hashes
+
+
 def test_gather_preserves_mixed_modalities():
     """Modalities must be attached on tensors in gather order."""
     video = MultiModalFeatureSpec(

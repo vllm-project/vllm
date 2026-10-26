@@ -518,3 +518,111 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+def test_model_runner_output_msgpack_roundtrip_and_pp_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """mm_embed_mismatches survives Msgpack IPC and PP rank0 -> last_rank."""
+    from vllm.sequence import IntermediateTensors
+    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    mismatch = {
+        "req_bad": (
+            ["hash_bad"],
+            "Attempted to assign 138 = 138 multimodal tokens to 638 placeholders",
+        )
+    }
+    encoded = MsgpackEncoder().encode(
+        ModelRunnerOutput(
+            req_ids=["req_bad"],
+            req_id_to_index={"req_bad": 0},
+            sampled_token_ids=[[]],
+            mm_embed_mismatches=mismatch,
+        )
+    )
+    decoded = MsgpackDecoder(ModelRunnerOutput).decode(encoded)
+    assert decoded.mm_embed_mismatches == mismatch
+
+    sent_payload: dict[str, object] = {}
+    meta_handle = _OrderedHandle([], "meta")
+    tensor_handle = _OrderedHandle([], "tensor")
+
+    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
+        sent_payload.update(tensors)
+        return [meta_handle, tensor_handle]
+
+    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: SimpleNamespace())
+
+    # PP rank 0 encodes multimodal inputs and forwards mismatch metadata in PP dict.
+    pp_first = SimpleNamespace(
+        is_first_rank=True,
+        is_last_rank=False,
+        isend_tensor_dict=isend_tensor_dict,
+    )
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_first)
+    first_worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2, distributed_executor_backend="mp"
+            )
+        ),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(
+            execute_model=lambda s, i: IntermediateTensors({"h": torch.zeros(1)}),
+            take_mm_embed_mismatches=lambda: mismatch,
+            is_pooling_model=False,
+        ),
+        annotate_profile=lambda scheduler_output: nullcontext(),
+        _pp_send_work=[],
+    )
+    sched_out = SimpleNamespace(
+        total_num_scheduled_tokens=4, num_scheduled_tokens={"req_bad": 4}
+    )
+    assert gpu_worker.Worker.execute_model(first_worker, sched_out) is None
+
+    # PP last rank strips metadata before building IntermediateTensors and
+    # attaches mm_embed_mismatches onto the returned ModelRunnerOutput.
+    seen_intermediate_keys: list[str] = []
+
+    def irecv_tensor_dict(all_gather_group=None, all_gather_tensors=None):
+        return dict(sent_payload), [], None
+
+    pp_last = SimpleNamespace(
+        is_first_rank=False,
+        is_last_rank=True,
+        irecv_tensor_dict=irecv_tensor_dict,
+    )
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_last)
+
+    def last_execute_model(s, intermediate):
+        seen_intermediate_keys.extend(intermediate.tensors.keys())
+        for val in intermediate.tensors.values():
+            assert isinstance(val, torch.Tensor)
+        return None
+
+    last_worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2, distributed_executor_backend="mp"
+            )
+        ),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(
+            execute_model=last_execute_model,
+            sample_tokens=lambda grammar_output: ModelRunnerOutput(
+                req_ids=["req_bad"],
+                req_id_to_index={"req_bad": 0},
+                sampled_token_ids=[[7]],
+            ),
+            take_mm_embed_mismatches=lambda: None,
+            is_pooling_model=False,
+        ),
+        annotate_profile=lambda scheduler_output: nullcontext(),
+        _pp_send_work=[],
+    )
+    assert gpu_worker.Worker.execute_model(last_worker, sched_out) is None
+    final_output = gpu_worker.Worker.sample_tokens(last_worker, None)
+    assert seen_intermediate_keys == ["h"]
+    assert final_output.mm_embed_mismatches == mismatch

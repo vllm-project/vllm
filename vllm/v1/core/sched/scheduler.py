@@ -1956,17 +1956,19 @@ class Scheduler(SchedulerInterface):
     ) -> bool:
         if cached_num_encoder_embeds == requested_num_encoder_embeds:
             return False
-        logger.warning(
-            "Encoder cache entry for multimodal identifier %r holds %d "
-            "embeddings, but request %s input %d expects %d. A client-provided "
-            "multimodal UUID may have been reused for different content.",
-            identifier,
-            cached_num_encoder_embeds,
-            request.request_id,
-            input_id,
-            requested_num_encoder_embeds,
+        msg = (
+            f"Encoder cache entry for multimodal identifier {identifier!r} "
+            f"holds {cached_num_encoder_embeds} embeddings, but request "
+            f"{request.request_id} input {input_id} expects "
+            f"{requested_num_encoder_embeds}. A client-provided multimodal "
+            "UUID may have been reused for different content."
         )
+        logger.warning("%s", msg)
         self.encoder_cache_mismatch_reqs.add(request.request_id)
+        if hasattr(self, "grammar_compile_error_reqs"):
+            self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                code="validation_error", message=msg
+            )
         return True
 
     def _allocate_encoder_inputs(
@@ -2273,6 +2275,10 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
+        mm_embed_mismatches = model_runner_output.mm_embed_mismatches
+        mm_invalidate_hashes_by_req: dict[str, list[str]] | None = (
+            {} if mm_embed_mismatches else None
+        )
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
@@ -2288,6 +2294,35 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
+            if mm_embed_mismatches and req_id in mm_embed_mismatches:
+                bad_ids, mismatch_msg = mm_embed_mismatches[req_id]
+                if request is not None and not request.is_finished():
+                    prev_computed = (
+                        request.num_computed_tokens
+                        - request.num_in_flight_tokens
+                        - num_tokens_scheduled
+                    )
+                    if self.kv_cache_manager.enable_caching:
+                        for (
+                            mgr
+                        ) in self.kv_cache_manager.coordinator.single_type_managers:
+                            start_idx = max(prev_computed, 0) // mgr.block_size
+                            for blk in mgr.req_to_blocks.get(req_id, ())[start_idx:]:
+                                mgr.block_pool._maybe_evict_cached_block(blk)
+                    bad_id_set = set(bad_ids)
+                    proc_hashes = list(
+                        dict.fromkeys(
+                            (feat.mm_hash or feat.identifier)
+                            for feat in request.mm_features
+                            if feat.identifier in bad_id_set
+                        )
+                    ) or list(dict.fromkeys(bad_ids))
+                    assert mm_invalidate_hashes_by_req is not None
+                    mm_invalidate_hashes_by_req[req_id] = proc_hashes
+                    self.grammar_compile_error_reqs[req_id] = RequestError(
+                        code="validation_error", message=mismatch_msg
+                    )
+                continue
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2540,9 +2575,18 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        mm_cache_miss_hashes=(
+                            mm_invalidate_hashes_by_req.get(request.request_id)
+                            if mm_invalidate_hashes_by_req is not None
+                            else None
+                        ),
                         error=request_errors.get(request.request_id),
                     )
                 )
+        if mm_embed_mismatches:
+            for bad_ids, _ in mm_embed_mismatches.values():
+                for identifier in bad_ids:
+                    self.encoder_cache_manager.evict_mm_hash(identifier)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:

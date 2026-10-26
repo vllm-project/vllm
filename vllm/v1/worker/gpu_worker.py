@@ -194,6 +194,25 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+_PP_MM_MISMATCH_KEY = "__vllm_mm_embed_mismatches__"
+
+
+def _attach_mm_embed_mismatches(
+    output: ModelRunnerOutput | AsyncModelRunnerOutput | None,
+    mm_embed_mismatches: dict[str, tuple[list[str], str]] | None,
+) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+    if not mm_embed_mismatches or output is None:
+        return output
+    if isinstance(output, AsyncModelRunnerOutput):
+        model_output = getattr(output, "model_runner_output", None)
+        if isinstance(model_output, ModelRunnerOutput):
+            ModelRunnerOutput.with_mm_embed_mismatches(
+                model_output, mm_embed_mismatches
+            )
+        return output
+    return ModelRunnerOutput.with_mm_embed_mismatches(output, mm_embed_mismatches)
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -245,6 +264,7 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        self._pending_pp_mm_mismatches: dict[str, tuple[list[str], str]] | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1327,7 +1347,12 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        output = self.model_runner.sample_tokens(grammar_output)
+        pending = getattr(self, "_pending_pp_mm_mismatches", None)
+        if pending is not None:
+            self._pending_pp_mm_mismatches = None
+            output = _attach_mm_embed_mismatches(output, pending)  # type: ignore[assignment]
+        return output
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1350,6 +1375,13 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
+            recv_mismatches = tensor_dict.pop(_PP_MM_MISMATCH_KEY, None)
+            if recv_mismatches:
+                existing = getattr(self, "_pending_pp_mm_mismatches", None)
+                if existing:
+                    existing.update(recv_mismatches)
+                else:
+                    self._pending_pp_mm_mismatches = dict(recv_mismatches)
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
@@ -1369,6 +1401,11 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                if output is not None:
+                    pending = getattr(self, "_pending_pp_mm_mismatches", None)
+                    if pending is not None:
+                        self._pending_pp_mm_mismatches = None
+                        output = _attach_mm_embed_mismatches(output, pending)
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -1378,11 +1415,28 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
+        take_mismatches = getattr(self.model_runner, "take_mm_embed_mismatches", None)
+        runner_mismatches = take_mismatches() if take_mismatches is not None else None
+        pending = getattr(self, "_pending_pp_mm_mismatches", None)
+        if pending is not None:
+            self._pending_pp_mm_mismatches = None
+        if pending or runner_mismatches:
+            merged_mismatches = {
+                **(pending or {}),
+                **(runner_mismatches or {}),
+            }
+            send_dict: dict[str, Any] = {
+                **output.tensors,
+                _PP_MM_MISMATCH_KEY: merged_mismatches,
+            }
+        else:
+            send_dict = output.tensors
+
         # Non-blocking send of the intermediate tensors. The metadata handle
         # is reaped lazily by the GroupCoordinator; the device handles are
         # waited at the top of the next step.
         handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
+            send_dict,
             all_gather_group=get_tp_group(),
         )
         self._pp_send_work = handles[1:]
