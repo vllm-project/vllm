@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that ``InputProcessor.inject_into_mm_cache()`` correctly injects
+"""Test that ``InputProcessor.inject_into_mm_cache()`` correctly injects
 pre-processed mm_kwargs into the processor cache and reports MM cache
 hit rate metrics accurately.
 

@@ -4,12 +4,19 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -44,6 +51,113 @@ def test_optional_type():
     optional_type_func = optional_type(int)
     assert optional_type_func("None") is None
     assert optional_type_func("42") == 42
+
+
+def test_watermark_config_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+            '"allow_target_only_watermarking":true}',
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.algorithm == "dual_key_gumbel"
+    assert config.key == 42
+    assert config.alpha == 0.25
+    assert config.context_width == 4
+    assert config.deduplicate_contexts == "single_turn"
+    assert config.deduplicate_contexts_max_history == 8192
+    assert config.prf == "philox"
+    assert config.allow_target_only_watermarking
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":"none",'
+            '"deduplicate_contexts_max_history":32}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.deduplicate_contexts == "none"
+    assert config.deduplicate_contexts_max_history == 32
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--device-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+def test_device_memory_utilization_property():
+    config = CacheConfig(gpu_memory_utilization=0.8)
+
+    assert config.device_memory_utilization == 0.8
+
+    config.device_memory_utilization = 0.7
+    assert config.gpu_memory_utilization == 0.7
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [
+            "--engram-config",
+            '{"cpu_offload": false, "embedding_across_dp": true}',
+        ],
+        [
+            "--engram-config.cpu_offload",
+            "false",
+            "--engram-config.embedding_across_dp",
+            "true",
+        ],
+    ],
+)
+def test_engram_config_cli(options):
+    """JSON and dotted CLI options independently control Engram settings."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.engram_config is not None
+    assert args.engram_config.cpu_offload is False
+    assert args.engram_config.embedding_across_dp is True
+
+
+@pytest.mark.parametrize(
+    "options,provided,dp_shared_memory",
+    [
+        ([], False, False),
+        (["--engram-config", "{}"], True, None),
+        (
+            ["--engram-config", '{"dp_shared_memory": true}'],
+            True,
+            True,
+        ),
+        (["--engram-config.dp_shared_memory", "true"], True, True),
+    ],
+)
+def test_engram_config_cli_optional(options, provided, dp_shared_memory):
+    """Explicit configs honor defaults and the JSON/dotted DP shared-memory flag."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert (args.engram_config is not None) == provided
+    if provided:
+        assert args.engram_config.cpu_offload is True
+        assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
 @pytest.mark.parametrize(
@@ -167,10 +281,13 @@ def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
 
 
-def test_get_kwargs():
-    kwargs = get_kwargs(DummyConfig)
-    print(kwargs)
+@pytest.fixture
+def dummy_config_kwargs():
+    return get_kwargs(DummyConfig)
 
+
+def test_get_kwargs(dummy_config_kwargs):
+    kwargs = dummy_config_kwargs
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
@@ -180,7 +297,7 @@ def test_get_kwargs():
     assert kwargs["optional_bool_or_str"]["const"] is True
     assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", None]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
@@ -206,6 +323,22 @@ def test_get_kwargs():
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--optional-literal", "None"], None),
+        (["--optional-literal", ""], None),
+        (["--optional-literal", "x"], "x"),
+    ],
+)
+def test_optional_handling(args, expected, dummy_config_kwargs):
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--optional-literal", **dummy_config_kwargs["optional_literal"])
+
+    assert parser.parse_args(args).optional_literal is expected
+    assert "None" in parser.format_help()
+
+
 def test_jit_monitor_verbose_arg():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--jit-monitor-verbose"])
@@ -223,6 +356,22 @@ def test_jit_monitor_mode_arg(mode):
     engine_args = EngineArgs(model="test", jit_monitor_mode=mode)
     assert engine_args.jit_monitor_mode == mode
     assert engine_args.create_observability_config().jit_monitor_mode == mode
+
+
+def test_sleep_mode_backend_arg():
+    """A plugin-registered sleep-mode backend can be selected from the CLI."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    engine_args = EngineArgs.from_cli_args(
+        parser.parse_args(["--model", "facebook/opt-125m"])
+    )
+    assert engine_args.sleep_mode_backend == "cumem"
+
+    args = parser.parse_args(
+        ["--model", "facebook/opt-125m", "--sleep-mode-backend", "my_backend"]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == "my_backend"
+    assert engine_args.create_model_config().sleep_mode_backend == "my_backend"
 
 
 def test_hf_token_get_kwargs():
@@ -288,8 +437,7 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    """Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
@@ -308,9 +456,7 @@ def test_optimization_level(args, expected):
     ],
 )
 def test_mode_parser(args, expected):
-    """
-    Test compilation config modes (-cc.mode=int) map to compilation_config.
-    """
+    """Test compilation config modes (-cc.mode=int) map to compilation_config."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
     assert parsed_args.compilation_config.mode == expected
@@ -351,6 +497,18 @@ def test_compilation_config():
     )
 
 
+def test_trust_request_mm_kwargs_cli():
+    from vllm.entrypoints.common.cli_args import FrontendArgs
+
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert not args.trust_request_mm_kwargs
+
+    args = parser.parse_args(["--trust-request-mm-kwargs"])
+    assert args.trust_request_mm_kwargs
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -361,6 +519,12 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
+
+    args = parser.parse_args(
+        ["--attention-config", '{"tokenspeed_mla_min_split_kv": 8}']
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.tokenspeed_mla_min_split_kv == 8
 
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
@@ -505,24 +669,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
-
-
-def test_prefix_cache_retention_interval_from_deprecated_env(
-    monkeypatch, caplog, disable_log_dedup
-):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
-
-    engine_args = EngineArgs()
-
-    assert engine_args.prefix_cache_retention_interval == 64
-    assert "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in caplog.text
-    assert "deprecated" in caplog.text
-    assert "prefix_cache_retention_interval" in caplog.text
-
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--prefix-cache-retention-interval", "32"])
-    engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.prefix_cache_retention_interval == 32
 
 
 @pytest.mark.parametrize(
@@ -676,6 +822,27 @@ def test_ir_op_priority():
         ).create_engine_config()
 
 
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
+
+
 @pytest.mark.parametrize(
     ("input_json", "expected_json"),
     [
@@ -734,13 +901,14 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
 
 class TestDeviceIds:
-    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+    @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):
         """--device-ids index beyond the CVD set raises ValueError."""
         from vllm.platforms import current_platform
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5")
-        args = EngineArgs(model="m", device_ids=[0, 2])
+        args = EngineArgs(model="m", device_ids=device_ids)
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 
@@ -924,3 +1092,34 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+@pytest.mark.parametrize(
+    ("name", "mem_gib", "capability", "expected_api_tokens", "expected_api_seqs"),
+    [
+        ("nvidia gb10", 121, (12, 1), 2048, 256),
+        ("nvidia h100", 80, (9, 0), 8192, 1024),
+        ("nvidia rtx pro 6000 blackwell", 96, (12, 0), 8192, 1024),
+    ],
+)
+def test_get_batch_defaults_gb10_stays_on_small_tier(
+    monkeypatch, name, mem_gib, capability, expected_api_tokens, expected_api_seqs
+):
+    """GB10 reports >= 70 GiB (unified memory) but not the compute of a
+    large discrete GPU, so it keeps the small-tier defaults."""
+    from types import SimpleNamespace
+
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils.mem_constants import GiB_bytes
+
+    stub = SimpleNamespace(
+        get_device_total_memory=lambda: mem_gib * GiB_bytes,
+        get_device_name=lambda: name,
+        is_device_capability=lambda cap: cap == capability,
+        is_tpu=lambda: False,
+        is_cpu=lambda: False,
+    )
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", stub)
+    tokens, seqs = EngineArgs.get_batch_defaults(1)
+    assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
+    assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs

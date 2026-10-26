@@ -14,6 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    get_offloading_group_ids,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -36,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class OffloadingConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
@@ -50,7 +53,9 @@ class OffloadingConnectorWorker:
         self.worker: OffloadingWorker | None = None
         # Non-writers still ack: pending_count waits for world_size per job.
         self._is_store_writer = (
-            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+            not self.spec.replicated_layout
+            or self.spec.config.canonical_layout
+            or self.spec.config.parallel.rank == 0
         )
 
         # job_id -> req_id for in-flight loads.
@@ -65,7 +70,10 @@ class OffloadingConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
-        num_blocks = kv_cache_config.num_blocks
+        selected_group_ids = get_offloading_group_ids(kv_cache_config)
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
+        )
         mappings = derive_canonical_mappings(
             self.vllm_config, kv_cache_config, kv_caches
         )
@@ -76,7 +84,9 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for kv_cache_group in selected_groups:
+            assert not kv_cache_group.host_resident
+            num_blocks = kv_cache_config.num_blocks
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -131,8 +141,12 @@ class OffloadingConnectorWorker:
             ),
             None,
         )
-        if packed_layer_name is not None:
+        if (
+            packed_layer_name is not None
+            and kv_cache_config.hisparse_host_num_blocks is None
+        ):
             (tensor,) = tensors_per_block[packed_layer_name]
+            num_blocks = tensor.shape[0]
             block_stride = tensor.stride(0)
             packed_tensor = tensor.as_strided(
                 (num_blocks, block_stride),
@@ -142,10 +156,7 @@ class OffloadingConnectorWorker:
             self._init_worker(
                 CanonicalKVCaches(
                     [CanonicalKVCacheTensor(packed_tensor, block_stride)],
-                    [
-                        [CanonicalKVCacheRef(0, block_stride)]
-                        for _ in kv_cache_config.kv_cache_groups
-                    ],
+                    [[CanonicalKVCacheRef(0, block_stride)] for _ in selected_groups],
                 )
             )
             return
@@ -192,7 +203,7 @@ class OffloadingConnectorWorker:
                     )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for kv_cache_group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in kv_cache_group.layer_names:
                 group_refs += block_data_refs[layer_name]
@@ -260,14 +271,14 @@ class OffloadingConnectorWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """
-        Returns:
-            tuple of (finished_sending, finished_recving). Stores never
-            emit finished_sending — the scheduler tracks store completion
-            via kv_connector_worker_meta.completed_jobs and fences any
-            block reuse via jobs_to_flush. Loads still emit
-            finished_recving so the base scheduler can resume requests
-            blocked on remote KV (and free aborted-during-load reqs).
+        """Returns:
+        tuple of (finished_sending, finished_recving). Stores never
+        emit finished_sending — the scheduler tracks store completion
+        via kv_connector_worker_meta.completed_jobs and fences any
+        block reuse via jobs_to_flush. Loads still emit
+        finished_recving so the base scheduler can resume requests
+        blocked on remote KV (and free aborted-during-load reqs).
+
         """
         assert self.worker is not None
         finished_recving: set[str] = set()

@@ -10,27 +10,37 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
-    get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
+    get_varlen_cudagraph_unsupported_backend,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def resolve_adaptive_cudagraph_mode(
+    mode: CUDAGraphMode, *, piecewise_capture_available: bool
+) -> CUDAGraphMode:
+    """Select a separate decode route for variable-length verification."""
+    assert mode.has_full_cudagraphs()
+    if mode == CUDAGraphMode.FULL_DECODE_ONLY or not piecewise_capture_available:
+        return CUDAGraphMode.FULL_DECODE_ONLY
+    return CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 def _assign_draft_token_budget(
@@ -77,9 +87,14 @@ def build_cost_tables_from_curves(
     """Build cost tables: graph-padded below the capture limit, smooth above.
 
     Args:
+        draft_curve: (size, cost) samples for the draft model.
+        verify_curve: (size, cost) samples for the verify model.
+        max_num_reqs: Largest request count to build a table for.
+        max_batch_tokens: Largest token count to build a table for.
         cudagraph_limit: Largest cudagraph-captured size. At or below it,
             execution pads up to the next captured size, so cost is a step
             function. Above it there is no padding, so cost is continuous.
+
     """
 
     def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
@@ -113,6 +128,19 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
+class AdmittedDraftCounts:
+    """Per-request admitted draft counts, in flight to the host."""
+
+    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+        self._cpu = cpu
+        self._event = event
+
+    def wait(self) -> np.ndarray:
+        with gpu_sync_allowed():
+            self._event.synchronize()
+        return self._cpu.numpy()
+
+
 class AdaptiveVerificationManager:
     def __init__(
         self,
@@ -120,6 +148,7 @@ class AdaptiveVerificationManager:
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
         max_total_logits: int,
+        copy_admitted_drafts_to_host: bool = False,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -148,6 +177,15 @@ class AdaptiveVerificationManager:
         )
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
+
+        # Batch-sharded sampling sizes its all-to-all from host counts, so it
+        # needs the admitted split on the host.
+        self._copy_admitted_drafts_to_host = copy_admitted_drafts_to_host
+        if copy_admitted_drafts_to_host:
+            self._admitted_drafts_cpu = torch.empty(
+                max_num_reqs, dtype=torch.int32, pin_memory=True
+            )
+            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._stale_confidences = [
@@ -239,9 +277,7 @@ class AdaptiveVerificationManager:
         logger.debug("DSpark cost tables: %s", self.cost_tables)
 
     def record_confidences(
-        self,
-        confidence_probs: torch.Tensor,
-        input_batch: "InputBatch",
+        self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
     ) -> None:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
@@ -289,9 +325,9 @@ class AdaptiveVerificationManager:
         )
         num_non_draft_tokens = scheduled_tokens - scheduled_drafts
         slots = np.fromiter(
-            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+            map(self.req_states.req_id_to_index.__getitem__, req_ids),
             dtype=np.int32,
-            count=len(req_ids),
+            count=num_reqs,
         )
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
@@ -378,7 +414,10 @@ class AdaptiveVerificationManager:
 
     def reallocate_drafts(
         self, req_ids: list[str], idx_mapping: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int, AdmittedDraftCounts | None]:
+        """The admitted draft counts are None unless copy_admitted_drafts_to_host
+        is set and the budget binds; otherwise the host counts are already exact.
+        """
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
         num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
@@ -402,7 +441,7 @@ class AdaptiveVerificationManager:
         if draft_budget == 0:
             capacities.zero_()
         else:
-            async_copy_to_gpu(scheduled_drafts, out=capacities)
+            async_tensor_h2d(scheduled_drafts, out=capacities)
             if draft_budget < int(scheduled_drafts.sum()):
                 _assign_draft_token_budget_compiled(
                     self._confidence_probs,
@@ -413,10 +452,7 @@ class AdaptiveVerificationManager:
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
-        async_copy_to_gpu(
-            num_non_draft_tokens,
-            out=num_non_draft_tokens_gpu,
-        )
+        async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
         self._cu_num_logits[:1].zero_()
         torch.cumsum(
             capacities + self.num_bonus_tokens,
@@ -430,10 +466,25 @@ class AdaptiveVerificationManager:
             out=self.query_start_loc[1 : num_reqs + 1],
         )
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+
+        admitted_drafts = None
+        if self._copy_admitted_drafts_to_host and (
+            0 < draft_budget < int(scheduled_drafts.sum())
+        ):
+            admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
+            current_stream = torch.cuda.current_stream(self.req_states.device)
+            self._copy_stream.wait_stream(current_stream)
+            with stream(self._copy_stream, current_stream):
+                admitted_cpu.copy_(capacities, non_blocking=True)
+                self._admitted_drafts_event.record()
+            admitted_drafts = AdmittedDraftCounts(
+                admitted_cpu, self._admitted_drafts_event
+            )
         return (
             self._cu_num_logits[: num_reqs + 1],
             self.query_start_loc,
             draft_budget,
+            admitted_drafts,
         )
 
 
@@ -441,7 +492,6 @@ def maybe_create_adaptive_verification_manager(
     *,
     enable_adaptive_verification: bool,
     attn_groups: list[list["AttentionGroup"]],
-    attn_cg_support: "AttentionCGSupportInfo",
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
@@ -449,6 +499,7 @@ def maybe_create_adaptive_verification_manager(
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+    copy_admitted_drafts_to_host: bool = False,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
@@ -456,8 +507,7 @@ def maybe_create_adaptive_verification_manager(
     # The selector rejects unsupported backends, but models that
     # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
     backend = get_query_lens_mismatch_unsupported_backend(
-        attn_groups,
-        checked_layer_names=target_layer_names,
+        attn_groups, checked_layer_names=target_layer_names
     )
     if backend is not None:
         raise ValueError(
@@ -467,25 +517,30 @@ def maybe_create_adaptive_verification_manager(
             "use a backend that does."
         )
 
-    target_attn_cg_support = attn_cg_support
-    if target_layer_names is not None:
-        target_attn_cg_support = get_attn_cg_support(
+    # The runner's decode_query_len, the width varlen decode graphs capture.
+    max_query_len = req_states.num_speculative_steps + num_bonus_tokens
+    unsupported: tuple[str | None, int | None] | None = (
+        get_varlen_cudagraph_unsupported_backend(
             attn_groups,
             vllm_config,
+            max_query_len,
             checked_layer_names=target_layer_names,
         )
-        if additional_attn_cg_support is not None:
-            target_attn_cg_support = target_attn_cg_support.narrow(
-                *additional_attn_cg_support
-            )
-    if target_attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
+    )
+    if unsupported is None and additional_attn_cg_support is not None:
+        # Groups built outside init_attn_backend report only their support
+        # level, and without a bound only ALWAYS replays varlen batches.
+        additional_support, additional_backend = additional_attn_cg_support
+        if additional_support != AttentionCGSupport.ALWAYS:
+            unsupported = additional_backend, None
+    if unsupported is not None:
+        backend, bound = unsupported
+        allowed = "none" if bound is None else f"at most {bound}"
         raise ValueError(
-            "Adaptive verification captures varlen decode cudagraphs, so every"
-            " target attention builder must report AttentionCGSupport.ALWAYS, but "
-            f"{target_attn_cg_support.min_cg_attn_backend} reports "
-            f"{target_attn_cg_support.min_cg_support}. Pass "
-            "enable_adaptive_verification=false in the speculative config, or "
-            "use a backend that does."
+            "Adaptive verification replays decode cudagraphs whose per-request "
+            f"query lengths vary up to {max_query_len}, but {backend} allows "
+            f"{allowed}. Pass enable_adaptive_verification=false in the "
+            "speculative config, or use a backend that does."
         )
 
     return AdaptiveVerificationManager(
@@ -493,4 +548,5 @@ def maybe_create_adaptive_verification_manager(
         query_start_loc,
         num_bonus_tokens,
         max_total_logits=max_total_logits,
+        copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
     )

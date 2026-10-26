@@ -5,7 +5,6 @@ from typing import Any, Final
 
 from fastapi import Request
 
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -23,6 +22,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import TokenizerLike
 
@@ -67,7 +67,18 @@ class ServingTokenization(BaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        if isinstance(request, TokenizeChatRequest):
+        if (
+            isinstance(request, TokenizeChatRequest)
+            and self.online_renderer.use_harmony
+        ):
+            # The chat route renders GPT-OSS chats with Harmony, not the template.
+            rendered = await self.online_renderer.render_chat(
+                request.to_chat_completion_request(), skip_mm_cache=True
+            )
+            if isinstance(rendered, ErrorResponse):
+                return rendered
+            _, engine_inputs = rendered
+        elif isinstance(request, TokenizeChatRequest):
             tool_dicts = (
                 None
                 if request.tools is None
