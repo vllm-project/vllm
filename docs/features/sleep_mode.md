@@ -77,8 +77,15 @@ llm.wake_up(tags=["kv_cache"])
 #### Retaining frozen weights during RLHF updates
 
 Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
-to runtime parameter-name glob
-patterns for weights that stay frozen during training. Each pattern must match
+to runtime parameter-name glob patterns for weights that stay frozen during
+training. It covers two use cases:
+
+- **Frozen Engram tables (original use case):** retain table weights and scales
+  omitted by the trainer, without retransmitting them after every sleep.
+- **Frozen draft weights:** retain draft-private parameters when the trainer
+  updates only the target model.
+
+Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
 Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
@@ -87,7 +94,33 @@ copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
 
 The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta
-tensors). This option does not filter updates and applies only to the target model.
+tensors). This option does not filter updates.
+
+For frozen Engram tables omitted by the trainer, select the target table weights
+and scales. For example, DeepSeek V4.1 uses these runtime parameter names:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash --enable-sleep-mode \
+    --sleep-preserve-parameter-names '*.engram.embed_tokens.weight*'
+```
+
+CPU-offloaded tables remain on CPU without an extra backup copy. Engram's
+[inference-time CPU offload](engram.md#cpu-offload) is configured separately;
+this option preserves the frozen tables across level-2 sleep and weight updates.
+
+To retain a frozen drafter while updating only target weights, use `draft.*`:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3.8-27B --enable-sleep-mode \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --sleep-preserve-parameter-names 'draft.*'
+```
+
+vLLM selects all draft-private parameters internally; you do not need to list
+them individually. Use `draft.<name>` to select specific draft parameters.
+Parameters shared with the target are excluded from the draft selection, so
+target updates remain authoritative. An empty `draft.*` selection is valid.
+The Engram and draft patterns can be supplied together.
 
 #### Release only KV cache memory
 
@@ -135,6 +168,24 @@ llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True
 ```
 
 or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
+
+#### Choosing a sleep-mode backend
+
+`sleep_mode_backend` selects how GPU memory is freed and restored. The default
+is the built-in `cumem` backend. Plugins can register other backends with
+`SleepModeBackendFactory.register_backend` from a `vllm.general_plugins` entry
+point, and you select one by name:
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_backend="my_backend")
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-backend my_backend`.
+
+An unregistered name is not caught at startup; it fails the first time the
+backend is used, such as on the first sleep. CUDA graph offloading and
+`release_kv_cache_memory()` have their own backend requirements, described
+above.
 
 ### Online Serving
 

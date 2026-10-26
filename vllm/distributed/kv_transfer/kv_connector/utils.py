@@ -4,6 +4,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -71,6 +73,8 @@ class KVOutputAggregator:
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
+        self._salvaged_outputs: list[KVConnectorOutput] = []
+
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
         return cls(connector.get_finished_count() or world_size)
@@ -103,9 +107,17 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
-        for model_runner_output in outputs:
-            assert model_runner_output is not None
-            kv_output = model_runner_output.kv_connector_output
+
+        salvaged, self._salvaged_outputs = self._salvaged_outputs, []
+
+        kv_outputs: list[KVConnectorOutput | None] = []
+        for o in outputs:
+            assert o is not None
+            kv_outputs.append(o.kv_connector_output)
+
+        # Salvaged outputs from failed workers join this round so their
+        # transfer progress isn't lost.
+        for kv_output in chain(salvaged, kv_outputs):
             if not kv_output:
                 continue
             # Allow the worker to dynamically update the expected number of
@@ -186,6 +198,20 @@ class KVOutputAggregator:
         )
 
         return output
+
+    def ft_defer_kv_connector_outputs(
+        self, kv_connector_outputs: list[KVConnectorOutput | None]
+    ) -> None:
+        """Stash KV connector outputs from failed workers for replay at the
+        next aggregate().
+
+        kv_cache_events are dropped: replaying them could break the live
+        workers' event quorum, and a missed event only costs a cache miss.
+        """
+        for o in kv_connector_outputs:
+            if o is not None:
+                o.kv_cache_events = None
+        self._salvaged_outputs.extend(o for o in kv_connector_outputs if o)
 
 
 def _make_src_and_dst_indices(
@@ -295,12 +321,14 @@ def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
     """Yields:
-    (req_id, new_block_id_groups, preempted)
+    (req_id, block_id_groups, is_full_table)
 
+    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
+    block table (new and resumed requests) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, False
+        yield req_data.req_id, req_data.block_ids, True
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -349,6 +377,35 @@ def get_current_attn_backends(
                 use_mla=vllm_config.model_config.use_mla,
             )
         ]
+
+
+def get_current_attn_backends_and_specs(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    fallback: list[type[AttentionBackend]],
+) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
+    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+
+    Compressed caches are skipped: their kernel pages never split transferred
+    blocks.
+    """
+    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    layer_type = cast(type[Any], AttentionLayerBase)
+    for group in kv_cache_config.transfer_groups:
+        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
+        layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
+        for name, layer in layers.items():
+            spec = specs.get(name, group.kv_cache_spec)
+            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
+                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+                assert layout.is_block_outermost, "Compressed caches must be packed"
+                continue
+            if not isinstance(spec, AttentionSpec):
+                spec = None
+            pairs[layer.get_attn_backend(), spec] = None
+    if not pairs:
+        return fallback, [None] * len(fallback)
+    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 
 
 def get_current_attn_backend(

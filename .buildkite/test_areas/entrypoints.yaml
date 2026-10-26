@@ -2,7 +2,7 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Initialized Snapshot E2E"
+- label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
   key: initialized-snapshot-e2e
   device: h200
   num_devices: 1
@@ -31,15 +31,19 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Unit"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
@@ -50,6 +54,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
+  automatic_shard: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -64,6 +69,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
@@ -88,7 +94,7 @@ steps:
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) %N"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) Shard %N"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
@@ -120,6 +126,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-chat_completion
+  automatic_shard: true
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -141,6 +148,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
   key: entrypoints-integration-api-server-generate
+  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -204,6 +212,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Speech to Text)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 60
       working_dir: "/vllm-workspace/tests"
@@ -213,6 +222,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
   key: entrypoints-integration-multimodal
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -248,6 +258,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"
