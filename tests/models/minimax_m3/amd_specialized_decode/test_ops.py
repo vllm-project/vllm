@@ -282,18 +282,35 @@ def test_route_near_ties_match_vllm_ops(weights):
 
 
 U = 2.0**-24
-# ``ffn._sigmoid``'s bound in test_mono_primitives: f32 ulps over 1 + its
-# condition number
-SIGMOID_ULPS = 4.5
-# a sigmoid + bias score's error: the sigmoid's (<= 6 U below 1) and the add's
-SCORE_ERR = 16 * U
-# route weights, f32 ulps: twice the maximum over 20 seeds x every width x TP
-ROUTE_W_ULPS = 10.5
-# A16W4 dot products: a wave's chain of 16x16x32 MFMAs, each within 33 U of its
-# |C| + sum |a b| (test_mono_primitives), then the waves' sums in order
-UP_N = 33 * 4 * ffn.UP_WAVE_STEPS + ffn.WAVES
-DOWN_N = 33 * 4 * ffn.K2_STEPS
-RATIOS = ("ssq", "xn", "logit", "mid", "partial")
+
+
+def _sigmoid_err(x):
+    """``ffn._sigmoid``'s relative error on an f32 ``x``, to first order:
+    LOG2E and the product (2 U times the condition number |x| (1 - s)),
+    v_exp_f32's 1 ulp (2 U times 1 - s), the add (U), v_rcp_f32's 1 ulp (2 U)."""
+    return (2 * x.abs() * (1 - torch.sigmoid(x)) + 5) * U
+
+
+# a sigmoid + bias score's error: the sigmoid's (5 + 2 c) U s <= 5.45 U (c s <=
+# 0.224), the add's half ulp of a score below 4
+SCORE_ERR = 8 * U
+
+
+def _mfma_err(x, w, waves):
+    """``x @ w.T``'s A16W4 error: a wave's chain of 16x16x32 MFMAs over its
+    128-K steps (MFMA d: K 32 g + 8 d .. + 8 of lane groups g), each within
+    33 U of its |C| + sum |a b| (test_mono_primitives), then the waves' sums in
+    order (U |sum| each)."""
+    xk, wk = (t.view(t.shape[0], -1, 4, 4, 8) for t in (x, w))
+    p, a = (
+        torch.einsum("tsgdj,nsgdj->tnsd", *ops).flatten(2).unflatten(2, (waves, -1))
+        for ops in ((xk, wk), (xk.abs(), wk.abs()))
+    )
+    chain = 33 * U * ((p.cumsum(-1) - p).abs() + a).sum((-2, -1))
+    return chain + U * p.sum(-1).cumsum(-1)[..., 1:].abs().sum(-1)
+
+
+RATIOS = ("ssq", "xn", "logit", "route_w", "mid", "partial")
 EXACT = ("sres", "res_out", "route_ids", "out", "pad")
 
 
@@ -430,7 +447,11 @@ def _stage_errors(w, r, parts, residual, valid, rank=0, experts=ffn.Experts.ALL)
     m["route_rows"] = int(clear.sum())
     m["tie_rows"] = int(((gaps == 0).any(-1) & clear).sum())
     _, wts, _ = R.route(logits, None, ffn.TOPK, "sigmoid", ffn.ROUTED_SCALE, ids)
-    m["route_w_ulps"] = R.ulps(r.wts[v], wts, torch.float32).max().item()
+    # 2 s_k / sum s: s_k within e_k, the sum within its terms' mean error and
+    # 3 adds, the division and the product within U each
+    sk, ek = (f(logits.gather(1, ids)) for f in (torch.sigmoid, _sigmoid_err))
+    ek = ek + (sk * ek).sum(-1, keepdim=True) / sk.sum(-1, keepdim=True) + 5 * U
+    m["route_w"] = _ratio((r.wts[v].double() - wts).abs(), ek * wts)
     m["pad"] = bool(
         (r.ids[~v] == -1).all()
         and (r.partials[:, ~v] == 0).all()
@@ -452,23 +473,27 @@ def _stage_errors(w, r, parts, residual, valid, rank=0, experts=ffn.Experts.ALL)
     for u, (e, cols) in enumerate(table):
         wd = R.dequant_mxfp4(w.raw.w13[e].to(dev), w.raw.s13[e].to(dev))
         g, up = (xs[cols] @ wd.T).split(INTER, -1)
-        dg, du = (UP_N * U * (xs[cols].abs() @ wd.abs().T)).split(INTER, -1)
+        dg, du = _mfma_err(xs[cols], wd, ffn.WAVES).split(INTER, -1)
         sat += int((g > ffn.LIMIT).sum() + (up.abs() > ffn.LIMIT).sum())
         total += 2 * g.numel()
         act = R.swiglu_oai(g, up, ffn.LIMIT, ffn.ALPHA, ffn.BETA)
         gc = g.clamp(max=ffn.LIMIT).abs() + dg
         uc = up.clamp(-ffn.LIMIT, ffn.LIMIT).abs() + du + ffn.BETA
-        lip = dg * (1 + ffn.ALPHA / 4 * gc) * uc + du * gc
+        # |d act / d g| / |u + BETA| = s + ALPHA |g| s (1 - s), s at most at g + dg
+        sh = torch.sigmoid(ffn.ALPHA * (g + dg).clamp(max=ffn.LIMIT))
+        slope = torch.minimum(1 + ffn.ALPHA / 4 * gc, sh * (1 + ffn.ALPHA * gc))
+        lip = dg * slope * uc + du * gc * sh
         z = ffn.ALPHA * g.clamp(max=ffn.LIMIT)
         c = z.abs() * (1 - torch.sigmoid(z))
-        d = lip + (act.abs() + lip) * (SIGMOID_ULPS * 2 * U * (1 + c) + (c + 4) * U)
+        # ALPHA and g ALPHA (2 c U), then g s, u + BETA and their product
+        d = lip + (act.abs() + lip) * (_sigmoid_err(z) + (2 * c + 3) * U)
         got = mid[u, : len(cols)].double()
         m["mid"] = max(
             m["mid"], _ratio((got - act).abs(), 0.5 * ulpb(act.abs() + d) + d)
         )
         w2 = R.dequant_mxfp4(w.raw.w2[e].to(dev), w.raw.s2[e].to(dev))
         down = got @ w2.T
-        cond = DOWN_N * U * (got.abs() @ w2.abs().T)
+        cond = _mfma_err(got, w2, 1)
         for j, i in enumerate(cols):
             contrib[(e, i)] = down[j], cond[j]
     m["saturated"] = sat / total
@@ -508,7 +533,6 @@ def _assert_stages(m, valid):
         assert m[name], name
     for name in RATIOS:
         assert m[name] <= 1, f"{name}: {m[name]:.3g} of its bound"
-    assert m["route_w_ulps"] <= ROUTE_W_ULPS, m["route_w_ulps"]
     nv = int(valid.sum())
     assert m["upf"] and m["zero_columns"]
     assert m["route_rows"] >= nv / 2 and m["tie_rows"] == nv

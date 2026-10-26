@@ -35,11 +35,10 @@ import zlib
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
-
-from .utils import check_logprobs_close
 
 MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
 LOAD_FORMAT = "dsv41_mono_random"

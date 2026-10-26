@@ -286,6 +286,8 @@ def test_layer_kernels_match_vllm_layers(vllm_runner, tmp_path_factory):
             llm.collective_rpc(_check_layers, args=(LAYER_LAUNCHES,))
             llm.generate(PROMPTS[:2], PARAMS, use_tqdm=False)
             ranks = llm.collective_rpc(_layer_errors)
+    # measured: vLLM's layer (hipBLASLt, custom all-reduce, AITER's a4w4 MoE)
+    # documents no error bound; test_numerics bounds every stage a priori
     for errors in ranks:
         assert len(errors) == LAYER_LAUNCHES
         assert {i for i, _ in errors} == set(range(1, 8))

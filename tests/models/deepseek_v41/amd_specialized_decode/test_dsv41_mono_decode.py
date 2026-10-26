@@ -479,14 +479,16 @@ def test_opt_in_without_flydsl_raises(monkeypatch):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
-def test_draft_layer_runs_whole_on_the_dspark_rows(monkeypatch):
+def test_draft_layer_runs_whole_on_the_dspark_rows(monkeypatch, run):
     """A DSpark draft layer runs whole with the draft's routing, its SWA rows
     the window and the block, padded: 128 + 5 drafts -> 192."""
     _deployment(monkeypatch)
     layer = _decoder_layer(layer_id=40, routing=DRAFT_ROUTING, compress_ratio=0)
     mono = md.MonoDecodeLayer.create(layer, _config())
-    assert mono is not None and mono.draft and not mono.ffn_only
-    assert (mono.experts, mono.topk, mono.swa_width) == (*DRAFT_ROUTING, DRAFT_WIDTH)
+    out, calls = run(**{**_draft(), "mono": mono})
+    assert out == ("mono outputs",) and calls[0][0][9].stride(0) == DRAFT_WIDTH
+    d = calls[0][1]["draft_runner"]  # what the draft's runner is built with
+    assert (d.experts, d.topk, d.swa_width) == (*DRAFT_ROUTING, DRAFT_WIDTH)
 
 
 def _declined(**changes):
@@ -498,24 +500,26 @@ def _declined(**changes):
 
 
 @pytest.mark.parametrize(
-    "changes",
+    "changes, why",
     [
-        dict(use_sequence_parallel=True),
-        dict(fuse_seam_norm=False),
-        dict(gate=SimpleNamespace(tid2eid=object())),
-        dict(scoring_func="sigmoid"),
-        dict(attn=dict(layer_id=40, compress_ratio=1), n_routed_experts=128,
-             n_activated_experts=3),
+        (dict(use_sequence_parallel=True), "sequence-parallel layer"),
+        (dict(fuse_seam_norm=False), "needs aiter's fused mHC seam"),
+        (dict(gate=SimpleNamespace(tid2eid=object())), "MoE routing outside"),
+        (dict(scoring_func="sigmoid"), "MoE routing outside"),
+        (dict(attn=dict(layer_id=40, compress_ratio=1), n_routed_experts=128,
+              n_activated_experts=3), "a draft layer with compressed keys"),
     ],
     ids=["sequence-parallel", "no-fused-seam", "hash-moe", "scoring",
          "draft-compressed"],
 )  # fmt: skip
-def test_layers_outside_the_kernels_run_vllm_path(monkeypatch, changes):
+def test_layers_outside_the_kernels_run_vllm_path(monkeypatch, changes, why):
     """A layer the kernels do not compute keeps vLLM's path, in a deployment
-    they take: that is not an error."""
+    they take, and says why: that is not an error."""
     _deployment(monkeypatch)
-    layer = _declined(**changes)
-    assert md.MonoDecodeLayer.create(layer, _config()) is None
+    said: list[str] = []
+    monkeypatch.setattr(md.logger, "info_once", lambda msg, *a: said.append(msg % a))
+    md.MonoDecodeLayer.create(_declined(**changes), _config())
+    assert any("mono decode off" in s and why in s for s in said), said
 
 
 def _other_backend():

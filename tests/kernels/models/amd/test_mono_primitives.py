@@ -13,12 +13,12 @@ The helper libraries are separate copies, so each runs here:
 
 Roundings, packings, scale codes and data movement are bit-exact against the
 references. The hardware transcendentals are held to AMD's documented 1 ulp
-and the helpers built on them to twice the error measured over 20 seeds."""
+and the helpers built on them to the first-order bound of their roundings."""
 
 import hashlib
 import importlib
 import math
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 
 import pytest
@@ -428,50 +428,116 @@ def _mixed(n, g, lo, hi, small=(-30, 6)):
     return torch.cat([u, _log_uniform(n - n // 2, small[0], small[1], g)])
 
 
-# name -> (inputs(n, g), reference, floor, ulp bound). The bound of the bare
-# instructions is AMD's documented 1 ulp; the others are twice the maximum
-# over 20 seeds (calibrated with mono_reference, as recorded in the PR).
+_U = 2.0**-24
+
+
+class _Rounded:
+    """A helper's formula in float64 with each f32 rounding v -> v (1 + d) + a,
+    |d| <= rel, |a| <= ab: ``bound(f)`` is the first-order error bound
+    sum rel |df/dd| + ab |df/da| (second-order terms in d, a dropped)."""
+
+    def __init__(self):
+        self.terms: list = []
+
+    def __call__(self, v, rel=_U, ab=0.0):
+        d, a = (torch.zeros_like(v, requires_grad=True) for _ in range(2))
+        self.terms += [(d, rel), (a, ab)]
+        return v * (1 + d) + a
+
+    def bound(self, f):
+        grads = torch.autograd.grad(f.sum(), [t for t, _ in self.terms])
+        return sum(e * g.abs() for (_, e), g in zip(self.terms, grads))
+
+
+# The roundings of the helpers, from their source and ISA: an f32 op, ``/``
+# (v_div_scale / fmas / fixup) and fmath.sqrt (correct-sqrt) round to nearest,
+# 2^-24; a rounded f32 constant another 2^-24 on its product; v_exp_f32 and
+# v_rcp_f32 1 ulp (AMD), 2^-23, flushing results below 2^-126; v_log_f32
+# 1 ulp too (LLVM AMDGPUUsage, llvm.log2: "Hardware provides 1ULP accuracy").
+def _hw(r, v):
+    return r(v, 2 * _U, R.FLT_MIN)
+
+
+def _m_sigmoid(r, z, rcp=False):
+    s = r(1 + _hw(r, torch.exp2(r(z * -math.log2(math.e), 2 * _U))))
+    return _hw(r, 1 / s) if rcp else r(1 / s)
+
+
+def _m_tanh(r, x, aiter=False):
+    e = _hw(r, torch.exp2(r(x.abs() * -2 * math.log2(math.e), 2 * _U)))
+    q = r(1 + e)
+    t = r(r(1 - e) * _hw(r, 1 / q)) if aiter else r(r(1 - e) / q)
+    return x.sign() * t
+
+
+def _m_score(r, x):
+    e = _hw(r, torch.exp2(r(x * math.log2(math.e), 2 * _U)))
+    sp = r(r(torch.log2(r(1 + e)), 2 * _U) * math.log(2), 2 * _U)
+    # The score squared: the sqrt's 2^-24 doubles.
+    return r(torch.where(x > 20, x, sp), 2 * _U)
+
+
+def _m_situ(r, g, u, aiter=False):
+    tanh = partial(_m_tanh, r, aiter=aiter)
+    tu = tanh(r(u * 0.04, 2 * _U))
+    if aiter:
+        a = r(4 * tanh(g / 4) * _m_sigmoid(r, g, rcp=True))
+        return r(r(a * 25) * tu)
+    a = r(2 * tanh(g / 4) * r(1 + tanh(g / 2)))
+    return r(a * r(25 * tu))
+
+
+def _m_swiglu(r, g, u):
+    g, u = g.clamp(max=7), u.clamp(-7, 7)
+    sg = _m_sigmoid(r, r(g * 1.702, 2 * _U), rcp=True)
+    return r(r(g * sg) * r(u + 1))
+
+
+# name -> (inputs(n, g), reference, model of the helper's roundings; None for
+# a bare instruction, held to AMD's 1 ulp).
 _TRANS = {
-    "hw_exp2": (lambda n, g: [_mixed(n, g, -126, 127)], torch.exp2, 0.0, 1.0),
+    "hw_exp2": (lambda n, g: [_mixed(n, g, -126, 127)], torch.exp2, None),
     "hw_rcp": (
         lambda n, g: [_log_uniform(n, -126, 126, g)],
         torch.reciprocal,
-        0.0,
-        1.0,
+        None,
     ),
     "hw_rsq": (
         lambda n, g: [_log_uniform(n, -126, 127, g, signed=False)],
         torch.rsqrt,
-        0.0,
-        1.0,
+        None,
     ),
-    "sigmoid": (lambda n, g: [_mixed(n, g, -80, 80)], torch.sigmoid, 0.0, 4.2),
-    "_sigmoid": (lambda n, g: [_mixed(n, g, -80, 80)], torch.sigmoid, 0.0, 4.5),
+    "sigmoid": (lambda n, g: [_mixed(n, g, -80, 80)], torch.sigmoid, _m_sigmoid),
+    "_sigmoid": (
+        lambda n, g: [_mixed(n, g, -80, 80)],
+        torch.sigmoid,
+        partial(_m_sigmoid, rcp=True),
+    ),
     "_score": (
         lambda n, g: [torch.cat([_mixed(n - 3, g, -40, 40), _neighbours(_full(20.0))])],
         lambda x: R.router_scores(x, "sqrt_softplus").square(),
-        1.0,
-        4.7,
+        _m_score,
     ),
-    "tanh_libm": (lambda n, g: [_log_uniform(n, -24, 6, g)], torch.tanh, 1.0, 1.5),
-    "tanh_aiter": (lambda n, g: [_log_uniform(n, -24, 6, g)], torch.tanh, 1.0, 2.0),
+    "tanh_libm": (lambda n, g: [_log_uniform(n, -24, 6, g)], torch.tanh, _m_tanh),
+    "tanh_aiter": (
+        lambda n, g: [_log_uniform(n, -24, 6, g)],
+        torch.tanh,
+        partial(_m_tanh, aiter=True),
+    ),
     "situ_vllm": (
         lambda n, g: [_mixed(n, g, -40, 40), _mixed(n, g, -80, 80)],
         R.situ,
-        1.0,
-        18.0,
+        _m_situ,
     ),
     "situ_aiter": (
         lambda n, g: [_mixed(n, g, -40, 40), _mixed(n, g, -80, 80)],
         R.situ,
-        1.0,
-        18.0,
+        partial(_m_situ, aiter=True),
     ),
     "_swiglu": (
         lambda n, g: [_mixed(n, g, -12, 12), _mixed(n, g, -12, 12)],
         R.swiglu_oai,
-        1.0,
-        4.7,
+        _m_swiglu,
     ),
 }
 
@@ -484,41 +550,31 @@ def _trans_cases():
     ]
 
 
-def _condition(ref, xs, h=2.0**-30):
-    """Sum over the inputs of |x df/dx / f| (central differences in float64):
-    the relative error a 1-ulp change of the inputs alone causes, in ulps."""
-    f = ref(*xs)
-    c = torch.zeros_like(f)
-    for i, x in enumerate(xs):
-        up = [y * (1 + h) if j == i else y for j, y in enumerate(xs)]
-        dn = [y * (1 - h) if j == i else y for j, y in enumerate(xs)]
-        c += ((ref(*up) - ref(*dn)) / (2 * h * f)).abs().nan_to_num(0.0)
-    return f, c
-
-
 def trans_error(lib, name, seed, n=1 << 22):
-    """Max error of helper ``name`` of ``lib`` over n inputs of the seed, in
-    f32 ulps of max(|ref|, floor) over 1 + the condition number (a
-    correctly rounded result of correctly rounded inputs scores <= 1)."""
-    inputs, ref, floor, _ = _TRANS[name]
+    """Max error of helper ``name`` of ``lib`` over n inputs of the seed over
+    its bound: f32 ulps of a bare instruction; else the model's rounding bound
+    plus the distance of its exact formula from the reference."""
+    inputs, ref, model = _TRANS[name]
     fn = _fn(lib, name)
     xs = inputs(n, _gen(seed))
     got = _run(f"t_{lib}_{name}", lambda *w: [i32(fn(*map(f32, w)))], 1, *xs)
     got = got.view(F32)[:, 0].double()
     if name == "_score":
         got = got.square()
-    f, cond = _condition(ref, [x.double() for x in xs])
-    if name.startswith("hw_"):
-        cond = 0
-    return (R.ulps(got, f, F32, floor) / (1 + cond)).max().item()
+    xs = [x.double() for x in xs]
+    f = ref(*xs)
+    if model is None:
+        return R.ulps(got, f, F32).max().item()
+    r = _Rounded()
+    m = model(r, *xs)
+    bound = (m.detach() - f).abs() + r.bound(m)
+    return torch.where(got == f, 0.0, (got - f).abs() / bound).max().item()
 
 
 @pytest.mark.parametrize(("lib", "name"), _trans_cases())
 def test_transcendentals(lib, name):
-    bound = _TRANS[name][3]
-    assert bound is not None, f"{name}: not calibrated"
     err = trans_error(lib, name, seed=0)
-    assert err <= bound, f"{name}: {err:.3g} ulp > {bound}"
+    assert err <= 1, f"{name}: {err:.3g} of its bound"
 
 
 @pytest.mark.parametrize("lib", _libs("div_rn"))
@@ -609,16 +665,16 @@ def _from_acc_lanes(d):
 
 
 def _mfma_error(got, a, b, c, k, block=None):
-    """D = C + A B^T: the error over the fp32 accumulation scale (k + 1)
-    2^-24 (|C| + |A| |B|^T), the a-priori bound being 1; or, ``block`` given,
-    over |C| + R.blockmax_cond (an FP8 MFMA's scale)."""
+    """D = C + A B^T: the error over its a-priori bound, the fp32 accumulation's
+    (k + 1) 2^-24 (|C| + |A| |B|^T), plus, ``block`` given (an FP8 MFMA, which
+    drops the products 2^-14 below the largest of their K block), block 2^-14
+    R.blockmax_cond."""
     d = _from_acc_lanes(got.view(F32).double())
     ref = c + a @ b.transpose(1, 2)
-    if block is None:
-        scale = (k + 1) * 2.0**-24 * (c.abs() + a.abs() @ b.abs().transpose(1, 2))
-    else:
-        scale = c.abs() + R.blockmax_cond(a, b, block)
-    return ((d - ref).abs() / scale).max().item()
+    bound = (k + 1) * 2.0**-24 * (c.abs() + a.abs() @ b.abs().transpose(1, 2))
+    if block is not None:
+        bound = bound + block * 2.0**-14 * R.blockmax_cond(a, b, block)
+    return ((d - ref).abs() / bound).max().item()
 
 
 def _bf16_operand(p, g):
@@ -691,8 +747,7 @@ def _scaled_cases():
 def mfma_scaled_error(lib, fmts, sel, seed, p=256):
     """The scaled MFMA of ``lib`` on random operands of the formats ``fmts``
     whose scale words hold 4 codes, byte ``sel`` the lane's -> (error over
-    the fp32 bound, error over the FP8 block scale, the operands' largest
-    product range within a block)."""
+    its bound, the operands' largest product range within a block)."""
     mfma = _fn(lib, "mfma_scaled")
     g = _gen(seed)
     (wa, va), (wb, vb) = (_mx_operand(p, f, g) for f in fmts)
@@ -718,13 +773,8 @@ def mfma_scaled_error(lib, fmts, sel, seed, p=256):
 
     a, b, c = scaled(va, 0), scaled(vb, 1), c.double()
     span = max((v.abs().max() / v[v != 0].abs().min()).item() for v in (va, vb))
-    return _mfma_error(got, a, b, c, 128), _mfma_error(got, a, b, c, 128, 32), span
-
-
-# The FP8 operand cases' error over |C| + R.blockmax_cond: twice the maximum
-# over 20 seeds. They exceed the fp32 bound: the MFMA drops a product 2^-14
-# below the largest of its 32-wide K block.
-_FP8_MFMA_BOUND = 1.5e-3
+    block = None if fmts == (4, 4) else 32
+    return _mfma_error(got, a, b, c, 128, block), span
 
 
 @pytest.mark.parametrize(("lib", "fmts", "sel"), _scaled_cases())
@@ -732,12 +782,10 @@ def test_mfma_scaled(lib, fmts, sel):
     """The 16x16x128 scaled MFMA (f8f6f4) with E8M0 scale words whose byte
     ``sel`` is the lane's (row or column, K block l / 16) code: against
     the float64 product of the exactly dequantized operands."""
-    e32, eblk, span = mfma_scaled_error(lib, fmts, sel, seed=8)
-    if fmts == (4, 4):
-        assert e32 <= 1, f"{e32:.3g} of the fp32 accumulation bound"
-    else:
+    err, span = mfma_scaled_error(lib, fmts, sel, seed=8)
+    if fmts != (4, 4):
         assert span > 2.0**14, "operands too narrow to show the FP8 MFMA's precision"
-        assert eblk <= _FP8_MFMA_BOUND, f"{eblk:.3g} > {_FP8_MFMA_BOUND}"
+    assert err <= 1, f"{err:.3g} of the bound"
 
 
 # ---------------------------------------------------------------- conversions

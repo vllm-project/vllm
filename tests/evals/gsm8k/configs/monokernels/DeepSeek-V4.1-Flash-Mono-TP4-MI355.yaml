@@ -1,10 +1,10 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
 # Two runs per arm. Mono off: 0.9045, 0.9030 (mean 0.904); on: 0.9045, 0.9105.
-# The runs vary by up to 0.0075, the mono-on mean is 0.004 above the mono-off
-# one. Tolerance: twice the largest distance of a run from the mono-off mean
-# (0.0068).
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.904, m = 2: 0.0298.
 accuracy_threshold: 0.904
-tolerance: 0.015
+tolerance: 0.030
 num_questions: 1319
 num_fewshot: 5
 # Decode steps of at most 48 rows run the monokernel (mono_decode.MAX_ROWS).

@@ -4547,11 +4547,11 @@ steps:
   source_file_dependencies:
   - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
   commands:
-  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv41_mono_layers.py
+  - pytest -v -s tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py
+  - pytest -v -s tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
 
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120

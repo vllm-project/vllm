@@ -606,10 +606,8 @@ def test_late_rank_fault_returns_no_tokens_from_full_graphs(
         assert len(llm.generate(prompt, params)[0].outputs[0].token_ids) == 8
         capfd.readouterr()
         llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
-        outputs = None
         with pytest.raises(EngineDeadError):
-            outputs = llm.generate(prompt, params)
-        assert outputs is None
+            llm.generate(prompt, params)
     logs = "".join(capfd.readouterr())
     # the error-word assert trapped the queue ahead of the step's sampling
     assert "hipErrorLaunchFailure" in logs or "HSA_STATUS_ERROR_EXCEPTION" in logs
@@ -752,10 +750,11 @@ def test_eagle3_verify_steps_match_native(
         if graphs:
             capfd.readouterr()
             llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
-            outputs = None
             with pytest.raises(EngineDeadError):
-                outputs = llm.generate(_spec_requests()[0], greedy)
-            assert outputs is None
+                llm.generate(_spec_requests()[0], greedy)
+    if graphs:
+        logs = "".join(capfd.readouterr())
+        assert "hipErrorLaunchFailure" in logs or "HSA_STATUS_ERROR_EXCEPTION" in logs
 
     native_rows, native_aux = [], []
     with _engine(vllm_runner, model_dir, mono=False) as runner:

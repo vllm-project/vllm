@@ -7,13 +7,12 @@ to the kernels' own captured input, so a failure names the stage. Nothing is
 compared with another kernel.
 
 Weights are random in the checkpoint's formats; the references read them raw,
-before vLLM's shuffles. Bounds are a priori where the arithmetic is specified
-(the quantization rules and data movement exact, a value rounded once from a
-known fp32 chain, fp32 dot products of bf16), else ``MEASURED``: twice the
-largest value over 20 seeds of every case (gfx950's FP8 MFMAs do not accumulate
-at fp32; hardware transcendentals). Plain outputs are poisoned before the
-checked launch and must match an unpoisoned one bit for bit; every case then
-replays in one graph, bit for bit."""
+before vLLM's shuffles. Every bound is a priori: the quantization rules and data
+movement exact, each rounding of the kernels' fp32 chains at 2^-24 (v_exp /
+v_rcp / v_rsq / v_log / sqrt at 1 ulp), the scaled FP8 / FP4 MFMAs as
+``_gemv_err`` models them. Plain outputs are poisoned before the checked launch
+and must match an unpoisoned one bit for bit; every case then replays in one
+graph, bit for bit."""
 
 import pytest
 import ray
@@ -46,22 +45,6 @@ LOG2E = 1.4426950408889634
 U = 2.0**-24
 NEG = -3.4028234663852886e38
 REPLAYS = 100
-# twice the largest value over the calibration sweep (``_bounded``)
-MEASURED = {
-    "pre": 5.44e-7,
-    "post": 1.44e-6,
-    "comb": 7.72e-7,
-    "qkvp": 1.28e-5,
-    "q": 1.77e-5,
-    "woa": 4.74e-6,
-    "wob": 1.74e-5,
-    "route_w": 9.36e-5,
-    "smid": 2.97e-6,
-    "mid": 9.43e-7,
-    "ffn": 0.0,
-}
-_CALIBRATING = False
-SEEN: dict[str, float] = {}
 
 # (compress ratio, requests, tokens a request, pad rows, key table, MoE, fold):
 # CSA / HCA, one and two hops (from 42 rows), hash and bias routing, the
@@ -82,16 +65,9 @@ CASES = (
 TOP5, TIE, OUTLIERS = (5, 133, 261, 300, 377), (70, 100), (200, 201, 202, 203)
 
 
-def _bounded(name: str, value: float, ctx) -> None:
-    SEEN[name] = max(SEEN.get(name, 0.0), value)
-    if not _CALIBRATING:
-        assert value <= MEASURED[name], (ctx, name, value, MEASURED[name])
-
-
 def _apriori(name: str, ratio: torch.Tensor, ctx) -> None:
     """``ratio``: each element's error over its a-priori bound."""
     worst = ratio.max().item() if ratio.numel() else 0.0
-    SEEN[name] = max(SEEN.get(name, 0.0), worst)
     assert worst <= 1.0, (ctx, name, worst)
 
 
@@ -99,11 +75,17 @@ def _half_ulp(x):
     return 0.5 * R.ulp(x.double().abs())
 
 
-def _excess(got, ref, rnd, cond):
-    """The error past the a-priori rounding allowance ``rnd``, over the dot
-    products' conditioning scale."""
-    d = ((got.double() - ref).abs() - rnd).clamp(min=0)
-    return (d / cond.clamp(min=1e-300)).max().item()
+def _gemv_err(a, b, waves=8):
+    """The error bound of a scaled-MFMA GEMV a @ b^T (f64 operands, as
+    dequantized) whose K steps of 128 are split over ``waves`` chains, then
+    summed: gfx950 drops a product 2^-14 below its 32-block's largest (32 2^-14
+    blockmax a block), plus each MFMA's fp32 accumulation, (128 + 1) 2^-24 (|C|
+    + |A| |B|) as test_mono_primitives' ``_mfma_error`` bounds it, along a
+    chain, and the chains' sum."""
+    steps = -(-a.shape[-1] // (128 * waves))
+    return 2.0**-9 * R.blockmax_cond(a, b) + (129 * steps + waves) * U * (
+        a.abs() @ b.abs().T
+    )
 
 
 def _deq128(w, s):
@@ -142,10 +124,10 @@ def _q8_equal(name, q8, codes, x, rule, ctx):
     assert torch.equal(_e4m3(q8), ref_q), (ctx, name, "values")
 
 
-def _q8_within(name, q8, codes, x, d, rule, ctx):
+def _q8_within(name, q8, codes, x, d, rule, ctx, sharp=True):
     """MXFP8 of values x known to +-d (``R.assert_quant_equal`` where d may
     span more than one step): each code and value between the rule's at the
-    two ends, so exact wherever they agree (the rest under 1 %)."""
+    two ends, so exact wherever they agree (``sharp``: the rest under 1 %)."""
     xb, db = x.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
     amax, dmax = xb.abs().amax(-1), db.amax(-1)
     lo_c, hi_c = rule((amax - dmax).clamp(min=0)), rule(amax + dmax)
@@ -156,28 +138,7 @@ def _q8_within(name, q8, codes, x, d, rule, ctx):
     got = _e4m3(q8).unflatten(-1, (-1, 32))
     assert ((got >= lo) & (got <= hi)).all(), (ctx, name, "values")
     frac = ((lo != hi).sum() + 32 * (lo_c != hi_c).sum()).item() / x.numel()
-    assert frac < 0.01, (ctx, name, "boundary set", frac)
-    SEEN[f"{name}_boundary"] = max(SEEN.get(f"{name}_boundary", 0.0), frac)
-
-
-def _q8_close(name, q8, codes, x, rnd, cond, rule, ctx):
-    """MXFP8 of a GEMV's values ``x``, known to +-rnd past the GEMV's error:
-    the codes between the rule's at amax -+ that, each value within half an
-    E4M3 step of x / scale; the excess, over ``cond``, is measured."""
-    # the code's range: the GEMV's error before its bf16 rounding is not tapped,
-    # wqkv's (an FP8 GEMV with an fp32 tap) stands in
-    d = rnd + max(MEASURED[name], MEASURED["qkvp"]) * cond
-    xb, db = x.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
-    amax, dmax = xb.abs().amax(-1), db.amax(-1)
-    codes = codes.long()
-    lo, hi = rule((amax - dmax).clamp(min=0)), rule(amax + dmax)
-    assert ((codes >= lo) & (codes <= hi)).all(), (ctx, name, "codes")
-    scale = R.e8m0(codes)[..., None]
-    y = xb / scale
-    p2 = torch.exp2(torch.floor(torch.log2(y.abs().clamp(min=2.0**-9))).clamp(-6, 8))
-    got = _e4m3(q8).unflatten(-1, (-1, 32))
-    err = ((got - y).abs() - p2 / 16).clamp(min=0) * scale
-    _bounded(name, _excess(err.flatten(-2), 0, rnd, cond), ctx)
+    assert not sharp or frac < 0.01, (ctx, name, "boundary set", frac)
 
 
 # ---------------------------------------------------------------- inputs
@@ -322,17 +283,71 @@ def _fn_as_read(fn):
     return hi + R.bf16_rne(fn.double() - hi)
 
 
+def _gate_err(x, fn, scale, base, eps, hc_eps, iters):
+    """First-order bound on ``stage_gate``'s (pre, post, comb): sum |d out / d e|
+    |e| over its roundings e, along its op order -- 2^-24 an fp32 op, 2^-23 a
+    1-ulp v_exp / v_rcp / v_rsq or division, 2^-23 an op with a rounded f32
+    constant; the mix projection 58 2^-24 sum |x fn| (4 MFMAs 16x16x4 at
+    (4 + 1) roundings, 8 waves, 14 + 16 slices), the sum of squares 37 2^-24
+    (a pair, 6 lanes, 14 + 16 slices)."""
+    errs = []
+
+    def r(v, rel, extra=0):
+        z = torch.zeros_like(v, requires_grad=True)
+        errs.append((z, rel * v.detach().abs() + extra))
+        return v + z
+
+    def sigmoid(z):
+        e = r(torch.exp2(r(z * -LOG2E, 2 * U)), 2 * U)
+        return r(1 / r(1 + e, U), 2 * U)
+
+    def rsum(c, dim):
+        a, b, c_, d = c.unbind(dim)
+        return r(r(a + b, U) + r(c_ + d, U), U).unsqueeze(dim)
+
+    x, fn, base = x.double(), fn.double(), base.double()
+    with torch.enable_grad():
+        mix = r(x @ fn.T, 0, 58 * U * (x.abs() @ fn.abs().T))
+        sq = r(x.square().sum(-1, True), 37 * U)
+        rs = r(torch.rsqrt(r(sq / x.shape[-1] + eps, 2 * U)), 2 * U)
+        v = r(mix * rs, U)
+        sl = (slice(0, HC), slice(HC, 2 * HC), slice(2 * HC, None))
+        g = [r(v[:, s] * scale[i].item() + base[s], U) for i, s in enumerate(sl)]
+        pre = r(sigmoid(g[0]) + hc_eps, 2 * U)
+        post = sigmoid(g[1]) * 2
+        cv = g[2].view(-1, HC, HC)
+        cv = r(cv - cv.detach().amax(-1, True), U)
+        cv = r(torch.exp2(r(cv * LOG2E, 2 * U)), 2 * U)
+        cv = r(cv * r(1 / rsum(cv, -1), 2 * U) + hc_eps, 2 * U)
+        cv = r(cv * r(1 / r(rsum(cv, -2) + hc_eps, 2 * U), 2 * U), U)
+        for _ in range(iters - 1):
+            for dim in (-1, -2):
+                cv = r(cv * r(1 / r(rsum(cv, dim) + hc_eps, 2 * U), 2 * U), U)
+        outs = torch.cat([pre, post, cv.flatten(1)], 1)
+        bound = torch.zeros_like(outs)
+        zs = [z for z, _ in errs]
+        for j in range(outs.shape[1]):
+            grads = torch.autograd.grad(
+                outs[:, j].sum(), zs, retain_graph=True, allow_unused=True
+            )
+            for gz, (_, e) in zip(grads, errs):
+                if gz is not None:
+                    bound[:, j] += (gz.abs() * e).flatten(1).sum(1)
+    return bound.split((HC, HC, HC * HC), 1)
+
+
 def _check_mixes(tag, w, sub, res, post, comb, pre, eps, ctx):
     from vllm.models.deepseek_v4.amd.mono.dims import HC_EPS, HC_SINKHORN
 
     M = res.shape[0]
-    rp, rq, rc = R.mhc_mixes(
-        res.reshape(M, -1), _fn_as_read(w[f"{sub}_fn"]), w[f"{sub}_scale"],
-        w[f"{sub}_base"], HC, eps, HC_EPS, HC_EPS, 2.0, HC_SINKHORN,
-    )  # fmt: skip
-    for name, got, ref in (("pre", pre, rp), ("post", post, rq), ("comb", comb, rc)):
-        err = (got.double().reshape(ref.shape) - ref).abs().max().item()
-        _bounded(name, err, (ctx, tag))
+    x, fn = res.reshape(M, -1), _fn_as_read(w[f"{sub}_fn"])
+    scale, base = w[f"{sub}_scale"], w[f"{sub}_base"]
+    refs = R.mhc_mixes(x, fn, scale, base, HC, eps, HC_EPS, HC_EPS, 2.0, HC_SINKHORN)
+    bounds = _gate_err(x, fn, scale, base, eps, HC_EPS, HC_SINKHORN)
+    names = ("pre", "post", "comb")
+    for name, got, ref, b in zip(names, (pre, post, comb), refs, bounds):
+        err = (got.double().reshape(M, -1) - ref.reshape(M, -1)).abs()
+        _apriori(name, err / b, (ctx, tag))
 
 
 def _bf16_known(x, d):
@@ -595,8 +610,8 @@ def _check_case(runner, vc, w, moes, widths, case, seed, index):
     qkvp = qkvp.view(2, M, 2048)
     for half_k in range(2):
         ks = slice(half_k * HIDDEN // 2, (half_k + 1) * HIDDEN // 2)
-        ref, cond = _mm(xd[:, ks], wqkv[:, ks])
-        _bounded("qkvp", _excess(qkvp[half_k], ref, 0, cond), ctx)
+        err = (qkvp[half_k].double() - xd[:, ks] @ wqkv[:, ks].T).abs()
+        _apriori("qkvp", err / _gemv_err(xd[:, ks], wqkv[:, ks]), ctx)
     h = (qkvp[0] + qkvp[1]).to(bf)
     qr = runner.qr[:M]
     ref = R.rmsnorm(h[:, :Q_RANK], w["q_norm"], eps)
@@ -630,17 +645,23 @@ def _check_case(runner, vc, w, moes, widths, case, seed, index):
     xod = R.dequant_fp8(xo, xos, (1, 32))
     o_rows, gk = runner.d.o_rows, runner.d.group_k
     woa = _deq128(w["wo_a"], w["wo_a_s"])
+    # wo_a: a 16-row tile's K over 4 waves (``WOA_SPLIT_K``), then bf16
     zs = [
-        _mm(xod[:, g * gk : (g + 1) * gk], woa[g * O_RANK : (g + 1) * O_RANK])
-        for g in range(runner.d.groups)
+        (a @ b.T, _gemv_err(a, b, 4))
+        for a, b in (
+            (xod[:, g * gk : (g + 1) * gk], woa[g * O_RANK : (g + 1) * O_RANK])
+            for g in range(runner.d.groups)
+        )
     ]
-    z, zc = (torch.cat([v[i] for v in zs], 1) for i in (0, 1))
+    z, ze = (torch.cat([v[i] for v in zs], 1) for i in (0, 1))
     x8b = region("x8b")[: M * o_rows].view(M, o_rows)
     x8bs = region("x8bs")[: M * o_rows // 8].view(torch.int32).view(M, -1)
-    _q8_close("woa", x8b, x8bs, z, _half_ulp(z), zc, R.mx_code_vllm, ctx)
+    d = ze + _half_ulp(z.abs() + ze)
+    _q8_within("woa", x8b, x8bs, z, d, R.mx_code_vllm, ctx, sharp=False)
     part, attn = _gather_peer(peer, rank, M, tag2, two_hop, ctx)
-    ref, cond = _mm(R.dequant_fp8(x8b, x8bs, (1, 32)), _deq128(w["wo_b"], w["wo_b_s"]))
-    _bounded("wob", _excess(part[rank], ref, _half_ulp(part[rank]), cond), ctx)
+    x8bd, wob = R.dequant_fp8(x8b, x8bs, (1, 32)), _deq128(w["wo_b"], w["wo_b_s"])
+    err = (part[rank].double() - x8bd @ wob.T).abs()
+    _apriori("wob", err / (_half_ulp(part[rank]) + _gemv_err(x8bd, wob)), ctx)
 
     # ---- K2: the FFN seam
     _check_fold("res_out", o[1], attn, res_mid, post_a, comb_a, ctx)
@@ -681,22 +702,22 @@ def _cos_sin(cos_sin, pos):
 def _check_q(got, s, qx8, qx8s, w, cos_sin, ctx):
     """wq_b: the GEMV -> bf16 -> GPT-J RoPE of each head's dims 448.. -> bf16."""
     M, H = got.shape[:2]
-    v, cond = _mm(R.dequant_fp8(qx8, qx8s, (1, 32)), _deq128(w["wq_b"], w["wq_b_s"]))
-    v, cond = v.view(M, H, HEAD_DIM), cond.view(M, H, HEAD_DIM)
+    qd, wqb = R.dequant_fp8(qx8, qx8s, (1, 32)), _deq128(w["wq_b"], w["wq_b_s"])
+    v, ge = (t.view(M, H, HEAD_DIM) for t in (qd @ wqb.T, _gemv_err(qd, wqb)))
     cos, sin = (c[:, None] for c in _cos_sin(cos_sin, s["positions"]))
-    ref, rc = v.clone(), cond.clone()
+    ref, rc = v.clone(), ge.clone()
     ref[..., NOPE:] = R.rope_gptj(v[..., NOPE:], cos, sin)
-    ce, co = cond[..., NOPE::2], cond[..., NOPE + 1 :: 2]
+    ce, co = ge[..., NOPE::2], ge[..., NOPE + 1 :: 2]
     rc[..., NOPE::2] = cos.abs() * ce + sin.abs() * co
     rc[..., NOPE + 1 :: 2] = sin.abs() * ce + cos.abs() * co
     rnd = _half_ulp(got)
     rv = v[..., NOPE:].abs()
     pair = (rv[..., 0::2] + rv[..., 1::2]).repeat_interleave(2, -1)
     trig = (cos.abs() + sin.abs()).repeat_interleave(2, -1)
-    hu = _half_ulp(v[..., NOPE:])
+    hu = _half_ulp(rv + ge[..., NOPE:])
     hu = torch.maximum(hu[..., 0::2], hu[..., 1::2]).repeat_interleave(2, -1)
     rnd[..., NOPE:] += trig * (hu + 2 * U * pair)
-    _bounded("q", _excess(got, ref, rnd, rc), ctx)
+    _apriori("q", (got.double() - ref).abs() / (rnd + rc), ctx)
 
 
 def _record_bytes(cache, block, slots):
@@ -847,13 +868,14 @@ def _check_attention(runner, s, region, w, cos_sin, width, eps, ctx):
     _q8_within("xo", xo, xos, torch.stack(ys), torch.stack(dys), R.mx_code_vllm, ctx)
 
 
-def _swiglu(g, u):
-    """DeepSeek's clamped SwiGLU in f64 and its partials (d/dg, d/du)."""
+def _swiglu(g, u, eg, eu):
+    """DeepSeek's clamped SwiGLU in f64 and its partials (d/dg, d/du), each
+    kept on a clamp within the inputs' errors (eg, eu) of its edge."""
     gc, uc = g.clamp(max=10), u.clamp(-10, 10)
     sg = torch.sigmoid(gc)
     act = gc * sg
-    dg = (sg + gc * sg * (1 - sg)) * uc * (g < 10)
-    du = act * (u.abs() < 10)
+    dg = (sg + gc * sg * (1 - sg)) * uc * (g - eg < 10)
+    du = act * (u.abs() - eu < 10)
     return act, act * uc, dg, du
 
 
@@ -881,46 +903,66 @@ def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, c
     lg = lg.view(M, EXPERTS, 4)
     tot = ((lg[..., 0] + lg[..., 1]) + lg[..., 2]) + lg[..., 3]
     ref, cond = _mm(x, moe.gate.weight.double())
-    _apriori("logit", (tot.double() - ref).abs() / (HIDDEN * U * cond), ctx)
+    # router_tile: a wave's chain of HIDDEN / 1024 bf16 16x16x32 MFMAs at (32 +
+    # 1) u each, 8 wave partials summed from 0, the 4 parts' 3 adds
+    eta = (33 * HIDDEN // 1024 + 8 + 3) * U
+    _apriori("logit", (tot.double() - ref).abs() / (eta * cond), ctx)
 
     rt = R.pairs(region("route"), ROUTE_COPIES * M * 2 * TOPK, tag)
     rt = rt.view(ROUTE_COPIES, M, 2 * TOPK)
     assert (rt == rt[0]).all(), (ctx, "route copies")
     ids, wts = rt[0, :, :TOPK], rt[0, :, TOPK:].view(torch.float32).double()
     scores = R.router_scores(tot, "sqrt_softplus")
+    # ``_score``: x log2e (2 u), exp2 (2 u + 2 u |x|), 1 + e (u), log (2 u),
+    # x ln2 (2 u) -> sp; sqrt (2 u): each score's relative error
+    lx = tot.double()
+    ex = lx.clamp(max=20).exp()
+    sp = torch.where(lx > 20, lx, torch.log1p(ex))
+    dsp = 4 * U * sp + U * (1 + ex / (1 + ex) * (2 + 2 * lx.abs()))
+    dsc = torch.where(lx > 20, 0, dsp) / (2 * sp) + 2 * U
     if route_ids is not None:
         assert torch.equal(ids, route_ids), (ctx, "hash ids")
     else:
         bias = moe.gate.e_score_correction_bias.double()
         ref_ids, _, margin = R.route(tot, bias, TOPK, "sqrt_softplus", ROUTED_SCALE)
         tie = margin == 0
-        bound = 2.0**-18 * (scores + bias).abs().amax(-1)
-        rows = R.assert_topk(ids, ref_ids, torch.where(tie, torch.inf, margin), bound)
+        # the picks are certain where every reference pick's score + bias (the
+        # add: u) clears every other's by their errors
+        sel = scores + bias
+        es = dsc * scores + U * sel.abs()
+        top = torch.zeros_like(sel, dtype=torch.bool).scatter(1, ref_ids.long(), True)
+        gap = torch.where(top, sel - es, torch.inf).amin(-1)
+        gap = gap - torch.where(top, -torch.inf, sel + es).amax(-1)
+        rows = R.assert_topk(ids, ref_ids, torch.where(tie, torch.inf, gap), 0)
         assert rows >= M - M // 8, (ctx, "routes checked", rows)
         if kind == "adv":
             assert tie.all() and (tot[:, TIE[0]] == tot[:, TIE[1]]).all(), ctx
             assert (tot > 20).any(), (ctx, "softplus' linear branch")
-    sw = scores.gather(1, ids.long())
+    sw, dsc = scores.gather(1, ids.long()), dsc.gather(1, ids.long())
     wref = sw * ROUTED_SCALE / sw.sum(-1, keepdim=True)
-    _bounded("route_w", ((wts - wref).abs() / wref).max().item(), ctx)
+    # the weights: 5 adds, a division, a product
+    rel = dsc + (sw * dsc).sum(-1, True) / sw.sum(-1, True) + 8 * U
+    _apriori("route_w", (wts - wref).abs() / (rel * wref), ctx)
 
     sh = d.sh_inter
     xd = R.dequant_fp8(x8, x8s, (1, 32))
-    g, cg = _mm(xd, raw.sgu[:sh].double())
-    u, cu = _mm(xd, raw.sgu[sh:].double())
-    act, ref, dg, du = _swiglu(g, u)
+    sg, su = raw.sgu[:sh].double(), raw.sgu[sh:].double()
+    g, u, eg, eu = xd @ sg.T, xd @ su.T, _gemv_err(xd, sg), _gemv_err(xd, su)
+    act, ref, dg, du = _swiglu(g, u, eg, eu)
     smid = R.pairs(region("smid"), M * sh, tag).view(torch.float32).view(M, sh)
+    # gate and up -> bf16; silu: expf (2 u), 1 + e (u), the division (2 u), ->
+    # bf16; x up (u) -> bf16
     rnd = (
         _half_ulp(smid)
         + u.clamp(-10, 10).abs() * _half_ulp(act)
-        + dg.abs() * _half_ulp(g)
-        + act.abs() * _half_ulp(u)
-        + 2.0**-21 * ref.abs()
+        + dg.abs() * _half_ulp(g.abs() + eg)
+        + act.abs() * _half_ulp(u.abs() + eu)
+        + 6 * U * ref.abs()
     )
-    _bounded("smid", _excess(smid, ref, rnd, dg.abs() * cg + du.abs() * cu), ctx)
+    err = (smid.double() - ref).abs()
+    _apriori("smid", err / (rnd + dg.abs() * eg + du.abs() * eu), ctx)
     if kind == "adv":
         sat = (g > 10).double().mean().item()
-        SEEN["sat_shared"] = max(SEEN.get("sat_shared", 0.0), sat)
         assert 0.01 <= sat <= 0.2, (ctx, "shared gate clamp", sat)
     smq = R.pairs(region("smq"), M * sh // 4, tag).view(torch.uint8).view(M, sh)
     smc = R.pairs(region("smc"), M * sh // 32, tag).view(M, -1)
@@ -936,41 +978,55 @@ def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, c
     gi = torch.arange(groups)
     mids = mids[:, gi % 4 * (inter // 128) + gi // 4]
     x8rd = R.dequant_fp8(x8r, x8rs, (1, 32))
-    vs, rnds, conds, rows_ = [], [], [], []
-    out = torch.zeros(M, HIDDEN, dtype=R.F64, device=x.device)
-    outc, outa = torch.zeros_like(out), torch.zeros_like(out)
+    vs, ds, rows_ = [], [], []
+    out = torch.zeros(M, TOPK, HIDDEN, dtype=R.F64, device=x.device)
+    eout = torch.zeros_like(out)
     sat = []
     for e in sorted({p[0] for p in picks}):
         tk = [(t, k) for p_e, t, k in picks if p_e == e]
-        toks = [t for t, _ in tk]
+        toks, ks = [t for t, _ in tk], [k for _, k in tk]
         rr = [row[p] for p in tk]
         w13 = R.dequant_mxfp4(raw.w13[0][e], raw.w13[1][e])
-        h, ch = _mm(x8rd[toks], w13)
-        _, v, dg, du = _swiglu(h[:, :inter], h[:, inter:])
-        sat.append((h[:, :inter] > 10).double().mean())
+        # ug: K in 2 or 4 slices (``ug_rounds``), summed pairwise
+        h, eh = x8rd[toks] @ w13.T, _gemv_err(x8rd[toks], w13, 2)
+        hg, hu, eg, eu = h[:, :inter], h[:, inter:], eh[:, :inter], eh[:, inter:]
+        _, v, dg, du = _swiglu(hg, hu, eg, eu)
+        sat.append((hg > 10).double().mean())
+        # sigmoid: x log2e (2 u), exp2 (2 u + 2 u |g|), 1 + e (u), rcp (2 u);
+        # x g, x up (2 u); then bf16
+        dv = dg.abs() * eg + du.abs() * eu
+        dv = dv + (7 + 2 * hg.clamp(max=10).abs()) * U * v.abs()
         vs.append(v)
-        rnds.append(_half_ulp(v) + 2.0**-21 * v.abs())
-        conds.append(dg.abs() * ch[:, :inter] + du.abs() * ch[:, inter:])
+        ds.append(dv + _half_ulp(v.abs() + dv))
         rows_ += rr
         w2 = R.dequant_mxfp4(raw.w2[0][e], raw.w2[1][e][..., :groups])
         md = R.dequant_fp8(mid[rr], mids[rr], (1, 32))
-        y, cy = _mm(md, w2)
-        wk = wts[toks, [k for _, k in tk]][:, None]
-        out.index_add_(0, torch.tensor(toks, device=x.device), wk * y)
-        outc.index_add_(0, torch.tensor(toks, device=x.device), wk * cy)
-        outa.index_add_(0, torch.tensor(toks, device=x.device), (wk * y).abs())
-    _q8_close(
-        "mid", mid[rows_], mids[rows_], torch.cat(vs), torch.cat(rnds),
-        torch.cat(conds), _rule_ceil, ctx,
+        wk = wts[toks, ks][:, None]
+        out[toks, ks] = wk * (md @ w2.T)
+        # down: K on DOWN_CHAINS = 2 accumulators
+        eout[toks, ks] = wk * _gemv_err(md, w2, 2)
+    _q8_within(
+        "mid", mid[rows_], mids[rows_], torch.cat(vs), torch.cat(ds), _rule_ceil,
+        ctx, sharp=False,
     )  # fmt: skip
     if kind == "adv":
         sat = torch.stack(sat).mean().item()
-        SEEN["sat_routed"] = max(SEEN.get("sat_routed", 0.0), sat)
         assert 0.01 <= sat <= 0.2, (ctx, "routed gate clamp", sat)
-    y, cy = _mm(R.dequant_fp8(smq, smc, (1, 32)), raw.sd.double())
+    # ``down_combine``: routed = bf16(routed + bf16(v w)) in top-k order, then
+    # bf16(routed + bf16(shared)); an fp32 add (u) before each bf16
+    acc = torch.zeros_like(out[:, 0])
+    bound = torch.zeros_like(acc)
+    for k in range(TOPK):
+        c = out[:, k]
+        ec = eout[:, k] + U * c.abs()
+        acc, bound = acc + c, bound + ec + _half_ulp(c.abs() + ec)
+        bound = bound + U * acc.abs() + _half_ulp(acc.abs() + bound)
+    smd, sd = R.dequant_fp8(smq, smc, (1, 32)), raw.sd.double()
+    y, ey = smd @ sd.T, _gemv_err(smd, sd)
+    acc, bound = acc + y, bound + ey + _half_ulp(y.abs() + ey)
+    bound = bound + U * acc.abs() + _half_ulp(acc.abs() + bound)
     part, total = _gather_peer(ffn, rank, M, tag, two_hop, ctx)
-    rnd = _half_ulp(outa + y.abs()) * (2 * TOPK + 2)
-    _bounded("ffn", _excess(part[rank], out + y, rnd, outc + cy), ctx)
+    _apriori("ffn", (part[rank].double() - acc).abs() / bound, ctx)
     return total
 
 

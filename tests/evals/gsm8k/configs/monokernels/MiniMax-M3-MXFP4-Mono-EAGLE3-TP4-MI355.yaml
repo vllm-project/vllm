@@ -1,8 +1,10 @@
 model_name: "amd/MiniMax-M3-MXFP4"
 # Mono off: 0.862, 0.864; on: 0.863, 0.861, acceptance length 2.90-2.91.
-# Tolerance as for MiniMax-M3-MXFP4-Mono-TP4-MI355 (runs vary by up to 0.039).
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.863, m = 2: 0.0348.
 accuracy_threshold: 0.863
-tolerance: 0.05
+tolerance: 0.035
 min_acceptance_length: 2.6
 num_questions: 1319
 num_fewshot: 5

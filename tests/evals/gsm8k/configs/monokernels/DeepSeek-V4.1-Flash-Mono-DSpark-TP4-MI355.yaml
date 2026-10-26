@@ -1,9 +1,10 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
 # One run per arm: mono off 0.9045, on 0.8923 (acceptance length 3.545, 3.551).
-# The on/off gap (0.0122) exceeds DeepSeek-V4.1-Flash-Mono-TP4-MI355's
-# run-to-run spread (0.0075). Tolerance: twice the gap.
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.9045, m = 1: 0.0343.
 accuracy_threshold: 0.9045
-tolerance: 0.025
+tolerance: 0.035
 min_acceptance_length: 2.5
 num_questions: 1319
 num_fewshot: 5

@@ -59,21 +59,21 @@ steps:
   - docker/docker-bake-rocm.hcl
   - requirements/rocm.txt
   - tests/models/utils.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
   - vllm/models/deepseek_v41/
-  - tests/models/test_dsv41_mono_decode.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_decode.py
   - tests/kernels/models/amd/test_dsv41_gfx942_weights.py
   - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
   - tests/kernels/models/amd/test_dsv41_mono_keylist.py
   - tests/models/mono_reference.py
   - tests/kernels/models/amd/test_mono_primitives.py
   commands:
-  - pytest -v -s tests/models/test_dsv41_mono_decode.py tests/kernels/models/amd/test_dsv41_gfx942_weights.py tests/kernels/models/amd/test_dsv41_mono_keylist.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
+  - pytest -v -s tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_decode.py tests/kernels/models/amd/test_dsv41_gfx942_weights.py tests/kernels/models/amd/test_dsv41_mono_keylist.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
   - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py -k dsv41
   # mono/common/sync.py waits without a bound, so a hand-off bug would hang.
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k "not vllm_ops"
-  - pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 2-8"
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py -k "not vllm_ops"
+  - pytest -v -s --timeout=900 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 2-8"
 
 - label: ":amd: (MI355) [Nightly] DeepSeek-V4.1 Mono E2E"
   key: dsv41-mono-e2e-mi355
@@ -88,8 +88,8 @@ steps:
   - vllm/models/deepseek_v4/
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - docker/Dockerfile.rocm_base
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
   - tests/evals/gsm8k/test_gsm8k_correctness.py
   - tests/evals/gsm8k/gsm8k_eval.py
   - tests/evals/gsm8k/conftest.py
@@ -98,8 +98,8 @@ steps:
   - tests/evals/gsm8k/configs/monokernels/DeepSeek-V4.1-Flash-Mono-TP4-MI355.yaml
   - tests/evals/gsm8k/configs/monokernels/DeepSeek-V4.1-Flash-Mono-DSpark-TP4-MI355.yaml
   commands:
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k vllm_ops
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and 2-8)"
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py -k vllm_ops
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and 2-8)"
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k DeepSeek-V4.1
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono I/O"
@@ -156,15 +156,15 @@ steps:
   - docker/docker-bake-rocm.hcl
   - requirements/rocm.txt
   - tests/models/utils.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
   - vllm/v1/worker/gpu/sample/gumbel.py
   - tests/kernels/models/amd/
   - tests/models/mono_reference.py
   commands:
   - pytest -v -s tests/kernels/models/amd/
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k "not vllm_ops"
-  - pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 4-8"
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py -k "not vllm_ops"
+  - pytest -v -s --timeout=900 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 4-8"
 
 - label: ":amd: (MI300) [Nightly] DeepSeek-V4.1 gfx942 Mono E2E"
   key: dsv41-mono-e2e-mi300
@@ -179,9 +179,9 @@ steps:
   - vllm/models/deepseek_v4/
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - docker/Dockerfile.rocm_base
-  - tests/models/test_dsv41_mono_layers.py
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py
   commands:
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and 4-8)"
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and 4-8)"
 
 # DeepSeek-V4-Pro mono decode layer (--monokernel), TP8.
 - label: ":amd: (MI355) DeepSeek-V4-Pro Mono I/O"

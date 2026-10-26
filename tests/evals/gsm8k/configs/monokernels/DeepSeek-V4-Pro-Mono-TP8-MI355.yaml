@@ -1,9 +1,10 @@
 model_name: "deepseek-ai/DeepSeek-V4-Pro"
-# One run per arm: mono off 0.9477, on 0.9492. With no spread of its own, the
-# tolerance is twice the run-to-run spread of DeepSeek-V4.1-Flash-Mono-TP4-MI355
-# (0.0075).
+# One run per arm: mono off 0.9477, on 0.9492.
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.9477, m = 1: 0.0260.
 accuracy_threshold: 0.9477
-tolerance: 0.015
+tolerance: 0.027
 num_questions: 1319
 num_fewshot: 5
 # Decode steps of at most 64 rows run the monokernel (mono.dims.MAX_TOKENS).

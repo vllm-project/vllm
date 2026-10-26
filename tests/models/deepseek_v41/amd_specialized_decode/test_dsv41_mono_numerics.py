@@ -35,14 +35,13 @@ import pytest
 import ray
 import torch
 
-from vllm.platforms import current_platform
-
-from ..utils import (
+from tests.models import mono_reference as R
+from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
 )
-from . import mono_reference as R
+from vllm.platforms import current_platform
 
 MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
 HIDDEN, Q_RANK, HEAD_DIM, NOPE, ROPE = 5120, 1280, 512, 448, 64
@@ -111,19 +110,27 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 # ---------------------------------------------------------------- slow references
 
-# Measured error constants (2x the maximum over 20 seeds, every case, TP2 and
-# TP4), each relative to its stage's conditioning scale: the scaled-MFMA GEMVs
-# (FP8 x FP8, the routed FP4 x FP8 gate / up and down) over R.blockmax_cond,
-# "rstd" and "mix" relative, "act" of the f32 SiLU, "route" of the routing
-# weights. The attention's is over sum_n p_n |v_n|.
+U = 2.0**-24
+# Error constants derived from each stage's rounding steps, u = 2^-24. The
+# gfx950 scaled MFMAs (FP8 x FP8, the routed FP4 x FP8) drop a product 2^-14
+# below the largest of its 32-wide K block: 32 * 2^-14 over R.blockmax_cond,
+# plus the fp32 sum of the K / 32 block sums, each <= 32 blockmax: K u.
+_SCALED_GEMV = 32 * 2.0**-14 + HIDDEN * U
 KAPPA = dict(
-    fp8=0.00011,
-    fp4_ug=9.9e-06,
-    fp4_down=0.014,
-    rstd=0,
-    mix=7.9e-06,
-    act=0,
-    route=5.6e-07,
+    fp8=_SCALED_GEMV,
+    fp4_ug=_SCALED_GEMV,
+    fp4_down=_SCALED_GEMV,
+    # relative rstd: the seam norm's 23 adds a thread, 6 + 2 butterfly levels,
+    # 1 / H and the fma, halved by rsq, plus its 1 ulp (q / kv norms: fewer)
+    rstd=(33 / 2 + 2) * U,
+    # the shared SiLU g / (1 + expf(-g)): LLVM's expf (an exact range reduction,
+    # v_exp_f32 1 ulp) 4u, 1 + e u, the divide 3u: with _silu's F32_2
+    act=4 * U,
+    # routing weights past the scores' error (allow): sqrt 1 ulp on a score and
+    # on the sum, the 5 top-k adds, the divide 3u, x scale u
+    route=(4 + 5 + 3 + 1) * U,
+    # the mixes' error over _mix_bound
+    mix=1.0,
 )
 # a-priori: a bf16 MFMA GEMV of K = 5120 accumulates exact products in fp32
 KAPPA["logit"] = HIDDEN * 2.0**-24
@@ -218,6 +225,51 @@ def _norm_span(x, w, eps, kappa):
     z = x * w.double() * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
     lo, hi = _widen(z, z, kappa + F32_2)
     return R.bf16_rne(lo), R.bf16_rne(hi)
+
+
+def _mix_bound(x, fn, scale, base, eps, hc_eps, iters):
+    """First-order bounds on |pre|, |post| and |comb| - their float64, as the
+    seam's gate rounds them, for the bf16 rows x [M, HC D]."""
+    x, fn = x.double(), fn.double()
+    rstd = torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
+    v = x @ fn.T * rstd
+    # the projection: 4 chained 16x16x4 f32 MFMAs a wave ((4 + 1) u each), 7
+    # adds over the waves, 7 over a gate block, 19 over the blocks; rstd: (33
+    # adds + 1 / K + the fma) / 2 + rsq's 1 ulp; v rounded
+    dv = 53 * U * rstd * (x.abs() @ fn.abs().T) + (35 / 2 + 3) * U * v.abs()
+    sc = scale.double()[[0] * HC + [1] * HC + [2] * HC * HC]
+    z = v * sc + base.double()
+    dz = sc.abs() * dv + U * z.abs()
+    # sigmoid: exp2 of RN(z RN(-log2 e)) (|z| + 1) 2u, 1 + e u, the divide 3u,
+    # pre's + eps u
+    zs = z[:, : 2 * HC]
+    s = torch.sigmoid(zs)
+    ds = s * ((1 - s) * (dz[:, : 2 * HC] + (zs.abs() + 1) * 2 * U) + 5 * U)
+    # comb: the softmax and Sinkhorn steps, each step's rounding (exp: 3u |z -
+    # max| in its argument and 2u; a normalization: the 4-sum 2u, + eps u, rcp
+    # 2u, the product u) and dz carried to the output by the steps' Jacobians
+    row = lambda c: c / (c.sum(-1, keepdim=True) + hc_eps)  # noqa: E731
+    col = lambda c: c / (c.sum(-2, keepdim=True) + hc_eps)  # noqa: E731
+    steps = [
+        lambda c: torch.exp(c - c.amax(-1, keepdim=True)),
+        lambda c: c / c.sum(-1, keepdim=True) + hc_eps,
+        col,
+    ] + [row, col] * (iters - 1)
+    zc = z[:, 2 * HC :].reshape(-1, HC, HC)
+    rho = [3 * U * (zc - zc.amax(-1, keepdim=True)).abs() + 2 * U, 5 * U]
+    rho += [6 * U] * (len(steps) - 2)
+    xs = [zc]
+    for f in steps:
+        xs.append(f(xs[-1]))
+    n = HC * HC
+    G = torch.eye(n, dtype=z.dtype, device=z.device).expand(z.shape[0], n, n)
+    dc = 0
+    for i in reversed(range(len(steps))):
+        dc = dc + G.abs() @ (rho[i] * xs[i + 1].abs()).reshape(-1, n, 1)
+        flat = lambda c, f=steps[i]: f(c.view(HC, HC)).reshape(n)  # noqa: E731
+        G = G @ torch.func.vmap(torch.func.jacrev(flat))(xs[i].reshape(-1, n))
+    dc = dc + G.abs() @ dz[:, 2 * HC :, None]
+    return ds[:, :HC], 2 * ds[:, HC:], dc.view(-1, HC, HC)
 
 
 def _mx_within(tag, q, codes, lo, hi, rule, block=32) -> float:
@@ -836,11 +888,14 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             hc_eps, 2.0, cfg.hc_sinkhorn_iters,
         )  # fmt: skip
         got = (pre, post.view(-1, HC), comb)
+        bound = _mix_bound(
+            res.flatten(1), fns[sub], sm["scale"], sm["base"], eps, hc_eps,
+            cfg.hc_sinkhorn_iters,
+        )  # fmt: skip
 
         def check(kappa):
-            for name, a, b in zip(("pre", "post", "comb"), got, want):
-                err = ((a.double() - b) / b).abs().max().item()
-                assert err <= kappa, f"{tag} {name}: {err:.3g} > {kappa:.3g}"
+            for name, a, b, d in zip(("pre", "post", "comb"), got, want, bound):
+                _le(f"{tag} {name}", (a.double() - b).abs() / d, kappa)
 
         stage("mix", check)
 
@@ -904,17 +959,23 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         ref_ids, _, margin = R.route(logits, gate_b, topk_k, "sqrt_softplus", 1.5)
         _, ref_w, _ = R.route(logits, gate_b, topk_k, "sqrt_softplus", 1.5, ids=ids)
 
-        # the kernel's softplus rounds 1 + e^x to f32: within 2^-23, so each
-        # score within d of the reference's, which the weights carry
-        sp = torch.nn.functional.softplus(logits.double())
-        d = sp.sqrt() - (sp - 2.0**-23).clamp(min=0).sqrt()
+        # the kernel's softplus (x itself past 20, as the reference's): exp2 of
+        # RN(x RN(log2 e)) (|x| + 1) 2u, 1 + e^x u, v_log_f32 within OpenCL's
+        # 3 ulp (LLVM: "good enough for OpenCL") and x RN(ln 2) 8u relative; so
+        # each score within d of the reference's, which the weights carry
+        x = logits.double()
+        sp = torch.nn.functional.softplus(x)
+        dsp = torch.sigmoid(x) * (x.abs() + 1) * 2 * U + U + 8 * U * sp
+        d = sp.sqrt() - (sp - torch.where(x > 20, 0, dsp)).clamp(min=0).sqrt()
         di, si = d.gather(1, ids), sp.gather(1, ids).sqrt()
         allow = (1.5 * di + ref_w * di.sum(-1, keepdim=True)) / si.sum(-1, keepdim=True)
         err = ((w.double() - ref_w).abs() - allow).clamp(min=0) / ref_w
         stage("route", lambda k: _le(f"{tag} routing weights", err, k))
         sel = sp.sqrt() + gate_b.double()
+        # a selection value: d, sqrt's 1 ulp and the f32 + bias
+        e = d + 2 * U * sp.sqrt() + U * sel.abs()
         edge = sel.sort(-1, descending=True).indices[:, topk_k - 1 : topk_k + 1]
-        bound = 2 * (KAPPA["route"] * sel.abs().amax(-1) + d.gather(1, edge).amax(-1))
+        bound = 2 * e.gather(1, edge).amax(-1)
         if hard:
             assert (margin == 0).all(), tag
             assert (logits[:, TIE[0]] == logits[:, TIE[1]]).all(), tag
@@ -1013,7 +1074,10 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
                     (ur - kappa * uc).clamp(-10, 10),
                     (ur + kappa * uc).clamp(-10, 10),
                 )
-                a_lo, a_hi = _silu(glo, ghi, KAPPA["act"])
+                # g rcp(1 + exp2(RN(g RN(-log2 e)))): the exp2 (|g| + 1) 2u;
+                # 1 + e u, rcp 2u and x g u in _silu's F32_2
+                gmax = torch.maximum(glo.abs(), ghi.abs())
+                a_lo, a_hi = _silu(glo, ghi, (gmax + 1) * 2 * U)
                 lo, hi = _mul(a_lo, a_hi, ulo, uhi)
                 lo, hi = _widen(lo, hi, F32_2)
                 _mx_within(

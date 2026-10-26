@@ -1,8 +1,10 @@
 model_name: "amd/MiniMax-M3-MXFP4"
-# Mono off: 0.889, 0.864, 0.851 (mean 0.868); on: 0.864, 0.883, 0.867. The
-# runs vary by up to 0.039, the mono-on mean is 0.003 above the mono-off one.
+# Mono off: 0.889, 0.864, 0.851 (mean 0.868); on: 0.864, 0.883, 0.867.
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.868, m = 3: 0.0323.
 accuracy_threshold: 0.868
-tolerance: 0.05
+tolerance: 0.033
 num_questions: 1319
 num_fewshot: 5
 # Decode steps of at most 16 rows run the monokernel (DecodeConfig.max_rows).

@@ -1,9 +1,10 @@
 model_name: "moonshotai/Kimi-K3"
 # One run per arm: mono off 0.9568, on 0.9462 (acceptance length 4.673, 4.663).
-# The on/off gap (0.0106) exceeds DeepSeek-V4.1-Flash-Mono-TP4-MI355's
-# run-to-run spread (0.0075). Tolerance: twice the gap.
+# Tolerance: 3 binomial standard errors of one run minus the mean of m off runs
+# (one-sided false-failure rate 0.13%), 3 * sqrt(p(1-p)/1319 * (1 + 1/m)) with
+# p = 0.9568, m = 1: 0.0238.
 accuracy_threshold: 0.9568
-tolerance: 0.022
+tolerance: 0.024
 min_acceptance_length: 3.0
 num_questions: 1319
 num_fewshot: 5

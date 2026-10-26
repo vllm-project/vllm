@@ -7,15 +7,17 @@ at TP8 shapes:
   GPUs) read from its mailbox / scratch / peer tap and checked against a
   float64 reference (``tests/models/mono_reference.py``) applied to the
   kernel's own input to that stage, with the kernel's rounding points
-  reproduced. A bound is a priori (error over its bound <= 1: exact stages,
-  bf16 hand-offs, fp32-accumulated dots of exact products) or measured (2x the
-  maximum of a 20-seed sweep: chains through hardware exp2 / rcp / rsq).
+  reproduced. Every bound is a priori (error over its bound <= 1), derived
+  from the stage's fp32 operations: U = 2^-24 a rounding, v_exp_f32 / v_rcp_f32
+  / v_rsq_f32 1 ulp (2 U), the division IEEE, bf16 x bf16 products exact.
 - ``*_matches_vllm_ops``: K1 and K2 against the ops vLLM runs for the same
   spec-verify step (nightly).
 - The protocol: a CUDA graph of K2 replayed 300 times, bit-identical, and a
   stalled rank (the fault hook): every rank's launch finishes and the output
   rank's flags fail the step.
 """
+
+import math
 
 import pytest
 import ray
@@ -33,19 +35,10 @@ from tests.utils import (
 from vllm.platforms import current_platform
 
 bf = torch.bfloat16
+# measured (vllm_ops only): vLLM's ops document no error bound
 COS_MIN = 0.9999
 K1_STEPS = 6
-# measured bounds: 2x the maximum over 20 seeds of every case
-BOUNDS = {
-    "x": 1.01,
-    "qk": 1.01,
-    "state": 6.6e-7,
-    "core": 1.01,
-    "xrow": 1.01,
-    "route_w": 9.3,
-    "h": 2.0,
-    "ln": 1.01,
-}
+U = 2.0**-24
 
 
 def _on_gfx950() -> bool:
@@ -81,27 +74,125 @@ def _tap(region: torch.Tensor, n: int, tag: int, dtype=torch.float32):
     return R.pairs(region, n, tag).view(dtype)
 
 
-def _dot_err(got, a, b, add=None, out=bf):
+def _dot_err(got, a, b, add=None, out=bf, n=None):
     """|got - (a @ b^T + add)| over its a-priori bound: an fp32-accumulated dot
-    of exact products (K 2^-24 sum |a||b|, an fp32 add of ``add``), then
-    rounded to ``out``."""
+    of exact products (n, by default K, roundings: n 2^-24 sum |a||b|; an fp32
+    add of ``add``), then rounded to ``out``."""
     a, b = a.double(), b.double()
     ref = a @ b.T
-    d = a.size(-1) * 2.0**-24 * (a.abs() @ b.abs().T)
+    d = (a.size(-1) if n is None else n) * U * (a.abs() @ b.abs().T)
     if add is not None:
         ref = ref + add.double()
-        d = d + 2.0**-24 * ref.abs()
+        d = d + U * ref.abs()
+    return _err(got, ref, d, out)
+
+
+def _err(got, ref, d, out=bf):
+    """|got - ref| over its bound: ``ref`` computed to +-d, rounded to ``out``."""
+    ref = ref.double()
     bound = 0.5 * R.ulp(ref.abs() + d, out) + d
     return ((got.double() - ref).abs() / bound).max().item()
 
 
-def _row_ulps(got, ref, rows: int = 1):
-    """bf16 ulps of max(|ref|, the RMS of each run of ``rows`` x the last dim):
-    a normalized output's error, at its row's scale where it cancels."""
-    ref = ref.double()
-    rms = ref.unflatten(-1, (rows, -1)).square().mean(-1, keepdim=True).sqrt()
-    floor = rms.expand(*rms.shape[:-1], ref.size(-1) // rows).flatten(-2)
-    return R.ulps(got, ref, bf, floor).max().item()
+def _exp2_rel(z):
+    """e^z's relative error as v_exp_f32 (2 U) of RN(RN(z) RN(log2 e)) (2 U);
+    exact at z = 0 (the ISA's V_EXP_F32(-0.0) = 1)."""
+    return torch.where(z == 0, 0, 2 * U * (1 + z.abs()))
+
+
+def _sigmoid_rel(z, div=U):
+    """1 / (1 + exp2(-z log2 e)): exp2's error through 1 + e, the add, the
+    division (IEEE U, v_rcp 2 U)."""
+    return torch.sigmoid(-z) * _exp2_rel(z) + U + div
+
+
+def _silu_err(y, dy):
+    """Y sigmoid(y) on y known to +-dy, the product rounded."""
+    s = torch.sigmoid(y)
+    return (s * (1 + y * (1 - s))).abs() * dy + (y * s).abs() * (_sigmoid_rel(y) + U)
+
+
+def _tanh_err(x, rel_x=0.0, div=U):
+    """(1 - e) / (1 + e) at e = exp2(-2|x| log2 e), x known to rel_x: e's
+    error through 2 / (1 + e)^2, then 1 - e, 1 + e and the division (IEEE U;
+    v_rcp and a product 3 U)."""
+    x = x.abs()
+    e, t = torch.exp(-2 * x), torch.tanh(x)
+    de = 2 * e * _exp2_rel(2 * x) / (1 + e) ** 2
+    return de + (2 * U + div) * t + (1 - t**2) * x * rel_x
+
+
+def _attn_res_err(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
+    """``R.attn_res``'s fp32 error in stage_slice / gate / mix: exact bf16
+    products, the sources' sums of squares and qk dots 21 adds deep, rsq to
+    14 U; log2 logits to +-dl; v_exp_f32 of logit - max (the shift cancels);
+    the mix ns deep over its denominator (6 deep, IEEE division); its sum of
+    squares 22 deep, rsq; two products."""
+    src = torch.cat([blocks.double(), prefix.double()[:, None]], 1)
+    ns, wq = src.size(1), w_norm.double() * w_qk.double()
+    rstd = torch.rsqrt(src.square().mean(-1) + eps) / math.log(2)
+    lg = (src @ wq) * rstd
+    dl = 17 * U * lg.abs() + 21 * U * rstd * (src.abs() @ wq.abs())
+    top = lg.amax(-1, keepdim=True)
+    rel_ex = math.log(2) * (dl + U * (top - lg)) + 2 * U
+    p = torch.softmax(lg * math.log(2), -1)[..., None]
+    mixed = (p * src).sum(1)
+    d_mix = (p * src.abs() * (rel_ex[..., None] + ns * U)).sum(1)
+    d_mix = d_mix + mixed.abs() * (rel_ex.amax(-1, True) + 7 * U)
+    ss = mixed.square().sum(-1, keepdim=True)
+    rel_r = ((2 * mixed.abs() * d_mix).sum(-1, True) / ss + 25 * U) / 2 + 2 * U
+    rw = torch.rsqrt(ss / src.size(-1) + out_eps) * w_out.double()
+    return rw.abs() * d_mix + (mixed * rw).abs() * (rel_r + 2 * U)
+
+
+def _kda_state_err(S, k, v, g, beta, a_log, dt_bias, lower_bound):
+    """``R.kda_step``'s state in fp32 (kda_gates / kda_recur) on exact inputs:
+    k l2-normed to 7 U; exp(a_log), the gate's sigmoid and the decay's exp2;
+    the decayed state; its dot with k 9 deep; the delta; the update."""
+    S, k, v, a_log = S.double(), k.double(), v.double(), a_log.double()
+    kn = k * torch.rsqrt(k.square().sum(-1, keepdim=True) + 1e-6)
+    z = torch.exp(a_log)[:, None] * (g.double() + dt_bias.double())
+    rel_z = _exp2_rel(a_log)[:, None] + 2 * U
+    sg = torch.sigmoid(z)
+    gate = lower_bound * sg
+    d_sg = sg * (1 - sg) * z.abs() * rel_z + sg * _sigmoid_rel(z)
+    rel_dec = abs(lower_bound) * d_sg + U * gate.abs() + _exp2_rel(gate)
+    S1 = S * torch.exp(gate)[:, None]
+    d1 = S1.abs() * (rel_dec[:, None] + U)
+    p = torch.einsum("hvk,hk->hv", S1, kn)
+    d_p = torch.einsum("hvk,hk->hv", d1 + 16 * U * S1.abs(), kn.abs())
+    b = torch.sigmoid(beta.double())
+    vn = (v - p) * b[:, None]
+    d_vn = b[:, None] * (d_p + U * (v - p).abs())
+    d_vn = d_vn + vn.abs() * (_sigmoid_rel(beta.double())[:, None] + U)
+    upd = vn[:, :, None] * kn[:, None]
+    d = d1 + d_vn[:, :, None] * kn.abs()[:, None] + 8 * U * upd.abs()
+    return d + U * (S1 + upd).abs()
+
+
+def _situ_vllm_err(g, u):
+    """situ_vllm on exact g, u: 2 tanh(g / 4) (1 + tanh(g / 2)) 25 tanh(u / 25),
+    u / 25 to 2 U, then 1 + t and three products (4 U)."""
+    t1, t2, t3 = torch.tanh(g / 4), torch.tanh(g / 2), torch.tanh(u / 25)
+    a, b = 2 * t1 * (1 + t2), 25 * t3
+    return (
+        2 * (1 + t2) * b.abs() * _tanh_err(g / 4)
+        + 2 * (t1 * b).abs() * _tanh_err(g / 2)
+        + 25 * a.abs() * _tanh_err(u / 25, 2 * U)
+        + 4 * U * (a * b).abs()
+    )
+
+
+def _situ_aiter_err(g, u):
+    """situ_aiter on exact g, u: 4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25), each
+    through v_rcp, u / 25 to 2 U, then three products."""
+    sg, t1, t3 = torch.sigmoid(g), torch.tanh(g / 4), torch.tanh(u / 25)
+    v = 100 * t1 * sg * t3
+    return (
+        100 * (sg * t3).abs() * _tanh_err(g / 4, div=3 * U)
+        + v.abs() * (_sigmoid_rel(g, 2 * U) + 3 * U)
+        + 100 * (t1 * sg).abs() * _tanh_err(u / 25, 2 * U, 3 * U)
+    )
 
 
 def _rank_sum(parts: torch.Tensor) -> torch.Tensor:
@@ -388,16 +479,8 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
     assert torch.equal(out["blocks"], blocks), "blocks"
 
     x = R.words(sc[lay["x"][0] :], S * HIDDEN, bf).view(S, HIDDEN)
-    x_ref = R.attn_res(
-        out["prefix"],
-        blocks[:, :nb],
-        w["ares_nw"],
-        w["ares_qk"],
-        w["in_nw"],
-        1e-5,
-        1e-5,
-    )
-    m["x"] = _row_ulps(x, x_ref)
+    ares = (out["prefix"], blocks[:, :nb], w["ares_nw"], w["ares_qk"], w["in_nw"])
+    m["x"] = _err(x, R.attn_res(*ares, 1e-5, 1e-5), _attn_res_err(*ares, 1e-5, 1e-5))
 
     proj = _tap(sc[lay["proj"][0] :], S * NPROJ, tag).view(S, NPROJ)
     assert torch.equal(proj.double(), R.bf16_rne(proj)), "proj is not bf16"
@@ -413,13 +496,15 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
         acc = int(w["num_acc"][r]) - 1
         old = w["conv_state"][max(slots[0], 0)].double()
         win = old[:, acc : acc + 3]
-        conv, _ = R.causal_conv1d(win, proj[rows, :QKV], w["conv_w"])
+        pre, _ = R.causal_conv1d(win, proj[rows, :QKV], w["conv_w"], act=False)
         cond, _ = R.causal_conv1d(
             win.abs(), proj[rows, :QKV].abs(), w["conv_w"].abs(), act=False
         )
-        conv, cond = (t.view(q, 3, NH, HD) for t in (conv, cond))
+        # 4 products summed from 0: 4 U cond
+        conv_d = _silu_err(pre, 4 * U * cond).view(q, 3, NH, HD)
+        conv = R.silu(pre).view(q, 3, NH, HD)
         got = qk[r].permute(1, 2, 0, 3)
-        m["qk"] = max(m.get("qk", 0), R.ulps(got, conv[:, :2], bf, cond[:, :2]).max())
+        m["qk"] = max(m.get("qk", 0), _err(got, conv[:, :2], conv_d[:, :2]))
         if slots[0] > 0:
             kept = old[:, acc + 1 : acc + 1 + old.size(1) - q]
             new = torch.cat([kept, proj[rows, :QKV].double().T], 1)
@@ -435,9 +520,9 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
         # on the state is allowed
         fa = proj[rows, FA_0 : FA_0 + HD].double()
         g1 = fa @ w["w_fb"].double().T
-        g_d = HD * 2.0**-24 * (fa.abs() @ w["w_fb"].double().abs().T)
+        g_d = HD * U * (fa.abs() @ w["w_fb"].double().abs().T)
         hand = [
-            _bf16_ends(conv[:, 2], 2.0**-19 * cond[:, 2]),
+            _bf16_ends(conv[:, 2], conv_d[:, 2]),
             _bf16_ends(g1.view(q, NH, HD), g_d.view(q, NH, HD)),
         ]
         beta = proj[rows, BETA_0 : BETA_0 + NH]
@@ -447,6 +532,7 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
             qkj = (st, got[j, 0], got[j, 1])
             vg = [x[j] for x, _ in hand]
             ref = R.kda_step(*qkj, vg[0], vg[1], beta[j], *rest)[0]
+            d = _kda_state_err(*qkj[::2], vg[0], vg[1], beta[j], *rest[:3])
             allow = torch.zeros_like(ref)
             for i, (_, alt) in enumerate(hand):
                 for at in alt[j].nonzero():
@@ -458,28 +544,32 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
                 m["n_flips"] = m.get("n_flips", 0) + int(alt[j].count_nonzero())
             st = out["rstate"][slots[j]]
             written["rstate"].add(slots[j])
-            err = ((st.double() - ref).abs() - allow).clamp(min=0).amax((1, 2))
-            err = err / ref.abs().amax((1, 2))
-            m["state"] = max(m.get("state", 0), err.max().item())
+            err = ((st.double() - ref).abs() - allow).clamp(min=0)
+            err = torch.where(err > 0, err / d, 0).max().item()
+            m["state"] = max(m.get("state", 0), err)
             qn = got[j, 0].double()
             qn = qn * torch.rsqrt(qn.square().sum(-1, keepdim=True) + 1e-6) * HD**-0.5
             o = torch.einsum("hvk,hk->hv", st.double(), qn)
-            o_d = 2.0**-20 * torch.einsum("hvk,hk->hv", st.double().abs(), qn.abs())
+            # q l2-normed and scaled to 9 U, the dot 9 deep
+            o_d = 18 * U * torch.einsum("hvk,hk->hv", st.double().abs(), qn.abs())
             o_lo, o_hi = R.bf16_rne(o - o_d), R.bf16_rne(o + o_d)
             hi = torch.maximum(o_lo.square(), o_hi.square()).view(NH, NVCH, -1).sum(-1)
             lo = torch.minimum(o_lo.square(), o_hi.square()) * (o_lo * o_hi > 0)
             lo = lo.view(NH, NVCH, -1).sum(-1)
             ss = onrm[r, :, j].double()
-            out_of = torch.maximum(ss - hi, lo - ss).clamp(min=0) / (2.0**-20 * hi)
+            # 16 exact squares summed from 0
+            out_of = torch.maximum(ss - hi, lo - ss).clamp(min=0) / (15 * U * hi)
             m["onrm"] = max(m.get("onrm", 0), out_of.max().item())
             rstd = torch.rsqrt(onrm[r, :, j].double().sum(-1, keepdim=True) / HD + 1e-5)
             g2 = proj[r * q + j, G2_0 : G2_0 + PROJ].double().view(NH, HD)
             ends = torch.stack([o_lo, o_hi]) * rstd * w["on_w"] * torch.sigmoid(g2)
             got_core = out["core"][r * q + j].view(NH, HD).double()
             core = torch.maximum(torch.minimum(got_core, ends.amax(0)), ends.amin(0))
-            m["core"] = max(
-                m.get("core", 0), _row_ulps(got_core.flatten(), core.flatten(), NH)
-            )
+            # rstd: 8 partials and eps to 8 U, rsq 6 U; sigmoid; three products
+            top = ends.abs().amax(0)
+            d = top * (9 * U + _sigmoid_rel(g2))
+            err = (got_core - core).abs() / (0.5 * R.ulp(top + d) + d)
+            m["core"] = max(m.get("core", 0), err.max().item())
     for name, done in written.items():
         free = torch.ones(w[name].size(0), dtype=torch.bool)
         free[list(done)] = False
@@ -526,8 +616,7 @@ def test_k1_matches_slow_reference(q, requests, nb, steps, write, dim_first, pad
     requests."""
     m = _k1_io(q, requests, nb, steps, write, dim_first, pad)
     assert m["pad_requests"] == pad and m["n_flips"] > 0, m
-    assert m["proj"] <= 1 and m["onrm"] <= 1, m
-    assert all(m[k] <= BOUNDS[k] for k in ("x", "qk", "state", "core")), m
+    assert all(m[k] <= 1 for k in ("x", "proj", "qk", "state", "onrm", "core")), m
 
 
 # ---------------------------------------------------------------- K2 / MoE
@@ -814,11 +903,16 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     x = plain("xrow", s * HIDDEN).view(s, HIDDEN)
     blocks = w["blocks"][:, : key.nblocks]
     ares = (w["ares_nw"], w["ares_qk"], w["in_nw"], key.eps, key.out_eps)
-    m["xrow"] = _row_ulps(x, R.attn_res(prefix, blocks, *ares))
+    m["xrow"] = _err(
+        x, R.attn_res(prefix, blocks, *ares), _attn_res_err(prefix, blocks, *ares)
+    )
 
     rlog = peer("rlog", TP * s * (E // TP)).view(TP, s, E // TP)
     logits = rlog.transpose(0, 1).reshape(s, E)
-    m["rlog"] = _dot_err(logits, x, mw["w_gate"], out=torch.float32)
+    # a wave's 8 chained bf16 MFMAs (33 U each, test_mono_primitives), the 8
+    # waves' sum, the 4 K parts'
+    n = 33 * 8 + 8 + 3
+    m["rlog"] = _dot_err(logits, x, mw["w_gate"], out=torch.float32, n=n)
     lat = peer("lat", s * LAT // 2, bf).view(s, LAT)
     m["lat"] = _dot_err(lat, x, mw["w_ld"])
     sgu = scratch("sgu", s * SI, bf).view(s, 2 * SI)
@@ -828,25 +922,30 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     ids, wts = route[:, 0].long(), route[:, 1].view(torch.float32)
     ref_ids, _, margin = R.route(logits, mw["bias"], TOPK, "sigmoid", 1.0)
     sig = torch.sigmoid(logits.double())
-    top = (sig + mw["bias"].double()).sort(-1, descending=True).values[:, : TOPK + 1]
-    gap = top[:, :-1] - top[:, 1:]
-    clear = (gap == 0) | (gap > 2 * 2.0**-21 * top[:, :1].abs().clamp(min=1))
+    # sigmoid by v_rcp, + bias rounded
+    rel_sig = _sigmoid_rel(logits.double(), 2 * U)
+    sel = sig + mw["bias"].double()
+    top, at = sel.sort(-1, descending=True)
+    sel_d = (sig * rel_sig + U * sel.abs()).gather(1, at)[:, : TOPK + 1]
+    gap = top[:, :TOPK] - top[:, 1 : TOPK + 1]
+    clear = (gap == 0) | (gap > sel_d[:, :-1] + sel_d[:, 1:])
     rows = clear.all(-1)
     assert torch.equal(ids[rows], ref_ids[rows]), "top-k ids or their order"
     assert torch.equal(ids.sort(-1)[0][clear[:, -1]], ref_ids.sort(-1)[0][clear[:, -1]])
     m["n_route_rows"] = int(rows.sum())
     m["n_boundary_ties"] = int(((margin == 0) & rows).sum())
-    ws = sig.gather(1, ids)
-    m["route_w"] = R.ulps(wts, ws / ws.sum(-1, keepdim=True), torch.float32).max()
+    ws, rel_ws = sig.gather(1, ids), rel_sig.gather(1, ids)
+    # summed serially in rank order, an IEEE 1 / sum, a product
+    tot = ws.sum(-1, keepdim=True)
+    d_tot = (ws * rel_ws).sum(-1, True) + U * ws.cumsum(-1)[:, 1:].sum(-1, True)
+    w_ref = ws / tot
+    m["route_w"] = (
+        (wts - w_ref).abs() / (w_ref * (rel_ws + d_tot / tot + 2 * U))
+    ).max()
 
     h = scratch("h", s * SI // 2, bf).view(s, SI)
     g, u = sgu[:, :SI].double(), sgu[:, SI:].double()
-    a, b = 4 * torch.tanh(g / 4) * torch.sigmoid(g), 25 * torch.tanh(u / 25)
-    h_ref = R.situ(g, u)
-    # tanh_libm's absolute error (<= 0.75 2^-23) through each of its 3 uses
-    d = 2.0**-22 * (h_ref.abs() + 25 * a.abs() + 6 * b.abs())
-    bound = 0.5 * R.ulp(h_ref.abs() + d, bf) + d
-    m["h"] = ((h.double() - h_ref).abs() / bound).max()
+    m["h"] = _err(h, R.situ(g, u), _situ_vllm_err(g, u))
 
     lat_codes = R.e8m0_roundup6(lat.double().abs().unflatten(-1, (-1, 32)).amax(-1))
     scale = R.e8m0(lat_codes).repeat_interleave(32, -1)
@@ -857,10 +956,14 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     raw = mw["raw"]
     w13 = R.dequant_mxfp4(raw["w13"][union], raw["w13s"][union])
     gu = torch.einsum("urk,tk->tur", w13, latv)
-    # a wave chains 14 scaled MFMAs (a 128-product dot each: 129 2^-24, the
-    # primitives' bound), then the two K halves are added
-    d_gu = 144 * 2.0**-24 * torch.einsum("urk,tk->tur", w13.abs(), latv.abs())
-    del w13
+    # a wave chains 14 FP4 MFMAs of K 128, each within 129 U of its |C| + sum |a b|
+    # (test_mono_primitives); then the two K halves are added
+    w13, latv = w13.unflatten(-1, (-1, 128)), latv.unflatten(-1, (-1, 128))
+    steps = torch.einsum("urnk,tnk->turn", w13, latv).unflatten(-1, (2, -1))
+    chain = steps.cumsum(-1)[..., :-1].abs().sum((-2, -1))
+    cond = torch.einsum("urnk,tnk->tur", w13.abs(), latv.abs())
+    d_gu = 129 * U * (cond + chain) + U * gu.abs()
+    del w13, steps
     picks = torch.arange(s, device=device)[:, None], slot
     g, u = gu[picks].requires_grad_().split(RI, -1)
     v = R.situ(g, u)
@@ -868,7 +971,7 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     g, u, v = g.detach(), u.detach(), v.detach()
     d_g, d_u = d_gu[picks].split(RI, -1)
     d = dg.abs() * d_g + du.abs() * d_u
-    d = d + 18 * 2.0**-23 * (v.abs() + (g * dg).abs() + (u * du).abs())
+    d = d + _situ_aiter_err(g, u)
     sat = (g.abs() > 4 * 2.65) | (u.abs() > 25 * 2.65)
     m["situ_saturated"] = sat.double().mean().item()
     inter = scratch("inter", s * TOPK * 48, torch.int32).view(s * TOPK, 48)
@@ -885,9 +988,14 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     y = e = torch.zeros(s, LAT, dtype=torch.float64, device=device)
     for k in range(TOPK):
         wt = wts[:, k : k + 1].double()
-        acc = torch.einsum("tlr,tr->tl", w2[slot[:, k]], iv[:, k])
-        cond = torch.einsum("tlr,tr->tl", w2[slot[:, k]].abs(), iv[:, k].abs())
-        dk = wt * RI * 2.0**-24 * cond + 2.0**-24 * (wt * acc).abs()
+        wk = w2[slot[:, k]].unflatten(-1, (-1, 128))
+        ik = iv[:, k].unflatten(-1, (-1, 128))
+        steps = torch.einsum("tlnr,tnr->tln", wk, ik)
+        acc = steps.sum(-1)
+        cond = torch.einsum("tlnr,tnr->tl", wk.abs(), ik.abs())
+        # 3 chained FP4 MFMAs, as gu's
+        chain = steps.cumsum(-1)[..., :-1].abs().sum(-1)
+        dk = wt * 129 * U * (cond + chain) + U * (wt * acc).abs()
         c = R.bf16_rne(wt * acc)
         ec = dk + R.ulp(c.abs() + dk, bf)
         y = R.bf16_rne(y + c)
@@ -897,7 +1005,9 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     m["latr"] = ((latr[rank].double() - y).abs() / e).max()
 
     ln = plain("ln", s * LAT).view(s, LAT)
-    m["ln"] = _row_ulps(ln, R.rmsnorm(_rank_sum(latr), mw["ln_w"], key.ln_eps))
+    ln_ref = R.rmsnorm(_rank_sum(latr), mw["ln_w"], key.ln_eps)
+    # sum of squares of exact squares 34 deep, / LAT and eps: 37 U; rsq; two products
+    m["ln"] = _err(ln, ln_ref, (37 / 2 + 4) * U * ln_ref.abs())
     shp = plain("shp", s * UP_N).view(s, UP_N)
     final = peer("final", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN)
     mine = torch.zeros(HIDDEN, dtype=torch.bool, device=device)
@@ -1064,9 +1174,8 @@ def _k2_io_worker(
     m = _k2_io(runner)
     assert m["n_boundary_ties"] > 0 and m["n_zero_lat_groups"] > 0, m
     assert m["n_zero_inter_groups"] > 0 and 0.01 <= m["situ_saturated"] <= 0.2, m
-    a_priori = ("ar", "rlog", "lat", "sgu", "latr", "up", "sdown")
-    assert all(m[k] <= 1 for k in a_priori), m
-    assert all(m[k] <= BOUNDS[k] for k in ("xrow", "route_w", "h", "ln")), m
+    stages = ("ar", "xrow", "rlog", "lat", "sgu", "route_w", "h", "latr", "ln", "up")
+    assert all(m[k] <= 1 for k in (*stages, "sdown")), m
     _assert_replays_bit_identical(
         runner, _k2_inputs(rank, device), _moe_weights(rank, device)
     )
