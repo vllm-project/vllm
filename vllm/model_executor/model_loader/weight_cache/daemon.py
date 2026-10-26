@@ -319,11 +319,11 @@ class WeightCacheDaemon:
         )
 
     def release_distributed(self) -> None:
-        """Tear down the daemon's process groups after loading and warmup.
+        """Release process groups and BLAS workspaces after loading and warmup.
 
         Serving only exports CUDA IPC handles, so the communicators (NCCL,
-        custom all-reduce and FlashInfer workspaces) would otherwise pin GPU
-        memory outside the engine's budget for the daemon's lifetime.
+        custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
+        would otherwise pin GPU memory for the daemon's lifetime.
         """
         free_before, _ = torch.accelerator.get_memory_info()
         # No rank may tear down a communicator while a peer is still in a
@@ -334,10 +334,17 @@ class WeightCacheDaemon:
         destroy_model_parallel()
         destroy_distributed_environment()
         gc.collect()
+        if current_platform.is_cuda():
+            # ATen caches these separately from the model's exported storages.
+            clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_workspaces is not None:
+                clear_workspaces()
+            else:
+                logger.debug("PyTorch does not expose BLAS workspace cleanup")
         torch.accelerator.empty_cache()
         free_after, _ = torch.accelerator.get_memory_info()
         logger.info(
-            "Weight cache %s daemon rank %d released its process groups (%s GiB freed)",
+            "Weight cache %s daemon rank %d released startup resources (%s GiB freed)",
             self.role,
             self.global_rank,
             format_gib(free_after - free_before),
