@@ -24,6 +24,8 @@ logger = init_logger(__name__)
 
 _S = TypeVar("_S", list[int], "torch.Tensor")
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
 # Prompt keys whose entry i describes token i of the prompt, so they must be
 # reduced with the same slice as the prompt tokens themselves. Anything added
 # here is truncated by `TokenizeParams.apply_post_tokenization`.
@@ -46,6 +48,17 @@ def merge_kwargs(
         overrides = {}
 
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
+
+
+def map_reasoning_effort(
+    effort: str | None,
+    effort_map: dict[str, str] | None,
+) -> str | None:
+    """Rewrite a requested effort to the one the chat template supports."""
+    if effort is None or not effort_map:
+        return effort
+
+    return effort_map.get(effort, effort)
 
 
 def recursively_merge_kwargs(
