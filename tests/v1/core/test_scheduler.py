@@ -5147,6 +5147,40 @@ def test_mamba_align_encoder_cache_cap_makes_progress():
     assert output.scheduled_encoder_inputs[request.request_id] == [1]
 
 
+@pytest.mark.parametrize(
+    ("prompt_len", "max_num_batched_tokens"),
+    [(49, 512), (50, 512), (33, 32), (65, 512)],
+)
+def test_mamba_align_multi_module_mtp_prefill_does_not_livelock(
+    prompt_len: int, max_num_batched_tokens: int
+):
+    """#61762: with multi-module MTP (prefill lookahead 3) and Mamba "align"
+    without EAGLE block drop, a prompt ending 1..lookahead-1 tokens past a
+    block boundary used to be scheduled 0 tokens on every step after its first
+    chunk, so it never finished.
+    """
+    scheduler = create_scheduler(
+        block_size=16,
+        enable_prefix_caching=True,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.num_prefill_lookahead = 3
+    (request,) = create_requests(num_requests=1, num_tokens=prompt_len, max_tokens=1)
+    scheduler.add_request(request)
+
+    for _ in range(8):
+        output = scheduler.schedule()
+        if request.request_id not in output.num_scheduled_tokens:
+            break
+        _model_output(
+            scheduler, output, [[] if request.is_prefill_chunk else [EOS_TOKEN_ID]]
+        )
+    assert request.is_finished(), (
+        f"stalled at {request.num_computed_tokens}/{prompt_len}"
+    )
+
+
 def test_mamba_align_eagle_schedules_encoder_at_boundary():
     """EAGLE lookahead at an aligned MM boundary requires encoder cache."""
     block_size = 512
