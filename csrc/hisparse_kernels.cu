@@ -404,54 +404,54 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
 
-  // Phase 1: translate every row's request-relative positions, resolve
-  // resident rows directly, and count the host-backed positions.
-  for (int row = first_row; row < end_row; ++row) {
-    const int32_t* row_topk =
-        global_indices + static_cast<int64_t>(row) * input_row_stride;
+  // Phase 1: translate every row's request-relative positions in one pass,
+  // resolve resident rows directly, and count the host-backed positions.
+  // s_chunk_off holds per-row valid counts until phase 2.
+  int32_t* s_row_valid = s_chunk_off;
+  const int num_positions = (end_row - first_row) * top_k;
+  for (int position = tid; position < num_positions; position += blockDim.x) {
+    const int row = first_row + position / top_k;
+    const int i = position % top_k;
     int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
     int32_t* row_attention =
         attention_indices != nullptr
             ? attention_indices +
                   static_cast<int64_t>(row) * attention_row_stride
             : nullptr;
-    int32_t* row_miss = miss_mask != nullptr
-                            ? miss_mask + static_cast<int64_t>(row) * top_k
-                            : nullptr;
-    for (int i = tid; i < top_k; i += blockDim.x) {
-      int32_t resident_row;
-      const int32_t g = translate_topk_entry(
-          row_topk[i], request_row, state_row, source_block_table,
-          resident_block_table, host_rows, source_bt_stride, source_num_reqs,
-          source_num_blocks, source_block_size, resident_bt_stride,
-          resident_num_reqs, resident_num_blocks, resident_block_size,
-          resident_null_block, resident_row);
-      if (resolved_global_indices != nullptr) {
-        resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
-      }
-      if (resident_row >= 0 || g >= 0) atomicAdd(&s_counters[2], 1);
-      if (row_miss != nullptr) row_miss[i] = 0;
-      if (resident_row >= 0) {
-        store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
-                        attention_block_stride);
-      } else if (g < 0) {
-        store_hot_index(row_out, row_attention, i, -1, hot_block_size,
-                        attention_block_stride);
-      } else {
-        // Stash the host row in its output slot; later phases overwrite it.
-        row_out[i] = encode_host_row(g);
-        atomicAdd(&s_counters[3], 1);
-      }
+    int32_t resident_row;
+    const int32_t g = translate_topk_entry(
+        global_indices[static_cast<int64_t>(row) * input_row_stride + i],
+        request_row, state_row, source_block_table, resident_block_table,
+        host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
+        source_block_size, resident_bt_stride, resident_num_reqs,
+        resident_num_blocks, resident_block_size, resident_null_block,
+        resident_row);
+    if (resolved_global_indices != nullptr) {
+      resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
     }
-    __syncthreads();
-    if (tid == 0) {
-      if (valid_counts != nullptr) {
-        valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-            s_counters[2];
-      }
-      s_counters[2] = 0;
+    if (resident_row >= 0 || g >= 0)
+      atomicAdd(&s_row_valid[row - first_row], 1);
+    if (miss_mask != nullptr)
+      miss_mask[static_cast<int64_t>(row) * top_k + i] = 0;
+    if (resident_row >= 0) {
+      store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
+                      attention_block_stride);
+    } else if (g < 0) {
+      store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                      attention_block_stride);
+    } else {
+      // Stash the host row in its output slot; later phases overwrite it.
+      row_out[i] = encode_host_row(g);
+      atomicAdd(&s_counters[3], 1);
     }
-    __syncthreads();
+  }
+  __syncthreads();
+  for (int row = first_row + tid; row < end_row; row += blockDim.x) {
+    if (valid_counts != nullptr) {
+      valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+          s_row_valid[row - first_row];
+    }
+    s_row_valid[row - first_row] = 0;
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // building the table or touching the hot LRU when no row can consult it.
@@ -474,7 +474,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   __syncthreads();
 
   // Phase 1b: collect the union of host rows.
-  const int num_positions = (end_row - first_row) * top_k;
   for (int position = tid; position < num_positions; position += blockDim.x) {
     const int32_t stashed =
         hot_indices[static_cast<int64_t>(first_row) * top_k + position];
