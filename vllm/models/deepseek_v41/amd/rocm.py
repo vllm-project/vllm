@@ -554,7 +554,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
-    _use_aiter_sparse_mla = False
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
