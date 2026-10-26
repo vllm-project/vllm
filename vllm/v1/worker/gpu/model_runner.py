@@ -2054,21 +2054,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_active_loras=batch_desc.num_active_loras,
             )
 
-            with (
-                set_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=input_batch.num_tokens_after_padding,
-                    cudagraph_runtime_mode=batch_desc.cg_mode,
-                    num_tokens_across_dp=dp_sync_state
-                    and dp_sync_state.num_tokens_across_dp,
-                    batch_descriptor=batch_descriptor,
-                    ubatch_slices=ubatch_slices,
-                    slot_mapping=slot_mappings_by_layer,
-                    skip_compiled=skip_compiled,
-                    is_padding=input_batch.is_padding,
-                ),
-                self.tensor_dumper_capture(input_batch, dummy_run),
+            with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=input_batch.num_tokens_after_padding,
+                cudagraph_runtime_mode=batch_desc.cg_mode,
+                num_tokens_across_dp=dp_sync_state
+                and dp_sync_state.num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
+                ubatch_slices=ubatch_slices,
+                slot_mapping=slot_mappings_by_layer,
+                skip_compiled=skip_compiled,
+                is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output, input_batch)
                 if ubatch_state is not None:
@@ -2086,7 +2083,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     # Eager (NONE): call the raw model directly.
-                    model_output = self.model(**model_inputs)
+                    with self.tensor_dumper_capture(input_batch, dummy_run):
+                        model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
 
