@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
@@ -196,7 +197,7 @@ def test_draft_lookahead_ignores_freed_feature(draft_lookahead, num_computed):
     freed = _feature("freed", offset=0, length=8)
     current = _feature("current", offset=8, length=8)
     runner = _make_runner([freed, current], cached=[freed, current])
-    runner.encoder_cache.free_encoder_cache(freed.identifier)
+    runner.encoder_cache.free_encoder_cache([freed.identifier])
 
     mm_embeds, is_mm_embed = _gather(
         runner,
@@ -428,6 +429,124 @@ def test_encoder_timing_stats_registry():
     assert runner.get_encoder_timing_stats() == {}
 
 
+def test_encoder_connector_storage_is_never_relocated():
+    cache = EncoderCache(allow_storage_relocation=False)
+    outputs = list(torch.arange(16).reshape(2, 8).unbind(0))
+    cache.add_encoder_outputs(["local_a", "local_b"], outputs)
+    assert all(
+        t.untyped_storage().nbytes() == t.nbytes for t in cache.encoder_outputs.values()
+    )
+    local_b = cache.encoder_outputs["local_b"]
+    # A connector may insert views into its registered receive buffer.
+    cache.encoder_outputs.update(zip(("remote_a", "remote_b"), outputs))
+    cache.free_encoder_cache(["local_a", "remote_a"])
+    assert cache.encoder_outputs["local_b"] is local_b
+    assert cache.encoder_outputs["remote_b"] is outputs[1]
+    torch.testing.assert_close(local_b, outputs[1])
+
+
+@pytest.mark.parametrize("duplicate_hash", [False, True])
+def test_encoder_insertion_does_not_retain_unowned_storage(duplicate_hash):
+    cache = EncoderCache()
+    outputs = list(torch.arange(16).reshape(2, 8).unbind(0))
+    hashes = ["same", "same"] if duplicate_hash else ["cropped"]
+    cache.add_encoder_outputs(hashes, outputs if duplicate_hash else outputs[:1])
+    assert len(cache.encoder_outputs) == 1
+    output = next(iter(cache.encoder_outputs.values()))
+    torch.testing.assert_close(output, outputs[1 if duplicate_hash else 0])
+    assert output.untyped_storage().nbytes() == output.nbytes
+
+
+class _LimitedCloneAllocator(TorchDispatchMode):
+    def __init__(self, successful_copies):
+        super().__init__()
+        self.remaining = successful_copies
+        self.attempts = 0
+        self.copy_refs = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        is_clone = func is torch.ops.aten.clone.default
+        if is_clone:
+            self.attempts += 1
+            if self.remaining == 0:
+                raise torch.OutOfMemoryError("Compaction allocation exhausted")
+            self.remaining -= 1
+        result = func(*args, **(kwargs or {}))
+        if is_clone:
+            self.copy_refs.append(weakref.ref(result))
+        return result
+
+
+@pytest.mark.parametrize(
+    ("operation", "successful_copies"),
+    [("evict", 0), ("evict", 1), ("insert", 1), ("connector", 1)],
+)
+def test_encoder_compaction_oom_preserves_entries_and_releases_partial_copies(
+    operation, successful_copies
+):
+    """Optional copies must fail atomically at both insertion and eviction."""
+    cache = EncoderCache(allow_storage_relocation=operation != "connector")
+    independent = torch.ones(8)
+    cache.add_encoder_outputs(["other"], [independent])
+    outputs = list(torch.arange(48).reshape(6, 8).unbind(0))
+    hashes = ["a", "b", "c", "d", "e", "f"]
+    if operation == "evict":
+        cache.add_encoder_outputs(hashes, outputs)
+        hashes, outputs = hashes[3:], outputs[3:]
+    elif operation == "insert":
+        hashes, outputs = hashes[:3], outputs[:3]
+    expected = dict(zip(hashes, outputs))
+    with _LimitedCloneAllocator(successful_copies) as allocator:
+        if operation == "evict":
+            cache.free_encoder_cache(["a", "b", "c"])
+        else:
+            cache.add_encoder_outputs(hashes, outputs)
+    assert allocator.attempts == successful_copies + 1
+    assert all(ref() is None for ref in allocator.copy_refs)
+    assert set(cache.encoder_outputs) == set(expected) | {"other"}
+    assert cache.encoder_outputs["other"] is independent
+    for key, original in expected.items():
+        assert cache.encoder_outputs[key] is original
+    if operation == "connector":
+        # The connector registers the chosen addresses after insertion returns.
+        cache.free_encoder_cache(["a"])
+        for key in ("b", "c", "d", "e", "f"):
+            assert cache.encoder_outputs[key] is expected[key]
+    elif operation == "evict":
+        # A later eviction can retry once allocator headroom is available.
+        cache.free_encoder_cache(["d"])
+        for key in ("e", "f"):
+            current = cache.encoder_outputs[key]
+            torch.testing.assert_close(current, expected[key])
+            assert current.untyped_storage().nbytes() == current.nbytes
+
+
+@pytest.mark.parametrize("partial_insertion", [False, True])
+def test_encoder_compaction_does_not_copy_more_than_it_reclaims(partial_insertion):
+    """Small evictions retain views until enough backing storage is unused."""
+    cache = EncoderCache()
+    independent = torch.ones(8)
+    cache.add_encoder_outputs(["other"], [independent])
+    outputs = list(torch.arange(128).reshape(16, 8).unbind(0))
+    keys = [str(i) for i in range(16)]
+    with _LimitedCloneAllocator(0) as allocator:
+        cache.add_encoder_outputs(
+            keys[1:] if partial_insertion else keys,
+            outputs[1:] if partial_insertion else outputs,
+        )
+        cache.free_encoder_cache(keys[:7])
+    assert allocator.attempts == 0
+    assert all(cache.encoder_outputs[keys[i]] is outputs[i] for i in range(7, 16))
+
+    cache.free_encoder_cache([keys[7]])
+    for i in range(8, 16):
+        current = cache.encoder_outputs[keys[i]]
+        torch.testing.assert_close(current, outputs[i])
+        assert current.untyped_storage().nbytes() == current.nbytes
+    cache.free_encoder_cache(keys + ["missing"])
+    assert cache.encoder_outputs == {"other": independent}
+
+
 def test_consumed_cpu_input_updates_are_request_local_and_replayable():
     """Release one occurrence, keep layout/embeddings, then restore encode input."""
     pixels = torch.ones(8, HIDDEN)
@@ -445,7 +564,7 @@ def test_consumed_cpu_input_updates_are_request_local_and_replayable():
     assert cache.mm_features["b"][0].data is feature.data
     assert source[0].data is not None
     assert "same" in cache.encoder_outputs
-    cache.free_encoder_cache("same")
+    cache.free_encoder_cache(["same"])
     cache.update_encoder_inputs("a", {0: source[0].data})
     runner = EncoderRunner(
         model=torch.nn.Module(),
