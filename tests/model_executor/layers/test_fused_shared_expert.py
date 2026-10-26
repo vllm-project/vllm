@@ -594,6 +594,92 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     assert reason is None
 
 
+def test_deepseek_v41_quant_config_rejects_fp8_mtp_shared_expert_fse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp4",
+        quantization_config={
+            "quant_method": "quark",
+            "global_quant_config": {
+                "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+            },
+            "layer_quant_config": {
+                r"re:mtp\.0\.ffn\.shared_experts\.w1": {"weight": {"dtype": "fp8_e4m3"}}
+            },
+            "exclude": [],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    )
+
+    assert not compatible
+    assert (
+        reason
+        == "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts are not MXFP4"
+    )
+
+
+def test_deepseek_v41_fp8_experts_keep_fp8_fse_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp8",
+        quantization_config={
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    ) == (True, None)
+
+
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
     from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
 
@@ -1717,12 +1803,14 @@ def test_models_fse_init(
             if aiter_fse_enabled:
                 warning.assert_called_once()
                 assert (
-                    "DeepSeek-V4 shared experts at <shared_expert>"
+                    "DeepSeek-V4/V4.1 shared experts at <shared_expert>"
                     in (warning.call_args.args[1])
                 )
             else:
                 # Without AITER nothing fuses, so no skip reason is reported.
                 warning.assert_not_called()
+        if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
+            warning.assert_called_once()
         if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
             warning.assert_called_once()
             if model_type == "deepseek_v4":
