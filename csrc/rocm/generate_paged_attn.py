@@ -35,7 +35,6 @@ BLOCK_SIZES = [16, 32]
 # instead of getting units of their own: see the NOTE in attention_kernels.cuh.
 
 # One entry per supported (query dtype, kv-cache dtype, head size) kernel set:
-#   name:               suffix of the generated file/entry point names
 #   query_type/kv_type: C++ types of the query/out and of the key/value cache
 #                       (template parameters T and KVT), written with the HIP
 #                       spellings hipify produces; `__half` is a distinct type
@@ -46,7 +45,6 @@ BLOCK_SIZES = [16, 32]
 #                       is None when the kv-cache dtype does not split on it.
 VARIANTS = [
     {
-        "name": "h64_f16_auto",
         "query_type": "_Float16",
         "kv_type": "_Float16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
@@ -57,7 +55,6 @@ VARIANTS = [
         "mfma_type": None,
     },
     {
-        "name": "h128_f16_auto",
         "query_type": "_Float16",
         "kv_type": "_Float16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
@@ -68,7 +65,6 @@ VARIANTS = [
         "mfma_type": None,
     },
     {
-        "name": "h64_bf16_auto",
         "query_type": "__hip_bfloat16",
         "kv_type": "__hip_bfloat16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
@@ -79,7 +75,6 @@ VARIANTS = [
         "mfma_type": None,
     },
     {
-        "name": "h128_bf16_auto",
         "query_type": "__hip_bfloat16",
         "kv_type": "__hip_bfloat16",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kAuto",
@@ -90,7 +85,6 @@ VARIANTS = [
         "mfma_type": None,
     },
     {
-        "name": "h64_f16_fp8_f16",
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -101,7 +95,6 @@ VARIANTS = [
         "mfma_type": "f16",
     },
     {
-        "name": "h128_f16_fp8_f16",
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -112,7 +105,6 @@ VARIANTS = [
         "mfma_type": "f16",
     },
     {
-        "name": "h64_f16_fp8_fp8",
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -123,7 +115,6 @@ VARIANTS = [
         "mfma_type": "fp8",
     },
     {
-        "name": "h128_f16_fp8_fp8",
         "query_type": "_Float16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -134,7 +125,6 @@ VARIANTS = [
         "mfma_type": "fp8",
     },
     {
-        "name": "h64_bf16_fp8_f16",
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -145,7 +135,6 @@ VARIANTS = [
         "mfma_type": "f16",
     },
     {
-        "name": "h128_bf16_fp8_f16",
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -156,7 +145,6 @@ VARIANTS = [
         "mfma_type": "f16",
     },
     {
-        "name": "h64_bf16_fp8_fp8",
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -167,7 +155,6 @@ VARIANTS = [
         "mfma_type": "fp8",
     },
     {
-        "name": "h128_bf16_fp8_fp8",
         "query_type": "__hip_bfloat16",
         "kv_type": "uint8_t",
         "kv_cache_enum": "vllm::Fp8KVCacheDataType::kFp8E4M3",
@@ -178,6 +165,22 @@ VARIANTS = [
         "mfma_type": "fp8",
     },
 ]
+
+
+def variant_name(variant):
+    """File and entry-point suffix, derived so it cannot disagree with the fields."""
+    parts = [
+        f"h{variant['head_size']}",
+        {"_Float16": "f16", "__hip_bfloat16": "bf16"}[variant["query_type"]],
+        variant["kv_cache_dtype"],
+    ]
+    if variant["mfma_type"] is not None:
+        parts.append(variant["mfma_type"])
+    return "_".join(parts)
+
+
+for variant in VARIANTS:
+    variant["name"] = variant_name(variant)
 
 # kv_cache_dtype values accepted per VARIANTS["kv_cache_dtype"], in dispatch
 # order (the first matching arm wins).
