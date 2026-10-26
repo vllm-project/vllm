@@ -51,6 +51,12 @@ def test_suffix_pattern_still_matches_all_forms():
         assert get_dynamic_override(cfg, layer_name=name) is False
 
 
+def test_re_match_anchor_pattern_matches_via_variants():
+    cfg = _cfg({"-:layers\\.43\\.self_attn\\.qkv_proj$": {}})
+    for name in (checkpoint_name, mapped_name, module_name):
+        assert get_dynamic_override(cfg, layer_name=name) is False
+
+
 def test_unmatched_layer_keeps_default():
     cfg = _cfg({"-:.*layers\\.42\\.self_attn\\.qkv_proj$": {}})
     assert get_dynamic_override(cfg, layer_name=module_name) is None

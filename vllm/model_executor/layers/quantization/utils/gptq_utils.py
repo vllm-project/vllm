@@ -105,6 +105,7 @@ def _dynamic_name_variants(layer_name: str) -> list[str]:
         if layer_name.startswith(prefix):
             rest = layer_name[len(prefix):]
             variants.extend(alt + rest for alt in alternates)
+            variants.append(rest)
             break
     seen: set[str] = set()
     unique = [v for v in variants if not (v in seen or seen.add(v))]
