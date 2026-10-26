@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,173 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.benchmark
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
+)
+@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
+def test_bench_forward_drafter(tmp_path, method):
+    """The CLI captures real proposals, with full acceptance, unless excluded."""
+    config = dict(
+        architectures=["Qwen3ForCausalLM"],
+        model_type="qwen3",
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        vocab_size=1024,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_theta=10000,
+        hidden_act="silu",
+        tie_word_embeddings=False,
+        dtype="bfloat16",
+    )
+    if method == "mtp":
+        config.update(
+            architectures=["MiMoForCausalLM"],
+            model_type="qwen2",
+            num_nextn_predict_layers=1,
+            attention_bias=True,
+        )
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "config.json").write_text(json.dumps(config))
+    spec = dict(method=method, num_speculative_tokens=3)
+    if method != "mtp":
+        draft_config = dict(config, num_hidden_layers=1)
+        if method == "eagle3":
+            draft_config.update(
+                architectures=["LlamaForCausalLMEagle3"],
+                model_type="llama",
+                draft_vocab_size=1024,
+                eagle_aux_hidden_state_layer_ids=[1, 2, 3],
+            )
+        else:
+            draft_config.update(
+                architectures=[
+                    "Qwen3DSparkModel" if method == "dspark" else "DFlashDraftModel"
+                ],
+                block_size=4,
+                num_target_layers=4,
+                dflash_config=dict(mask_token_id=0, target_layer_ids=[0, 1, 2]),
+                markov_rank=32,
+                markov_head_type="vanilla",
+                sample_from_anchor=True,
+            )
+        draft = tmp_path / "draft"
+        draft.mkdir()
+        (draft / "config.json").write_text(json.dumps(draft_config))
+        spec["model"] = str(draft)
+    command = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "forward",
+        "--model",
+        str(target),
+        "--skip-tokenizer-init",
+        "--speculative-config",
+        json.dumps(spec),
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "256",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--kv-len-jitter",
+        "0",
+        "--case",
+        "verify=4*4@128:3",
+        "--case",
+        "prefill=128",
+        "--case",
+        "mixed=32,2*4@128:3",
+        "--iters",
+        "3",
+        "--samples",
+        "2",
+    ]
+    for exclude in (False, True):
+        output = tmp_path / f"{exclude}.json"
+        args = command + ["--output-json", str(output)]
+        if exclude:
+            args.append("--exclude-drafter")
+        result = subprocess.run(args, capture_output=True, text=True, timeout=600)
+        assert result.returncode == 0, result.stdout + result.stderr
+        for row in json.loads(output.read_text()):
+            assert row["median_us"] > 0
+            (rank,) = row["ranks"]
+            assert rank["finite"] and rank["graph_deterministic"]
+            assert rank["graph_vs_eager"]["relative_rms"] == 0
+            if exclude:
+                assert rank["timing_scope"] == "target_only"
+                assert "drafter" not in rank
+            else:
+                assert rank["timing_scope"] == "target_and_drafter"
+                assert rank["drafter"]["acceptance"] == "all"
+                assert rank["drafter"]["num_draft_tokens"] == 3
+                assert rank["drafter"]["graph_matches_eager"]
+                assert rank["drafter"]["valid_token_ids"]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="The pipeline benchmark needs two CUDA devices.",
+)
+def test_bench_forward_pipeline(tmp_path):
+    """PP measures matching microbatches across stages with real transfers."""
+    output = tmp_path / "pipeline.json"
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "forward",
+        "--model",
+        MODEL_NAME,
+        "--pipeline-parallel-size",
+        "2",
+        "--max-model-len",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.3",
+        "--case",
+        "prefill=8*128",
+        "--iters",
+        "4",
+        "--samples",
+        "2",
+        "--output-json",
+        str(output),
+        "--profile-dir",
+        str(tmp_path / "profile"),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    (row,) = json.loads(output.read_text())
+    assert row["median_us"] > 0
+    assert [r["pp_rank"] for r in row["ranks"]] == [0, 1]
+    for rank in row["ranks"]:
+        assert rank["finite"]
+        summary = json.loads(Path(rank["profile"]["summary"]).read_text())
+        assert Path(summary["trace"]).exists()
+        assert any("nccl" in k["name"].lower() for k in summary["kernels"])
+        assert all(c["relative_rms"] == 0 for c in rank["pipeline_vs_eager"].values())
+        assert rank["latency_us"]["count"] == 8
+    first, last = [r["pipeline_timeline"] for r in row["ranks"]]
+    margin = row["ranks"][0]["pipeline_warmup_microbatches"]
+    expected = np.array(last["ends_us"]) - np.array(first["starts_us"])
+    assert np.median(expected[margin:-margin]) == pytest.approx(row["median_us"])
 
 
 @pytest.mark.parametrize("rank", [0, 1])
@@ -93,6 +261,17 @@ def test_build_batch_layout():
         parse_case("c=1@640"), groups, 1000, 1000, np.random.default_rng(0), 4
     )
     assert batch.group_block_ranges == [[(1, 11)], [(11, 51)]]
+    with_drafts = build_batch(
+        parse_case("c=1@640"),
+        groups,
+        1000,
+        1000,
+        np.random.default_rng(0),
+        dcp_size=4,
+        lookahead=4,
+    )
+    assert with_drafts.group_block_ranges == [[(1, 12)], [(12, 53)]]
+    assert with_drafts.expected == batch.expected
 
 
 def test_jitter_kv_lens():
