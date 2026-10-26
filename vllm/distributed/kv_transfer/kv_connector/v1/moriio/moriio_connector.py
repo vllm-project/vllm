@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MORIIO_HANDSHAKE_VERSION,
     ROLE,
     EngineId,
     HandshakeError,
@@ -2234,6 +2235,8 @@ class MoRIIOConnectorWorker:
                 got_metadata_time - start_time,
             )
 
+            self._validate_handshake_compat(metadata, expected_engine_id)
+
             self.moriio_wrapper.remote_engine_ip = host
             remote_agent_name = self.moriio_wrapper.register_remote_engine(
                 metadata.agent_metadata
@@ -2277,6 +2280,53 @@ class MoRIIOConnectorWorker:
             )
 
         return {remote_agent_name}
+
+    def _validate_handshake_compat(
+        self,
+        remote: MoRIIOAgentMetadata,
+        remote_engine_id: str,
+    ) -> None:
+        """Reject an incompatible peer up front (Gap 12)."""
+        remote_version = getattr(remote, "handshake_version", 0)
+        if remote_version == 0:
+            logger.warning(
+                "Remote engine %s has handshake_version=0; "
+                "assuming legacy peer — skipping strict compatibility checks",
+                remote_engine_id,
+            )
+            return
+
+        if remote_version != MORIIO_HANDSHAKE_VERSION:
+            raise HandshakeError(
+                f"Handshake version mismatch with {remote_engine_id}: "
+                f"local={MORIIO_HANDSHAKE_VERSION}, remote={remote_version}"
+            )
+
+        remote_mode = getattr(remote, "mode", "")
+        local_mode = self.mode.value
+        if remote_mode and local_mode:
+            if remote_mode == local_mode:
+                logger.warning(
+                    "Remote engine %s has the same mode (%s) as local; "
+                    "transfers require complementary READ/WRITE modes",
+                    remote_engine_id,
+                    remote_mode,
+                )
+
+        if remote.block_len != self.block_len:
+            raise HandshakeError(
+                f"Block length mismatch with {remote_engine_id}: "
+                f"local={self.block_len}, remote={remote.block_len}"
+            )
+
+        if remote.attn_backend_name != self.backend_name:
+            logger.warning(
+                "Remote engine %s uses attention backend %r "
+                "while local uses %r",
+                remote_engine_id,
+                remote.attn_backend_name,
+                self.backend_name,
+            )
 
     def _remote_tp_rank(self, remote_tp_size: int) -> int:
         # 0/unknown remote TP == homogeneous (avoids collapsing all ranks to 0).
@@ -2763,6 +2813,8 @@ class MoRIIOConnectorWorker:
                 for name, layout in self.mamba_state_layouts.items()
             },
             attention_block_sizes=self.attention_block_sizes,
+            handshake_version=MORIIO_HANDSHAKE_VERSION,
+            mode=self.mode.value,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
