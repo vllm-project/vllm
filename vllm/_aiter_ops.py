@@ -3646,6 +3646,7 @@ class rocm_aiter_ops:
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
+        assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
         sparse_mla_fwd(
             q,

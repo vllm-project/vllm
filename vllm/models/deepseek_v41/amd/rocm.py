@@ -1452,7 +1452,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 swa_metadata, attn_metadata, compressed_k_cache
             )
 
-        assert (output is None) != (mxfp8_out is None)
         self._aiter_sparse_mla(
             q[:num_prefill_tokens],
             None if output is None else output[:num_prefill_tokens],
@@ -1488,6 +1487,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        assert (output is None) != (output_mxfp8 is None)
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the
         # store applies the inverse RoPE; output_mxfp8 replaces output.
