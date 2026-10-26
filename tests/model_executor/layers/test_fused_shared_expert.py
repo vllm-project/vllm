@@ -504,7 +504,8 @@ def test_deepseek_v41_quant_config_rejects_fp8_mtp_shared_expert_fse(
 
     assert not compatible
     assert (
-        reason == "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts are not MXFP4"
+        reason
+        == "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts are not MXFP4"
     )
 
 
@@ -1011,7 +1012,7 @@ def test_models_fse_init(
             ].mtp_block.ffn.is_fused_shared_expert_enabled
             warning.assert_called_once()
             assert (
-                "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"
+                "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts"
                 in (warning.call_args.args[1])
             )
         if aiter_fse_enabled and exclude:
