@@ -414,6 +414,29 @@ def test_all_padding_microbatch_has_no_work_to_do():
     )
 
 
+def test_full_graph_all_padding_microbatch_is_graph_padding():
+    """Under FULL, the microbatch past the last real token holds only padding
+    requests: the captured row count, each with no query and no context."""
+    query_lens, seq_lens = [1] * 6, [64] * 6
+    buffers = _make_buffers()
+    input_batch = _make_input_batch(
+        query_lens, seq_lens, buffers, num_reqs_padded=16, num_tokens_padded=16
+    )
+    ubatch_slices = create_ubatch_slices(input_batch, 2, CUDAGraphMode.FULL)
+    ubatch_buffers = _make_ubatch_buffers()
+
+    first = _slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
+    last = _slice_input_batch(input_batch, ubatch_slices[1], *ubatch_buffers[1])
+
+    assert (first.num_reqs, first.num_reqs_after_padding) == (6, 8)
+    assert (last.num_reqs, last.num_tokens) == (0, 0)
+    assert (last.num_reqs_after_padding, last.num_tokens_after_padding) == (8, 8)
+    assert last.max_query_len == 1
+    assert last.query_start_loc.tolist() == [0] * 9
+    assert last.seq_lens.tolist() == [0] * 8
+    assert last.seq_lens_cpu_upper_bound.tolist() == [0] * 8
+
+
 def test_microbatching_off_when_a_rank_does_not_allow_it():
     assert _sync_dp([256, 256], allow_ubatching=False)[0].num_ubatches == 1
 
@@ -907,16 +930,20 @@ def test_capturable_run_replays_as_a_cudagraph():
     assert (capturer.device_buffer == 3).all()
 
 
-def _request_slices(input_batch: InputBatch) -> list[slice]:
-    return [s.request_slice for s in create_ubatch_slices(input_batch, 2)]
+def _request_slices(
+    input_batch: InputBatch, cg_mode: CUDAGraphMode = CUDAGraphMode.NONE
+) -> list[slice]:
+    return [s.request_slice for s in create_ubatch_slices(input_batch, 2, cg_mode)]
 
 
-def test_captured_split_survives_a_replay_with_enough_requests():
-    """Replay preserves the captured split only if real requests reach it."""
+def test_full_graph_replay_keeps_the_captured_split():
+    """FULL replay keeps the captured split even when real requests don't reach
+    it; eager clamps a trailing all-padding microbatch onto the last request."""
     buffers = _make_buffers()
-    captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
+    full = CUDAGraphMode.FULL
+    captured = _request_slices(InputBatch.make_dummy(16, 16, buffers), full)
 
-    def replay(num_reqs: int) -> list[slice]:
+    def replay(num_reqs: int, cg_mode: CUDAGraphMode) -> list[slice]:
         return _request_slices(
             _make_input_batch(
                 [1] * num_reqs,
@@ -924,12 +951,13 @@ def test_captured_split_survives_a_replay_with_enough_requests():
                 buffers,
                 num_reqs_padded=16,
                 num_tokens_padded=16,
-            )
+            ),
+            cg_mode,
         )
 
-    assert replay(16) == captured
-    assert replay(9) == captured
-    assert replay(4) != captured
+    for num_reqs in (16, 9, 8, 4):
+        assert replay(num_reqs, full) == captured
+    assert replay(4, CUDAGraphMode.NONE) != captured
 
 
 def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
@@ -988,17 +1016,13 @@ def test_microbatched_graphs_are_only_offered_to_uniform_batches():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
-def test_microbatched_graph_needs_every_rank_to_reach_the_split():
-    """Fall back to eager on all ranks if any rank cannot reach the captured split."""
+def test_microbatched_graph_survives_a_rank_that_cannot_reach_the_split():
+    """A rank whose real tokens stop before the captured split still replays."""
     manager = _make_cudagraph_manager([64, 128])
     uniform = [1, 1]
 
-    desc, _ = _sync_dp([64, 64], uniform, cudagraph_manager=manager)
-    assert desc.cg_mode == CUDAGraphMode.FULL
-    assert desc.num_ubatches == 2
-
     # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
     desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
-    assert desc.cg_mode == CUDAGraphMode.NONE
+    assert desc.cg_mode == CUDAGraphMode.FULL
     assert desc.num_ubatches == 2
-    assert dp_sync_state is not None and dp_sync_state.eager
+    assert dp_sync_state is not None and not dp_sync_state.eager
