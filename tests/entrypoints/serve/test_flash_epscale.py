@@ -211,6 +211,28 @@ def test_scale_up_opens_routing_after_resume(monkeypatch):
     engine.set_active_data_parallel_size.assert_called_once_with(4)
 
 
+@pytest.mark.parametrize(
+    "active,target,receivers", [(1, 2, [1]), (2, 4, [2, 3]), (2, 1, [])]
+)
+def test_l2_refills_only_ranks_joining_the_target(
+    monkeypatch, active, target, receivers
+):
+    client, _, rpc_calls = _build_client(
+        monkeypatch,
+        active_ep_size=active,
+        current_sleeping=list(range(active, 4)),
+    )
+    response = client.post("/flash_epscale", json={"ep_size": target, "level": 2})
+    assert response.status_code == 200, response.text
+    refill = [kwargs for method, kwargs in rpc_calls if method == "finalize_l2_wake"]
+    assert refill == [
+        {
+            "sleeping_ep_ranks": list(range(active, 4)),
+            "refill_ep_ranks": receivers,
+        }
+    ]
+
+
 def test_resume_runs_even_when_inner_step_fails(monkeypatch):
     """If a collective_rpc inside the pause window raises, the engine must
     still be resumed before the HTTP error is returned."""

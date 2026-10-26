@@ -193,8 +193,10 @@ async def _transition(
     Phase 3 failures raise ``_PostResizeError``: the resize is live and
     must not be rolled back; only the memory release failed.
     """
+    refill_ep_ranks = [rank for rank in current_sleeping if rank not in target_sleeping]
     if current_sleeping:
         try:
+            wake_kwargs = {"required_ep_ranks": refill_ep_ranks} if level == 2 else {}
             await _rpc(
                 client,
                 timing,
@@ -203,6 +205,7 @@ async def _transition(
                 sleeping_ep_ranks=current_sleeping,
                 tags=tags,
                 level=level,
+                **wake_kwargs,
             )
         except Exception:
             try:
@@ -253,6 +256,7 @@ async def _transition(
                         "l2_refill",
                         "finalize_l2_wake",
                         sleeping_ep_ranks=current_sleeping,
+                        refill_ep_ranks=refill_ep_ranks,
                     )
             await _rpc(
                 client,

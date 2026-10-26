@@ -60,8 +60,9 @@ def transfer_dense_to_waking_ranks(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     dp_group: GroupCoordinator,
     waking_dp_ranks: list[int],
+    source_dp_ranks: list[int] | None = None,
 ) -> None:
-    """Refill dense weights on waking ranks from one active rank in the DP group.
+    """Refill dense weights, distributing receivers among active DP ranks.
 
     Must be called on every rank of `dp_group` in lockstep — active
     non-sender ranks return early after posting nothing. NCCL pairs the
@@ -69,20 +70,30 @@ def transfer_dense_to_waking_ranks(
     """
     my_rank = dp_group.rank_in_group
     dp_size = dp_group.world_size
+    if not waking_dp_ranks:
+        return
     waking = set(waking_dp_ranks)
-    is_waking = my_rank in waking
-    # Lowest-numbered active rank acts as sender. With suffix-only sleeping
-    # this is always rank 0; kept general in case the convention relaxes.
-    sender = next(r for r in range(dp_size) if r not in waking)
-    if my_rank != sender and not is_waking:
+    sources = (
+        [rank for rank in range(dp_size) if rank not in waking]
+        if source_dp_ranks is None
+        else source_dp_ranks
+    )
+    if not sources or waking.intersection(sources):
+        raise ValueError("Dense refill requires disjoint active sources and receivers")
+    senders = {
+        peer: sources[index % len(sources)]
+        for index, peer in enumerate(waking_dp_ranks)
+    }
+    receivers = [peer for peer, sender in senders.items() if sender == my_rank]
+    if not receivers and my_rank not in waking:
         return
 
     params = _collect_dense_params(model, expert_weights)
 
     ops: list[P2POp] = []
-    if my_rank == sender:
+    if receivers:
         for w in params:
-            for peer in waking_dp_ranks:
+            for peer in receivers:
                 op = object.__new__(P2POp)
                 op.op = torch.distributed.isend
                 op.tensor = w
@@ -93,7 +104,7 @@ def transfer_dense_to_waking_ranks(
             op = object.__new__(P2POp)
             op.op = torch.distributed.irecv
             op.tensor = w
-            op.group_peer = sender
+            op.group_peer = senders[my_rank]
             ops.append(op)
 
     device_comm = dp_group.device_communicator

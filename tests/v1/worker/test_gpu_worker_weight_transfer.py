@@ -17,6 +17,60 @@ from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_re
 from vllm.v1.worker.gpu_worker import Worker
 
 
+@pytest.mark.parametrize("rank,expected", [(0, None), (1, True), (2, False)])
+def test_l2_wake_maps_kv_only_on_joining_ranks(monkeypatch, rank, expected):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.distributed.parallel_state as parallel_state
+
+    monkeypatch.setattr(
+        parallel_state, "get_ep_group", lambda: SimpleNamespace(rank=rank)
+    )
+    worker = SimpleNamespace(wake_up=Mock())
+    tags = ["shared_weights", "expert_weights", "kv_cache"]
+    Worker.wake_up_ep_ranks(worker, [1, 2, 3], tags, level=2, required_ep_ranks=[1])
+    if expected is None:
+        worker.wake_up.assert_not_called()
+    else:
+        worker.wake_up.assert_called_once_with(tags=tags if expected else tags[:2])
+
+
+@pytest.mark.parametrize(
+    "sources,receivers,expected",
+    [([0], [1], [(0, 1)]), ([0, 1], [2, 3], [(0, 2), (1, 3)]), ([0, 1], [], [])],
+)
+def test_dense_refill_uses_active_sources_and_skips_nonreceivers(
+    monkeypatch, sources, receivers, expected
+):
+    from types import SimpleNamespace
+
+    from vllm.distributed.elastic_ep.peer_weight_transfer import (
+        transfer_dense_to_waking_ranks,
+    )
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    sends, recvs = [], []
+    for rank in range(4):
+        model = nn.Linear(2, 2, bias=False)
+
+        def record(ops, rank=rank):
+            for op in ops:
+                if op.op is torch.distributed.isend:
+                    sends.append((rank, op.group_peer))
+                else:
+                    recvs.append((op.group_peer, rank))
+
+        group = SimpleNamespace(
+            rank_in_group=rank,
+            world_size=4,
+            device_communicator=SimpleNamespace(batch_isend_irecv=record),
+        )
+        transfer_dense_to_waking_ranks(model, (), group, receivers, sources)
+    assert sends == expected
+    assert sorted(recvs) == sorted(expected)
+
+
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 

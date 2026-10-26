@@ -727,6 +727,7 @@ class Worker(WorkerBase):
         sleeping_ep_ranks: list[int],
         tags: list[str] | None = None,
         level: int = 1,
+        required_ep_ranks: list[int] | None = None,
     ) -> None:
         """Rank-local CuMem wake on ranks in ``sleeping_ep_ranks``.
 
@@ -734,21 +735,34 @@ class Worker(WorkerBase):
         while active ranks keep serving. At level 2 the remapped weights
         hold garbage until ``finalize_l2_wake`` refills them; the waking
         ranks stay logically slept (and skip forwards) until the
-        subsequent ``resize_sleep_ep_ranks``.
+        subsequent ``resize_sleep_ep_ranks``. Ranks outside
+        ``required_ep_ranks`` keep their KV cache unmapped.
         """
         del level  # local wake is identical for both levels
         from vllm.distributed.parallel_state import get_ep_group
 
-        if get_ep_group().rank in sleeping_ep_ranks:
-            self.wake_up(tags=tags)
+        ep_rank = get_ep_group().rank
+        if ep_rank in sleeping_ep_ranks:
+            wake_tags = tags
+            if required_ep_ranks is not None and ep_rank not in required_ep_ranks:
+                wake_tags = (
+                    [tag for tag in tags if tag != "kv_cache"]
+                    if tags is not None
+                    else list(WEIGHT_SLEEP_TAGS)
+                )
+            self.wake_up(tags=wake_tags)
 
-    def finalize_l2_wake(self, sleeping_ep_ranks: list[int]) -> None:
+    def finalize_l2_wake(
+        self, sleeping_ep_ranks: list[int], refill_ep_ranks: list[int] | None = None
+    ) -> None:
         """Collective L2 refill after ``wake_up_ep_ranks``.
 
         Must run on every EP rank inside the pause window: the EPLB map
         broadcast and dense-weight P2P are NCCL group calls that must not
         interleave with active ranks' forward-pass collectives. Experts
         are refilled later by resize_sleep_ep_ranks -> EPLB rearrange.
+        Only ``refill_ep_ranks`` receive dense weights; other sleeping
+        ranks participate in the collective metadata update.
         """
         from vllm.distributed.elastic_ep.peer_weight_transfer import (
             get_max_dp_group,
@@ -757,6 +771,11 @@ class Worker(WorkerBase):
         from vllm.distributed.parallel_state import get_ep_group
 
         is_waking = get_ep_group().rank in sleeping_ep_ranks
+        refill_ep_ranks = (
+            sleeping_ep_ranks if refill_ep_ranks is None else refill_ep_ranks
+        )
+        timings = {}
+        started = time.perf_counter()
 
         # Refill EPLB GPU maps on waking ranks (collective, all EP ranks).
         # L2 sleep wiped their physical pages with no CPU backup, so the
@@ -767,6 +786,9 @@ class Worker(WorkerBase):
             eplb.broadcast_eplb_maps_from_active()
             if is_waking:
                 eplb.reset_load_history_after_l2_wake()
+        torch.accelerator.synchronize()
+        timings["maps"] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
 
         # Use the always-preserved max DP communicator directly instead of
         # get_dp_group(): a prior scale_down may have NCCL-split _DP down
@@ -774,14 +796,32 @@ class Worker(WorkerBase):
         # peers. Reading _DP_MAX avoids mutating any global DP state, so
         # the subsequent resize_sleep_ep_ranks can manage _DP as usual.
         model = self.model_runner.get_model()
+        dp_group = get_max_dp_group()
+        timings["resume_max_dp"] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
+        sleeping_dp_ranks = self._ep_ranks_to_dp_ranks(sleeping_ep_ranks)
         transfer_dense_to_waking_ranks(
             model=model,
             expert_weights=model.expert_weights,
-            dp_group=get_max_dp_group(),
-            waking_dp_ranks=self._ep_ranks_to_dp_ranks(sleeping_ep_ranks),
+            dp_group=dp_group,
+            waking_dp_ranks=self._ep_ranks_to_dp_ranks(refill_ep_ranks),
+            source_dp_ranks=[
+                rank
+                for rank in range(dp_group.world_size)
+                if rank not in sleeping_dp_ranks
+            ],
         )
+        timings["dense"] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
         if is_waking:
             self._maybe_nixl_eplb_on_l2_wake()
+        timings["registration"] = (time.perf_counter() - started) * 1000
+        logger.info(
+            "L2 refill ep_rank=%s receivers=%s timing_ms=%s",
+            get_ep_group().rank,
+            refill_ep_ranks,
+            timings,
+        )
 
     def _ep_ranks_to_dp_ranks(self, ep_ranks: list[int]) -> list[int]:
         """Translate EP ranks into DP-local indices for the current DP group.
