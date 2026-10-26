@@ -57,6 +57,7 @@ from vllm.distributed.parallel_state import (
     suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
+    RetryableWeightUpdateError,
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
@@ -1641,7 +1642,12 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except RetryableWeightUpdateError:
+                self.weight_transfer_engine.reset_weight_update_target()
+                self._weight_update_active = False
+                raise
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
             if self._weight_update_is_draft and (

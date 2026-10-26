@@ -7,6 +7,7 @@ to inference workers.
 from vllm.distributed.weight_transfer.base import (
     ModuleSource,
     ParamMeta,
+    RetryableWeightUpdateError,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
@@ -23,6 +24,7 @@ from vllm.distributed.weight_transfer.factory import (
 
 __all__ = [
     "WeightTransferEngine",
+    "RetryableWeightUpdateError",
     "WeightTransferEngineFactory",
     "TrainerWeightTransferEngine",
     "WeightTransferTrainerFactory",

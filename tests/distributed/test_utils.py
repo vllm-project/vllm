@@ -17,6 +17,20 @@ from vllm.utils.system_utils import update_environment_variables
 from ..utils import multi_gpu_test
 
 
+def test_stateless_process_group_many_to_one_objects_do_not_collide():
+    """Each sender needs an independent key when several ranks target rank 0."""
+    store = torch.distributed.HashStore()
+    groups = [
+        StatelessProcessGroup(rank=rank, world_size=3, store=store) for rank in range(3)
+    ]
+
+    groups[1].send_obj("from-one", 0)
+    groups[2].send_obj("from-two", 0)
+
+    assert groups[0].recv_obj(1) == "from-one"
+    assert groups[0].recv_obj(2) == "from-two"
+
+
 @ray.remote
 class _CUDADeviceCountStatelessTestActor:
     def get_count(self):

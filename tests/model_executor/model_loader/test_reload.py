@@ -24,6 +24,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    abort_layerwise_reload,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     initialize_online_processing,
@@ -429,6 +430,26 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_abort_layerwise_reload_restores_tensors_for_retry():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 3))
+    layer = model[0]
+    weight = layer.weight
+    bias = layer.bias
+    record_metadata_for_reloading(model)
+
+    initialize_layerwise_reload(model)
+    abort_layerwise_reload(model)
+
+    assert layer.weight is weight
+    assert layer.bias is bias
+    assert not reload_layerwise.get_layerwise_info(layer).can_load()
+
+    initialize_layerwise_reload(model)
+    abort_layerwise_reload(model)
+    assert layer.weight is weight
+    assert layer.bias is bias
 
 
 def test_restore_layer_replaces_postprocessed_tensor_attribute():
