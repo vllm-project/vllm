@@ -177,6 +177,24 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
+    def get_migration_request_ids(self) -> list[str]:
+        """Return unfinished request IDs whose worker state may be exported."""
+        raise NotImplementedError
+
+    def migrate_requests(self) -> "dict[int, EngineCoreOutputs]":
+        """Finish all requests so that another engine can continue them.
+
+        Used by ``pause_generation(mode="migrate")`` once no scheduled step is
+        in flight.
+
+        Returns:
+            Final outputs per client index. Each output carries the KV
+            connector's ``kv_transfer_params`` for its request, or ``None``
+            when the request's KV cache was not exported.
+
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         """Number of unfinished requests in the scheduler's internal queue."""

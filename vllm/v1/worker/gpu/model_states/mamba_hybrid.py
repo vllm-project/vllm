@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -35,6 +37,8 @@ from vllm.v1.worker.mamba_utils import (
     validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -94,6 +98,10 @@ class MambaHybridModelState(DefaultModelState):
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
+        self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
+        self._mamba_group_ids: list[int] = []
+        self._mamba_spec: MambaSpec | None = None
+        self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -104,10 +112,6 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
-            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
-            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -145,6 +149,13 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         if not self._align_mode:
             return
+        self._initialize_mamba_ctx(kv_cache_config, block_tables)
+
+    def _initialize_mamba_ctx(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        if self._mamba_ctx is not None:
+            return
         mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
@@ -175,6 +186,32 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_copy_funcs,
             [block_tables.block_tables[gid].gpu for gid in mamba_group_ids],
             [block_tables.input_block_tables[gid] for gid in mamba_group_ids],
+        )
+
+    def prepare_migration(
+        self,
+        req_indices: list[int],
+        kv_cache_config: KVCacheConfig,
+        block_tables: BlockTables,
+    ) -> None:
+        if not req_indices or not self.vllm_config.num_speculative_tokens:
+            return
+        if self._align_mode:
+            raise NotImplementedError(
+                "Speculative recurrent-state migration requires "
+                "mamba_cache_mode='none'."
+            )
+        self._initialize_mamba_ctx(kv_cache_config, block_tables)
+        assert self._mamba_ctx is not None
+        indices = torch.tensor(req_indices, dtype=torch.int64, device=self.device)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Materializing migration state; final accepted counts: %s",
+                self.num_accepted_tokens_gpu[indices].tolist(),
+            )
+        self._mamba_ctx.materialize_requests(
+            self.num_accepted_tokens_gpu,
+            indices,
         )
 
     def preprocess_state(

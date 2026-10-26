@@ -132,6 +132,21 @@ class WorkerBase:
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
+    def prepare_migration(self, request_ids: list[str]) -> None:
+        """Commit accepted state before the scheduler publishes KV descriptors."""
+        prepare = getattr(self.model_runner, "prepare_migration", None)
+        if prepare is not None:
+            prepare(request_ids)
+        elif self.vllm_config.num_speculative_tokens and (
+            self.model_config.has_inner_state
+            or self.model_config.is_hybrid
+            or self.model_config.is_attention_free
+        ):
+            raise NotImplementedError(
+                "Speculative recurrent-state migration requires Model Runner V2."
+            )
+        self.synchronize_device()
+
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.

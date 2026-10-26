@@ -384,6 +384,8 @@ class RequestStatus(enum.IntEnum):
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
     FINISHED_REPETITION = enum.auto()
+    # Handed off to another engine by pause_generation(mode="migrate").
+    FINISHED_MIGRATED = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -409,4 +411,7 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
     RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
+    # Reported as an abort; the output's kv_transfer_params, when present,
+    # describe the KV cache another engine can load to continue the request.
+    RequestStatus.FINISHED_MIGRATED: FinishReason.ABORT,
 }

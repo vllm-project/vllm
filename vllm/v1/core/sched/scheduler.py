@@ -2857,6 +2857,52 @@ class Scheduler(SchedulerInterface):
             already finished.
 
         """
+        return [
+            request
+            for request, _, _ in self._finish_requests(request_ids, finished_status)
+        ]
+
+    def get_migration_request_ids(self) -> list[str]:
+        return [
+            req_id
+            for req_id, request in self.requests.items()
+            if not request.is_finished()
+        ]
+
+    def migrate_requests(self) -> dict[int, EngineCoreOutputs]:
+        """Finish all requests so that another engine can continue them.
+
+        Each final output carries the KV connector's ``kv_transfer_params``
+        for the request, or ``None`` when its KV cache was not exported, and
+        any ``ec_transfer_params`` of the EC connector. Call only when no
+        scheduled step is in flight.
+        """
+        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        for request, kv_transfer_params, ec_transfer_params in self._finish_requests(
+            None, RequestStatus.FINISHED_MIGRATED
+        ):
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    finish_reason=request.get_finished_reason(),
+                    events=request.take_events(),
+                    kv_transfer_params=kv_transfer_params,
+                    ec_transfer_params=ec_transfer_params,
+                    trace_headers=request.trace_headers,
+                )
+            )
+        return {
+            client_index: EngineCoreOutputs(
+                outputs=client_outputs,
+                finished_requests={output.request_id for output in client_outputs},
+            )
+            for client_index, client_outputs in outputs.items()
+        }
+
+    def _finish_requests(
+        self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
+    ) -> list[tuple[Request, dict[str, Any] | None, dict[str, Any] | None]]:
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
@@ -2893,6 +2939,7 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
+        finished = []
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -2902,10 +2949,20 @@ class Scheduler(SchedulerInterface):
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
 
-            request.status = finished_status
-            self._free_request(request, delay_free_blocks=delay_free_blocks)
+            # Incoming KV is not readable yet; preserve abort cleanup and let
+            # the caller replay instead of exporting an unfinished transfer.
+            request.status = (
+                RequestStatus.FINISHED_ABORTED
+                if delay_free_blocks
+                and finished_status == RequestStatus.FINISHED_MIGRATED
+                else finished_status
+            )
+            kv_transfer_params, ec_transfer_params = self._free_request(
+                request, delay_free_blocks=delay_free_blocks
+            )
+            finished.append((request, kv_transfer_params, ec_transfer_params))
 
-        return valid_requests
+        return finished
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False

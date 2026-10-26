@@ -322,6 +322,28 @@ python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
 
     We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
 
+## Migrating In-Flight Requests
+
+An instance that is being retired can hand its in-flight requests to other
+instances together with their KV cache, so that they continue without
+recomputing the prompt and the tokens generated so far.
+
+1. Pause the source with `mode="migrate"`: `AsyncLLM.pause_generation(mode="migrate")`, or `POST /pause?mode=migrate` when the server runs with `VLLM_SERVER_DEV_MODE=1`.
+2. Once no scheduled step is in flight, every request finishes with `finish_reason` `"abort"`. Its response carries the tokens generated so far and `kv_transfer_params` in the same form as a finished remote prefill.
+3. As soon as a response arrives, continue the request on another instance through `/inference/v1/generate`, which is served with `--enable-scale-out`; do not wait for the pause call to return. Pass the prompt plus the generated tokens as `token_ids`, the remaining `max_tokens`, and the returned `kv_transfer_params`. That instance pulls the KV cache from the source and recomputes only the last token.
+4. The source keeps the exported blocks under the producer lease (`kv_lease_duration`), which the consumer's heartbeats renew once it has the request. The pause call returns once all of them are released, either after the consumer reads them or after their leases expire. The orchestrator must track whether each continuation succeeded separately.
+
+Requirements and limitations:
+
+- Both instances use the `NixlConnector` in its default pull mode, with the same model and a KV cache layout that P/D transfer supports between them.
+- Read source outputs through `AsyncLLM` or non-streaming (`stream=false`) `/inference/v1/generate`. The HTTP streaming route does not return `kv_transfer_params`.
+- Use a single completion (`n=1`); the response does not carry separate transfer parameters for parallel completions.
+- A request whose KV cache could not be exported returns `kv_transfer_params: null`; resubmit it without them. This happens for requests that never ran, requests still receiving remote KV, host-buffer KV caches, and multi-module MTP configurations whose prefill backoff exceeds one token.
+- Speculative requests export the committed token boundary after all scheduled steps settle. The NIXL connector transfers the model's running recurrent-state slot and computed attention KV; speculative scratch slots are excluded. Speculative recurrent-state migration requires Model Runner V2 and `mamba_cache_mode="none"`, as on decode instances without prefix caching; the source commits the final accepted state and convolution window before publishing transfer parameters. Other configurations are rejected with an error before anything is paused. If the workers fail to commit that state at runtime, the pause call raises and every request finishes as aborted with `kv_transfer_params: null`; the instance stays paused until it is resumed.
+- Each `kv_transfer_params` serves one read within its lease. As in any NIXL pull transfer, the consumer does not validate the read with the source, which frees the blocks after the first read or when the lease expires: a late or repeated read can return another request's KV once the source has resumed, and `kv_load_failure_policy` does not detect it. Resubmit a failed continuation without its `kv_transfer_params`, and resume the source only after every continuation has produced its first token.
+- Generated tokens become prompt tokens on the new instance. Penalties and structured-output state therefore restart there, as with a plain resubmission.
+- Validated with TP=2 and DP=2 expert-parallel instances on one node, and with DP=4 expert-parallel instances on two nodes.
+
 ## Multi-Instance Setup
 
 ### Multiple Prefiller Instances on Different Machines

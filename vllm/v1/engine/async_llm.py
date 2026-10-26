@@ -994,10 +994,10 @@ class AsyncLLM(EngineClient):
     ) -> None:
         """Pause generation to allow model weight updates.
 
-        All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
-        with ``RetryableRequestError`` from when the pause starts until
-        :meth:`resume_generation`; ``keep`` accepts and queues them.
+        All mode handling (abort / wait / keep / migrate) and cache clearing is
+        done in the engine. In ``abort``, ``wait`` and ``migrate`` mode, new
+        requests are rejected with ``RetryableRequestError`` from when the pause
+        starts until :meth:`resume_generation`; ``keep`` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
@@ -1006,6 +1006,12 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
+                - ``"migrate"``: Finish in-flight requests so that another
+                  engine can continue them. Each final output reports
+                  ``abort`` and carries the KV connector's
+                  ``kv_transfer_params`` for loading its KV cache, or ``None``
+                  if none was kept. Returns once the connector has released
+                  the exported blocks.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 

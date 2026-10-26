@@ -30,7 +30,9 @@ from vllm.v1.serial_utils import UtilityResult
 # - "abort": Abort all in-flight requests immediately (default).
 # - "wait": Wait for in-flight requests to complete before pausing.
 # - "keep": Freeze requests in queue; they resume on resume_generation().
-PauseMode = Literal["abort", "wait", "keep"]
+# - "migrate": Finish in-flight requests with their KV cache left readable by
+#   the KV connector, so that another engine can continue them.
+PauseMode = Literal["abort", "wait", "keep", "migrate"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.

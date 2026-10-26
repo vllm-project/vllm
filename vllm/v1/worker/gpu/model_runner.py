@@ -1178,6 +1178,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state.remove_request(req_id)
         return True
 
+    def prepare_migration(self, request_ids: list[str]) -> None:
+        self.update_pp_decode_requests()
+        req_indices = [
+            self.req_states.req_id_to_index[req_id]
+            for req_id in request_ids
+            if req_id in self.req_states.req_id_to_index
+        ]
+        self.model_state.prepare_migration(
+            req_indices, self.kv_cache_config, self.block_tables
+        )
+
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
         if self.pooling_runner is not None:

@@ -960,8 +960,8 @@ class EngineCore:
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
-        if mode == "wait":
-            raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        if mode in ("wait", "migrate"):
+            raise ValueError(f"'{mode}' mode can't be used in inproc-engine mode")
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
@@ -1640,6 +1640,8 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            if self.has_work():
+                break
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1686,7 +1688,9 @@ class EngineCoreProc(EngineCore):
         return model_executed
 
     def _notify_idle_state_callbacks(self) -> None:
-        while self._idle_state_callbacks:
+        # A callback may create work, e.g. migrated requests whose KV blocks
+        # are still being read; the remaining ones wait for the next idle state.
+        while self._idle_state_callbacks and not self.has_work():
             callback = self._idle_state_callbacks.pop()
             callback(self)
 
@@ -2183,9 +2187,18 @@ class EngineCoreProc(EngineCore):
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+        - ``migrate``: Set PAUSED_ALL; once in-flight steps have finished,
+          finish all requests and send their outputs with the KV connector's
+          ``kv_transfer_params``, then complete the returned Future when the
+          connector has released the exported blocks. Configurations whose
+          workers cannot commit speculative recurrent state are rejected
+          before anything is paused; if committing it fails, all requests are
+          aborted and the Future raises.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        if mode == "migrate":
+            self._check_migration_supported()
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
@@ -2201,8 +2214,43 @@ class EngineCoreProc(EngineCore):
             )
             self._send_abort_outputs(aborted_reqs)
 
-        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        pause_state = (
+            PauseState.PAUSED_ALL
+            if mode in ("keep", "migrate")
+            else PauseState.PAUSED_NEW
+        )
         self.scheduler.set_pause_state(pause_state)
+
+        if mode == "migrate":
+            future = Future[Any]()
+
+            def migrate_callback(engine: "EngineCoreProc") -> None:
+                try:
+                    engine.model_executor.collective_rpc(
+                        "prepare_migration",
+                        args=(engine.scheduler.get_migration_request_ids(),),
+                    )
+                except Exception as e:
+                    # Workers may have committed part of the recurrent state, so
+                    # the requests can be neither exported nor resumed in place.
+                    engine._send_abort_outputs(
+                        engine.scheduler.finish_requests(
+                            None, RequestStatus.FINISHED_ABORTED
+                        )
+                    )
+                    future.set_exception(e)
+                    return
+                for output in engine.scheduler.migrate_requests().items():
+                    engine.output_queue.put_nowait(output)
+                engine._idle_state_callbacks.append(
+                    partial(engine_idle_callback, future=future)
+                )
+
+            if self._pause_complete():
+                migrate_callback(self)
+            else:
+                self._idle_state_callbacks.append(migrate_callback)
+            return future
 
         if self._pause_complete():
             self._finish_pause(clear_cache)
@@ -2211,6 +2259,27 @@ class EngineCoreProc(EngineCore):
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
+
+    def _check_migration_supported(self) -> None:
+        """Workers can commit speculative recurrent state for export only on
+        Model Runner V2 with ``mamba_cache_mode="none"``."""
+        model_config = self.vllm_config.model_config
+        if self.vllm_config.speculative_config is None or not (
+            model_config.is_hybrid
+            or model_config.has_inner_state
+            or model_config.is_attention_free
+        ):
+            return
+        if not self.vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "'migrate' with speculative decoding on a recurrent-state model "
+                "requires Model Runner V2."
+            )
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            raise ValueError(
+                "'migrate' with speculative decoding on a recurrent-state model "
+                "requires mamba_cache_mode='none'."
+            )
 
     def pause_generation(
         self, mode: PauseMode = "abort", clear_cache: bool = True
