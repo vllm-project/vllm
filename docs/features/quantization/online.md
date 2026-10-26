@@ -101,6 +101,15 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
+the W4A8 int8-dot GEMV for decode (batches of up to 8 tokens); larger batches
+run weight-only. On W4A4 checkpoints this replaces the MXFP4 activation
+quantization:
+
+```bash
+vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
+```
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.

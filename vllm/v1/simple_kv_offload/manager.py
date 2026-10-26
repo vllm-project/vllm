@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -54,6 +55,7 @@ from vllm.v1.simple_kv_offload.metrics import (
     MetricName,
     SimpleCPUOffloadStats,
 )
+from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -152,6 +154,7 @@ class SimpleCPUOffloadScheduler:
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
+        aligned_num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -171,7 +174,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity, num_cpu_blocks
+            kv_cache_config, offload_capacity, num_cpu_blocks, aligned_num_cpu_blocks
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
@@ -282,21 +285,29 @@ class SimpleCPUOffloadScheduler:
         gpu_config: "KVCacheConfig",
         cpu_capacity_bytes: int,
         num_cpu_blocks: int | None = None,
+        aligned_num_cpu_blocks: int | None = None,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
-        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
+        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
+
+        An explicit ``num_cpu_blocks`` is checked against local capacity.
+        ``aligned_num_cpu_blocks`` comes from the live worker allocations and
+        is used as-is when no explicit count is configured."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        # Every KVCacheTensor describes placement within the same backing allocation,
-        # so its size is the total GPU KV cache size.
-        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        local_capacity = num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes
+        local_capacity = (
+            num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
+        )
         if num_cpu_blocks is None:
-            num_cpu_blocks = max(1, local_capacity)
+            num_cpu_blocks = (
+                aligned_num_cpu_blocks
+                if aligned_num_cpu_blocks is not None
+                else max(1, local_capacity)
+            )
         elif (
             type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity
         ):
@@ -374,6 +385,15 @@ class SimpleCPUOffloadScheduler:
                 self.block_size,
             )
             return 0, False
+
+        # Suffix-relative chunk boundaries must match absolute token positions.
+        for group_id in self.prefix_cacheable_group_ids:
+            spec = self.cpu_kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if (
+                isinstance(spec, ChunkedLocalAttentionSpec)
+                and num_computed_tokens % spec.attention_chunk_size
+            ):
+                return 0, False
 
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
@@ -759,16 +779,19 @@ class SimpleCPUOffloadScheduler:
                 state.block_ids = tuple([] for _ in range(num_groups))
                 state.num_stored_blocks = [0] * num_groups
 
-        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
+        for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if new_block_id_groups:
-                for g in range(min(num_groups, len(new_block_id_groups))):
-                    if new_block_id_groups[g] is not None:
+            if is_full_table:
+                state.block_ids = tuple([] for _ in range(num_groups))
+
+            if block_id_groups:
+                for g in range(min(num_groups, len(block_id_groups))):
+                    if block_id_groups[g] is not None:
                         # Accumulate new block IDs.
-                        state.block_ids[g].extend(new_block_id_groups[g])
+                        state.block_ids[g].extend(block_id_groups[g])
 
             num_new_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
             if num_new_tokens == 0:
