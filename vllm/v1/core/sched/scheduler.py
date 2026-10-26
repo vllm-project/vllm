@@ -1039,6 +1039,10 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
+            # Blocks still reserved by in-flight prefills. Summed once per
+            # waiting scan and kept up to date as the scan admits async loads,
+            # so admitting k loads costs O(k), not O(k^2). None: recompute.
+            inflight_reserved: int | None = None
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1413,10 +1417,9 @@ class Scheduler(SchedulerInterface):
                     # only if it fits in (free - other in-flight reservations)
                     # plus its own spec decode step blocks, to avoid deadlock and
                     # predictable preemptions.
-                    reserved_blocks = (
-                        self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks
-                    )
+                    if inflight_reserved is None:
+                        inflight_reserved = self._inflight_prefill_reserved_blocks()
+                    reserved_blocks = inflight_reserved + self._spec_decode_step_blocks
 
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
@@ -1513,6 +1516,11 @@ class Scheduler(SchedulerInterface):
                         self.aux_output_connector.request_loading(
                             request, num_computed_tokens
                         )
+                    if inflight_reserved is not None:
+                        if request in self._inflight_prefills:
+                            inflight_reserved = None
+                        else:
+                            inflight_reserved += self._request_remaining_blocks(request)
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
@@ -1521,6 +1529,8 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                # A chunked prefill admitted here joins _inflight_prefills below.
+                inflight_reserved = None
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True

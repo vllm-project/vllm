@@ -7942,6 +7942,50 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.request_id not in req_to_blocks
 
 
+def test_async_load_admission_reservation_is_linear(monkeypatch):
+    """Admitting many async KV loads in one schedule() must stay linear.
+
+    Each async-load admission is gated on the blocks that in-flight prefills
+    still reserve. That sum covers the loads admitted earlier in the same
+    scan, so recomputing it from scratch per admission made one schedule()
+    O(k^2) in the number of loads it parks (a P/D decode burst). The scan now
+    keeps the sum up to date as it admits loads. The admission decisions must
+    not change: with room for exactly 10 loads (4 loaded blocks + 1 reserved
+    block each), exactly 10 of 16 are parked.
+    """
+    BLOCK_SIZE = 16
+    NUM_REQUESTS = 16
+    ADMITTABLE = 10
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        num_blocks=ADMITTABLE * 5 + 1,  # + the null block
+        max_num_seqs=NUM_REQUESTS,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 4, is_async=True),
+    )
+    calls = 0
+    orig = Scheduler._request_remaining_blocks
+
+    def counting(self, request):
+        nonlocal calls
+        calls += 1
+        return orig(self, request)
+
+    monkeypatch.setattr(Scheduler, "_request_remaining_blocks", counting)
+    requests = create_requests(
+        num_requests=NUM_REQUESTS, num_tokens=BLOCK_SIZE * 5, block_size=BLOCK_SIZE
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    scheduler.schedule()
+
+    parked = [r for r in requests if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS]
+    assert len(parked) == ADMITTABLE
+    assert all(r.status == RequestStatus.WAITING for r in requests[ADMITTABLE:])
+    # One computation per admitted load, not one per (admission, in-flight load)
+    # pair (55 before the fix).
+    assert calls == ADMITTABLE
+
+
 def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
